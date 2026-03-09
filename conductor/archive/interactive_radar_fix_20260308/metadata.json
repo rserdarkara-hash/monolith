@@ -1,0 +1,8 @@
+{
+  "track_id": "interactive_radar_fix_20260308",
+  "type": "bug",
+  "status": "new",
+  "created_at": "2026-03-08T12:00:00Z",
+  "updated_at": "2026-03-08T12:00:00Z",
+  "description": "Fix attempting to apply non-function error when viewing radar plot interactively in plotly mode."
+}

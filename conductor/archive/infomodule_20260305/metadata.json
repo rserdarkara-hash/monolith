@@ -1,0 +1,8 @@
+{
+  "track_id": "infomodule_20260305",
+  "type": "feature",
+  "status": "new",
+  "created_at": "2026-03-05T00:00:00Z",
+  "updated_at": "2026-03-05T00:00:00Z",
+  "description": "Design and seamlessly implement a comprehensive Information & Documentation Module (Scientific & UI/UX Guides) into the application using external Markdown files, a sliding drawer, and contextual popovers."
+}
