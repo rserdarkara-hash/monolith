@@ -1,8 +1,0 @@
-{
-  "track_id": "spatial_fixes_20260306",
-  "type": "bug",
-  "status": "new",
-  "created_at": "2026-03-06T00:00:00Z",
-  "updated_at": "2026-03-06T00:00:00Z",
-  "description": "Critical app issues and fixes for Spatial Soil Analysis Dashboard Preview Preparation (app_v2.6a to app_v2.7)."
-}
