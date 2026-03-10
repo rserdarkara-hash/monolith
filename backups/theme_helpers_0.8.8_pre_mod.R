@@ -196,7 +196,7 @@ app_themes <- list(
     font_family = "Inter",
     map_tiles = "Esri.WorldImagery",
     sidebar_text_color = "#f0f0f0",
-    body_text_color = "#212529",
+    body_text_color = "#2d5a27",
     header_text_color = "#ffffff"
   ),
   "Obsidian Night" = create_app_theme(
