@@ -460,11 +460,17 @@ ui <- fluidPage(
                              )
                            ),                           conditionalPanel(condition = "input.method == 'RK'",
                               h4("Linear Trend Performance (Actual)"), uiOutput("model_summary_ui_act"),
-                              div(id = "rk_pred_ui", h4("Linear Trend Performance (Predicted)"), uiOutput("model_summary_ui_pre"))
+                              div(id = "rk_pred_ui", h4("Linear Trend Performance (Predicted)"), uiOutput("model_summary_ui_pre")),
+                              hr(),
+                              h4("Internal Residual Variogram (Actual)"), plotOutput("rk_internal_vgm_act", height = "350px"),
+                              div(id = "rk_internal_vgm_pre_ui", h4("Internal Residual Variogram (Predicted)"), plotOutput("rk_internal_vgm_pre", height = "350px"))
                             ),
                             conditionalPanel(condition = "input.method == 'RFK'",
                               h4("RF Variable Importance (Actual)"), plotOutput("rf_importance_plot_act", height = "350px"),
-                              div(id = "rfk_pred_ui", h4("RF Variable Importance (Predicted)"), plotOutput("rf_importance_plot_pre", height = "350px"))
+                              div(id = "rfk_pred_ui", h4("RF Variable Importance (Predicted)"), plotOutput("rf_importance_plot_pre", height = "350px")),
+                              hr(),
+                              h4("Internal Residual Variogram (Actual)"), plotOutput("rfk_internal_vgm_act", height = "350px"),
+                              div(id = "rfk_internal_vgm_pre_ui", h4("Internal Residual Variogram (Predicted)"), plotOutput("rfk_internal_vgm_pre", height = "350px"))
                             ),
                             conditionalPanel(condition = "input.method == 'CK'",
                               h4("Cross-Variogram (Actual)"), plotOutput("ck_variogram_plot_act", height = "350px"),
@@ -746,7 +752,9 @@ server <- function(input, output, session) {
     has_interp <- rv$has_predictions
     shinyjs::toggle(id = "predicted_data_structure_ui", condition = has_interp)
     shinyjs::toggle(id = "rk_pred_ui", condition = has_interp)
+    shinyjs::toggle(id = "rk_internal_vgm_pre_ui", condition = has_interp)
     shinyjs::toggle(id = "rfk_pred_ui", condition = has_interp)
+    shinyjs::toggle(id = "rfk_internal_vgm_pre_ui", condition = has_interp)
     shinyjs::toggle(id = "ck_pred_ui", condition = has_interp)
     shinyjs::toggle(id = "tps_pred_ui", condition = has_interp)
     shinyjs::toggle(id = "validation_diagnostics_pre_ui", condition = has_interp)
@@ -4769,6 +4777,25 @@ Error in ", l, ": ", e$message)
   output$rf_importance_plot_pre <- renderPlot({
     loc <- input$sel_loc_stats; req(rv$rf_models[[paste0(loc, "_pre")]])
     randomForest::varImpPlot(rv$rf_models[[paste0(loc, "_pre")]], main = paste("Variable Importance (Predicted):", loc))
+  })
+  
+  # RK/RFK Internal Variograms
+  output$rk_internal_vgm_act <- renderPlot({
+    loc <- input$sel_loc_stats; req(rv$v_emp_list[[paste0(loc, "_act")]], rv$v_fit_list[[paste0(loc, "_act")]])
+    plot(rv$v_emp_list[[paste0(loc, "_act")]], rv$v_fit_list[[paste0(loc, "_act")]], main = paste("Internal Residual Variogram (Actual):", loc))
+  })
+  output$rk_internal_vgm_pre <- renderPlot({
+    loc <- input$sel_loc_stats; req(rv$v_emp_list[[paste0(loc, "_pre")]], rv$v_fit_list[[paste0(loc, "_pre")]])
+    plot(rv$v_emp_list[[paste0(loc, "_pre")]], rv$v_fit_list[[paste0(loc, "_pre")]], main = paste("Internal Residual Variogram (Predicted):", loc))
+  })
+  
+  output$rfk_internal_vgm_act <- renderPlot({
+    loc <- input$sel_loc_stats; req(rv$v_emp_list[[paste0(loc, "_act")]], rv$v_fit_list[[paste0(loc, "_act")]])
+    plot(rv$v_emp_list[[paste0(loc, "_act")]], rv$v_fit_list[[paste0(loc, "_act")]], main = paste("Internal Residual Variogram (Actual):", loc))
+  })
+  output$rfk_internal_vgm_pre <- renderPlot({
+    loc <- input$sel_loc_stats; req(rv$v_emp_list[[paste0(loc, "_pre")]], rv$v_fit_list[[paste0(loc, "_pre")]])
+    plot(rv$v_emp_list[[paste0(loc, "_pre")]], rv$v_fit_list[[paste0(loc, "_pre")]], main = paste("Internal Residual Variogram (Predicted):", loc))
   })
 
   # CK Variograms
