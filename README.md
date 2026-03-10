@@ -1,4 +1,4 @@
-# Monolith 0.8.7: Advanced Spatial Analysis Dashboard
+# Monolith 0.8.8: Advanced Spatial Analysis Dashboard
 *Monolith* is a high-performance R Shiny application designed for proper (or a standardized, at least) spatial statistical analysis, geostatistical modeling, and mapping. It provides a comprehensive toolkit for exploring spatial variability, you may find it well-suited for research in soil science, life sciences, and agronomy.
 
 Whether you are mapping soil physicochemistry, analyzing topographical interactions, or generating publication-ready **spatial, descriptive and multi-criteria explorative metrics**, Monolith provides a seamless, parallel-processed environment to ingest, interpolate, interpret and export the data.
@@ -7,7 +7,6 @@ Whether you are mapping soil physicochemistry, analyzing topographical interacti
 * Diverse Spatial Engine: Implement deterministic and geostatistical interpolation models, including Inverse Distance Weighting (IDW), Thin Plate Splines (TPS), Ordinary Kriging (OK), Co-Kriging (CK), Regression Kriging (RK), and Random Forest Kriging (RFK).
 
   ![Alternative Text](assets/1.png)
-* 
   
 * Automated & Manual Optimization: Automated least-squares fitting for variograms for four different models, Generalized Cross-Validation (GCV) for TPS, and Leave-One-Out Cross-Validation (LOOCV) based power optimization for IDW. Dynamic variogram fitting and manual tuning overrides are available for expert calibration. When the interpolation run, every result related to that and many extra statisticaligure and table will be available for batch export.
 * Comprehensive Diagnostics: Evaluate models through LOOCV. Generate advanced metrics including Concordance Correlation Coefficient (CCC), Nash-Sutcliffe Efficiency (NSE), RPD, RPIQ, and Moran's I for spatial autocorrelation.
