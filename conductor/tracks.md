@@ -4,5 +4,5 @@ This file tracks all major tracks for the project. Each track has its own detail
 
 ---
 
-- [ ] **Track: Optimizing UI content depending on user mapping choice**
+- [x] **Track: Optimizing UI content depending on user mapping choice**
 *Link: [./tracks/optimize_ui_20260310/](./tracks/optimize_ui_20260310/)*
