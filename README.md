@@ -8,7 +8,7 @@ Whether you are mapping soil physicochemistry, analyzing topographical interacti
 
   ![Alternative Text](assets/1.png)
 
- ! [Alternative Text](assets/2.png)
+  ![Alternative Text](assets/2.png)
   
 * Automated & Manual Optimization: Automated least-squares fitting for variograms for four different models, Generalized Cross-Validation (GCV) for TPS, and Leave-One-Out Cross-Validation (LOOCV) based power optimization for IDW. Dynamic variogram fitting and manual tuning overrides are available for expert calibration. When the interpolation run, every result related to that and many extra statisticaligure and table will be available for batch export.
 * Comprehensive Diagnostics: Evaluate models through LOOCV. Generate advanced metrics including Concordance Correlation Coefficient (CCC), Nash-Sutcliffe Efficiency (NSE), RPD, RPIQ, and Moran's I for spatial autocorrelation.
