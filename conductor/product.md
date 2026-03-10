@@ -62,6 +62,7 @@ Provides an exhaustive suite of cross-validation (CV) diagnostics to quantify mo
 
 ### Tab 3: Scientific Analysis & Metrics Panel
 - **Geostatistical Plots:** Generates experimental and fitted variogram plots for visual inspection of spatial autocorrelation.
+- **Dynamic Content Visibility:** UI elements requiring predictive data (e.g., cross-validation metrics, predicted data structure plots) are automatically hidden when users map or analyze solely actual sampled data without interpolating, eliminating confusing blank spaces and errors.
 - **Quantitative Zoning:** Computes precise surface area coverage statistics (in Hectares) for different management zones or nutrient classes.
 
 ### Tab 5: Scientific Analytics Engine (Descriptive, Correlation, PCA)
