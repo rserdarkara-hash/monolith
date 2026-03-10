@@ -7,11 +7,14 @@ tuning_ui <- function(id, label,
                       manual_btn_label = paste("Apply Manual", label),
                       outer_style = NULL,
                       manual_style = "background-color: #fff9db; padding: 10px; border: 1px solid #fab005; border-radius: 4px; margin-bottom: 10px;",
+                      top_extra_ui = NULL,
                       extra_ui = NULL) {
   
   content <- tagList(
     radioButtons(paste0(id, "_mode"), "Fitting Mode", 
                  choices = c("Auto-Fit" = "auto", "Manual" = "manual"), inline = TRUE),
+    
+    top_extra_ui,
     
     # Auto Panel
     conditionalPanel(
