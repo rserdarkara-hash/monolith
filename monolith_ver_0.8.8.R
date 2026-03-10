@@ -758,7 +758,8 @@ server <- function(input, output, session) {
     shinyjs::toggle(id = "prediction_performance_ui", condition = has_upl_pred)
   })
 
-  # --- Phase 2: Analytics Engine (Grouping Logic) ---  observe({
+  # --- Phase 2: Analytics Engine (Grouping Logic) ---
+  observe({
     req(rv$user_data)
     cols <- colnames(rv$user_data)
     # Exclude x, y, and target var if needed, or allow all
