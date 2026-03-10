@@ -7,6 +7,8 @@ Whether you are mapping soil physicochemistry, analyzing topographical interacti
 * Diverse Spatial Engine: Implement deterministic and geostatistical interpolation models, including Inverse Distance Weighting (IDW), Thin Plate Splines (TPS), Ordinary Kriging (OK), Co-Kriging (CK), Regression Kriging (RK), and Random Forest Kriging (RFK).
 
   ![Alternative Text](assets/1.png)
+
+ ! [Alternative Text](assets/2.png)
   
 * Automated & Manual Optimization: Automated least-squares fitting for variograms for four different models, Generalized Cross-Validation (GCV) for TPS, and Leave-One-Out Cross-Validation (LOOCV) based power optimization for IDW. Dynamic variogram fitting and manual tuning overrides are available for expert calibration. When the interpolation run, every result related to that and many extra statisticaligure and table will be available for batch export.
 * Comprehensive Diagnostics: Evaluate models through LOOCV. Generate advanced metrics including Concordance Correlation Coefficient (CCC), Nash-Sutcliffe Efficiency (NSE), RPD, RPIQ, and Moran's I for spatial autocorrelation.
@@ -31,3 +33,6 @@ To understand the spatial structure of model errors, Monolith provides two diagn
 **3. Actionable Agronomical Output**
 
 Monolith’s classification engine automatically translates continuous predictions (e.g., Nitrogen levels) into standard agronomical zones see information section for default limits that are valid for Eastern Mediterrenean Turkey. It outputs exact area coverages (in hectares).
+
+
+[def]: assets/2.png
