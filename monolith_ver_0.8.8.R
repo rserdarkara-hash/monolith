@@ -1933,6 +1933,7 @@ server <- function(input, output, session) {
 
   rv <- reactiveValues(
     user_data = NULL, # Uploaded data
+    has_predictions = FALSE, # Tracks interpolation state
     export_registry = list(), # Registry of plots and tables for export
     shp_bound = NULL, # Custom shapefile boundary
     mapping = list(
@@ -3881,7 +3882,7 @@ apply_interpolation <- function(data, target_var, method, grid_p, aux_vars, lags
     shinyjs::runjs("document.getElementById('map_progress_bar_fill').style.width = '5%'; document.getElementById('map_progress_text').innerText = 'Initializing Spatial Analysis Engine...';")
 
     rv$rast_list_act <- list(); rv$rast_list_pre <- list(); sf_list <- list(); b_list <- list()
-    rv$rast <- NULL; rv$rast_pred <- NULL; rv$rast_res <- NULL
+    rv$rast <- NULL; rv$rast_pred <- NULL; rv$rast_res <- NULL; rv$has_predictions <- FALSE
     rv$v_emp_list <- list(); rv$log <- paste0("Starting spatial interpolation using method: ", input$method, "...")
     rv$run_method[[input$var_id]] <- input$method
     rv$model_summaries <- list(); rv$rf_models <- list(); rv$gstat_objs <- list()
@@ -4122,6 +4123,7 @@ Error in ", l, ": ", e$message)
     }
     if(length(valid_p) > 0) {
       rv$rast_pred <- terra::wrap(if(length(valid_p) > 1) do.call(merge, lapply(unname(valid_p), terra::unwrap)) else terra::unwrap(valid_p[[1]]))
+      rv$has_predictions <- TRUE
       register_export_item("map_predicted", paste(meta$label, "- Predicted Map"), "map", rv$rast_pred, meta$category)
     }
     if(length(valid_r) > 0) {
