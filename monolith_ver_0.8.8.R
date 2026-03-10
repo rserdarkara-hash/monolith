@@ -455,9 +455,10 @@ ui <- fluidPage(
                     column(8,
                            conditionalPanel(condition = "input.method == 'OK'",
                              h4("Actual Data Structure"), plotOutput("vgm_plot_main", height = "350px"),
-                             h4("Predicted Data Structure"), plotOutput("vgm_plot_pred", height = "350px")
-                           ),
-                           conditionalPanel(condition = "input.method == 'RK'",
+                             div(id = "predicted_data_structure_ui",
+                               h4("Predicted Data Structure"), plotOutput("vgm_plot_pred", height = "350px")
+                             )
+                           ),                           conditionalPanel(condition = "input.method == 'RK'",
                              h4("Linear Trend Performance (Actual)"), uiOutput("model_summary_ui_act"),
                              h4("Linear Trend Performance (Predicted)"), uiOutput("model_summary_ui_pre")
                            ),
@@ -506,14 +507,15 @@ ui <- fluidPage(
                                hr(style="opacity: 0.3;")
                              ),
                              h5("Model Performance"), div(class="table-container", tableOutput("metrics_table")),
-                             hr(style="opacity: 0.3;"),
-                             h5("Prediction Performance (Uploaded Data)"),
-                             div(class="table-container", tableOutput("uploaded_metrics_table")),
-                             hr(style="opacity: 0.3;"),
-                             h5("Classification Performance (Uploaded Predictions)"),
-                             selectInput("kappa_bin_method", "Binning Method:", choices = c("Agronomical Classes" = "agro", "Quartiles" = "quartile")),
-                             div(class="table-container", tableOutput("kappa_table"))
-                           ),
+                             div(id = "prediction_performance_ui",
+                               hr(style="opacity: 0.3;"),
+                               h5("Prediction Performance (Uploaded Data)"),
+                               div(class="table-container", tableOutput("uploaded_metrics_table")),
+                               hr(style="opacity: 0.3;"),
+                               h5("Classification Performance (Uploaded Predictions)"),
+                               selectInput("kappa_bin_method", "Binning Method:", choices = c("Agronomical Classes" = "agro", "Quartiles" = "quartile")),
+                               div(class="table-container", tableOutput("kappa_table"))
+                             )                           ),
                            div(style = "background-color: #e7f5ff; padding: 15px; border: 2px solid #339af0; border-radius: 8px;",
                              h4("Data Summary Statistics"),
                              tags$p(style="font-size: 0.85em; opacity: 0.8; font-style: italic;", "Aggregated descriptive statistics and area coverage for the data."),
@@ -526,9 +528,8 @@ ui <- fluidPage(
                              ),
                              fluidRow(
                                column(6, h6("Locality - Actual"), tableOutput("area_table_loc_act")),
-                               column(6, h6("Locality - Predicted"), tableOutput("area_table_loc_pre"))
-                             ),
-                             hr(style="border-top: 1px solid #339af0;"),
+                               column(6, div(id = "loc_pred_col", h6("Locality - Predicted"), tableOutput("area_table_loc_pre")))
+                             ),                             hr(style="border-top: 1px solid #339af0;"),
                              h5("Descriptive Statistics"),
                              conditionalPanel(condition = "input.locality.length > 1 || (input.locality.length == 1 && input.locality[0] == 'ALL')",
                                tableOutput("stats_table_total")
@@ -739,9 +740,25 @@ ui <- fluidPage(
 
 # --- Server ---
 server <- function(input, output, session) {
-  
-  # --- Phase 2: Analytics Engine (Grouping Logic) ---
+
+  # --- UI Visibility based on Prediction State ---
   observe({
+    # 1. Elements requiring Interpolation
+    shinyjs::toggle(id = "predicted_data_structure_ui", condition = rv$has_predictions)
+    shinyjs::toggle(id = "loc_pred_col", condition = rv$has_predictions)
+    
+    # 2. Elements requiring Uploaded Predictions
+    has_upl_pred <- FALSE
+    if(!is.null(rv$mapping$vars) && !is.null(input$var_id)) {
+       meta <- Filter(function(x) x$actual == input$var_id, rv$mapping$vars)
+       if(length(meta) > 0) {
+         if(!is.null(meta[[1]]$pred) || !is.null(meta[[1]]$pred_ss)) has_upl_pred <- TRUE
+       }
+    }
+    shinyjs::toggle(id = "prediction_performance_ui", condition = has_upl_pred)
+  })
+
+  # --- Phase 2: Analytics Engine (Grouping Logic) ---  observe({
     req(rv$user_data)
     cols <- colnames(rv$user_data)
     # Exclude x, y, and target var if needed, or allow all
@@ -5118,10 +5135,12 @@ Error in ", l, ": ", e$message)
           }
       
           m_act <- get_metrics_df(rv$cv_metrics_act, rv$cv_data_act, "Actual Model (CV)")
-          m_pre <- get_metrics_df(rv$cv_metrics_pre, rv$cv_data_pre, "Predicted Model (CV)")
-          
-          rbind(m_act, m_pre)
-        })
+          if(rv$has_predictions) {
+            m_pre <- get_metrics_df(rv$cv_metrics_pre, rv$cv_data_pre, "Predicted Model (CV)")
+            return(rbind(m_act, m_pre))
+          } else {
+            return(m_act)
+          }        })
       
         output$uploaded_metrics_table <- renderTable({
           req(rv$sf, input$sel_loc_stats)
