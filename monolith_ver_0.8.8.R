@@ -459,22 +459,21 @@ ui <- fluidPage(
                                h4("Predicted Data Structure"), plotOutput("vgm_plot_pred", height = "350px")
                              )
                            ),                           conditionalPanel(condition = "input.method == 'RK'",
-                             h4("Linear Trend Performance (Actual)"), uiOutput("model_summary_ui_act"),
-                             h4("Linear Trend Performance (Predicted)"), uiOutput("model_summary_ui_pre")
-                           ),
-                           conditionalPanel(condition = "input.method == 'RFK'",
-                             h4("RF Variable Importance (Actual)"), plotOutput("rf_importance_plot_act", height = "350px"),
-                             h4("RF Variable Importance (Predicted)"), plotOutput("rf_importance_plot_pre", height = "350px")
-                           ),
-                           conditionalPanel(condition = "input.method == 'CK'",
-                             h4("Cross-Variogram (Actual)"), plotOutput("ck_variogram_plot_act", height = "350px"),
-                             h4("Cross-Variogram (Predicted)"), plotOutput("ck_variogram_plot_pre", height = "350px")
-                           ),
-                           conditionalPanel(condition = "input.method == 'TPS'",
-                             h4("TPS GCV Diagnostics (Actual)"), plotOutput("tps_gcv_plot_act", height = "350px"),
-                             h4("TPS GCV Diagnostics (Predicted)"), plotOutput("tps_gcv_plot_pre", height = "350px")
-                           ),
-                           conditionalPanel(condition = "!['OK', 'RK', 'RFK', 'CK', 'TPS'].includes(input.method)",
+                              h4("Linear Trend Performance (Actual)"), uiOutput("model_summary_ui_act"),
+                              div(id = "rk_pred_ui", h4("Linear Trend Performance (Predicted)"), uiOutput("model_summary_ui_pre"))
+                            ),
+                            conditionalPanel(condition = "input.method == 'RFK'",
+                              h4("RF Variable Importance (Actual)"), plotOutput("rf_importance_plot_act", height = "350px"),
+                              div(id = "rfk_pred_ui", h4("RF Variable Importance (Predicted)"), plotOutput("rf_importance_plot_pre", height = "350px"))
+                            ),
+                            conditionalPanel(condition = "input.method == 'CK'",
+                              h4("Cross-Variogram (Actual)"), plotOutput("ck_variogram_plot_act", height = "350px"),
+                              div(id = "ck_pred_ui", h4("Cross-Variogram (Predicted)"), plotOutput("ck_variogram_plot_pre", height = "350px"))
+                            ),
+                            conditionalPanel(condition = "input.method == 'TPS'",
+                              h4("TPS GCV Diagnostics (Actual)"), plotOutput("tps_gcv_plot_act", height = "350px"),
+                              div(id = "tps_pred_ui", h4("TPS GCV Diagnostics (Predicted)"), plotOutput("tps_gcv_plot_pre", height = "350px"))
+                            ),                           conditionalPanel(condition = "!['OK', 'RK', 'RFK', 'CK', 'TPS'].includes(input.method)",
                              div(style="padding: 20px; text-align: center; color: #666;",
                                  h4("Diagnostic Mode Active"),
                                  p("Detailed spatial diagnostics are currently optimized for Kriging and TPS."))
@@ -486,14 +485,15 @@ ui <- fluidPage(
                              column(6, plotOutput("resid_vgm_plot_act", height = "300px"))
                            ),
                            conditionalPanel(condition = "input.comp_mode || input.value_type != 'actual'",
-                             hr(),
-                             h4("Validation Diagnostics (Predicted)"),
-                             fluidRow(
-                               column(6, plotOutput("obs_pred_plot_pre", height = "300px")),
-                               column(6, plotOutput("resid_vgm_plot_pre", height = "300px"))
+                             div(id = "validation_diagnostics_pre_ui",
+                               hr(),
+                               h4("Validation Diagnostics (Predicted)"),
+                               fluidRow(
+                                 column(6, plotOutput("obs_pred_plot_pre", height = "300px")),
+                                 column(6, plotOutput("resid_vgm_plot_pre", height = "300px"))
+                               )
                              )
-                           )
-                    ),
+                           )                    ),
                     column(4,
                            div(style = "background-color: #fff9db; padding: 15px; border: 2px solid #fab005; border-radius: 8px; margin-bottom: 20px;",
                              h4("Spatial Interpolation Statistics"),
@@ -523,10 +523,9 @@ ui <- fluidPage(
                              conditionalPanel(condition = "input.locality.length > 1 || (input.locality.length == 1 && input.locality[0] == 'ALL')",
                                fluidRow(
                                  column(6, h6("Total - Actual"), tableOutput("area_table_total_act")),
-                                 column(6, h6("Total - Predicted"), tableOutput("area_table_total_pre"))
+                                 column(6, div(id = "area_total_pred_col", h6("Total - Predicted"), tableOutput("area_table_total_pre")))
                                )
-                             ),
-                             fluidRow(
+                             ),                             fluidRow(
                                column(6, h6("Locality - Actual"), tableOutput("area_table_loc_act")),
                                column(6, div(id = "loc_pred_col", h6("Locality - Predicted"), tableOutput("area_table_loc_pre")))
                              ),                             hr(style="border-top: 1px solid #339af0;"),
@@ -744,8 +743,15 @@ server <- function(input, output, session) {
   # --- UI Visibility based on Prediction State ---
   observe({
     # 1. Elements requiring Interpolation
-    shinyjs::toggle(id = "predicted_data_structure_ui", condition = rv$has_predictions)
-    shinyjs::toggle(id = "loc_pred_col", condition = rv$has_predictions)
+    has_interp <- rv$has_predictions
+    shinyjs::toggle(id = "predicted_data_structure_ui", condition = has_interp)
+    shinyjs::toggle(id = "rk_pred_ui", condition = has_interp)
+    shinyjs::toggle(id = "rfk_pred_ui", condition = has_interp)
+    shinyjs::toggle(id = "ck_pred_ui", condition = has_interp)
+    shinyjs::toggle(id = "tps_pred_ui", condition = has_interp)
+    shinyjs::toggle(id = "validation_diagnostics_pre_ui", condition = has_interp)
+    shinyjs::toggle(id = "loc_pred_col", condition = has_interp)
+    shinyjs::toggle(id = "area_total_pred_col", condition = has_interp)
     
     # 2. Elements requiring Uploaded Predictions
     has_upl_pred <- FALSE
