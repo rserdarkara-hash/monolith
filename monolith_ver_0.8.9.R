@@ -4640,7 +4640,7 @@ Error in ", l, ": ", e$message)
   output$comp_map_right <- renderLeaflet({
     req(rv$run_method[[input$var_id]])
     if(input$value_type == "resid") {
-      draw_map(rv$rast_point_res, "resid_raster")
+      draw_map(rv$rast_point_res, "resid_points")
     } else {
       draw_map(terra::unwrap(rv$rast_pred), "Predicted")
     }
