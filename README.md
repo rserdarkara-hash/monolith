@@ -35,7 +35,7 @@ Whether you are mapping soil physicochemistry, analyzing topographical interacti
 
 * **Descriptive & Exploratory Suite**: 
 
-  - Understand your dataset with simultaneous descriptive, correlation, principal component with results that can be instantly generated and observed by simultaneous categorization and data popularization of choice. An additional variable importance -or maybe a factor- analysis section is included to possibly increase the understanding of observed spatial data.
+  - Understand your dataset with simultaneous descriptive, correlation, and principal component analyses with results that can be instantly generated and observed by simultaneous categorization and data popularization of choice. An additional variable importance -or maybe a factor- analysis section is included to possibly increase the understanding of observed spatial data.
 
   ![Alternative Text](assets/5.png) 
 
@@ -44,7 +44,7 @@ Whether you are mapping soil physicochemistry, analyzing topographical interacti
   ![Alternative Text](assets/6.png) 
 
 
-* **Dynamic UI & Theming**: Fully responsive interface with customizable themes and figures, accessible data details on maps/graphs with dual-map support for visual audits of hot-points and actual vs. predicted surfaces.
+* **Dynamic UI & Theming**: Fully responsive interface with customizable themes and figures, accessible data details on maps/graphs for visual audits of hot-points.
 
   ![Alternative Text](assets/7.png) 
 
