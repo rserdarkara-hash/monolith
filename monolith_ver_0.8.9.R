@@ -742,6 +742,16 @@ ui <- fluidPage(
 # --- Server ---
 server <- function(input, output, session) {
 
+  # --- Force Comparison Mode for Residuals ---
+  observeEvent(input$value_type, {
+    if (isTruthy(input$value_type) && input$value_type == "resid") {
+      updateCheckboxInput(session, "comp_mode", value = TRUE)
+      shinyjs::disable("comp_mode")
+    } else {
+      shinyjs::enable("comp_mode")
+    }
+  })
+
   # --- UI Visibility based on Prediction State ---
   observe({
     # 1. Elements requiring Interpolation
