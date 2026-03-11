@@ -370,7 +370,7 @@ ui <- fluidPage(
                      h3("Step 1: Upload Your Dataset"),
                      fluidRow(
                        column(6, fileInput("user_file", "Choose CSV or Excel File", accept = c(".csv", ".xlsx", ".xls"))),
-                       column(6, fileInput("user_shp", "Upload Shapefile - Optional (.shp, .shx, .dbf, .prj)", multiple = TRUE, accept = c(".shp", ".shx", ".dbf", ".prj")))
+                       column(6, fileInput("user_shp", "Shapefile - Optional (.shp, .shx, .dbf, .prj)", multiple = TRUE, accept = c(".shp", ".shx", ".dbf", ".prj")))
                      ),
                      conditionalPanel(condition = "output.file_uploaded",
                        downloadButton("export_updated_data", "Export Updated Dataset", class = "btn-success", style = "margin-bottom: 15px;")
@@ -3088,14 +3088,14 @@ server <- function(input, output, session) {
       footer = modalButton("Close"),
       div(style = "text-align: center; padding: 20px;",
           img(src = "assets/banner.png", style = "max-width: 100%; height: auto; margin-bottom: 20px;"),
-          h3("Spatial Soil Analysis Dashboard"),
-          p(strong("Version: 0.8.7")),
+          h4("A statistics and optimized mapping tool for life scientists"),
+          p("Version: 0.8.7"),
           p("Integrated geostatistical modeling, classification and statistical interpretation"),
           hr(),
           p("Designed for high-performance parallel processing and spatial diagnostics, multi-scale interpolation via kriging, inverse distance weighting, and thin plate splines with practical multi-criteria optimization."),
           p("Supported with the Descriptive and Explarotive Suite with dynamic visualizations and statistics."),
           hr(),
-          p(strong("Product of the days without an institutional e-mail address.")),
+          p(strong("A product of days without an institutional e-mail address.")),
           p(style = "color: #666; font-size: 0.9em;", "  by Recep Serdar Kara in cooperation with Gemini CLI - 2026")
       )
     ))
