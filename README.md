@@ -1,10 +1,11 @@
-# Monolith 0.8.8: Advanced Spatial Analysis Dashboard
+# Monolith 0.8.9: Advanced Spatial Analysis Dashboard
 *Monolith* is a high-performance R Shiny application designed for proper (or a standardized, at least) spatial statistical analysis, geostatistical modeling, and mapping. It provides a comprehensive toolkit for exploring spatial variability, you may find it well-suited for research in soil science, life sciences, and agronomy.
 
 Whether you are mapping soil physicochemistry, analyzing topographical interactions, or generating publication-ready **spatial, descriptive and multi-criteria explorative metrics**, Monolith provides a seamless, parallel-processed environment to ingest, interpolate, interpret and export the data for continuous and classified maps.
 
 # Key Features
-* **Diverse Spatial Engine**: Deterministic and geostatistical interpolation models for contunious and classified maps of your small field or vast plains you study on. 
+* **Diverse Spatial Engine**: Deterministic and geostatistical interpolation models for contunious and classified maps of your small fields or vast plains you study on. Monolith’s classification engine automatically translates continuous predictions (e.g., Nitrogen levels) into standard agronomical zones. It outputs exact area coverages (in hectares).
+
 
   - Inverse Distance Weighting (IDW), 
   
@@ -27,12 +28,14 @@ Whether you are mapping soil physicochemistry, analyzing topographical interacti
   ![Alternative Text](assets/3.png) 
 
 
-* **Comprehensive Diagnostics**: Evaluate models through LOOCV. Generate advanced metrics including Concordance Correlation Coefficient (CCC), Nash-Sutcliffe Efficiency (NSE), RPD, RPIQ, and Moran's I for spatial autocorrelation.
+* **Comprehensive Diagnostics**: Evaluate models through LOOCV. Generate advanced metrics including Nash-Sutcliffe Efficiency (NSE), RPD, RPIQ, and Moran's I for spatial autocorrelation.
 
   ![Alternative Text](assets/4.png) 
 
 
-* **Descriptive & Exploratory Suite**: Understand your dataset: Simultaneous descriptive, correlation, principal component and factor analyses.
+* **Descriptive & Exploratory Suite**: 
+
+  - Understand your dataset with simultaneous descriptive, correlation, principal component with results that can be instantly generated and observed by simultaneous categorization and data popularization of choice. An additional variable importance -or maybe a factor- analysis section is included to possibly increase the understanding of observed spatial data.
 
   ![Alternative Text](assets/5.png) 
 
@@ -41,7 +44,7 @@ Whether you are mapping soil physicochemistry, analyzing topographical interacti
   ![Alternative Text](assets/6.png) 
 
 
-* **Dynamic UI & Theming**: Fully responsive interface with customizable, accessible themes (e.g., Deep Forest, Obsidian Night) and dual-map comparison modes for visual audits of actual vs. predicted surfaces.
+* **Dynamic UI & Theming**: Fully responsive interface with customizable thematics, accessible data details on maps/grahs with dual-map support for visual audits of hot-points and actual vs. predicted surfaces.
 
   ![Alternative Text](assets/7.png) 
 
@@ -66,9 +69,6 @@ To understand the spatial structure of model errors, Monolith provides two diagn
   ![Alternative Text](assets/9.png) 
 
 
-**3. Actionable Agronomical Output**
-
-Monolith’s classification engine automatically translates continuous predictions (e.g., Nitrogen levels) into standard agronomical zones see information section for default limits that are valid for Eastern Mediterrenean Turkey. It outputs exact area coverages (in hectares).
 
 
 [def]: assets/2.png
