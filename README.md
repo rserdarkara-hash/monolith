@@ -4,14 +4,25 @@
 Whether you are mapping soil physicochemistry, analyzing topographical interactions, or generating publication-ready **spatial, descriptive and multi-criteria explorative metrics**, Monolith provides a seamless, parallel-processed environment to ingest, interpolate, interpret and export the data for continuous and classified maps.
 
 # Key Features
-* **Diverse Spatial Engine**: Implement deterministic and geostatistical interpolation models for contunious and classified maps, including Inverse Distance Weighting (IDW), Thin Plate Splines (TPS), Ordinary Kriging (OK), Co-Kriging (CK), Regression Kriging (RK), and Random Forest Kriging (RFK).
+* **Diverse Spatial Engine**: Deterministic and geostatistical interpolation models for contunious and classified maps of your small field or vast plains you study on. 
+
+  - Inverse Distance Weighting (IDW), 
+  
+  - Thin Plate Splines (TPS), 
+
+  - Ordinary Kriging (OK), 
+
+  - Co-Kriging (CK), 
+
+  - Regression Kriging (RK), 
+  
+  - Random Forest Kriging (RFK).
 
   ![Alternative Text](assets/1.png) 
   ![Alternative Text](assets/2.png) 
   
   
-  
-* **Automated & Interactive Manual Optimization of Model Fittings**: Automated least-squares fitting for variograms for four different models, Generalized Cross-Validation (GCV) for TPS, and Leave-One-Out Cross-Validation (LOOCV) based power optimization for IDW. Dynamic variogram fitting and manual tuning overrides are available for expert calibration. When the interpolation run, each results of it will be instantly available  for batch export.
+* **Automated & Manual Optimization of Model Fittings**: Automated least-squares fitting for variograms for four different models, Generalized Cross-Validation (GCV) for TPS, and Leave-One-Out Cross-Validation (LOOCV) based power optimization for IDW. Interactive variogram fitting and manual tuning overrides are available for expert calibration. When the interpolation run, each results of interpolation will be instantly available for batch export.
 
   ![Alternative Text](assets/3.png) 
 
