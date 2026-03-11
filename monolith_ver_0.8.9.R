@@ -337,7 +337,7 @@ ui <- fluidPage(
           hr(),
           h5("Uncertainty Mapping"),
           conditionalPanel(condition = "['OK', 'RK', 'RFK', 'CK'].includes(input.method)",
-            checkboxInput("show_uncertainty", "Map Uncertainty Instead of Prediction", FALSE),
+            checkboxInput("show_uncertainty", "Map Uncertainty Instead of Interpolation", FALSE),
             conditionalPanel(condition = "input.show_uncertainty",
               radioButtons("uncertainty_type", "Metric", choices = c("Variance" = "var", "Standard Error" = "se"), selected = "se", inline = TRUE)
             )
