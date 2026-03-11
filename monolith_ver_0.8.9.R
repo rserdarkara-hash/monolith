@@ -264,10 +264,8 @@ ui <- fluidPage(
                            h5("Residual Diagnostics"),
                            actionButton("resid_info_btn", "i", class = "info-btn")
                          ),
-                         selectInput("resid_type", "Residual Calculation:", 
-                                     choices = c("Surface Delta (Identify Regional Bias)" = "delta", 
-                                                 "Point Errors (Identify Sampling Hotspots)" = "point")),
-                         tags$p(style="font-size: 0.8em; opacity: 0.8;", "Delta: Difference between two full surfaces (uploaded actual map - uploaded prediction map). Reveals regional zones where your uploaded predictions consistently over- or under-predict across the field. Point Error: Kriged map of local prediction errors. Acts as an 'Uncertainty Map'. Highlights exact points where the model failed.")
+                         tags$p(style="font-size: 0.85em; margin-bottom: 5px;", tags$b("Interpolated Delta:"), " Difference between two full surfaces (actual - prediction). Reveals regional zones of consistent over/under-prediction."),
+                         tags$p(style="font-size: 0.85em; margin-bottom: 0;", tags$b("Interpolated Point Errors:"), " Kriged map of local prediction errors. Acts as an 'Uncertainty Map' highlighting exact points of model failure.")
                        )
                      ),          
           # Static Kriging Controls
@@ -430,10 +428,10 @@ ui <- fluidPage(
                              actionButton("refresh_map_area", "Refresh Map Area", icon = icon("sync"), class = "btn-info btn-sm", style = "margin-left: auto;"),
                              actionButton("show_popup_settings", "Pop-up Settings", icon = icon("cog"), class = "btn-info btn-sm"),
                              actionButton("quick_export_map", "Quick Export", icon = icon("camera"), class = "btn-info btn-sm", title = "Immediately send the currently viewed map to the Export Registry.")
-                         ),                         conditionalPanel(condition = "!input.comp_mode || input.value_type == 'actual'",
+                         ),                         conditionalPanel(condition = "(!input.comp_mode && input.value_type != 'resid') || input.value_type == 'actual'",
                                           h4(textOutput("main_map_title")),
                                           leafletOutput("main_map", height = "700px")),
-                         conditionalPanel(condition = "input.comp_mode && input.value_type != 'actual'",
+                         conditionalPanel(condition = "(input.comp_mode && input.value_type != 'actual') || input.value_type == 'resid'",
                                           fluidRow(column(6, h4(textOutput("comp_left_title")), leafletOutput("comp_map_left", height = "600px")),
                                                    column(6, h4(textOutput("comp_right_title")), leafletOutput("comp_map_right", height = "600px")))),
                          div(id = "distance_scale_container", style = "margin-top: 15px; display: flex; justify-content: center; min-height: 30px;"),
