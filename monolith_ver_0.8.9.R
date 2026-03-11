@@ -4620,21 +4620,18 @@ Error in ", l, ": ", e$message)
     shinyjs::runjs("setTimeout(function() { window.dispatchEvent(new Event('resize')); }, 100);")
   })
 
-  output$main_map <- renderLeaflet({ 
+  output$main_map <- renderLeaflet({
     req(input$value_type); req(rv$run_method[[input$var_id]])
-    target <- if(input$value_type == "actual") rv$rast 
-              else if(input$value_type == "resid") {
-                if(input$resid_type == "point") rv$rast_point_res else rv$rast_res
-              }
+    target <- if(input$value_type == "actual") rv$rast
+              else if(input$value_type == "resid") rv$rast_res
               else rv$rast_pred
-    draw_map(target, input$value_type) 
+    draw_map(target, input$value_type)
   })
 
   output$comp_map_left <- renderLeaflet({
     req(rv$run_method[[input$var_id]])
     if(input$value_type == "resid") {
-      target <- if(input$resid_type == "point") rv$rast_point_res else rv$rast_res
-      draw_map(target, "resid_raster")
+      draw_map(rv$rast_res, "resid_raster")
     } else {
       draw_map(rv$rast, "Actual")
     }
@@ -4643,12 +4640,11 @@ Error in ", l, ": ", e$message)
   output$comp_map_right <- renderLeaflet({
     req(rv$run_method[[input$var_id]])
     if(input$value_type == "resid") {
-      draw_map(NULL, "resid_points")
+      draw_map(rv$rast_point_res, "resid_raster")
     } else {
       draw_map(terra::unwrap(rv$rast_pred), "Predicted")
-      }
-      })
-
+    }
+  })
       # --- Map Panning Logic ---
       output$locality_pan_ui <- renderUI({
       req(rv$loc_names)
