@@ -44,7 +44,7 @@ Whether you are mapping soil physicochemistry, analyzing topographical interacti
   ![Alternative Text](assets/6.png) 
 
 
-* **Dynamic UI & Theming**: Fully responsive interface with customizable thematics, accessible data details on maps/grahs with dual-map support for visual audits of hot-points and actual vs. predicted surfaces.
+* **Dynamic UI & Theming**: Fully responsive interface with customizable themes and figures, accessible data details on maps/graphs with dual-map support for visual audits of hot-points and actual vs. predicted surfaces.
 
   ![Alternative Text](assets/7.png) 
 
