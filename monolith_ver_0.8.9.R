@@ -4485,7 +4485,7 @@ Error in ", l, ": ", e$message)
        pts_view <- st_transform(rv$sf, 4326)
        abs_max_p <- max(abs(pts_view$resid), na.rm=T)
        if(is.infinite(abs_max_p) || is.na(abs_max_p)) abs_max_p <- 1
-       pal_pts <- colorNumeric("RdBu", domain = c(-abs_max_p, abs_max_p), na.color = "black", reverse = TRUE)
+       pal_pts <- colorNumeric("RdBu", domain = c(-abs_max_p, abs_max_p), na.color = "black")
        df_clean <- st_drop_geometry(pts_view)
        popups <- lapply(1:nrow(df_clean), function(i) generate_popup(df_clean[i, ])) %>% unlist()
        
@@ -4640,7 +4640,7 @@ Error in ", l, ": ", e$message)
   output$comp_map_right <- renderLeaflet({
     req(rv$run_method[[input$var_id]])
     if(input$value_type == "resid") {
-      draw_map(rv$rast_point_res, "resid_points")
+      draw_map(NULL, "resid_points")
     } else {
       draw_map(terra::unwrap(rv$rast_pred), "Predicted")
     }
