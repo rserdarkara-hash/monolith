@@ -1,0 +1,8 @@
+{
+  "track_id": "scientific_review_20260312",
+  "type": "chore",
+  "status": "new",
+  "created_at": "2026-03-12T12:00:00Z",
+  "updated_at": "2026-03-12T12:00:00Z",
+  "description": "study the codebase, and the docs as a geostatician that has great experience in environmental and life sciences. report missing points, contradictions, and necessary additions to the scientific guide and the user guide for scientific integrity, to increase user experience, to be precise and consistent, in separate formatted .md files for each. do not overwrite the current files."
+}
