@@ -12,7 +12,7 @@
 
 ## Phase 3: Resolution Calculation Fix
 - [x] Task: Write Failing Tests - Add test data mimicking `samp_data_2.xlsx` CRS (degrees) and assert that UI reports resolution strictly in meters. 6db6b96
-- [ ] Task: Implement Fix - Add a strict EPSG heuristic or `sf::st_transform` logic inside the resolution calculation function to accurately convert degree measurements to meters.
+- [x] Task: Implement Fix - Add a strict EPSG heuristic or `sf::st_transform` logic inside the resolution calculation function to accurately convert degree measurements to meters. dc97002
 - [ ] Task: Conductor - User Manual Verification 'Phase 3: Resolution Calculation Fix' (Protocol in workflow.md)
 
 ## Phase 4: Refresh Button Fix
