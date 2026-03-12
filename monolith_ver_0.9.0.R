@@ -2361,6 +2361,7 @@ server <- function(input, output, session) {
   
   output$batch_export <- downloadHandler(
     filename = function() { paste0("Batch_Export_", format(Sys.time(), "%Y%m%d_%H%M%S"), ".zip") },
+    contentType = "application/zip",
     content = function(file) {
       req(input$selected_assets, length(input$selected_assets) > 0)
       
