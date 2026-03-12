@@ -25,12 +25,12 @@
 - [x] Task: Conductor - User Manual Verification 'Phase 3: Codebase Investigation (UI/UX and Architecture)' (Protocol in workflow.md) 83032fc
 
 ## Phase 4: Report Generation and Finalization
-- [ ] Task: Draft Scientific Guide Additions
-    - [ ] Synthesize findings on math, algorithms, and scientific claims.
-    - [ ] Output a separate, formatted markdown file (e.g., `docs/scientific_guide_additions.md`).
-- [ ] Task: Draft UI/UX Guide Additions
-    - [ ] Synthesize findings on user workflows, inconsistencies, and proposed architectural solutions.
-    - [ ] Output a separate, formatted markdown file (e.g., `docs/ui_ux_guide_additions.md`).
-- [ ] Task: Final Polish
-    - [ ] Ensure formatting is precise and both files correctly detail missing points and contradictions without modifying original docs.
+- [x] Task: Draft Scientific Guide Additions 5cde14e
+    - [x] Synthesize findings on math, algorithms, and scientific claims.
+    - [x] Output a separate, formatted markdown file (e.g., `docs/scientific_guide_additions.md`).
+- [x] Task: Draft UI/UX Guide Additions 5cde14e
+    - [x] Synthesize findings on user workflows, inconsistencies, and proposed architectural solutions.
+    - [x] Output a separate, formatted markdown file (e.g., `docs/ui_ux_guide_additions.md`).
+- [x] Task: Final Polish 5cde14e
+    - [x] Ensure formatting is precise and both files correctly detail missing points and contradictions without modifying original docs.
 - [ ] Task: Conductor - User Manual Verification 'Phase 4: Report Generation and Finalization' (Protocol in workflow.md)
