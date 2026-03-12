@@ -2755,21 +2755,11 @@ server <- function(input, output, session) {
   # --- Dynamic Resolution Sync ---
   observeEvent(input$crs_selection, {
     req(input$crs_selection)
-    crs_obj <- tryCatch(st_crs(input$crs_selection), error = function(e) NULL)
-    req(crs_obj)
-    
-    units <- crs_obj$units_gdal
-    if (is.null(units)) units <- "meters" # fallback
-    
-    if (grepl("degree", units, ignore.case = TRUE)) {
-      updateSliderInput(session, "grid_res", label = "Resolution (Degrees)", 
-                        min = 0.0001, max = 0.01, value = 0.0005, step = 0.0001)
-    } else {
-      updateSliderInput(session, "grid_res", label = "Resolution (m)", 
-                        min = 1, max = 500, value = 50, step = 1)
-    }
-  })
 
+    # We now enforce metric resolution reporting regardless of target CRS
+    updateSliderInput(session, "grid_res", label = "Resolution (m)",
+                      min = 1, max = 500, value = 50, step = 1)
+  })
   # --- Smart Resolution Recommendation ---
   observeEvent(list(rv$user_data, input$map_x, input$map_y, input$crs_selection, input$locality, input$res_mode), {
     req(rv$user_data, input$map_x, input$map_y, input$crs_selection, input$locality, input$res_mode)
@@ -2844,22 +2834,24 @@ server <- function(input, output, session) {
             sub_pts <- tryCatch(st_as_sf(sub_df, coords=c("x","y"), crs=input$map_crs) %>% st_transform(input$crs_selection), error=function(e) NULL)
             if(is.null(sub_pts)) next
             
-            sub_coords <- st_coordinates(sub_pts)
-            if (nrow(sub_coords) > 1) {
-                 sub_knn <- FNN::get.knn(sub_coords, k = 1)
+            if (nrow(sub_pts) > 1) {
+                 # Strictly enforce metric distances for resolution estimation
+                 sub_pts_m <- tryCatch(sf::st_transform(sub_pts, 3857), error = function(e) sub_pts)
+                 sub_coords_m <- sf::st_coordinates(sub_pts_m)
+                 sub_knn <- FNN::get.knn(sub_coords_m, k = 1)
                  l_res <- mean(sub_knn$nn.dist) * 0.5
+
+                 # If transformation failed and we are in degrees, apply heuristic to convert to meters
+                 if (is_degree && identical(sub_pts, sub_pts_m)) {
+                    lat_c <- mean(sf::st_coordinates(sf::st_transform(sub_pts, 4326))[,2])
+                    m_per_deg <- 111319 * cos(lat_c * pi / 180)
+                    l_res <- l_res * m_per_deg
+                 }
             } else l_res <- final_rec
-            
-            sub_bbox <- st_bbox(sub_pts)
-            sub_max_dim <- max(sub_bbox["xmax"] - sub_bbox["xmin"], sub_bbox["ymax"] - sub_bbox["ymin"])
-            sub_min_res <- sub_max_dim / 300
-            l_res <- max(l_res, sub_min_res)
-            
-            if (is_degree) l_res <- max(0.00001, min(0.01, l_res))
-            else l_res <- max(0.1, min(500, l_res))
-            
-            temp_res[[l]] <- l_res
-        }
+
+            l_res <- max(1, min(5000, l_res))
+
+            temp_res[[l]] <- l_res        }
         rv$loc_resolutions <- temp_res
     } else {
         # If not local mode, apply global/fixed resolution to all selected localities
