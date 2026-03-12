@@ -4618,6 +4618,15 @@ Error in ", l, ": ", e$message)
     leafletProxy("main_map") %>%
       clearTiles() %>%
       addProviderTiles(input$base_map_layer, layerId="base_tiles", options = providerTileOptions(zIndex = -10))
+    
+    leafletProxy("comp_map_left") %>%
+      clearTiles() %>%
+      addProviderTiles(input$base_map_layer, layerId="base_tiles", options = providerTileOptions(zIndex = -10))
+      
+    leafletProxy("comp_map_right") %>%
+      clearTiles() %>%
+      addProviderTiles(input$base_map_layer, layerId="base_tiles", options = providerTileOptions(zIndex = -10))
+      
     # Trigger window resize to force Leaflet invalidateSize which fixes gray tiles
     shinyjs::runjs("setTimeout(function() { window.dispatchEvent(new Event('resize')); }, 100);")
   })
