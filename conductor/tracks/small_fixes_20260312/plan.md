@@ -7,7 +7,7 @@
 
 ## Phase 2: Moran's I NA Handling
 - [x] Task: Write Failing Tests - Write tests that mock a pure nugget effect triggering a Moran's I `NA` output to verify UI handles it poorly. a317a12
-- [ ] Task: Implement Fix - Modify the metric calculation and UI display layers to catch `NA` gracefully and display "No Spatial Structure Detected" with a tooltip instead of raw NA.
+- [x] Task: Implement Fix - Modify the metric calculation and UI display layers to catch `NA` gracefully and display "No Spatial Structure Detected" with a tooltip instead of raw NA. a9e3c7e
 - [ ] Task: Conductor - User Manual Verification 'Phase 2: Moran's I NA Handling' (Protocol in workflow.md)
 
 ## Phase 3: Resolution Calculation Fix
