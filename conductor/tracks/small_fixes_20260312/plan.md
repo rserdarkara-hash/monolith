@@ -2,7 +2,7 @@
 
 ## Phase 1: File Backup and Version Bump
 - [x] Task: Back up `monolith_ver_0.8.9.R` and all 0.8.9.R helper scripts to the `backups/` directory. b576726
-- [ ] Task: Copy `monolith_ver_0.8.9.R` and its helpers to `monolith_ver_0.9.0.R` and update version headers in code.
+- [x] Task: Copy `monolith_ver_0.8.9.R` and its helpers to `monolith_ver_0.9.0.R` and update version headers in code. 17edfd5
 - [ ] Task: Conductor - User Manual Verification 'Phase 1: File Backup and Version Bump' (Protocol in workflow.md)
 
 ## Phase 2: Moran's I NA Handling
