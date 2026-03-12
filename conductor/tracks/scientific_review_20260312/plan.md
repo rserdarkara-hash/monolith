@@ -17,11 +17,11 @@
 - [x] Task: Conductor - User Manual Verification 'Phase 2: Codebase Investigation (Scientific Integrity)' (Protocol in workflow.md) 2a0ef32
 
 ## Phase 3: Codebase Investigation (UI/UX and Architecture)
-- [ ] Task: Analyze UI Workflows
-    - [ ] Review data ingestion, spatial selection, and mapping workflows.
-    - [ ] Assess alignment between visual parameters and scientific output expectations.
-- [ ] Task: Review Code Architecture
-    - [ ] Map out data pipeline efficiency and potential structural contradictions compared to documentation.
+- [x] Task: Analyze UI Workflows bfcd640
+    - [x] Review data ingestion, spatial selection, and mapping workflows.
+    - [x] Assess alignment between visual parameters and scientific output expectations.
+- [x] Task: Review Code Architecture bfcd640
+    - [x] Map out data pipeline efficiency and potential structural contradictions compared to documentation.
 - [ ] Task: Conductor - User Manual Verification 'Phase 3: Codebase Investigation (UI/UX and Architecture)' (Protocol in workflow.md)
 
 ## Phase 4: Report Generation and Finalization
