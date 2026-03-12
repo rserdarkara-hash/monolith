@@ -13,7 +13,7 @@
 ## Phase 3: Resolution Calculation Fix
 - [x] Task: Write Failing Tests - Add test data mimicking `samp_data_2.xlsx` CRS (degrees) and assert that UI reports resolution strictly in meters. 6db6b96
 - [x] Task: Implement Fix - Add a strict EPSG heuristic or `sf::st_transform` logic inside the resolution calculation function to accurately convert degree measurements to meters. dc97002
-- [ ] Task: Conductor - User Manual Verification 'Phase 3: Resolution Calculation Fix' (Protocol in workflow.md)
+- [x] Task: Conductor - User Manual Verification 'Phase 3: Resolution Calculation Fix' (Protocol in workflow.md)
 
 ## Phase 4: Refresh Button Fix
 - [ ] Task: Write Failing Tests - Create an integration test simulating the Refresh button click to assert geostatistical re-calculation functions are NOT called.
