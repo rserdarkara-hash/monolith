@@ -8,12 +8,12 @@
 - [x] Task: Conductor - User Manual Verification 'Phase 1: Contextual Research and Document Ingestion' (Protocol in workflow.md) afe4aa0
 
 ## Phase 2: Codebase Investigation (Scientific Integrity)
-- [ ] Task: Analyze Spatial Interpolation Modules
-    - [ ] Cross-check Ordinary Kriging (OK) and Regression Kriging (RK) scripts.
-    - [ ] Evaluate Thin Plate Spline and Inverse Distance Weighting routines for theoretical alignment.
-- [ ] Task: Analyze Data Analytics and Diagnostics
-    - [ ] Inspect cross-validation metric calculations (RMSE, R2, Lin's CCC, Moran's I).
-    - [ ] Verify PCA collinearity logic and Random Forest variable importance.
+- [x] Task: Analyze Spatial Interpolation Modules 443716f
+    - [x] Cross-check Ordinary Kriging (OK) and Regression Kriging (RK) scripts.
+    - [x] Evaluate Thin Plate Spline and Inverse Distance Weighting routines for theoretical alignment.
+- [x] Task: Analyze Data Analytics and Diagnostics 443716f
+    - [x] Inspect cross-validation metric calculations (RMSE, R2, Lin's CCC, Moran's I).
+    - [x] Verify PCA collinearity logic and Random Forest variable importance.
 - [ ] Task: Conductor - User Manual Verification 'Phase 2: Codebase Investigation (Scientific Integrity)' (Protocol in workflow.md)
 
 ## Phase 3: Codebase Investigation (UI/UX and Architecture)
