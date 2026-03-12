@@ -1,7 +1,7 @@
 # Implementation Plan: Small controls and fixes (monolith_ver_0.8.9.R to 0.9.0.R)
 
 ## Phase 1: File Backup and Version Bump
-- [ ] Task: Back up `monolith_ver_0.8.9.R` and all 0.8.9.R helper scripts to the `backups/` directory.
+- [x] Task: Back up `monolith_ver_0.8.9.R` and all 0.8.9.R helper scripts to the `backups/` directory. b576726
 - [ ] Task: Copy `monolith_ver_0.8.9.R` and its helpers to `monolith_ver_0.9.0.R` and update version headers in code.
 - [ ] Task: Conductor - User Manual Verification 'Phase 1: File Backup and Version Bump' (Protocol in workflow.md)
 
