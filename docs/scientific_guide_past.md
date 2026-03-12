@@ -8,8 +8,6 @@ The Monolith Spatial Analysis Dashboard provides agronomists, soil scientists, a
 
 Spatial interpolation creates continuous prediction surfaces from discrete point samples. The dashboard implements both deterministic methods (relying solely on geometric proximity) and geostatistical models (incorporating spatial autocorrelation and statistical uncertainty).
 
-**NaN Protection:** Across all Kriging methods, the resulting predictions (`var1.pred`) and theoretical variances (`var1.var`) are systematically protected against NaN or Infinite outputs, explicitly converting them to `NA` for downstream mapping.
-
 ### 1.1 Ordinary Kriging (OK)
 
 **Mathematical Intuition:** Ordinary Kriging assumes that the value at an unsampled location <i>Z<sup>*</sup>(x<sub>0</sub>)</i> is a linear combination of known surrounding values <i>Z(x<sub>i</sub>)</i>. The formula is:
@@ -19,8 +17,6 @@ Spatial interpolation creates continuous prediction surfaces from discrete point
 Unlike simple kriging, OK assumes an unknown, constant global mean (<i>&mu;</i>). The weights <i>&lambda;<sub>i</sub></i> are determined by minimizing the estimation variance while ensuring the weights sum to 1 (<i>&sum; &lambda;<sub>i</sub> = 1</i>). The variance-covariance matrix used to solve for these weights is derived directly from the theoretical variogram.
 
 **Agronomical Example:** Predicting soil pH across a relatively uniform field where variations are driven by natural soil-forming processes rather than abrupt topographical changes or human intervention.
-
-**Algorithmic Stability (Epsilon-Nugget):** For variables with extremely low variance (e.g., specific micro-nutrients like Iron), the codebase strictly enforces a tiny nugget (`1e-6 * initial_sill`) when the initial empirical nugget is exactly zero. This prevents singular matrix inversion failures during Kriging.
 
 ### 1.2 Regression Kriging (RK)
 
@@ -48,8 +44,6 @@ By incorporating the cross-covariance matrix, CK utilizes dense secondary sampli
 
 **Agronomical Example:** You have sparse, expensive laboratory soil tests for Nitrate (NO3), but dense, cheap sensor data for Soil Electrical Conductivity (EC). Since EC and Nitrate often co-vary, CK uses the dense EC points to dramatically improve the Nitrate interpolation surface.
 
-**Covariate Kriging Fallback (CK/RK/RFK):** When interpolating covariates across the spatial grid, if covariate kriging fails (e.g., due to pure nugget effects or collinearity collapses), the pipeline implements an automatic and silent `tryCatch` fallback to IDW (p=2, nmax=12). Documenting this increases transparency on how the spatial engine ensures map generation succeeds.
-
 ### 1.5 Inverse Distance Weighting (IDW)
 
 **Mathematical Intuition:** A purely deterministic method. The estimated value is a weighted average of known points, where the weight is inversely proportional to the distance <i>d</i> raised to a power <i>p</i> (usually <i>p=2</i>):
@@ -70,7 +64,7 @@ IDW assumes that points closer to the target are more similar. It does not accou
 
 ## 2. Automated Optimizations
 
-### 2.1 Variogram Optimization
+### 2.2 Variogram Optimization
 The empirical semivariogram <i>&gamma;(h)</i> quantifies spatial dependence by calculating half the average squared difference between paired data values separated by a distance lag <i>h</i>:
 <br><br>
 <div style="text-align:center;"><i>&gamma;(h) = (1 / 2N(h)) &sum; [Z(x<sub>i</sub>) - Z(x<sub>i</sub> + h)]<sup>2</sup></i></div>
@@ -100,7 +94,7 @@ The dashboard employs an automated least-squares fitting algorithm to establish 
 
 ## 3. Validation Diagnostics
 
-The dashboard automatically runs Leave-One-Out Cross-Validation (LOOCV) for the selected spatial model. By dropping one data point at a time and predicting its value using the remaining points, we generate a dataset of predicted vs. actual values (<i>P<sub>i</sub></i> vs <i>O<sub>i</sub></i>). The cross-validation engine utilizes a centralized metric abstraction (`perform_cv`) to process an expanded suite of metrics natively.
+The dashboard automatically runs Leave-One-Out Cross-Validation (LOOCV) for the selected spatial model. By dropping one data point at a time and predicting its value using the remaining points, we generate a dataset of predicted vs. actual values (<i>P<sub>i</sub></i> vs <i>O<sub>i</sub></i>).
 
 - **RMSE (Root Mean Square Error):**
   <div style="text-align:center;"><i>RMSE = &radic;( &sum; (P<sub>i</sub> - O<sub>i</sub>)<sup>2</sup> / n )</i></div>
@@ -127,7 +121,7 @@ The dashboard automatically runs Leave-One-Out Cross-Validation (LOOCV) for the 
 - **SMAPE (Symmetric Mean Absolute Percentage Error):** Standardizes absolute errors as percentages, preventing extreme inflation when actual values are near zero.
 
 - **Moran's I (Spatial Autocorrelation of Residuals):**
-  Evaluates whether the LOOCV errors are randomly distributed across the field. If Moran's I is significantly positive, errors are clustered (e.g., the model consistently underestimates in the north and overestimates in the south). This indicates the model failed to capture a macroscopic spatial trend, and an RK or RFK approach might be required. The system uses FNN (k=1) and `spdep` for rapid spatial weights matrix construction when calculating the spatial autocorrelation of residuals.
+  Evaluates whether the LOOCV errors are randomly distributed across the field. If Moran's I is significantly positive, errors are clustered (e.g., the model consistently underestimates in the north and overestimates in the south). This indicates the model failed to capture a macroscopic spatial trend, and an RK or RFK approach might be required.
 
 ---
 
@@ -145,7 +139,7 @@ This function interpolates the Actual measured data and the Predicted data (from
 
 This calculates the discrete error at each exact sampling location (<i>O<sub>i</sub> - P<sub>i</sub></i>, or Actual - Predicted) and runs an Inverse Distance Weighting (IDW) interpolation purely on those error values.
 
-**Use Case:** This creates a map showing the spatial structure of local model failure (the model produced the uploaded parameter predictions, not the spatial interpolation model). Hotspots on this map indicate distinct zones in the field where the current prediction model cannot capture the true soil variability.
+**Use Case:** This creates an "Uncertainty Map" showing the spatial structure of local model failure (the model produced the uploaded parameter predictions, not the spatial interpolation model). Hotspots on this map indicate distinct zones in the field where the current prediction model cannot capture the true soil variability.
 
 ## 5. Uncertainty Analysis & Confidence Mapping - regarding spatial interpolation
 
@@ -167,9 +161,3 @@ For advanced models (Regression Kriging and Random Forest Kriging), the uncertai
 * **Trend Uncertainty**: Captures the error in the relationship between your soil target and environmental predictors, such as how well Elevation explains Nitrogen levels.
 * **Residual Uncertainty**: Captures the Kriging error of the remaining unexplained variation.
 * **Total Map**: The final uncertainty map for RK/RFK is the mathematical sum of both the trend variance and the residual kriging variance, providing a comprehensive "Full-Model" error surface.
-
-## 6. Data Analytics & PCA Protocols
-
-### 6.1 Multicollinearity Filter
-
-The PCA module implements an automated strict collinearity check. Before executing standard PCA, it scans the numerical matrix for pairwise correlations > 0.95. If detected, it actively halts the execution and alerts the user, requiring a manual override or parameter drop. This is a critical statistical guardrail that prevents severe distortion of the loading vectors.

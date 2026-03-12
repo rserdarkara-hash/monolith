@@ -1,18 +1,18 @@
 ## Data Ingestion & Configuration
 
-The application requires cleanly structured, georeferenced tabular data.
-  - Column headings (the first row) need to be reserved for parameter titles  (e.g., `tn`, `p`, `k`, `ph`, `som`, `clay`), categorical/grouping factors if available (e.g., `subset`, `texture_class`, `locality` ), and coordinate labels (e.g., `x`, `y`, `lat`, `long`); rows are required to be the related data, numbering, coordinate values, locality names or category labels etc.
+The application requires simply but cleanly structured, georeferenced tabular data.
+  - Column headings (the first row) need to be reserved for parameters  (e.g., `tn`, `p`, `k`, `ph`, `som`, `clay`), categorical columns (e.g., `subset`, `texture_class`, `locality` ), and coordinates (e.g., `x`, `y`, `lat`, `long`); rows are required to be the related data, numbering, coordinate values, locality names or category labels etc.
 
 **Step 1. Upload Dataset:**
    - Click `Browse...` to upload your file. 
-   - The system accepts standard delimited formats (.csv, .txt) and Excel /.(.xlsx). Your file must contain distinct columns for X coordinates, Y coordinates and at least one variable of interest.
+   - The system accepts standard delimited formats (CSV, TXT) and Excel (XLSX). Ensure your file contains distinct columns for X coordinates, Y coordinates and at least one variable of interest.
    - Sample data sets are available in the app directory: 
       - the large data set is in `samp_data_1.xlsx` to be used with the variable list `samp_var_list.xlsx` (dummy soil phsysicochemistry data for Denizli/Türkiye - properties of tobacco growing soils with actual environmental, remote sensing and terrain data); 
       - the small data set is in `samp_data_2.xlsx` (dummy soil phsysicochemistry and hydrology data for Pardubice/Czech Republic - dummy data for a sunflower field under controlled drainage)
 
 **Step 2. Assign Variables:**
    - **X/Y Coordinates:** Select the columns representing longitude/latitude or easting/northing. App searches for exact matches of `x`, `y`, or headers starting with `lon` or `longitude`, `lat` or `latitude`.
-   * **Locality / Grouping:** Searches for headers containing `locality`, `loc`, `site`, `farm`, `id`, or `group`. It assigns this to the "Locality" or a "Grouping Factor" selector, which is used to filter analysis subsets later. See the sample data files for related columns.
+   * **Locality / Grouping:** Searches for headers containing `locality`, `loc`, `site`, `farm`, `id`, or `group`. It assigns this to the "Locality" selector, which is used to filter analysis subsets later.
    
 **Step 3. Coordinate Reference System (CRS) Management:**
    - The app attempts to automatically parse the CRS from the data structure.
@@ -25,13 +25,17 @@ The application requires cleanly structured, georeferenced tabular data.
   **A. Upload Metadata Context**
 
   - Upload File: Select a secondary .xlsx, JSON, or TXT file containing your variable definitions.
+
   - Label Mapping: The app scans for headers like label or name to display on all maps and reports.
+
   - Category Grouping: Headers containing cat or group allow the UI to organize variables into folders such as "Physicochemistry," "Remote Sensing," or "Terrain".
 
   **B. Automated Variable Processing**
 
   - Target Isolation: The system automatically filters out non-numeric columns and coordinates identified in Step 1, treating the remainder as target variables.
-  - Smart Pairing & Folder Grouping: The engine performs a suffix search to link observed data with model outputs. Additionally, the UI groups variables dynamically into structural folders (e.g., 'Soil Physicochemistry', 'Terrain') based on the uploaded metadata, allowing users to seamlessly navigate high-dimensional datasets.
+
+  - Smart Pairing: The engine performs a suffix search to link observed data with model outputs.
+
     * Cross-Validation: Matches target names with the `_cve` suffix; 
     * Single Split: Matches target names with the `_ss` suffix.
     * Successful matches create a "Triad" (Actual, Pred_cve, Pred_ss), allowing you to toggle between ground-truth maps and residual maps without manual re-linking.
@@ -39,6 +43,7 @@ The application requires cleanly structured, georeferenced tabular data.
   **C. Final Validation**
 
   - Review Mapping: Check the generated table at the bottom of the configuration panel to verify that labels, units, and prediction pairs are correctly assigned.
+
   - Confirm: Once the variable mapping is verified, confirm it at the end of the page, and proceed to the Spatial Engine to begin interpolation.
 
 ---
@@ -72,7 +77,7 @@ Once selections are made, the main interface transitions to the analytical modul
      - **Deterministic (Fast):** **IDW** (Inverse Distance Weighting) and **TPS** (Thin Plate Spline) are ideal for rapid visualization. IDW uses distance-based weights, while TPS fits a smooth surface by minimizing "bending energy".
      - **Geostatistical (Standard):** **Ordinary Kriging (OK)** uses a Variogram to model spatial autocorrelation, providing the Best Linear Unbiased Predictor (BLUE).
      - **Multivariate (Co-Kriging)**: **Co-Kriging (CK)** exploits the cross-correlation between your primary target and a densely sampled auxiliary variable (e.g., using Sensor-based Conductivity to improve a Clay map).
-     - **Hybrid/ML:** **Regression Kriging (RK)** and **Random Forest Kriging (RFK)** combine environmental trends (topography, satellite data) with Kriging of the residuals to capture complex soil patterns.
+     - **Hybrid/ML (High-Precision):** **Regression Kriging (RK)** and **Random Forest Kriging (RFK)** combine environmental trends (topography, satellite data) with Kriging of the residuals to capture complex soil patterns.
      
 **2.a. Variogram Optimization (Geostatistical Engines Only):**
    - If a Kriging method is selected, the Variogram Panel will appear.
@@ -84,13 +89,12 @@ Once selections are made, the main interface transitions to the analytical modul
 
 **2.b. IDW Optimization** 
      - If IDW method is selected, the related panel will appear.
-     - The interface provides a dynamic slider panel that calculates optimal parameters on a per-locality basis. When optimized, a reactive table details the exact Power factor chosen for *each independent spatial domain*.
-     - Adjust the `number of neighbors` before optimizing for the optimum `IDW factor`. A specific tooltip advises users to restrict `idw_nmax` (default 12) before optimization to prevent distant, unrelated points from distorting local predictions. 
+     - Adjust the `number of neighbors` before optimizing for the optimum `IDW factor`. 
      - Manual override will be available if you deem it necessary.
      
 **2.c. TPS Optimization** 
      - If TPS method is selected, the related panel will appear.
-     - Simply click to button to achieve locality specific `lambda` values. Similar to IDW, this generates a reactive table detailing the exact Lambda chosen for each independent spatial domain.
+     - Simply click to button to achieve locality specific `lambda` values.
      - Manual override will be available if you deem it necessary.
      
 **3. Define the Grid Resolution:**
@@ -111,7 +115,6 @@ Once selections are made, the main interface transitions to the analytical modul
 
 **5. Execution:**
    - Click **GENERATE MODELS**. The system will perform LOOCV, generate the surface, and populate the Validation Diagnostics table with RMSE, R², and Moran's I metrics.
-   - **Responsive Diagnostic Views:** The UI employs `shinyjs` to dynamically toggle the visibility of complex validation diagnostics (like the RF Variable Importance Plot, Internal Residual Variogram, or TPS GCV Diagnostic Plot) based on the active Spatial Engine and whether the user is viewing `Actual` or `Predicted` data. This prevents empty plots from rendering and provides visual cleanliness.
 
 ---
 
@@ -140,7 +143,7 @@ The Export Registry standardizes outputs for reports and presentations.
 **2. Typographical Scaling and Advanced Options:**
 
    - Advanced options in the styler provides comprehensive control by enabling individual size and orientation settings for the figure elements. 
-   - The styling configurations can be saved for future sessions. 
+   - The styling configurations can be saved for future sessions.
 
 **3. DPI Configuration:**
    - Choose your target resolution under **Output Quality**:
@@ -151,95 +154,3 @@ The Export Registry standardizes outputs for reports and presentations.
 **4. Download:**
    - Select your desired format (`.TIFF`, `.PNG`, `.JPEG`, `.PDF`).
    - Click **Finalize and Download**.
-
-
-# Descriptive & Exploratory Suite:
-
-The **Descriptive and Exploratory Suite**  provides a comprehensive set of statistical and visual tools to investigate your data either before interpolation or after generating parameter predictions.
-
-
-
-## 1. Global Data Grouping & Discretization
-
-At the top of the Analytics Engine, a master control panel dictates the data subset fed into all subsequent analysis tabs (Descriptive, Correlation, PCA, Governing Factors). Any filter or grouping applied persists across your entire analytical session through this tabs, the results will instantly updated if grouping modified.
-
-*   **Grouping Variables (Max 5):** You can select up to 5 categorical or numerical variables to act as grouping factors.
-*   **Auto-Discretization:** If a continuous numerical variable (like Elevation or pH) is selected as a grouping factor, the UI automatically applies discretization logic to bin it into logical categories (e.g., Low, Medium, High) so it can be used for grouping plots (like Boxplots) or Correlation network nodes.
-*   **Active Group Filter:** Once groups are defined, you can isolate specific sub-populations using the filter dropdown.
-
----
-
-## 2. Tab 1: Descriptive Suite
-
-This tab focuses on univariate and bivariate distributions, how data varies across the groups defined in the global panel.
-
-**2.1 Plot Type Selection**
-A central dropdown allows you to switch between over a dozen high-fidelity visualization modes:
-*   **Distribution:** Histogram, Density, ECDF, QQ Plot, Ridge/Joyplot.
-*   **Categorical Variance:** Boxplot, Violin, Sina-style Plot.
-*   **Multivariate/Spatial:** Scatterplot, 2D Density Heatmap, Parallel Coordinates, Radar/Spider Chart, Multi-fit XYZ Surface.
-
-**2.2 Significance Testing (ANOVA & Post-Hoc)**
-*   When utilizing categorical variance plots (Boxplot, Violin, Sina), the UI natively integrates ANOVA testing.
-*   Users can select post-hoc methods (Duncan's or Tukey's HSD).
-*   **UX Interaction:** The resulting statistical significance letters (e.g., 'a', 'b', 'ab') are dynamically rendered directly atop the individual plot geometries, allowing for immediate visual interpretation of statistical differences between soil or field groups.
-
-**2.3 Ghosting Overlay**
-*   **Functionality:** A toggleable feature that overlays the currently selected local sub-population (filtered group) over a faded, "ghosted" background representing the entire global dataset.
----
-
-## 3. Tab 2: Correlation Analysis
-
-This module evaluates the linear and monotonic relationships between all numeric variables in the dataset.
-
-**3.1 Method Selection**
-*   Choose between `Pearson` (linear), `Spearman` (rank/monotonic), or `Kendall` (tau).
-
-**3.2 Plot Type Selection**
-*   **Hierarchical Heatmap:** Automatically clusters highly correlated variables together.
-*   **Correlation Network:** Visualizes relationships as a node-edge graph, where edge thickness dictates correlation strength.
-*   **Partial Correlation:** Allows users to calculate correlations while mathematically controlling for the effect of a third variable (via regression residual extraction).
-*   **Correlogram & Lagged CCF:** For spatial or sequential lag analysis.
-
-**3.3 Data Table**
-*   A reactive data table (`DT::dataTableOutput`) below the plot provides the exact numerical correlation matrix for rigorous inspection and export.
-
----
-
-## 4. Tab 3: Principal Component Analysis (PCA)
-
-A dedicated high-dimensional dimensionality reduction module.
-
-**4.1 Automated Collinearity Filter (Critical UX Guardrail)**
-*   Before PCA executes, the system scans the selected variables. If near-perfect collinearity is detected ($r > 0.95$), a prominent warning UI (`pca_collinearity_warning_ui`) intercepts the process.
-*   It lists the exact conflicting pairs and prevents execution, offering an "Ignore Warning & Force PCA" red button for advanced users. This prevents the generation of heavily distorted loading vectors.
-
-**4.2 Plot Settings**
-*   **Types:** Scree Plot, Biplot (2D), Loadings, Contribution, Cumulative Variance, and Mahalanobis Distance.
-*   **Controls:** Dynamic numeric inputs appear based on the plot type to select specific Principal Components (e.g., X-Axis PC 1, Y-Axis PC 2) or assess specific loading contributions.
-
----
-
-## 5. Tab 4: Governing Factors
-
-This module leverages machine learning explainability to discover non-linear relationships and feature interactions.
-
-**5.1 Configuration**
-*   **Target:** Select the primary soil parameter you wish to explain.
-*   **Predictors:** Select the environmental or secondary variables acting as potential influences.
-*   **Permutations:** A slider controls the robustness of the Random Forest variable importance calculation (default: 50).
-
-**5.2 Functional Effect Plots**
-Users can toggle between two advanced explainability frameworks:
-*   **SHAP (SHapley Additive exPlanations):** Shows the marginal contribution of each feature across the dataset.
-*   **ALE (Accumulated Local Effects):** A faster, unbiased alternative to Partial Dependence Plots that maps the main effect of a predictor on the target variable.
-
----
-
-## 6. Expandable Plot Engine
-
-Across *most* tabs in the Analytics Engine (Descriptive, Correlation, PCA), the main plot area features an **"Expand / Interactive"** button in the top right corner.
-
-*   **Interaction:** Clicking this button opens a large, full-screen modal.
-*   **Modality:** The user can toggle between a "Static (High-Res)" view for clean screenshots or an "Interactive (Hover/Zoom)" mode.
-*   **Interactive Engine:** The interactive mode converts the standard `ggplot2` object into a `plotly` object, granting the user pan, zoom, and deep point-specific hover capabilities natively within the browser.
