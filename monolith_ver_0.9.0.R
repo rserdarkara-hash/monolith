@@ -5164,20 +5164,19 @@ Error in ", l, ": ", e$message)
                     Bias_ME = round(me, 4),
                     RPD_Prec = round(rpd, 4),
                     SMAPE_Pct = round(smape, 4),
-                    Moran_I = round(moran_i, 4)
-                  )
-                  names(res_df) <- c("Source", "RMSE", "R  (Corr)", "R  (NSE/Trad)", "Bias (ME)", "RPD (Prec)", "SMAPE (%)", "Moran's I")
-                  res_df
-          }
-      
-          m_act <- get_metrics_df(rv$cv_metrics_act, rv$cv_data_act, "Actual Model (CV)")
-          if(rv$has_predictions) {
-            m_pre <- get_metrics_df(rv$cv_metrics_pre, rv$cv_data_pre, "Predicted Model (CV)")
-            return(rbind(m_act, m_pre))
-          } else {
-            return(m_act)
-          }        })
-      
+                    Moran_I = if(is.na(moran_i)) '<span title="No Spatial Structure Detected">NA*</span>' else as.character(round(moran_i, 4))
+                    )
+                    names(res_df) <- c("Source", "RMSE", "R  (Corr)", "R  (NSE/Trad)", "Bias (ME)", "RPD (Prec)", "SMAPE (%)", "Moran's I")
+                    res_df
+                    }
+
+                    m_act <- get_metrics_df(rv$cv_metrics_act, rv$cv_data_act, "Actual Model (CV)")
+                    if(rv$has_predictions) {
+                    m_pre <- get_metrics_df(rv$cv_metrics_pre, rv$cv_data_pre, "Predicted Model (CV)")
+                    return(rbind(m_act, m_pre))
+                    } else {
+                    return(m_act)
+                    }        }, sanitize.text.function = function(x) x)      
         output$uploaded_metrics_table <- renderTable({
           req(rv$sf, input$sel_loc_stats)
           loc <- input$sel_loc_stats
