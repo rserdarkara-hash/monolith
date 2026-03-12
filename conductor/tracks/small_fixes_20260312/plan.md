@@ -16,6 +16,6 @@
 - [x] Task: Conductor - User Manual Verification 'Phase 3: Resolution Calculation Fix' (Protocol in workflow.md)
 
 ## Phase 4: Refresh Button Fix
-- [ ] Task: Write Failing Tests - Create an integration test simulating the Refresh button click to assert geostatistical re-calculation functions are NOT called.
+- [x] Task: Write Failing Tests - Create an integration test simulating the Refresh button click to assert geostatistical re-calculation functions are NOT called. 62952d0
 - [ ] Task: Implement Fix - Detach the Refresh action from the heavy re-render logic, replacing it with a leaflet map visual redraw (e.g. invalidate size or basic redraw function in Shiny).
 - [ ] Task: Conductor - User Manual Verification 'Phase 4: Refresh Button Fix' (Protocol in workflow.md)
