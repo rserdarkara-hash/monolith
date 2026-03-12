@@ -3,6 +3,87 @@
 
 Whether you are mapping soil physicochemistry, analyzing topographical interactions, or generating publication-ready **spatial, descriptive and multi-criteria explorative metrics**, Monolith provides a seamless, parallel-processed environment to ingest, interpolate, interpret and export the data for continuous and classified maps.
 
+# Installation & Setup Guide
+
+## 1. System Prerequisites
+
+Before installing the application, ensure you have the following software installed:
+
+*   **R:** Version 4.5.0 or higher is highly recommended. You can download it from [CRAN](https://cran.r-project.org/).
+*   **RStudio (Optional but recommended):** The easiest way to run and interact with Shiny applications. Download from [Posit](https://posit.co/download/rstudio-desktop/).
+*   **System Dependencies for Spatial Packages:** 
+    *   **Windows:** Generally, RTools handles most binary dependencies. Download [RTools](https://cran.r-project.org/bin/windows/Rtools/) matching your R version.
+    *   **macOS:** You may need to install `gdal` and `proj` via Homebrew (`brew install gdal proj`).
+    *   **Linux (Ubuntu/Debian):** Install spatial libraries using your package manager:
+        ```bash
+        sudo apt-get update
+        sudo apt-get install libgdal-dev libproj-dev libgeos-dev libudunits2-dev
+        ```
+
+## 2. Package Dependencies
+
+The Monolith dashboard relies on a comprehensive suite of R packages for its spatial engine, statistical analytics, and user interface. 
+
+You can install all required packages by running the following script in your R console:
+
+```R
+# Core Shiny & UI Framework
+install.packages(c("shiny", "shinyjs", "shinyWidgets", "shinyFiles", "shinycssloaders"))
+
+# Spatial Data & Mapping
+install.packages(c("sf", "terra", "leaflet", "leaflet.extras", "concaveman"))
+
+# Geostatistics & Machine Learning
+install.packages(c("gstat", "automap", "randomForest", "fields", "DALEX"))
+
+# Data Manipulation & Metrics
+install.packages(c("dplyr", "tidyr", "readxl", "openxlsx", "yardstick"))
+
+# Data Visualization
+install.packages(c("ggplot2", "ggpubr", "patchwork", "tidyterra", "ggspatial", "plotly", "latticeExtra"))
+
+# Color Palettes & Theming
+install.packages(c("RColorBrewer", "viridis", "classInt", "showtext"))
+
+# Export & Asynchronous Processing
+install.packages(c("future", "furrr", "promises", "progressr", "officer", "zip", "jsonlite"))
+```
+
+## 3. Application Structure
+
+Ensure your project directory maintains the following structure. The application consists of a main runner file and several helper scripts:
+
+```
+monolith/
+│
+├── monolith_ver_0.8.9.R        # Main Application Runner
+├── improvements/               # Modular Source Files
+│   ├── spatial_helpers_0.8.9.R # Spatial math & CV logic
+│   ├── ui_helpers_0.8.9.R      # Analytics & descriptive plots
+│   └── theme_helpers_0.8.9.R   # Theming & export configurations
+├── assets/                     # (Optional) Static assets, custom CSS
+
+```
+
+## 4. Running the Application
+
+### Option A: Using RStudio (Recommended)
+1. Open the `monolith_ver_0.8.9.R` file in RStudio.
+2. Ensure all required packages are installed and loaded without errors.
+3. Click the **"Run App"** button located at the top right of the source editor.
+
+### Option B: Using the R Console
+1. Open your R console or terminal.
+2. Set your working directory to the folder containing the app:
+   ```R
+   setwd("/path/to/your/monolith/directory")
+   ```
+3. Launch the Shiny app:
+   ```R
+   shiny::runApp("monolith_ver_0.8.9.R")
+   ```
+
+
 # Key Features
 * **Diverse Spatial Engine**: Deterministic and geostatistical interpolation models for contunious and classified maps of your small fields or vast plains you study on. Monolith’s classification engine automatically translates continuous predictions (e.g., Nitrogen levels) into standard agronomical zones. It outputs exact area coverages (in hectares).
 
