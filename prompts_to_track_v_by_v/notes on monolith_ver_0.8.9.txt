@@ -1,0 +1,35 @@
+Project: Monolith Spatial Soil Analysis Dashboard Preparation (monolith_ver_0.8.9.R -> monolith_ver_0.9.0.R; never overwrite monolith_ver_0.8.9.R file and its helpers, copy them to produce monolith_ver_0.9.0.R and its helpers):
+
+1.NEWTRACK:
+
+(1.1. TRACK DUTY: 
+
+Role: You are an expert R/Shiny Developer and Geostatistician with good agronomical and environmental science experience.
+
+A. START WITH BACKING UP THE APP AND HELPER FILES TO THE BACKUP FOLDER, YOU DO NOT NEED MANUAL VERIFICATION FOR THIS FIRST STAGE, BUT ALWAYS INCLUDE IT IN THE PLAN AS THE FIRST STAGE.
+
+B. Task Title: Small controls and fixes
+
+Current States and Solutions: 
+B1. moran's i metric is sometimes NA, does that mean there is no spatial autocorrelation available or is there something wrong? Check and fix if necessary.
+
+B2. resolution should be provided to user in meters in every coordinate system, for instance in sample data 2 the reported resolution to user is 0.005, but all resolution calculations are well for sample data 1, and reported in meters. 
+
+B3. refresh button does  not seem to refresh the panel. it should reload the panel with already prepared map, in case it goes gray. 
+
+
+
+
+	(1.2. AUTHOURATIVE INSTRUCTIONS:
+	"CURRENT TECH STACK IS ALLOWED TO BE EXPANDED WHEN NECESSARY, PARTICULARLY REGARDING R/PYTHON LIBRARIES AND PACKAGES. FEEL FREE TO 	INSTALL/IMPORT NEW ONES (r and python both can be used).
+
+	YOU HAVE YOLO RIGHTS WITHIN THE CONTEXT.
+
+ 	Ask questions for details when you are confused or need more clarified instructions, or you believe a guidance would improve the end-product quality.
+
+	EXAMPLE DATA FILES ARE "samp_data_1.xlsx" and "samp_data_2.xlsx"; variable list for these files are "samp_var_list.xlsx" and 	"samp_var_list_2.xlsx"
+
+	KEEPING ALL STYLE, CONTENT, SCIENTIFIC, AND WORKING/AUTOMATED FUNCTIONS OF monolith_ver_0.8.9.R IS CRUCIAL.
+
+	NEVER OVERWRITE THE EXISTING APP FILE, ALWAYS REPRODUCE ALL EXISTING FILES FOR THE APP TO WORK AND BACK THEM UP TO THE BACKUPS 	FOLDER THEN BEGIN WORKING FOR THE NEWER VERSION"))
+

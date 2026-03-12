@@ -3095,7 +3095,7 @@ server <- function(input, output, session) {
           p("Designed for high-performance parallel processing and spatial diagnostics, multi-scale interpolation via kriging, inverse distance weighting, and thin plate splines with practical multi-criteria optimization."),
           p("Supported with the Descriptive and Explarotive Suite with dynamic visualizations and statistics."),
           hr(),
-          p(strong("A product of days without an institutional e-mail address.")),
+          p(strong("A product of `that` couple of months following the loose of institutional e-mail address.")),
           p(style = "color: #666; font-size: 0.9em;", "  by Recep Serdar Kara in cooperation with Gemini CLI - 2026")
       )
     ))
