@@ -7,14 +7,14 @@
     - [x] Extract key claims, methodological assumptions, and UI descriptions for later verification.
 - [x] Task: Conductor - User Manual Verification 'Phase 1: Contextual Research and Document Ingestion' (Protocol in workflow.md) afe4aa0
 
-## Phase 2: Codebase Investigation (Scientific Integrity)
+## Phase 2: Codebase Investigation (Scientific Integrity) [checkpoint: 2a0ef32]
 - [x] Task: Analyze Spatial Interpolation Modules 443716f
     - [x] Cross-check Ordinary Kriging (OK) and Regression Kriging (RK) scripts.
     - [x] Evaluate Thin Plate Spline and Inverse Distance Weighting routines for theoretical alignment.
 - [x] Task: Analyze Data Analytics and Diagnostics 443716f
     - [x] Inspect cross-validation metric calculations (RMSE, R2, Lin's CCC, Moran's I).
     - [x] Verify PCA collinearity logic and Random Forest variable importance.
-- [ ] Task: Conductor - User Manual Verification 'Phase 2: Codebase Investigation (Scientific Integrity)' (Protocol in workflow.md)
+- [x] Task: Conductor - User Manual Verification 'Phase 2: Codebase Investigation (Scientific Integrity)' (Protocol in workflow.md) 2a0ef32
 
 ## Phase 3: Codebase Investigation (UI/UX and Architecture)
 - [ ] Task: Analyze UI Workflows
