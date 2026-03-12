@@ -6,7 +6,7 @@
 - [x] Task: Conductor - User Manual Verification 'Phase 1: File Backup and Version Bump' (Protocol in workflow.md)
 
 ## Phase 2: Moran's I NA Handling
-- [ ] Task: Write Failing Tests - Write tests that mock a pure nugget effect triggering a Moran's I `NA` output to verify UI handles it poorly.
+- [x] Task: Write Failing Tests - Write tests that mock a pure nugget effect triggering a Moran's I `NA` output to verify UI handles it poorly. a317a12
 - [ ] Task: Implement Fix - Modify the metric calculation and UI display layers to catch `NA` gracefully and display "No Spatial Structure Detected" with a tooltip instead of raw NA.
 - [ ] Task: Conductor - User Manual Verification 'Phase 2: Moran's I NA Handling' (Protocol in workflow.md)
 
