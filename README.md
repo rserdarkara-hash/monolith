@@ -1,5 +1,5 @@
 # Monolith 0.9.0: Advanced Spatial Analysis Dashboard
-*Monolith* is a high-performance R Shiny application designed for proper (or a standardized, at least) spatial statistical analysis, geostatistical modeling, and mapping. It provides a comprehensive toolkit for exploring spatial variability, you may find it well-suited for research in soil science, life sciences, and agronomy.
+*Monolith* is a R Shiny application designed for proper (or a standardized, at least) spatial statistical analysis, geostatistical modeling, and mapping. It provides a comprehensive toolkit for exploring spatial variability, you may find it well-suited for research in soil science, life sciences, and agronomy.
 
 Whether you are mapping soil physicochemistry, analyzing topographical interactions, or generating publication-ready **spatial, descriptive and multi-criteria explorative metrics**, Monolith provides a seamless, parallel-processed environment to ingest, interpolate, interpret and export the data for continuous and classified maps.
 
@@ -29,7 +29,7 @@ Whether you are mapping soil physicochemistry, analyzing topographical interacti
   ![Alternative Text](assets/3.png) 
 
 
-* **Comprehensive Diagnostics**: Evaluate models through LOOCV. Generate advanced metrics including Nash-Sutcliffe Efficiency (NSE), RPD, RPIQ, and Moran's I for spatial autocorrelation.
+* **Comprehensive Diagnostics**: Evaluate models through LOOCV. Generate advanced metrics including Nash-Sutcliffe Efficiency (NSE), CCC,  RPD, RPIQ, and Moran's I for spatial autocorrelation.
 
   ![Alternative Text](assets/4.png) 
 
@@ -121,11 +121,11 @@ Ensure your project directory maintains the following structure. The application
 ```
 monolith/
 │
-├── monolith_ver_0.8.9.R        # Main Application Runner
+├── monolith_ver_0.9.5.R        # Main Application Runner
 ├── improvements/               # Modular Source Files
-│   ├── spatial_helpers_0.8.9.R # Spatial math & CV logic
-│   ├── ui_helpers_0.8.9.R      # Analytics & descriptive plots
-│   └── theme_helpers_0.8.9.R   # Theming & export configurations
+│   ├── spatial_helpers_0.9.5.R # Spatial math & CV logic
+│   ├── ui_helpers_0.9.5.R      # Analytics & descriptive plots
+│   └── theme_helpers_0.9.5.R   # Theming & export configurations
 ├── assets/                     # (Optional) Static assets, custom CSS
 
 ```
@@ -133,7 +133,7 @@ monolith/
 ## 4. Running the Application
 
 ### Option A: Using RStudio (Recommended)
-1. Open the `monolith_ver_0.8.9.R` file in RStudio.
+1. Open the `monolith_ver_0.9.5.R` file in RStudio.
 2. Ensure all required packages are installed and loaded without errors.
 3. Click the **"Run App"** button located at the top right of the source editor.
 
@@ -145,9 +145,7 @@ monolith/
    ```
 3. Launch the Shiny app:
    ```R
-   shiny::runApp("monolith_ver_0.8.9.R")
+   shiny::runApp("monolith_ver_0.9.5.R")
    ```
-
-
 
 [def]: assets/2.png

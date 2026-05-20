@@ -1,4 +1,8 @@
 library(shiny)
+library(ggplot2)
+library(terra)
+library(tidyterra)
+library(patchwork)
 
 tuning_ui <- function(id, label, 
                       global_slider_id, manual_slider_id, 
@@ -7,11 +11,14 @@ tuning_ui <- function(id, label,
                       manual_btn_label = paste("Apply Manual", label),
                       outer_style = NULL,
                       manual_style = "background-color: #fff9db; padding: 10px; border: 1px solid #fab005; border-radius: 4px; margin-bottom: 10px;",
+                      top_extra_ui = NULL,
                       extra_ui = NULL) {
   
   content <- tagList(
     radioButtons(paste0(id, "_mode"), "Fitting Mode", 
                  choices = c("Auto-Fit" = "auto", "Manual" = "manual"), inline = TRUE),
+    
+    top_extra_ui,
     
     # Auto Panel
     conditionalPanel(
@@ -81,6 +88,8 @@ generate_styled_plot <- function(item, input, calibration = 1, agro_params = NUL
         legend.title = element_text(size = s_leg, face = "bold"),
         legend.key.size = unit(input$styler_legend_key_size %||% 1.0, "cm"),
         legend.position = input$styler_legend_pos %||% "right",
+        panel.grid.major = if(isTRUE(input$styler_show_grid)) element_line(color = "grey90") else element_blank(),
+        panel.grid.minor = if(isTRUE(input$styler_show_grid)) element_line(color = "grey95") else element_blank(),
         plot.margin = ggplot2::margin(
           (input$styler_margin_t %||% 10) * calibration, 
           (input$styler_margin_r %||% 10) * calibration, 
@@ -119,21 +128,30 @@ generate_styled_plot <- function(item, input, calibration = 1, agro_params = NUL
         abs_max <- max(abs(vv), na.rm = TRUE)
         if(is.infinite(abs_max) || is.na(abs_max)) abs_max <- 1
         resid_pal <- if (isTruthy(input$styler_high_contrast)) "PuOr" else "RdBu"
-        bp <- bp + scale_fill_distiller(palette = resid_pal, direction = 1, limits = c(-abs_max, abs_max), na.value = "transparent", name = leg_name)
+        bp <- bp + scale_fill_distiller(palette = resid_pal, direction = 1, limits = c(-abs_max, abs_max), na.value = "transparent", name = leg_name) +
+          coord_sf()
       } else if (is_agro && !is.null(agro_params)) {
+        # Classification for agronomical maps
         obj_c <- terra::classify(obj[[1]], agro_params$rcl_mat, right = FALSE)
-        df_p <- as.data.frame(obj_c, xy = TRUE)
-        colnames(df_p) <- c("x", "y", "val")
-        df_p$val <- factor(df_p$val, levels = 1:agro_params$n_c, labels = agro_params$leg_labels)
+        names(obj_c) <- "category"
+        
+        # Add levels to help tidyterra/ggplot2 recognize it as categorical
+        lvls <- data.frame(value = 1:agro_params$n_c, category = agro_params$labels)
+        levels(obj_c) <- lvls
         
         a_cols <- agro_params$colors
         if (isTruthy(input$styler_high_contrast)) {
             a_cols <- viridis::viridis(agro_params$n_c)
         }
         
-        bp <- ggplot(df_p, aes(x = x, y = y, fill = val)) + geom_tile() +
-          scale_fill_manual(values = setNames(a_cols, agro_params$leg_labels), na.value = "transparent", name = leg_name, drop = FALSE) +
-          coord_equal()
+        # Use geom_spatraster for classification to preserve coordinate labels
+        # Use explicit tidyterra::geom_spatraster and aes mapping
+        bp <- ggplot() + 
+          tidyterra::geom_spatraster(data = obj_c, aes(fill = category)) +
+          scale_fill_manual(values = a_cols, 
+                            labels = agro_params$leg_labels,
+                            na.value = "transparent", name = leg_name, drop = FALSE) +
+          coord_sf()
       } else {
         is_viridis <- pal_name %in% c("viridis", "magma", "inferno", "plasma", "cividis")
         if (input$color_style == "bin") {
@@ -143,6 +161,7 @@ generate_styled_plot <- function(item, input, calibration = 1, agro_params = NUL
           if(is_viridis) bp <- bp + scale_fill_viridis_c(option = pal_name, na.value = "transparent", name = leg_name)
           else bp <- bp + scale_fill_distiller(palette = pal_name, direction = 1, na.value = "transparent", name = leg_name)
         }
+        bp <- bp + coord_sf()
       }
       style_pane(bp, label)
     }
@@ -1112,7 +1131,113 @@ generate_pca_biplot_3d <- function(pca_res, df, pc_x=1, pc_y=2, pc_z=3, group_co
 # --- Map Viewer UI Components ---
 render_locality_pan_input <- function(loc_names) {
   if (length(loc_names) <= 1) return(NULL)
-  selectInput("locality_pan", NULL, 
+  selectInput("locality_pan", NULL,
               choices = c("Global View" = "global", loc_names),
               selected = "global", width = "160px", selectize = FALSE)
+}
+
+# F2: Tableau10 palette constant (not in RColorBrewer)
+TABLEAU10 <- c("#4e79a7","#f28e2b","#e15759","#76b7b2","#59a14f",
+               "#edc948","#b07aa1","#ff9da7","#9c755f","#bab0ac")
+
+# F2: Generate palette colors for a set of groups
+generate_group_palette <- function(groups, palette_name = "Set1") {
+  n <- length(groups)
+  if (n == 0) return(character(0))
+
+  if (palette_name == "Tableau10") {
+    colors <- rep_len(TABLEAU10, n)
+  } else {
+    max_n <- RColorBrewer::brewer.pal.info[palette_name, "maxcolors"]
+    colors <- RColorBrewer::brewer.pal(min(max(n, 3), max_n), palette_name)
+    if (n > max_n) colors <- grDevices::colorRampPalette(colors)(n)
+    colors <- colors[seq_len(n)]
+  }
+  stats::setNames(colors, groups)
+}
+
+# F2: Add styled sample points to a leaflet map
+add_styled_points <- function(map, pts_sf, color_by = "none", custom_colors = NULL,
+                              show_labels = FALSE, label_field = "none",
+                              label_size = 11, marker_size = 3,
+                              popup_fn = NULL) {
+
+  pts_view <- if (sf::st_crs(pts_sf)$epsg != 4326) sf::st_transform(pts_sf, 4326) else pts_sf
+  if (nrow(pts_view) == 0) return(map)
+
+  # --- Determine point colors ---
+  use_groups <- color_by != "none" && color_by %in% colnames(pts_view)
+
+  if (use_groups && !is.null(custom_colors)) {
+    grp_vals <- as.character(pts_view[[color_by]])
+    groups <- sort(unique(grp_vals))
+    # Ensure all groups have a color (fallback for unexpected values)
+    missing <- setdiff(groups, names(custom_colors))
+    if (length(missing) > 0) {
+      extra <- generate_group_palette(missing, "Set1")
+      custom_colors <- c(custom_colors, extra)
+    }
+    pal_fn <- leaflet::colorFactor(
+      palette = unname(custom_colors[groups]),
+      domain = groups
+    )
+    fill_colors <- pal_fn(grp_vals)
+    border_color <- "white"
+    fill_opacity <- 0.85
+
+    # Add legend
+    map <- map %>% leaflet::addLegend(
+      position = "bottomleft",
+      colors = unname(custom_colors[groups]),
+      labels = groups,
+      title = color_by,
+      opacity = 0.9
+    )
+  } else {
+    fill_colors <- "cyan"
+    border_color <- "cyan"
+    fill_opacity <- 0.5
+  }
+
+  # --- Popups ---
+  popups <- NULL
+  if (!is.null(popup_fn)) {
+    df_clean <- sf::st_drop_geometry(pts_view)
+    popups <- vapply(seq_len(nrow(df_clean)), function(i) popup_fn(df_clean[i, ]), character(1))
+  }
+
+  # --- Add circle markers ---
+  map <- map %>% leaflet::addCircleMarkers(
+    data = pts_view,
+    radius = marker_size,
+    color = border_color,
+    weight = 1,
+    fillColor = fill_colors,
+    fillOpacity = fill_opacity,
+    opacity = 1,
+    popup = popups,
+    group = "styled_points"
+  )
+
+  # --- Labels (separate layer for clarity) ---
+  if (show_labels && label_field != "none" && label_field %in% colnames(pts_view)) {
+    label_vals <- as.character(pts_view[[label_field]])
+    map <- map %>% leaflet::addLabelOnlyMarkers(
+      data = pts_view,
+      label = label_vals,
+      labelOptions = leaflet::labelOptions(
+        noHide = TRUE, direction = "top", textOnly = TRUE,
+        offset = c(0, -8),
+        style = list(
+          "font-size" = paste0(label_size, "px"),
+          "font-weight" = "bold",
+          "color" = "white",
+          "text-shadow" = "1px 1px 2px rgba(0,0,0,0.9), -1px -1px 2px rgba(0,0,0,0.9), 1px -1px 2px rgba(0,0,0,0.9), -1px 1px 2px rgba(0,0,0,0.9)"
+        )
+      ),
+      group = "styled_labels"
+    )
+  }
+
+  map
 }

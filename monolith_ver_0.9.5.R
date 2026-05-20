@@ -36,9 +36,9 @@ showtext_auto()
 addResourcePath("assets", getwd())
 plan(list(multisession, multisession)) # Enable nested async processing
 # --- Improvements---
-source("improvements/ui_helpers_0.8.9.R")
-source("improvements/spatial_helpers_0.8.9.R")
-source("improvements/theme_helpers_0.8.9.R")
+source("improvements/ui_helpers_0.9.5.R")
+source("improvements/spatial_helpers_0.9.5.R")
+source("improvements/theme_helpers_0.9.5.R")
 
 # --- Helpers ---
 `%||%` <- function(a, b) if (!is.null(a)) a else b
@@ -196,6 +196,16 @@ ui <- fluidPage(
       .popover { color: #333 !important; background-color: #fff !important; max-width: 400px; }
       .popover-header { color: #333 !important; background-color: #f8f9fa !important; border-bottom: 1px solid #ebebeb; }
       .popover-body { color: #333 !important; }
+      .expand-icon-btn { position: absolute; top: 10px; right: 10px; z-index: 100; opacity: 0.8; width: 32px; height: 32px; padding: 0 !important; display: inline-flex !important; align-items: center !important; justify-content: center !important; }
+      .expand-icon-btn > * { margin: 0 !important; padding: 0 !important; }
+      #pt_style_toolbar .form-group { margin-bottom: 4px !important; }
+      #pt_style_toolbar select, #pt_style_toolbar .form-control { background-color: #4a5568; color: #e2e8f0; border-color: #2d3748; font-size: 12px; height: 28px; padding: 2px 6px; }
+      #pt_style_toolbar .irs--shiny .irs-bar { background: #6c5ce7; }
+      #pt_style_toolbar .irs--shiny .irs-handle { border-color: #6c5ce7; }
+      #pt_style_toolbar .irs--shiny .irs-single { background: #6c5ce7; }
+      #pt_style_toolbar .checkbox label { color: #e2e8f0; font-size: 12px; }
+      #pt_style_toolbar label { font-weight: normal; color: #a0aec0; }
+      #pt_style_toolbar .btn-xs { font-size: 11px; padding: 2px 8px; }
     ")),
     uiOutput("dynamic_manual_style"),
     tags$script(HTML("$(function () { $('[data-toggle=\"popover\"]').popover({html: true}); });"))
@@ -222,7 +232,7 @@ ui <- fluidPage(
       div(style="background-color: #f8f9fa; padding: 10px; border: 1px solid #ddd;",
           h4("1. Context"),
           selectInput("locality", "Locality", choices = "Upload data first...", multiple = TRUE),
-          selectInput("subset", "Data Subset", choices = c("All" = "all", "Test" = "Test", "Train" = "Train", "Validation" = "Validation"), selected = "all"),
+          selectInput("subset", HTML(paste0("Data Subset", info_tooltip("data_subset_info", "Use this filter when mapping predicted parameters from single-split or similar models. Selecting 'Train', 'Test', or 'Validation' restricts the analysis to that specific data partition."))), choices = c("All" = "all", "Test" = "Test", "Train" = "Train", "Validation" = "Validation"), selected = "all"),
           selectInput("var_category", "Variable Category", choices = NULL),
           selectInput("var_id", "Variable", choices = NULL),
                      selectInput("value_type", "Primary View", choices = c("Actual Values" = "actual", "Best Predictions (_cve)" = "pred", "Single Split Predictions (_ss)" = "pred_ss", "Residuals (v - pv)" = "resid")),
@@ -427,8 +437,44 @@ ui <- fluidPage(
                                  ),
                              actionButton("refresh_map_area", "Refresh Map Area", icon = icon("sync"), class = "btn-info btn-sm", style = "margin-left: auto;"),
                              actionButton("show_popup_settings", "Pop-up Settings", icon = icon("cog"), class = "btn-info btn-sm"),
-                             actionButton("quick_export_map", "Quick Export", icon = icon("camera"), class = "btn-info btn-sm", title = "Immediately send the currently viewed map to the Export Registry.")
-                         ),                         conditionalPanel(condition = "(!input.comp_mode && input.value_type != 'resid') || input.value_type == 'actual'",
+                             actionButton("quick_export_map", "Quick Export", icon = icon("camera"), class = "btn-info btn-sm", title = "Immediately send the currently viewed map to the Export Registry."),
+                             actionButton("toggle_pt_style", NULL, icon = icon("palette"), class = "btn-sm",
+                                          style = "background-color: #6c5ce7; color: white; border: none;",
+                                          title = "Point Styling Options"),
+                             div(style="display: flex; align-items: center; gap: 5px; border-left: 1px solid #ccc; padding-left: 10px;",
+                                 selectInput("polygon_export_format", NULL, choices = c("Shapefile (ZIP)" = "shp", "GeoJSON" = "geojson", "KML" = "kml", "GPKG" = "gpkg"), selected = "shp", width = "120px", selectize = FALSE),
+                                 downloadButton("polygon_download_btn", "Export Polygon", class = "btn-success btn-sm", style = "padding: 4px 10px; font-size: 12px; line-height: 1.5; border-radius: 3px;")
+                             )
+                         ),
+                         # F2: Collapsible Point Styling Toolbar
+                         shinyjs::hidden(
+                           div(id = "pt_style_toolbar",
+                             style = "margin-bottom:10px; padding: 12px 15px; background: linear-gradient(135deg, #2d3436 0%, #1e272e 100%); border-radius: 6px; border: 1px solid #636e72; color: #dfe6e9; display: flex; flex-wrap: wrap; align-items: flex-start; gap: 18px;",
+                             # Column 1: Color-by controls
+                             div(style = "min-width: 160px;",
+                               tags$label("Color By", style = "font-size: 11px; color: #a0aec0; margin-bottom: 2px; display: block; text-transform: uppercase; letter-spacing: 0.5px;"),
+                               selectInput("pt_color_by", NULL, choices = c("None (Cyan)" = "none"), selected = "none", width = "160px", selectize = FALSE),
+                               selectInput("pt_palette", "Palette", choices = c("Set1", "Dark2", "Paired", "Set2", "Set3", "Accent", "Pastel1", "Tableau10"), selected = "Set1", width = "160px", selectize = FALSE),
+                               actionButton("pt_custom_colors", "Custom Colors...", icon = icon("paint-brush"), class = "btn-xs btn-default",
+                                            style = "margin-top: 4px; background-color: #4a5568; color: #e2e8f0; border-color: #2d3748;")
+                             ),
+                             # Column 2: Label controls
+                             div(style = "min-width: 160px;",
+                               tags$label("Labels", style = "font-size: 11px; color: #a0aec0; margin-bottom: 2px; display: block; text-transform: uppercase; letter-spacing: 0.5px;"),
+                               checkboxInput("pt_show_labels", "Show Labels", FALSE, width = "auto"),
+                               selectInput("pt_label_field", "Label Field", choices = c("(none)" = "none"), selected = "none", width = "160px", selectize = FALSE),
+                               sliderInput("pt_label_size", "Label Size", min = 8, max = 18, value = 11, step = 1, width = "150px", ticks = FALSE)
+                             ),
+                             # Column 3: Point size & options
+                             div(style = "min-width: 130px;",
+                               tags$label("Point Options", style = "font-size: 11px; color: #a0aec0; margin-bottom: 2px; display: block; text-transform: uppercase; letter-spacing: 0.5px;"),
+                               sliderInput("pt_marker_size", "Point Size", min = 1, max = 12, value = 3, step = 1, width = "130px", ticks = FALSE),
+                               checkboxInput("pt_apply_minimap", "Apply to Mini Map", TRUE, width = "auto")
+                             )
+                           )
+                         ),
+                         uiOutput("run_config_display_map"),
+                         conditionalPanel(condition = "(!input.comp_mode && input.value_type != 'resid') || input.value_type == 'actual'",
                                           h4(textOutput("main_map_title")),
                                           leafletOutput("main_map", height = "700px")),
                          conditionalPanel(condition = "(input.comp_mode && input.value_type != 'actual') || input.value_type == 'resid'",
@@ -508,16 +554,19 @@ ui <- fluidPage(
                                h5("Regional Parameters"), div(class="table-container", tableOutput("regional_params_table")),
                                hr(style="opacity: 0.3;")
                              ),
-                             h5("Model Performance"), div(class="table-container", tableOutput("metrics_table")),
-                             div(id = "prediction_performance_ui",
-                               hr(style="opacity: 0.3;"),
-                               h5("Prediction Performance (Uploaded Data)"),
-                               div(class="table-container", tableOutput("uploaded_metrics_table")),
-                               hr(style="opacity: 0.3;"),
-                               h5("Classification Performance (Uploaded Predictions)"),
-                               selectInput("kappa_bin_method", "Binning Method:", choices = c("Agronomical Classes" = "agro", "Quartiles" = "quartile")),
-                               div(class="table-container", tableOutput("kappa_table"))
-                             )                           ),
+                             h5("Model Performance"), div(class="table-container", tableOutput("metrics_table"))
+                           ),
+                           div(id = "prediction_performance_ui",
+                             style = "background-color: #f3e8ff; padding: 15px; border: 2px solid #9b59b6; border-radius: 8px; margin-bottom: 20px;",
+                             h4("Variable Prediction Statistics"),
+                             tags$p(style="font-size: 0.85em; opacity: 0.8; font-style: italic;", "Prediction accuracy and classification agreement metrics for uploaded data."),
+                             h5("Prediction Performance (Uploaded Data)"),
+                             div(class="table-container", tableOutput("uploaded_metrics_table")),
+                             hr(style="opacity: 0.3;"),
+                             h5("Classification Performance (Uploaded Predictions)"),
+                             selectInput("kappa_bin_method", "Binning Method:", choices = c("Agronomical Classes" = "agro", "Quartiles" = "quartile")),
+                             div(class="table-container", tableOutput("kappa_table"))
+                           ),
                            div(style = "background-color: #e7f5ff; padding: 15px; border: 2px solid #339af0; border-radius: 8px;",
                              h4("Data Summary Statistics"),
                              tags$p(style="font-size: 0.85em; opacity: 0.8; font-style: italic;", "Aggregated descriptive statistics and area coverage for the data."),
@@ -539,7 +588,9 @@ ui <- fluidPage(
                            )
                     )
                   ),
-                  hr(), verbatimTextOutput("log_output")),
+                  hr(),
+                  uiOutput("run_config_display"),
+                  verbatimTextOutput("log_output")),
         tabPanel("4. Export Panel",
                  div(style = "padding: 20px;",
                      h2("Unified Session Export Registry"),
@@ -561,7 +612,13 @@ ui <- fluidPage(
                                   )
                                   )
                                   )
-                                  )
+                                  ),
+                     hr(),
+                     div(style = "background-color: #fff3cd; padding: 20px; border: 1px solid #ffc107; border-radius: 8px;",
+                         h4(icon("archive"), "Run History Archive"),
+                         tags$p(style="font-size: 0.85em; opacity: 0.8; font-style: italic;", "Previous model runs are archived here. You can restore or permanently remove them."),
+                         uiOutput("run_history_ui")
+                     )
                                   )),
         tabPanel("5. Descriptive and Exploratory Suite",
                  div(style = "padding: 20px;",
@@ -607,7 +664,7 @@ ui <- fluidPage(
                                                 ),
                                                 column(9,
                                                   div(style = "position: relative;",
-                                                      actionButton("desc_expand_plot_btn", "Expand / Interactive", icon = icon("expand"), style = "position: absolute; top: 10px; right: 10px; z-index: 100; opacity: 0.8;"),
+                                                      tags$button(id = "desc_expand_plot_btn", type = "button", class = "btn btn-default action-button expand-icon-btn", icon("expand")),
                                                       plotOutput("desc_main_plot", height = "500px")
                                                   ),
                                                   hr(),
@@ -632,7 +689,7 @@ ui <- fluidPage(
                                                 ),
                                                 column(9,
                                                   div(style = "position: relative;",
-                                                      actionButton("corr_expand_plot_btn", "Expand / Interactive", icon = icon("expand"), style = "position: absolute; top: 10px; right: 10px; z-index: 100; opacity: 0.8;"),
+                                                      tags$button(id = "corr_expand_plot_btn", type = "button", class = "btn btn-default action-button expand-icon-btn", icon("expand")),
                                                       plotOutput("corr_main_plot", height = "500px")
                                                   ),
                                                   hr(),
@@ -664,7 +721,7 @@ ui <- fluidPage(
                                                 column(9,
                                                   uiOutput("pca_collinearity_warning_ui"),
                                                   div(style = "position: relative;",
-                                                      actionButton("pca_expand_plot_btn", "Expand / Interactive", icon = icon("expand"), style = "position: absolute; top: 10px; right: 10px; z-index: 100; opacity: 0.8;"),
+                                                      tags$button(id = "pca_expand_plot_btn", type = "button", class = "btn btn-default action-button expand-icon-btn", icon("expand")),
                                                       plotOutput("pca_main_plot", height = "500px")
                                                   ),
                                                   hr(),
@@ -687,7 +744,7 @@ ui <- fluidPage(
                                                   actionButton("gov_run_btn", "Run Analysis", class="btn-primary btn-block"),
                                                   hr(),
                                                   h4("Plot Settings"),
-                                                  radioButtons("gov_effect_type", "Functional Effect Plot:", choices = c("ALE" = "ale", "SHAP" = "shap"), inline = TRUE)
+                                                  radioButtons("gov_effect_type", "Functional Effect Plot:", choices = c("ALE" = "ale", "PDP" = "pdp"), inline = TRUE)
                                                 ),
                                                 column(9,
                                                   conditionalPanel("output.gov_ready == 'yes'",
@@ -695,14 +752,14 @@ ui <- fluidPage(
                                                       column(6, 
                                                         h4("Global Importance"),
                                                         div(style = "position: relative;",
-                                                            actionButton("gov_expand_imp_btn", "Expand / Interactive", icon = icon("expand"), style = "position: absolute; top: 10px; right: 10px; z-index: 100; opacity: 0.8;"),
+                                                            tags$button(id = "gov_expand_imp_btn", type = "button", class = "btn btn-default action-button expand-icon-btn", icon("expand")),
                                                             plotOutput("gov_plot_importance", height = "300px")
                                                         )
                                                       ),
                                                       column(6, 
                                                         h4("Causality / Interaction (A)"),
                                                         div(style = "position: relative;",
-                                                            actionButton("gov_expand_inta_btn", "Expand / Interactive", icon = icon("expand"), style = "position: absolute; top: 10px; right: 10px; z-index: 100; opacity: 0.8;"),
+                                                            tags$button(id = "gov_expand_inta_btn", type = "button", class = "btn btn-default action-button expand-icon-btn", icon("expand")),
                                                             plotOutput("gov_plot_interaction_a", height = "300px")
                                                         )
                                                       )
@@ -712,14 +769,14 @@ ui <- fluidPage(
                                                       column(6, 
                                                         h4("Functional Effect"),
                                                         div(style = "position: relative;",
-                                                            actionButton("gov_expand_eff_btn", "Expand / Interactive", icon = icon("expand"), style = "position: absolute; top: 10px; right: 10px; z-index: 100; opacity: 0.8;"),
+                                                            tags$button(id = "gov_expand_eff_btn", type = "button", class = "btn btn-default action-button expand-icon-btn", icon("expand")),
                                                             plotOutput("gov_plot_effect", height = "300px")
                                                         )
                                                       ),
                                                       column(6, 
                                                         h4("Causality / Interaction (B)"),
                                                         div(style = "position: relative;",
-                                                            actionButton("gov_expand_intb_btn", "Expand / Interactive", icon = icon("expand"), style = "position: absolute; top: 10px; right: 10px; z-index: 100; opacity: 0.8;"),
+                                                            tags$button(id = "gov_expand_intb_btn", type = "button", class = "btn btn-default action-button expand-icon-btn", icon("expand")),
                                                             plotOutput("gov_plot_interaction_b", height = "300px")
                                                         )
                                                       )
@@ -1806,10 +1863,10 @@ server <- function(input, output, session) {
          labs(title = paste("ALE Profile:", top_var_label), x = top_var_label, y = "ALE Effect") +
          theme_minimal()
      } else {
-       shap_df <- gov_rv$res$shap
-       ggplot(shap_df, aes(x = feature_value, y = contribution)) +
-         geom_point(color = "forestgreen", alpha = 0.6) +
-         labs(title = paste("SHAP Profile:", top_var_label), x = top_var_label, y = "SHAP Value") +
+       pdp_df <- gov_rv$res$pdp
+       ggplot(pdp_df, aes(x = `_x_`, y = `_yhat_`)) +
+         geom_line(color = "darkorange", linewidth = 1) + geom_rug(sides = "b", alpha = 0.3) +
+         labs(title = paste("PDP Profile:", top_var_label), x = top_var_label, y = "Partial Dependence") +
          theme_minimal()
      }
      })
@@ -1854,87 +1911,47 @@ server <- function(input, output, session) {
      })
 
      # --- Expanded View Handlers for Governing Factors ---
-     # Importance
-     observeEvent(input$gov_expand_imp_btn, {
-       showModal(modalDialog(
-         title = "Expanded View: Global Importance", size = "l", easyClose = TRUE,
-         plotOutput("gov_plot_imp_exp", height = "700px"), footer = modalButton("Close")
-       ))
-     })
-     output$gov_plot_imp_exp <- renderPlot({
-       req(gov_rv$res)
+     # Helper: get label for a variable
+     gov_get_label <- function(v) {
+       match <- Filter(function(x) x$actual == v, rv$mapping$vars)
+       if(length(match) > 0 && !is.null(match[[1]]$label) && match[[1]]$label != "") match[[1]]$label else v
+     }
+
+     # Helper: build ggplot for each gov panel (reused in static & plotly renderers)
+     gov_build_imp_plot <- function() {
        vip_df <- gov_rv$res$importance
        vip_df <- vip_df[order(vip_df$dropout_loss, decreasing = FALSE), ]
-       vip_df$variable_label <- sapply(as.character(vip_df$variable), function(v) {
-          match <- Filter(function(x) x$actual == v, rv$mapping$vars)
-          if(length(match) > 0 && !is.null(match[[1]]$label) && match[[1]]$label != "") match[[1]]$label else v
-       })
+       vip_df$variable_label <- sapply(as.character(vip_df$variable), gov_get_label)
        vip_df$variable_label <- factor(vip_df$variable_label, levels = vip_df$variable_label)
        ggplot(vip_df, aes(x = variable_label, y = dropout_loss)) + geom_bar(stat = "identity", fill = "steelblue") +
          coord_flip() + labs(title = "Global Variable Importance", x = "Variable", y = "Dropout Loss (RMSE increase)") + theme_minimal(base_size=16)
-     })
+     }
 
-     # Interaction A
-     observeEvent(input$gov_expand_inta_btn, {
-       showModal(modalDialog(
-         title = "Expanded View: Interaction (A)", size = "l", easyClose = TRUE,
-         plotOutput("gov_plot_inta_exp", height = "700px"), footer = modalButton("Close")
-       ))
-     })
-     output$gov_plot_inta_exp <- renderPlot({
-       req(gov_rv$res)
+     gov_build_inta_plot <- function() {
        shap_df <- gov_rv$res$shap
-       top_var_label <- (function(v) {
-          match <- Filter(function(x) x$actual == v, rv$mapping$vars)
-          if(length(match) > 0 && !is.null(match[[1]]$label) && match[[1]]$label != "") match[[1]]$label else v
-       })(gov_rv$res$top_var)
+       top_var_label <- gov_get_label(gov_rv$res$top_var)
        ggplot(shap_df, aes(x = feature_value, y = contribution)) + geom_point(color = "darkred", alpha = 0.6, size=3) +
          geom_smooth(method = "loess", color = "blue", se = FALSE, linewidth=1.5) +
          labs(title = paste("SHAP Dependence:", top_var_label), x = paste(top_var_label, "Value"), y = "SHAP Contribution") + theme_minimal(base_size=16)
-     })
+     }
 
-     # Effect
-     observeEvent(input$gov_expand_eff_btn, {
-       showModal(modalDialog(
-         title = "Expanded View: Functional Effect", size = "l", easyClose = TRUE,
-         plotOutput("gov_plot_eff_exp", height = "700px"), footer = modalButton("Close")
-       ))
-     })
-     output$gov_plot_eff_exp <- renderPlot({
-       req(gov_rv$res)
-       top_var_label <- (function(v) {
-          match <- Filter(function(x) x$actual == v, rv$mapping$vars)
-          if(length(match) > 0 && !is.null(match[[1]]$label) && match[[1]]$label != "") match[[1]]$label else v
-       })(gov_rv$res$top_var)
+     gov_build_eff_plot <- function() {
+       top_var_label <- gov_get_label(gov_rv$res$top_var)
        if (!is.null(input$gov_effect_type) && input$gov_effect_type == "ale") {
          ale_df <- gov_rv$res$ale
          ggplot(ale_df, aes(x = `_x_`, y = `_yhat_`)) + geom_line(color = "purple", linewidth = 2) +
            labs(title = paste("ALE Profile:", top_var_label), x = top_var_label, y = "ALE Effect") + theme_minimal(base_size=16)
        } else {
-         shap_df <- gov_rv$res$shap
-         ggplot(shap_df, aes(x = feature_value, y = contribution)) + geom_point(color = "forestgreen", alpha = 0.6, size=3) +
-           labs(title = paste("SHAP Profile:", top_var_label), x = top_var_label, y = "SHAP Value") + theme_minimal(base_size=16)
+         pdp_df <- gov_rv$res$pdp
+         ggplot(pdp_df, aes(x = `_x_`, y = `_yhat_`)) + geom_line(color = "darkorange", linewidth = 2) + geom_rug(sides = "b", alpha = 0.3) +
+           labs(title = paste("PDP Profile:", top_var_label), x = top_var_label, y = "Partial Dependence") + theme_minimal(base_size=16)
        }
-     })
+     }
 
-     # Interaction B
-     observeEvent(input$gov_expand_intb_btn, {
-       showModal(modalDialog(
-         title = "Expanded View: Interaction (B)", size = "l", easyClose = TRUE,
-         plotOutput("gov_plot_intb_exp", height = "700px"), footer = modalButton("Close")
-       ))
-     })
-     output$gov_plot_intb_exp <- renderPlot({
-       req(gov_rv$res, input$gov_target)
+     gov_build_intb_plot <- function() {
        df <- rv_analytics_data()
-       top_var_label <- (function(v) {
-          match <- Filter(function(x) x$actual == v, rv$mapping$vars)
-          if(length(match) > 0 && !is.null(match[[1]]$label) && match[[1]]$label != "") match[[1]]$label else v
-       })(gov_rv$res$top_var)
-       target_label <- (function(v) {
-          match <- Filter(function(x) x$actual == v, rv$mapping$vars)
-          if(length(match) > 0 && !is.null(match[[1]]$label) && match[[1]]$label != "") match[[1]]$label else v
-       })(input$gov_target)
+       top_var_label <- gov_get_label(gov_rv$res$top_var)
+       target_label <- gov_get_label(input$gov_target)
        if (gov_rv$res$top_var %in% colnames(df) && input$gov_target %in% colnames(df)) {
           ggplot(df, aes_string(x = paste0("`", gov_rv$res$top_var, "`"), y = paste0("`", input$gov_target, "`"))) +
             geom_point(alpha = 0.5, size=3) + geom_smooth(method = "lm", color = "red", linewidth=1.5) +
@@ -1942,7 +1959,83 @@ server <- function(input, output, session) {
        } else {
           ggplot() + annotate("text", x=0, y=0, label="Data not available") + theme_void()
        }
+     }
+
+     # Importance - expanded modal with interactive toggle
+     observeEvent(input$gov_expand_imp_btn, {
+       showModal(modalDialog(
+         title = "Expanded View: Global Importance", size = "l", easyClose = TRUE,
+         radioButtons("gov_imp_expand_mode", "View Mode:", choices=c("Static (High-Res)"="static", "Interactive (Hover/Zoom)"="interactive"), inline=TRUE),
+         uiOutput("gov_imp_expanded_ui"),
+         footer = modalButton("Close")
+       ))
      })
+     output$gov_imp_expanded_ui <- renderUI({
+       if (!is.null(input$gov_imp_expand_mode) && input$gov_imp_expand_mode == "interactive") {
+         plotly::plotlyOutput("gov_plot_imp_exp_plotly", height = "700px")
+       } else {
+         plotOutput("gov_plot_imp_exp", height = "700px")
+       }
+     })
+     output$gov_plot_imp_exp <- renderPlot({ req(gov_rv$res); gov_build_imp_plot() })
+     output$gov_plot_imp_exp_plotly <- plotly::renderPlotly({ req(gov_rv$res); plotly::ggplotly(gov_build_imp_plot()) })
+
+     # Interaction A - expanded modal with interactive toggle
+     observeEvent(input$gov_expand_inta_btn, {
+       showModal(modalDialog(
+         title = "Expanded View: Interaction (A)", size = "l", easyClose = TRUE,
+         radioButtons("gov_inta_expand_mode", "View Mode:", choices=c("Static (High-Res)"="static", "Interactive (Hover/Zoom)"="interactive"), inline=TRUE),
+         uiOutput("gov_inta_expanded_ui"),
+         footer = modalButton("Close")
+       ))
+     })
+     output$gov_inta_expanded_ui <- renderUI({
+       if (!is.null(input$gov_inta_expand_mode) && input$gov_inta_expand_mode == "interactive") {
+         plotly::plotlyOutput("gov_plot_inta_exp_plotly", height = "700px")
+       } else {
+         plotOutput("gov_plot_inta_exp", height = "700px")
+       }
+     })
+     output$gov_plot_inta_exp <- renderPlot({ req(gov_rv$res); gov_build_inta_plot() })
+     output$gov_plot_inta_exp_plotly <- plotly::renderPlotly({ req(gov_rv$res); plotly::ggplotly(gov_build_inta_plot()) })
+
+     # Effect - expanded modal with interactive toggle
+     observeEvent(input$gov_expand_eff_btn, {
+       showModal(modalDialog(
+         title = "Expanded View: Functional Effect", size = "l", easyClose = TRUE,
+         radioButtons("gov_eff_expand_mode", "View Mode:", choices=c("Static (High-Res)"="static", "Interactive (Hover/Zoom)"="interactive"), inline=TRUE),
+         uiOutput("gov_eff_expanded_ui"),
+         footer = modalButton("Close")
+       ))
+     })
+     output$gov_eff_expanded_ui <- renderUI({
+       if (!is.null(input$gov_eff_expand_mode) && input$gov_eff_expand_mode == "interactive") {
+         plotly::plotlyOutput("gov_plot_eff_exp_plotly", height = "700px")
+       } else {
+         plotOutput("gov_plot_eff_exp", height = "700px")
+       }
+     })
+     output$gov_plot_eff_exp <- renderPlot({ req(gov_rv$res); gov_build_eff_plot() })
+     output$gov_plot_eff_exp_plotly <- plotly::renderPlotly({ req(gov_rv$res); plotly::ggplotly(gov_build_eff_plot()) })
+
+     # Interaction B - expanded modal with interactive toggle
+     observeEvent(input$gov_expand_intb_btn, {
+       showModal(modalDialog(
+         title = "Expanded View: Interaction (B)", size = "l", easyClose = TRUE,
+         radioButtons("gov_intb_expand_mode", "View Mode:", choices=c("Static (High-Res)"="static", "Interactive (Hover/Zoom)"="interactive"), inline=TRUE),
+         uiOutput("gov_intb_expanded_ui"),
+         footer = modalButton("Close")
+       ))
+     })
+     output$gov_intb_expanded_ui <- renderUI({
+       if (!is.null(input$gov_intb_expand_mode) && input$gov_intb_expand_mode == "interactive") {
+         plotly::plotlyOutput("gov_plot_intb_exp_plotly", height = "700px")
+       } else {
+         plotOutput("gov_plot_intb_exp", height = "700px")
+       }
+     })
+     output$gov_plot_intb_exp <- renderPlot({ req(gov_rv$res, input$gov_target); gov_build_intb_plot() })
+     output$gov_plot_intb_exp_plotly <- plotly::renderPlotly({ req(gov_rv$res, input$gov_target); plotly::ggplotly(gov_build_intb_plot()) })
 
      active_theme_name <- theme_switcher_server("theme_mod")  
   output$dynamic_theme <- renderUI({
@@ -1973,6 +2066,7 @@ server <- function(input, output, session) {
     user_data = NULL, # Uploaded data
     has_predictions = FALSE, # Tracks interpolation state
     export_registry = list(), # Registry of plots and tables for export
+    drawn_polygons = list(), # Stores drawn polygons from Leaflet
     shp_bound = NULL, # Custom shapefile boundary
     mapping = list(
       x = NULL, y = NULL, loc = NULL, crs = "EPSG:32635",
@@ -1995,7 +2089,13 @@ server <- function(input, output, session) {
     rf_models = list(), # trained random forests
     gstat_objs = list(), # gstat objects for CK
     loc_names = NULL, metrics = NULL, log = "Ready.",
-    drawn_feature = NULL # Temporarily store drawn shape for grouping
+    drawn_feature = NULL, # Temporarily store drawn shape for grouping
+    run_config_summary = NULL, # B3: Plain text summary of latest run configuration
+    run_counter = 0L, # B4: Incremental run counter
+    run_history = list(), # B4: Archive of previous run results and configs
+    proceed_run = NULL, # B4: Trigger for model generation after archive decision
+    pt_style_colors = NULL, # F2: Named vector group_value -> hex_color
+    pt_style_palette = "Set1" # F2: Current qualitative palette name
   )
   
   # --- Export Registry Core ---
@@ -2036,7 +2136,96 @@ server <- function(input, output, session) {
     
     checkboxGroupInput("selected_assets", NULL, choices = choices, width = "100%")
   })
-  
+
+  # --- B3: Run Configuration Summary Display ---
+  output$run_config_display <- renderUI({
+    cfg <- rv$run_config_summary
+    if (is.null(cfg)) return(NULL)
+    div(style = "background-color: #e8f4fd; padding: 12px 15px; border-left: 4px solid #2196F3; border-radius: 4px; margin-bottom: 10px; font-family: monospace; font-size: 0.85em;",
+      tags$strong(icon("info-circle"), paste0(" Run #", cfg$run_id, " Configuration (", format(cfg$timestamp, "%Y-%m-%d %H:%M:%S"), ")")),
+      tags$br(),
+      tags$span(paste0("Variable: ", cfg$variable, " | Method: ", cfg$method, " | Localities: ", cfg$localities)),
+      tags$br(),
+      tags$span(paste0("Subset: ", cfg$subset, " | View: ", cfg$value_type, " | CRS: ", cfg$crs)),
+      tags$br(),
+      tags$span(paste0("Boundary: ", cfg$boundary_type, " | Buffer: ", cfg$buffer_dist, "m | Resolution: ", cfg$resolution, " (", cfg$res_mode, ")")),
+      if (!is.null(cfg$method_params) && nzchar(cfg$method_params)) tagList(tags$br(), tags$span(cfg$method_params))
+    )
+  })
+
+  # B3: Compact config display for Map Viewer tab
+  output$run_config_display_map <- renderUI({
+    cfg <- rv$run_config_summary
+    if (is.null(cfg)) return(NULL)
+    div(style = "background-color: #e8f4fd; padding: 8px 12px; border-left: 4px solid #2196F3; border-radius: 4px; margin-bottom: 8px; font-size: 0.82em;",
+      tags$strong(paste0("Run #", cfg$run_id, ": ")),
+      tags$span(paste0(cfg$variable, " | ", cfg$method, " | ", cfg$localities, " | ", format(cfg$timestamp, "%H:%M:%S")))
+    )
+  })
+
+  # --- B4: Run History Archive UI ---
+  output$run_history_ui <- renderUI({
+    hist <- rv$run_history
+    if (length(hist) == 0) return(tags$p(style="color: #888;", "No archived runs yet. Previous runs will appear here when a new model generation begins."))
+
+    run_panels <- lapply(seq_along(hist), function(i) {
+      run <- hist[[i]]
+      cfg <- run$config
+      n_items <- length(run$registry)
+      div(style = "background-color: #fff; padding: 12px; border: 1px solid #ddd; border-radius: 6px; margin-bottom: 8px;",
+        fluidRow(
+          column(8,
+            tags$strong(paste0("Run #", cfg$run_id, " - ", cfg$variable, " (", cfg$method, ")")),
+            tags$br(),
+            tags$small(style="color: #666;", paste0(
+              format(cfg$timestamp, "%Y-%m-%d %H:%M:%S"),
+              " | ", cfg$localities,
+              " | ", n_items, " registry items"
+            ))
+          ),
+          column(4, style = "text-align: right;",
+            actionButton(paste0("restore_run_", i), "Restore", class = "btn-sm btn-info", icon = icon("undo")),
+            actionButton(paste0("delete_run_", i), "Remove", class = "btn-sm btn-danger", icon = icon("trash"))
+          )
+        )
+      )
+    })
+    tagList(run_panels)
+  })
+
+  # B4: Dynamic observers for archive restore/delete buttons
+  observe({
+    hist <- rv$run_history
+    lapply(seq_along(hist), function(i) {
+      # Restore observer
+      observeEvent(input[[paste0("restore_run_", i)]], {
+        run <- isolate(rv$run_history[[i]])
+        if (is.null(run)) return()
+        # Archive current results first
+        current_cfg <- isolate(rv$run_config_summary)
+        current_reg <- isolate(rv$export_registry)
+        if (!is.null(current_cfg) && length(current_reg) > 0) {
+          rv$run_history <- c(
+            list(list(config = current_cfg, registry = current_reg)),
+            isolate(rv$run_history)
+          )
+        }
+        # Restore the selected run
+        rv$export_registry <- run$registry
+        rv$run_config_summary <- run$config
+        # Remove from history
+        rv$run_history <- isolate(rv$run_history[-i])
+        showNotification(paste0("Restored Run #", run$config$run_id, " to active session."), type = "message")
+      }, ignoreInit = TRUE, once = TRUE)
+
+      # Delete observer
+      observeEvent(input[[paste0("delete_run_", i)]], {
+        rv$run_history <- isolate(rv$run_history[-i])
+        showNotification("Archived run removed.", type = "warning")
+      }, ignoreInit = TRUE, once = TRUE)
+    })
+  })
+
   # Track the most recently selected item for the Styler
   active_styler_item <- reactiveVal(NULL)
   
@@ -2064,6 +2253,22 @@ server <- function(input, output, session) {
   # Debounce the preview to avoid flickering during slider movement
   styled_preview_obj_d <- styled_preview_obj %>% debounce(500)
   
+  # Dynamic UI for Styler Preview to show aspect ratio changes
+  output$styler_preview_dynamic_ui <- renderUI({
+    req(input$styler_width, input$styler_height)
+    w_px <- (if(isTruthy(input$styler_width)) input$styler_width else 10) * 96
+    h_px <- (if(isTruthy(input$styler_height)) input$styler_height else 8) * 96
+    
+    # Scale to fit the 800x600 viewing area while maintaining aspect ratio
+    scale <- min(1, 800 / w_px, 600 / h_px)
+    w_disp <- w_px * scale
+    h_disp <- h_px * scale
+    
+    div(style = sprintf("width: %fpx; height: %fpx; background-color: white; box-shadow: 0 4px 8px rgba(0,0,0,0.2);", w_disp, h_disp),
+        plotOutput("styler_preview_plot", height = "100%", width = "100%")
+    )
+  })
+
   output$styler_preview_plot <- renderPlot({
     req(styled_preview_obj_d())
     styled_preview_obj_d()
@@ -2121,6 +2326,8 @@ server <- function(input, output, session) {
       margin_l = input$styler_margin_l,
       show_grid = input$styler_show_grid,
       high_contrast = input$styler_high_contrast,
+      width = input$styler_width,
+      height = input$styler_height,
       aspect_ratio = input$styler_aspect_ratio,
       dpi = input$styler_dpi,
       format = input$styler_format
@@ -2164,24 +2371,24 @@ server <- function(input, output, session) {
                           wellPanel(
                             h4("Font Sizes (pt)"),
                             fluidRow(
-                              column(6, sliderInput("styler_title_size", "Main Title", min = 6, max = 40, value = 16)),
-                              column(6, sliderInput("styler_base_size", "Base Text", min = 4, max = 30, value = 12))
+                              column(6, sliderInput("styler_title_size", "Main Title", min = 6, max = 40, value = 15)),
+                              column(6, sliderInput("styler_base_size", "Base Text", min = 4, max = 30, value = 13))
                             ),
                             fluidRow(
-                              column(6, sliderInput("styler_x_size", "X-Axis Text Size", min = 4, max = 30, value = 12)),
-                              column(6, sliderInput("styler_y_size", "Y-Axis Text Size", min = 4, max = 30, value = 12))
+                              column(6, sliderInput("styler_x_size", "X-Axis Label Size", min = 4, max = 30, value = 13)),
+                              column(6, sliderInput("styler_y_size", "Y-Axis Label Size", min = 4, max = 30, value = 13))
                             ),
                             fluidRow(
-                              column(6, sliderInput("styler_label_size", "Axis Labels", min = 4, max = 30, value = 10)),
-                              column(6, sliderInput("styler_legend_size", "Legend Text", min = 4, max = 30, value = 10))
+                              column(6, sliderInput("styler_label_size", "Axis Text", min = 4, max = 30, value = 15)),
+                              column(6, sliderInput("styler_legend_size", "Legend Text", min = 4, max = 30, value = 15))
                             ),
                             fluidRow(
-                              column(6, sliderInput("styler_legend_key_size", "Legend Element Size", min = 0.5, max = 5.0, value = 1.0, step = 0.1)),
+                              column(6, sliderInput("styler_legend_key_size", "Legend Element Size", min = 0.5, max = 5.0, value = 0.5, step = 0.1)),
                               column(6, selectInput("styler_font_family", "Font Family", 
                                           choices = c("sans", "serif", "mono", "Roboto", "Open Sans", "Lato", "Montserrat")))
                             ),
                             selectInput("styler_label_orient", "X-Label Orientation", 
-                                        choices = c("Horizontal" = 0, "Vertical" = 90, "Angled (45)" = 45)),
+                                        choices = c("Vertical" = 90, "Horizontal" = 0, "Angled (45)" = 45)),
                             hr(),
                             h4("Layout & Spacing"),
                             selectInput("styler_legend_pos", "Legend Position", 
@@ -2196,6 +2403,10 @@ server <- function(input, output, session) {
                             hr(),
                             h4("Publication Modifiers"),
                             checkboxInput("styler_high_contrast", "High Contrast Palette (Colorblind Safe)", FALSE),
+                            fluidRow(
+                              column(6, numericInput("styler_width", "Export Width (in)", value = 10, min = 1, max = 50, step = 0.5)),
+                              column(6, numericInput("styler_height", "Export Height (in)", value = 8, min = 1, max = 50, step = 0.5))
+                            ),
                             numericInput("styler_aspect_ratio", "Custom Aspect Ratio (Width/Height)", value = 1.25, step = 0.1)
                           )
                  )
@@ -2203,12 +2414,10 @@ server <- function(input, output, session) {
         ),
         column(8,
                div(style = "background-color: #f0f0f0; border: 1px solid #ccc; height: 600px; display: flex; justify-content: center; align-items: center; overflow: auto;",
-                   div(style = "width: 100%; max-width: 800px; height: 600px; background-color: white; box-shadow: 0 4px 8px rgba(0,0,0,0.2);",
-                       plotOutput("styler_preview_plot", height = "600px", width = "100%")
-                   )
+                   uiOutput("styler_preview_dynamic_ui")
                ),
-               tags$p(style="font-size: 0.85em; color: #666; margin-top: 5px;", 
-                      "Preview is calibrated to 10x8 aspect ratio. Final export uses 2.5x typographical density enhancement.")
+               tags$p(style="font-size: 0.85em; color: #666; margin-top: 5px;",
+                      "Preview aspect ratio and dimensions are now live. Final export uses 2.5x typographical density enhancement.")
         )
       ),
       footer = tagList(
@@ -2241,9 +2450,37 @@ server <- function(input, output, session) {
     if(!is.null(cfg$show_grid)) updateCheckboxInput(session, "styler_show_grid", value = cfg$show_grid)
     if(!is.null(cfg$high_contrast)) updateCheckboxInput(session, "styler_high_contrast", value = cfg$high_contrast)
     if(!is.null(cfg$aspect_ratio)) updateNumericInput(session, "styler_aspect_ratio", value = cfg$aspect_ratio)
+    if(!is.null(cfg$width)) updateNumericInput(session, "styler_width", value = cfg$width)
+    if(!is.null(cfg$height)) updateNumericInput(session, "styler_height", value = cfg$height)
     if(!is.null(cfg$dpi)) updateNumericInput(session, "styler_dpi", value = cfg$dpi)
     if(!is.null(cfg$format)) updateSelectInput(session, "styler_format", selected = cfg$format)
   })
+
+  # Sync styler width, height and aspect ratio
+  observeEvent(input$styler_width, {
+    req(input$styler_width, input$styler_height)
+    new_ratio <- round(input$styler_width / input$styler_height, 2)
+    if (abs(new_ratio - (input$styler_aspect_ratio %||% 0)) > 0.01) {
+      updateNumericInput(session, "styler_aspect_ratio", value = new_ratio)
+    }
+  }, ignoreInit = TRUE)
+
+  observeEvent(input$styler_height, {
+    req(input$styler_width, input$styler_height)
+    new_ratio <- round(input$styler_width / input$styler_height, 2)
+    if (abs(new_ratio - (input$styler_aspect_ratio %||% 0)) > 0.01) {
+      updateNumericInput(session, "styler_aspect_ratio", value = new_ratio)
+    }
+  }, ignoreInit = TRUE)
+
+  observeEvent(input$styler_aspect_ratio, {
+    req(input$styler_aspect_ratio, input$styler_width)
+    # Update height based on aspect ratio
+    new_height <- round(input$styler_width / input$styler_aspect_ratio, 2)
+    if (abs(new_height - (input$styler_height %||% 0)) > 0.01) {
+      updateNumericInput(session, "styler_height", value = new_height)
+    }
+  }, ignoreInit = TRUE)
   
   output$styler_download_config <- downloadHandler(
     filename = function() { paste0("styler_config_", format(Sys.time(), "%Y%m%d"), ".json") },
@@ -2327,10 +2564,10 @@ server <- function(input, output, session) {
             )
 
             if (inherits(p_obj, "trellis")) {
-              if (ext == "png") png(file, width = 10, height = 8, units = "in", res = input$styler_dpi %||% 300)
-              else if (ext == "tiff") tiff(file, width = 10, height = 8, units = "in", res = input$styler_dpi %||% 300)
-              else if (ext == "pdf") pdf(file, width = 10, height = 8)
-              else jpeg(file, width = 10, height = 8, units = "in", res = input$styler_dpi %||% 300)
+              if (ext == "png") png(file, width = input$styler_width %||% 10, height = (if(isTruthy(input$styler_height)) input$styler_height else 8), units = "in", res = input$styler_dpi %||% 300)
+              else if (ext == "tiff") tiff(file, width = input$styler_width %||% 10, height = (if(isTruthy(input$styler_height)) input$styler_height else 8), units = "in", res = input$styler_dpi %||% 300)
+              else if (ext == "pdf") pdf(file, width = input$styler_width %||% 10, height = (if(isTruthy(input$styler_height)) input$styler_height else 8))
+              else jpeg(file, width = input$styler_width %||% 10, height = (if(isTruthy(input$styler_height)) input$styler_height else 8), units = "in", res = input$styler_dpi %||% 300)
 
               print(p_obj)
               dev.off()
@@ -2338,7 +2575,7 @@ server <- function(input, output, session) {
               ggsave(file, plot = p_obj, 
                      device = if(ext == "pdf") "pdf" else (if(ext == "tiff") "tiff" else NULL),
                      dpi = input$styler_dpi %||% 300,
-                     width = 10, height = 8, units = "in")
+                     width = input$styler_width %||% 10, height = (if(isTruthy(input$styler_height)) input$styler_height else 8), units = "in")
             }
           } else if (item$type == "table") {
             if (ext == "xlsx") {
@@ -2361,6 +2598,7 @@ server <- function(input, output, session) {
   
   output$batch_export <- downloadHandler(
     filename = function() { paste0("Batch_Export_", format(Sys.time(), "%Y%m%d_%H%M%S"), ".zip") },
+    contentType = "application/zip",
     content = function(file) {
       req(input$selected_assets, length(input$selected_assets) > 0)
       
@@ -2426,13 +2664,13 @@ server <- function(input, output, session) {
             )
             
             if (inherits(p, "trellis")) {
-              if (ext == "png") png(filepath, width = 10, height = 8, units = "in", res = input$styler_dpi %||% 300)
-              else if (ext == "tiff") tiff(filepath, width = 10, height = 8, units = "in", res = input$styler_dpi %||% 300)
-              else if (ext == "pdf") pdf(filepath, width = 10, height = 8)
-              else jpeg(filepath, width = 10, height = 8, units = "in", res = input$styler_dpi %||% 300)
+              if (ext == "png") png(filepath, width = input$styler_width %||% 10, height = (if(isTruthy(input$styler_height)) input$styler_height else 8), units = "in", res = input$styler_dpi %||% 300)
+              else if (ext == "tiff") tiff(filepath, width = input$styler_width %||% 10, height = (if(isTruthy(input$styler_height)) input$styler_height else 8), units = "in", res = input$styler_dpi %||% 300)
+              else if (ext == "pdf") pdf(filepath, width = input$styler_width %||% 10, height = (if(isTruthy(input$styler_height)) input$styler_height else 8))
+              else jpeg(filepath, width = input$styler_width %||% 10, height = (if(isTruthy(input$styler_height)) input$styler_height else 8), units = "in", res = input$styler_dpi %||% 300)
               print(p); dev.off()
             } else {
-              ggsave(filepath, plot = p, dpi = input$styler_dpi %||% 300, width = 10, height = 8, units = "in")
+              ggsave(filepath, plot = p, dpi = input$styler_dpi %||% 300, width = input$styler_width %||% 10, height = (if(isTruthy(input$styler_height)) input$styler_height else 8), units = "in")
             }
             files_to_zip <- c(files_to_zip, filename)
           }, error = function(e) {
@@ -2652,6 +2890,91 @@ server <- function(input, output, session) {
     showNotification("Pop-up settings updated.", type = "message")
   })
 
+  # --- F2: Point Styling Toolbar Logic ---
+  observeEvent(input$toggle_pt_style, {
+    shinyjs::toggle("pt_style_toolbar", anim = TRUE, animType = "slide", time = 0.3)
+  })
+
+  # Populate color-by and label-field dropdowns when data loads
+  observe({
+    req(rv$user_data)
+    df <- rv$user_data
+    cols <- colnames(df)
+
+    cat_cols <- cols[sapply(df, function(x) {
+      is.character(x) || is.factor(x) || (is.integer(x) && length(unique(x)) <= 20)
+    })]
+
+    color_choices <- c("None (Cyan)" = "none")
+    if (!is.null(rv$mapping$loc) && rv$mapping$loc %in% cols) {
+      color_choices <- c(color_choices, stats::setNames(rv$mapping$loc, paste0("Locality (", rv$mapping$loc, ")")))
+    }
+    other_cats <- setdiff(cat_cols, c(rv$mapping$loc, rv$mapping$x, rv$mapping$y))
+    if (length(other_cats) > 0) {
+      color_choices <- c(color_choices, stats::setNames(other_cats, other_cats))
+    }
+    updateSelectInput(session, "pt_color_by", choices = color_choices, selected = "none")
+
+    label_choices <- c("(none)" = "none", stats::setNames(cols, cols))
+    updateSelectInput(session, "pt_label_field", choices = label_choices, selected = "none")
+  })
+
+  # Generate default palette when color-by or palette changes
+  observeEvent(list(input$pt_color_by, input$pt_palette), {
+    req(input$pt_color_by)
+    if (input$pt_color_by == "none") {
+      rv$pt_style_colors <- NULL
+      return()
+    }
+    req(rv$user_data, input$pt_color_by %in% colnames(rv$user_data))
+    groups <- sort(unique(as.character(rv$user_data[[input$pt_color_by]])))
+    pal_name <- input$pt_palette %||% "Set1"
+    rv$pt_style_colors <- generate_group_palette(groups, pal_name)
+    rv$pt_style_palette <- pal_name
+  }, ignoreInit = TRUE)
+
+  # Custom color assignment modal
+  observeEvent(input$pt_custom_colors, {
+    req(rv$pt_style_colors)
+    groups <- names(rv$pt_style_colors)
+
+    color_inputs <- lapply(seq_along(groups), function(i) {
+      g <- groups[i]
+      col_hex <- rv$pt_style_colors[g]
+      div(style = "display: flex; align-items: center; gap: 10px; margin-bottom: 8px;",
+        div(style = paste0("width: 16px; height: 16px; border-radius: 3px; background-color: ", col_hex, "; border: 1px solid #ccc; flex-shrink: 0;")),
+        tags$span(g, style = "min-width: 110px; font-size: 13px; font-weight: 500;"),
+        textInput(paste0("pt_grp_col_", i), NULL, value = col_hex, width = "90px")
+      )
+    })
+
+    showModal(modalDialog(
+      title = tags$span(icon("palette"), " Custom Group Colors"),
+      div(style = "max-height: 400px; overflow-y: auto; padding: 5px;",
+        p("Enter hex color codes (e.g. #FF5733) for each group:", style = "font-size: 12px; color: #888; margin-bottom: 12px;"),
+        color_inputs
+      ),
+      footer = tagList(
+        modalButton("Cancel"),
+        actionButton("pt_apply_custom_colors", "Apply Colors", class = "btn-primary", icon = icon("check"))
+      ),
+      size = "s"
+    ))
+  })
+
+  observeEvent(input$pt_apply_custom_colors, {
+    req(rv$pt_style_colors)
+    groups <- names(rv$pt_style_colors)
+    for (i in seq_along(groups)) {
+      col_val <- input[[paste0("pt_grp_col_", i)]]
+      if (!is.null(col_val) && grepl("^#[0-9A-Fa-f]{6}$", col_val)) {
+        rv$pt_style_colors[groups[i]] <- col_val
+      }
+    }
+    removeModal()
+    showNotification("Custom colors applied.", type = "message", duration = 3)
+  })
+
   # --- Data Setup Logic ---
   output$file_uploaded <- reactive({ !is.null(input$user_file) })
   outputOptions(output, "file_uploaded", suspendWhenHidden = FALSE)
@@ -2755,21 +3078,11 @@ server <- function(input, output, session) {
   # --- Dynamic Resolution Sync ---
   observeEvent(input$crs_selection, {
     req(input$crs_selection)
-    crs_obj <- tryCatch(st_crs(input$crs_selection), error = function(e) NULL)
-    req(crs_obj)
-    
-    units <- crs_obj$units_gdal
-    if (is.null(units)) units <- "meters" # fallback
-    
-    if (grepl("degree", units, ignore.case = TRUE)) {
-      updateSliderInput(session, "grid_res", label = "Resolution (Degrees)", 
-                        min = 0.0001, max = 0.01, value = 0.0005, step = 0.0001)
-    } else {
-      updateSliderInput(session, "grid_res", label = "Resolution (m)", 
-                        min = 1, max = 500, value = 50, step = 1)
-    }
-  })
 
+    # We now enforce metric resolution reporting regardless of target CRS
+    updateSliderInput(session, "grid_res", label = "Resolution (m)",
+                      min = 1, max = 500, value = 50, step = 1)
+  })
   # --- Smart Resolution Recommendation ---
   observeEvent(list(rv$user_data, input$map_x, input$map_y, input$crs_selection, input$locality, input$res_mode), {
     req(rv$user_data, input$map_x, input$map_y, input$crs_selection, input$locality, input$res_mode)
@@ -2844,22 +3157,24 @@ server <- function(input, output, session) {
             sub_pts <- tryCatch(st_as_sf(sub_df, coords=c("x","y"), crs=input$map_crs) %>% st_transform(input$crs_selection), error=function(e) NULL)
             if(is.null(sub_pts)) next
             
-            sub_coords <- st_coordinates(sub_pts)
-            if (nrow(sub_coords) > 1) {
-                 sub_knn <- FNN::get.knn(sub_coords, k = 1)
+            if (nrow(sub_pts) > 1) {
+                 # Strictly enforce metric distances for resolution estimation
+                 sub_pts_m <- tryCatch(sf::st_transform(sub_pts, 3857), error = function(e) sub_pts)
+                 sub_coords_m <- sf::st_coordinates(sub_pts_m)
+                 sub_knn <- FNN::get.knn(sub_coords_m, k = 1)
                  l_res <- mean(sub_knn$nn.dist) * 0.5
+
+                 # If transformation failed and we are in degrees, apply heuristic to convert to meters
+                 if (is_degree && identical(sub_pts, sub_pts_m)) {
+                    lat_c <- mean(sf::st_coordinates(sf::st_transform(sub_pts, 4326))[,2])
+                    m_per_deg <- 111319 * cos(lat_c * pi / 180)
+                    l_res <- l_res * m_per_deg
+                 }
             } else l_res <- final_rec
-            
-            sub_bbox <- st_bbox(sub_pts)
-            sub_max_dim <- max(sub_bbox["xmax"] - sub_bbox["xmin"], sub_bbox["ymax"] - sub_bbox["ymin"])
-            sub_min_res <- sub_max_dim / 300
-            l_res <- max(l_res, sub_min_res)
-            
-            if (is_degree) l_res <- max(0.00001, min(0.01, l_res))
-            else l_res <- max(0.1, min(500, l_res))
-            
-            temp_res[[l]] <- l_res
-        }
+
+            l_res <- max(1, min(5000, l_res))
+
+            temp_res[[l]] <- l_res        }
         rv$loc_resolutions <- temp_res
     } else {
         # If not local mode, apply global/fixed resolution to all selected localities
@@ -3000,21 +3315,45 @@ server <- function(input, output, session) {
 
   output$setup_minimap <- renderLeaflet({
     req(rv$user_data, rv$mapping$x, rv$mapping$y, rv$mapping$crs)
-    
-    # Try to create SF object for mapping
-    df_map <- rv$user_data %>% select(x = !!sym(rv$mapping$x), y = !!sym(rv$mapping$y)) %>% na.omit()
+
+    # F2: Determine which extra columns are needed for styling
+    color_by <- input$pt_color_by %||% "none"
+    label_field <- input$pt_label_field %||% "none"
+    apply_mini <- isTRUE(input$pt_apply_minimap)
+
+    needed <- c(rv$mapping$x, rv$mapping$y)
+    if (apply_mini && color_by != "none" && color_by %in% colnames(rv$user_data)) needed <- c(needed, color_by)
+    if (apply_mini && isTRUE(input$pt_show_labels) && label_field != "none" && label_field %in% colnames(rv$user_data)) needed <- c(needed, label_field)
+    needed <- unique(needed)
+
+    df_map <- rv$user_data %>% dplyr::select(dplyr::all_of(needed)) %>% na.omit()
     if (nrow(df_map) == 0) return(NULL)
-    
+
+    # Rename coordinate columns to x/y for st_as_sf
+    coord_rename <- c(x = rv$mapping$x, y = rv$mapping$y)
     pts <- tryCatch({
-      st_as_sf(df_map, coords = c("x", "y"), crs = rv$mapping$crs) %>% st_transform(4326)
+      st_as_sf(df_map, coords = c(rv$mapping$x, rv$mapping$y), crs = rv$mapping$crs) %>% st_transform(4326)
     }, error = function(e) NULL)
-    
     req(pts)
+
     current_tiles <- input$base_map_layer %||% if(isTruthy(input$styler_local_config)) jsonlite::fromJSON(input$styler_local_config)$map_tiles else "Esri.WorldImagery"
     if (is.null(current_tiles) || current_tiles == "") current_tiles <- "Esri.WorldImagery"
-    
-    leaflet(pts) %>% addProviderTiles(current_tiles, layerId="base_tiles") %>%
-      addCircleMarkers(radius = 3, color = "cyan", opacity = 1)
+
+    m <- leaflet(pts) %>% addProviderTiles(current_tiles, layerId = "base_tiles")
+
+    if (apply_mini && color_by != "none") {
+      m <- add_styled_points(m, pts,
+        color_by = color_by,
+        custom_colors = rv$pt_style_colors,
+        show_labels = isTRUE(input$pt_show_labels),
+        label_field = label_field,
+        label_size = input$pt_label_size %||% 11,
+        marker_size = input$pt_marker_size %||% 3
+      )
+    } else {
+      m <- m %>% addCircleMarkers(radius = input$pt_marker_size %||% 3, color = "cyan", opacity = 1)
+    }
+    m
   })
 
   # --- Metadata Helper ---
@@ -3089,7 +3428,7 @@ server <- function(input, output, session) {
       div(style = "text-align: center; padding: 20px;",
           img(src = "assets/banner.png", style = "max-width: 100%; height: auto; margin-bottom: 20px;"),
           h4("Workbench for statistics and optimized mapping in life sciences."),
-          p("Version: 0.8.8"),
+          p("Version: 0.9.0"),
           p("Integrated geostatistical modeling, classification and statistical interpretation."),
           hr(),
           p("Designed for high-performance parallel processing and spatial diagnostics, multi-scale interpolation via kriging, inverse distance weighting, and thin plate splines with practical multi-criteria optimization."),
@@ -3904,24 +4243,103 @@ apply_interpolation <- function(data, target_var, method, grid_p, aux_vars, lags
   return(res)
 }
 
+  # B4: Modal dialog for archive choice when previous results exist
   observeEvent(input$run, {
-    req(rv$user_data, input$locality, rv$mapping$x, rv$mapping$y); 
+    req(rv$user_data, input$locality, rv$mapping$x, rv$mapping$y)
+    meta <- get_current_meta()
+    req(meta)
+    # If there are previous results, ask user what to do
+    if (!is.null(rv$run_config_summary) && length(rv$export_registry) > 0) {
+      showModal(modalDialog(
+        title = "Previous Results Detected",
+        tags$p("A previous model run exists. What would you like to do with those results?"),
+        div(style = "background-color: #f8f9fa; padding: 10px; border-radius: 5px; margin: 10px 0;",
+          tags$strong(paste0("Run #", rv$run_config_summary$run_id, ": ",
+            rv$run_config_summary$variable, " (", rv$run_config_summary$method, ")")),
+          tags$br(),
+          tags$small(paste0(rv$run_config_summary$localities, " | ",
+            format(rv$run_config_summary$timestamp, "%H:%M:%S")))
+        ),
+        footer = tagList(
+          actionButton("archive_prev_run", "Archive & Continue", class = "btn-warning", icon = icon("archive")),
+          actionButton("discard_prev_run", "Discard & Continue", class = "btn-danger", icon = icon("trash")),
+          modalButton("Cancel")
+        ),
+        size = "m", easyClose = FALSE
+      ))
+    } else {
+      # No previous results, proceed directly
+      rv$proceed_run <- runif(1)
+    }
+  })
+
+  # B4: Archive previous results then proceed
+  observeEvent(input$archive_prev_run, {
+    removeModal()
+    current_cfg <- rv$run_config_summary
+    current_reg <- rv$export_registry
+    if (!is.null(current_cfg) && length(current_reg) > 0) {
+      rv$run_history <- c(list(list(config = current_cfg, registry = current_reg)), rv$run_history)
+    }
+    rv$proceed_run <- runif(1)
+  })
+
+  # B4: Discard previous results then proceed
+  observeEvent(input$discard_prev_run, {
+    removeModal()
+    rv$proceed_run <- runif(1)
+  })
+
+  # Main model generation logic (triggered after archive decision)
+  observeEvent(rv$proceed_run, {
+    req(rv$user_data, input$locality, rv$mapping$x, rv$mapping$y);
     locs <- if("ALL" %in% input$locality) unique(rv$user_data[[rv$mapping$loc]]) else input$locality
     meta <- get_current_meta()
     req(meta)
-    
+
     # Automatically switch to Map Viewer tab to show progress
     updateTabsetPanel(session, "main_tabs", selected = "tab_map")
     shinyjs::runjs("$('#main_tabs li a[data-value=\"tab_map\"]').click();")
-    
+
     # Show progress overlay, hide reveal button
     shinyjs::show("map_progress_overlay")
     shinyjs::hide("map_reveal_overlay")
     shinyjs::runjs("document.getElementById('map_progress_bar_fill').style.width = '5%'; document.getElementById('map_progress_text').innerText = 'Initializing Spatial Analysis Engine...';")
 
+    # B3: Capture run configuration before clearing
+    rv$run_counter <- rv$run_counter + 1L
+    method_params_str <- switch(input$method,
+      "IDW" = paste0("IDW Power: ", input$idw_p, " | Nmax: ", input$idw_nmax),
+      "TPS" = paste0("TPS Lambda: ", input$tps_lambda),
+      "OK"  = "Ordinary Kriging (auto variogram)",
+      "RK"  = paste0("Regression Kriging | Aux: ", paste(input$aux_vars, collapse=", ")),
+      "RFK" = paste0("Random Forest Kriging | Aux: ", paste(input$aux_vars, collapse=", ")),
+      "CK"  = paste0("Co-Kriging | Aux: ", paste(input$aux_vars, collapse=", ")),
+      ""
+    )
+    rv$run_config_summary <- list(
+      run_id = rv$run_counter,
+      timestamp = Sys.time(),
+      variable = paste0(meta$label, " [", meta$actual, "]"),
+      method = input$method,
+      localities = paste(locs, collapse = ", "),
+      subset = input$subset,
+      value_type = input$value_type,
+      crs = rv$mapping$crs,
+      boundary_type = input$boundary_type,
+      buffer_dist = input$buff_dist,
+      resolution = input$grid_res,
+      res_mode = input$res_mode,
+      comp_mode = input$comp_mode,
+      sep_fit = input$sep_fit,
+      method_params = method_params_str
+    )
+
+    # Clear current results for fresh run
+    rv$export_registry <- list()
     rv$rast_list_act <- list(); rv$rast_list_pre <- list(); sf_list <- list(); b_list <- list()
     rv$rast <- NULL; rv$rast_pred <- NULL; rv$rast_res <- NULL; rv$has_predictions <- FALSE
-    rv$v_emp_list <- list(); rv$log <- paste0("Starting spatial interpolation using method: ", input$method, "...")
+    rv$v_emp_list <- list(); rv$log <- paste0("[Run #", rv$run_counter, "] Starting spatial interpolation using method: ", input$method, "...")
     rv$run_method[[input$var_id]] <- input$method
     rv$model_summaries <- list(); rv$rf_models <- list(); rv$gstat_objs <- list()
     rv$cv_metrics_act <- list(); rv$cv_metrics_pre <- list() # Reset CV metrics
@@ -3983,6 +4401,9 @@ apply_interpolation <- function(data, target_var, method, grid_p, aux_vars, lags
     })
 
     shinyjs::runjs("document.getElementById('map_progress_bar_fill').style.width = '50%'; document.getElementById('map_progress_text').innerText = 'Executing Parallel Interpolation Algorithms...';")
+
+    # C1: Clear rast lists before starting new run to prevent spatial interference
+    rv$rast_list_act <- list(); rv$rast_list_pre <- list(); rv$rast_list_res <- list(); rv$rast_list_point_res <- list()
 
     res_all <- furrr::future_map(df_list, function(item) {
       l <- item$l
@@ -4347,7 +4768,10 @@ Error in ", l, ": ", e$message)
        }
     }
     
-    rv$log <- paste0(rv$log, "\nDone.")
+    rv$log <- paste0(rv$log, "\n\n--- Run #", rv$run_counter, " Complete ---",
+      "\nConfig: ", rv$run_config_summary$method, " | ", rv$run_config_summary$variable,
+      " | ", rv$run_config_summary$localities,
+      "\n", rv$run_config_summary$method_params)
 
     shinyjs::runjs("document.getElementById('map_progress_bar_fill').style.width = '100%'; document.getElementById('map_progress_text').innerText = 'Complete!';")
     # Small delay before showing reveal overlay
@@ -4510,12 +4934,19 @@ Error in ", l, ": ", e$message)
     if(input$show_points_viewer && lab != "resid_raster" && lab != "resid_points") {
       pts_view <- st_transform(rv$sf, 4326)
       if(nrow(pts_view) > 0) {
-        df_clean <- st_drop_geometry(pts_view)
-        popups <- lapply(1:nrow(df_clean), function(i) generate_popup(df_clean[i, ])) %>% unlist()
-        
-        # Even in single resid view, user says "regular sample points"
-        m <- m %>% addCircleMarkers(data = pts_view, radius = 3, color = "cyan", opacity = 1, weight = 1,
-                                   fillOpacity = 0.5, popup = popups)
+        # F2: Use styled points with group coloring, labels, and custom sizes
+        color_by <- input$pt_color_by %||% "none"
+        label_field <- input$pt_label_field %||% "none"
+
+        m <- add_styled_points(m, pts_view,
+          color_by = color_by,
+          custom_colors = rv$pt_style_colors,
+          show_labels = isTRUE(input$pt_show_labels),
+          label_field = label_field,
+          label_size = input$pt_label_size %||% 11,
+          marker_size = input$pt_marker_size %||% 3,
+          popup_fn = generate_popup
+        )
       }
     }
     
@@ -4626,6 +5057,15 @@ Error in ", l, ": ", e$message)
     leafletProxy("main_map") %>%
       clearTiles() %>%
       addProviderTiles(input$base_map_layer, layerId="base_tiles", options = providerTileOptions(zIndex = -10))
+    
+    leafletProxy("comp_map_left") %>%
+      clearTiles() %>%
+      addProviderTiles(input$base_map_layer, layerId="base_tiles", options = providerTileOptions(zIndex = -10))
+      
+    leafletProxy("comp_map_right") %>%
+      clearTiles() %>%
+      addProviderTiles(input$base_map_layer, layerId="base_tiles", options = providerTileOptions(zIndex = -10))
+      
     # Trigger window resize to force Leaflet invalidateSize which fixes gray tiles
     shinyjs::runjs("setTimeout(function() { window.dispatchEvent(new Event('resize')); }, 100);")
   })
@@ -5164,20 +5604,19 @@ Error in ", l, ": ", e$message)
                     Bias_ME = round(me, 4),
                     RPD_Prec = round(rpd, 4),
                     SMAPE_Pct = round(smape, 4),
-                    Moran_I = round(moran_i, 4)
-                  )
-                  names(res_df) <- c("Source", "RMSE", "R  (Corr)", "R  (NSE/Trad)", "Bias (ME)", "RPD (Prec)", "SMAPE (%)", "Moran's I")
-                  res_df
-          }
-      
-          m_act <- get_metrics_df(rv$cv_metrics_act, rv$cv_data_act, "Actual Model (CV)")
-          if(rv$has_predictions) {
-            m_pre <- get_metrics_df(rv$cv_metrics_pre, rv$cv_data_pre, "Predicted Model (CV)")
-            return(rbind(m_act, m_pre))
-          } else {
-            return(m_act)
-          }        })
-      
+                    Moran_I = if(is.na(moran_i)) '<span title="No Spatial Structure Detected">NA*</span>' else as.character(round(moran_i, 4))
+                    )
+                    names(res_df) <- c("Source", "RMSE", "R  (Corr)", "R  (NSE/Trad)", "Bias (ME)", "RPD (Prec)", "SMAPE (%)", "Moran's I")
+                    res_df
+                    }
+
+                    m_act <- get_metrics_df(rv$cv_metrics_act, rv$cv_data_act, "Actual Model (CV)")
+                    if(rv$has_predictions) {
+                    m_pre <- get_metrics_df(rv$cv_metrics_pre, rv$cv_data_pre, "Predicted Model (CV)")
+                    return(rbind(m_act, m_pre))
+                    } else {
+                    return(m_act)
+                    }        }, sanitize.text.function = function(x) x)      
         output$uploaded_metrics_table <- renderTable({
           req(rv$sf, input$sel_loc_stats)
           loc <- input$sel_loc_stats
@@ -5410,6 +5849,86 @@ Error in ", l, ": ", e$message)
             } else input$exp_title
             
             build_export_plot(target, single_title, subtitle = method_lab)  }
+  # --- Polygon Drawing & Export Logic ---
+  observeEvent(input$main_map_draw_new_feature, {
+    feat <- input$main_map_draw_new_feature
+    if(feat$geometry$type %in% c("Polygon", "MultiPolygon")) {
+      rv$drawn_polygons[[as.character(feat$properties$`_leaflet_id`)]] <- feat
+    }
+  })
+  
+  observeEvent(input$main_map_draw_edited_features, {
+    feats <- input$main_map_draw_edited_features$features
+    for (feat in feats) {
+      if(feat$geometry$type %in% c("Polygon", "MultiPolygon")) {
+        rv$drawn_polygons[[as.character(feat$properties$`_leaflet_id`)]] <- feat
+      }
+    }
+  })
+  
+  observeEvent(input$main_map_draw_deleted_features, {
+    feats <- input$main_map_draw_deleted_features$features
+    for (feat in feats) {
+      rv$drawn_polygons[[as.character(feat$properties$`_leaflet_id`)]] <- NULL
+    }
+  })
+  
+  get_drawn_sf <- reactive({
+    polys <- rv$drawn_polygons
+    if(length(polys) == 0) return(NULL)
+    
+    # Convert list of GeoJSON features to an sf object
+    sf_list <- lapply(polys, function(p) {
+      json_str <- jsonlite::toJSON(p, auto_unbox = TRUE)
+      sf::st_read(json_str, quiet = TRUE)
+    })
+    
+    sf_combined <- do.call(rbind, sf_list)
+    sf::st_crs(sf_combined) <- 4326 # Leaflet uses WGS84
+    return(sf_combined)
+  })
+  
+  output$polygon_download_btn <- downloadHandler(
+    filename = function() {
+      fmt <- input$polygon_export_format
+      ext <- switch(fmt, "shp" = "zip", "geojson" = "geojson", "kml" = "kml", "gpkg" = "gpkg", "zip")
+      paste0("Drawn_Polygons_", format(Sys.time(), "%Y%m%d_%H%M%S"), ".", ext)
+    },
+    content = function(file) {
+      sf_obj <- get_drawn_sf()
+      if(is.null(sf_obj)) {
+        showNotification("No polygons to export. Please draw a polygon first.", type = "warning")
+        return(NULL)
+      }
+      
+      fmt <- input$polygon_export_format
+      
+      tryCatch({
+        if (fmt == "shp") {
+          temp_dir <- file.path(tempdir(), paste0("shp_export_", as.integer(Sys.time())))
+          dir.create(temp_dir, showWarnings = FALSE)
+          shp_path <- file.path(temp_dir, "drawn_polygons.shp")
+          
+          sf::st_write(sf_obj, shp_path, driver = "ESRI Shapefile", quiet = TRUE, delete_layer = TRUE)
+          
+          # Zip the files
+          files_to_zip <- list.files(temp_dir, full.names = FALSE)
+          zip::zip(zipfile = file, files = files_to_zip, root = temp_dir)
+          
+          unlink(temp_dir, recursive = TRUE)
+        } else if (fmt == "geojson") {
+          sf::st_write(sf_obj, file, driver = "GeoJSON", quiet = TRUE, delete_dsn = TRUE)
+        } else if (fmt == "kml") {
+          sf::st_write(sf_obj, file, driver = "KML", quiet = TRUE, delete_dsn = TRUE)
+        } else if (fmt == "gpkg") {
+          sf::st_write(sf_obj, file, driver = "GPKG", layer = "drawn_polygons", quiet = TRUE, delete_dsn = TRUE)
+        }
+      }, error = function(e) {
+        showNotification(paste("Export failed:", e$message), type = "error")
+      })
+    }
+  )
+
   output$export_preview <- renderPlot({ get_export_plot() })
   output$dl_map <- downloadHandler(
     filename = function() { paste0("Map_", format(Sys.time(), "%H%M%S"), ".", tolower(input$exp_format %||% "png")) },
@@ -5418,18 +5937,18 @@ Error in ", l, ": ", e$message)
       
       ext <- tolower(input$exp_format %||% "png")
       if (inherits(p, "trellis")) {
-        if (ext == "png") png(file, width = 10, height = 8, units = "in", res = 300)
-        else if (ext == "tiff") tiff(file, width = 10, height = 8, units = "in", res = 300)
-        else if (ext == "pdf") pdf(file, width = 10, height = 8)
-        else jpeg(file, width = 10, height = 8, units = "in", res = 300)
+        if (ext == "png") png(file, width = (if(isTruthy(input$styler_width)) input$styler_width else 10), height = (if(isTruthy(input$styler_height)) input$styler_height else 8), units = "in", res = 300)
+        else if (ext == "tiff") tiff(file, width = (if(isTruthy(input$styler_width)) input$styler_width else 10), height = (if(isTruthy(input$styler_height)) input$styler_height else 8), units = "in", res = 300)
+        else if (ext == "pdf") pdf(file, width = (if(isTruthy(input$styler_width)) input$styler_width else 10), height = (if(isTruthy(input$styler_height)) input$styler_height else 8))
+        else jpeg(file, width = (if(isTruthy(input$styler_width)) input$styler_width else 10), height = (if(isTruthy(input$styler_height)) input$styler_height else 8), units = "in", res = 300)
         print(p)
         dev.off()
       } else {
-        ggsave(file, plot = p, device = if(ext == "pdf") "pdf" else (if(ext == "tiff") "tiff" else NULL), width = 10, height = 8, dpi = 300)
+      ggsave(file, plot = p, device = if(ext == "pdf") "pdf" else (if(ext == "tiff") "tiff" else NULL), width = input$styler_width %||% 10, height = (if(isTruthy(input$styler_height)) input$styler_height else 8), dpi = 300)
       }
-    }
-  )
+      }
+      )
+      }
+      if (Sys.getenv("SHINY_PORT") != "" || interactive()) {  shinyApp(ui, server)
 }
-if (Sys.getenv("SHINY_PORT") != "" || interactive()) {
-  shinyApp(ui, server)
-}
+shinyApp(ui = ui, server = server)
