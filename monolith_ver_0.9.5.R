@@ -380,7 +380,7 @@ ui <- fluidPage(
                      h3("Step 1: Upload Your Dataset"),
                      fluidRow(
                        column(6, fileInput("user_file", "Choose CSV or Excel File", accept = c(".csv", ".xlsx", ".xls"))),
-                       column(6, fileInput("user_shp", "Shapefile - Optional (.shp, .shx, .dbf, .prj)", multiple = TRUE, accept = c(".shp", ".shx", ".dbf", ".prj")))
+                       shinyjs::hidden(column(6, fileInput("user_shp", "Shapefile - Optional (.shp, .shx, .dbf, .prj)", multiple = TRUE, accept = c(".shp", ".shx", ".dbf", ".prj"))))
                      ),
                      conditionalPanel(condition = "output.file_uploaded",
                        downloadButton("export_updated_data", "Export Updated Dataset", class = "btn-success", style = "margin-bottom: 15px;")
