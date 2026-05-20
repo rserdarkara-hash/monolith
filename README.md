@@ -148,4 +148,11 @@ monolith/
    shiny::runApp("monolith_ver_0.9.5.R")
    ```
 
+## License
+
+This project features a dual-licensing structure to protect both open-source contributions and private research datasets:
+
+*   **Software & Source Code**: The core codebase of **Monolith** is licensed under the **GNU General Public License v3.0 (GPL-3.0)**. You are free to run, study, share, and modify the software, provided all derivative works remain open-source under the same terms. See the [LICENSE](LICENSE) file for the full legal text.
+*   **Sample Datasets**: The files within the [sample_data/](file:///C:/Users/serda/Desktop/Data%20analysis%20tool%20creation/monolith/sample_data) directory are **not** open-source. They are provided solely for demonstrating and testing the application. You are strictly prohibited from publishing, redistributing, or using these datasets in any scientific publications or external projects. See the [sample_data/DATA_LICENSE](file:///C:/Users/serda/Desktop/Data%20analysis%20tool%20creation/monolith/sample_data/DATA_LICENSE) file for the full terms and restrictions.
+
 [def]: assets/2.png
