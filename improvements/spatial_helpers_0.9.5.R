@@ -303,8 +303,12 @@ compute_governing_factors <- function(df, target_col, predictors, n_permutations
   # 5. ALE Profile for top variable
   ale_prof <- DALEX::model_profile(explainer_rf, variables = top_var, type = "accumulated")
   ale_df <- as.data.frame(ale_prof$agr_profiles)
-  
-  # 6. SHAP profile (using sample)
+
+  # 6. PDP (Partial Dependence Plot) for top variable
+  pdp_prof <- DALEX::model_profile(explainer_rf, variables = top_var, type = "partial")
+  pdp_df <- as.data.frame(pdp_prof$agr_profiles)
+
+  # 7. SHAP profile (using sample) - used for Causality/Interaction (A)
   sample_idx <- sample(1:nrow(df_clean), min(20, nrow(df_clean)))
   shap_list <- lapply(sample_idx, function(i) {
     sp <- DALEX::predict_parts(explainer_rf, new_observation = df_clean[i, predictors, drop = FALSE], type = "shap")
@@ -313,7 +317,7 @@ compute_governing_factors <- function(df, target_col, predictors, n_permutations
     sp
   })
   shap_df <- do.call(rbind, shap_list)
-  
+
   # To make a scatterplot, we need the original feature values and the shap contribution
   shap_val_df <- data.frame(
     feature_value = df_clean[[top_var]][sample_idx],
@@ -322,13 +326,14 @@ compute_governing_factors <- function(df, target_col, predictors, n_permutations
       if(nrow(sub) > 0) sum(sub$contribution) else 0
     })
   )
-  
+
   list(
     model = rf_model,
     explainer = explainer_rf,
     importance = vip_agg,
     top_var = top_var,
     ale = ale_df,
+    pdp = pdp_df,
     shap = shap_val_df
   )
 }
