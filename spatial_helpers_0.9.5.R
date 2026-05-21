@@ -338,3 +338,18 @@ compute_governing_factors <- function(df, target_col, predictors, n_permutations
   )
 }
 
+# Helper to merge lists of wrapped/unwrapped spatial rasters
+merge_wrapped_rasters <- function(raster_list) {
+  if (is.null(raster_list) || length(raster_list) == 0) return(NULL)
+  valid_list <- Filter(Negate(is.null), raster_list)
+  if (length(valid_list) == 0) return(NULL)
+  
+  merged <- if (length(valid_list) > 1) {
+    do.call(terra::merge, lapply(unname(valid_list), terra::unwrap))
+  } else {
+    terra::unwrap(valid_list[[1]])
+  }
+  terra::wrap(merged)
+}
+
+

@@ -53,9 +53,10 @@ showtext_auto()
 addResourcePath("assets", getwd())
 plan(multisession) # Enable standard async processing
 # --- Improvements---
-source("ui_helpers_0.9.6.R")
-source("spatial_helpers_0.9.6.R")
-source("theme_helpers_0.9.6.R")
+source("ui_helpers_0.9.5.R")
+source("spatial_helpers_0.9.5.R")
+source("theme_helpers_0.9.5.R")
+source("gov_module_0.9.5.R")
 
 # --- Helpers ---
 `%||%` <- function(a, b) if (!is.null(a)) a else b
@@ -937,60 +938,7 @@ ui <- fluidPage(
                                           )
                                  ),
                                  tabPanel("Governing Factors",
-                                          div(style = "padding: 10px;",
-                                              fluidRow(
-                                                column(3,
-                                                  h4("Analysis Configuration"),
-                                                  uiOutput("gov_target_ui"),
-                                                  uiOutput("gov_predictors_ui"),
-                                                  sliderInput("gov_permutations", "Permutations (for RF importance)", min = 10, max = 100, value = 50, step = 10),
-                                                  actionButton("gov_run_btn", "Run Analysis", class="btn-primary btn-block"),
-                                                  hr(),
-                                                  h4("Plot Settings"),
-                                                  radioButtons("gov_effect_type", "Functional Effect Plot:", choices = c("ALE" = "ale", "PDP" = "pdp"), inline = TRUE)
-                                                ),
-                                                column(9,
-                                                  conditionalPanel("output.gov_ready == 'yes'",
-                                                    fluidRow(
-                                                      column(6, 
-                                                        h4("Global Importance"),
-                                                        div(style = "position: relative;",
-                                                            tags$button(id = "gov_expand_imp_btn", type = "button", class = "btn btn-default action-button expand-icon-btn", icon("expand")),
-                                                            plotOutput("gov_plot_importance", height = "300px")
-                                                        )
-                                                      ),
-                                                      column(6, 
-                                                        h4("Causality / Interaction (A)"),
-                                                        div(style = "position: relative;",
-                                                            tags$button(id = "gov_expand_inta_btn", type = "button", class = "btn btn-default action-button expand-icon-btn", icon("expand")),
-                                                            plotOutput("gov_plot_interaction_a", height = "300px")
-                                                        )
-                                                      )
-                                                    ),
-                                                    hr(),
-                                                    fluidRow(
-                                                      column(6, 
-                                                        h4("Functional Effect"),
-                                                        div(style = "position: relative;",
-                                                            tags$button(id = "gov_expand_eff_btn", type = "button", class = "btn btn-default action-button expand-icon-btn", icon("expand")),
-                                                            plotOutput("gov_plot_effect", height = "300px")
-                                                        )
-                                                      ),
-                                                      column(6, 
-                                                        h4("Causality / Interaction (B)"),
-                                                        div(style = "position: relative;",
-                                                            tags$button(id = "gov_expand_intb_btn", type = "button", class = "btn btn-default action-button expand-icon-btn", icon("expand")),
-                                                            plotOutput("gov_plot_interaction_b", height = "300px")
-                                                        )
-                                                      )
-                                                    ),
-                                                    hr(),
-                                                    h4("Tabular Data Metrics"),
-                                                    DT::dataTableOutput("gov_summary_table")
-                                                  )
-                                                )
-                                              )
-                                          )
+                                          gov_factors_ui("gov")
                                  )
                      )
                  )
@@ -1943,303 +1891,7 @@ server <- function(input, output, session) {
      })
 
      # --- Phase 7: Governing Factors Logic ---
-     output$gov_target_ui <- renderUI({
-     req(rv$user_data)
-     cols <- colnames(rv$user_data)
-     num_cols <- cols[sapply(rv$user_data, is.numeric)]
-
-     vars_metadata <- rv$mapping$vars
-     num_named <- if (!is.null(vars_metadata)) {
-      setNames(num_cols, sapply(num_cols, function(v) {
-        match <- Filter(function(x) x$actual == v, vars_metadata)
-        if(length(match) > 0 && !is.null(match[[1]]$label) && match[[1]]$label != "") match[[1]]$label else v
-      }))
-     } else { num_cols }
-
-     selectInput("gov_target", "Target Parameter", choices = num_named)
-     })
-
-     output$gov_predictors_ui <- renderUI({
-     req(rv$user_data)
-     cols <- colnames(rv$user_data)
-     num_cols <- cols[sapply(rv$user_data, is.numeric)]
-
-     vars_metadata <- rv$mapping$vars
-     num_named <- if (!is.null(vars_metadata)) {
-      setNames(num_cols, sapply(num_cols, function(v) {
-        match <- Filter(function(x) x$actual == v, vars_metadata)
-        if(length(match) > 0 && !is.null(match[[1]]$label) && match[[1]]$label != "") match[[1]]$label else v
-      }))
-     } else { num_cols }
-
-     shinyWidgets::pickerInput("gov_predictors", "Governing Factors", choices = num_named, multiple = TRUE, options = list(`actions-box` = TRUE))
-     })
-
-     gov_rv <- reactiveValues(res = NULL, ready = FALSE)
-
-     observeEvent(input$gov_run_btn, {
-     req(rv_analytics_data(), input$gov_target, input$gov_predictors)
-     df <- rv_analytics_data()
-
-     # Respect the existing grouping/discretization engine
-     active_groups <- input$analytics_active_group
-     if (!is.null(active_groups) && length(active_groups) > 0 && "group_id" %in% colnames(df)) {
-       df <- df[df$group_id %in% active_groups, ]
-     } else if (!is.null(active_groups) && length(active_groups) == 0 && "group_id" %in% colnames(df)) {
-       df <- df[0, ]
-     }
-
-     # Exclude target from predictors if mistakenly selected
-     preds <- setdiff(input$gov_predictors, input$gov_target)
-
-     if (length(preds) < 1 || nrow(df) < 10) {
-       showNotification("Insufficient data or predictors for analysis.", type = "error")
-       return()
-     }
-
-     withProgress(message = 'Calculating Governing Factors...', value = 0, {
-       incProgress(0.2, detail = "Fitting Random Forest...")
-       res <- compute_governing_factors(df, target_col = input$gov_target, predictors = preds, n_permutations = input$gov_permutations)
-       incProgress(0.8, detail = "Extracting ML Explanations...")
-
-       if (!is.null(res)) {
-         gov_rv$res <- res
-         gov_rv$ready <- TRUE
-       } else {
-         gov_rv$ready <- FALSE
-         showNotification("Failed to calculate governing factors. Check data quality.", type = "error")
-       }
-     })
-     })
-
-     output$gov_ready <- reactive({
-     if (isTRUE(gov_rv$ready)) "yes" else "no"
-     })
-     outputOptions(output, "gov_ready", suspendWhenHidden = FALSE)
-
-     output$gov_plot_importance <- renderPlot({
-     req(gov_rv$res)
-     vip_df <- gov_rv$res$importance
-     vip_df <- vip_df[order(vip_df$dropout_loss, decreasing = FALSE), ]
-     
-     # Apply labels
-     vip_df$variable_label <- sapply(as.character(vip_df$variable), function(v) {
-        match <- Filter(function(x) x$actual == v, rv$mapping$vars)
-        if(length(match) > 0 && !is.null(match[[1]]$label) && match[[1]]$label != "") match[[1]]$label else v
-     })
-     vip_df$variable_label <- factor(vip_df$variable_label, levels = vip_df$variable_label)
-
-     ggplot(vip_df, aes(x = variable_label, y = dropout_loss)) +
-       geom_bar(stat = "identity", fill = "steelblue") +
-       coord_flip() +
-       labs(title = "Global Variable Importance", x = "Variable", y = "Dropout Loss (RMSE increase)") +
-       theme_minimal()
-     })
-
-     output$gov_plot_interaction_a <- renderPlot({
-     req(gov_rv$res)
-     shap_df <- gov_rv$res$shap
-     
-     # Apply labels
-     top_var_label <- (function(v) {
-        match <- Filter(function(x) x$actual == v, rv$mapping$vars)
-        if(length(match) > 0 && !is.null(match[[1]]$label) && match[[1]]$label != "") match[[1]]$label else v
-     })(gov_rv$res$top_var)
-
-     ggplot(shap_df, aes(x = feature_value, y = contribution)) +
-       geom_point(color = "darkred", alpha = 0.6) +
-       geom_smooth(method = "loess", color = "blue", se = FALSE) +
-       labs(title = paste("SHAP Dependence:", top_var_label), x = paste(top_var_label, "Value"), y = "SHAP Contribution") +
-       theme_minimal()
-     })
-
-     output$gov_plot_effect <- renderPlot({
-     req(gov_rv$res)
-     top_var_label <- (function(v) {
-        match <- Filter(function(x) x$actual == v, rv$mapping$vars)
-        if(length(match) > 0 && !is.null(match[[1]]$label) && match[[1]]$label != "") match[[1]]$label else v
-     })(gov_rv$res$top_var)
-
-     if (!is.null(input$gov_effect_type) && input$gov_effect_type == "ale") {
-       ale_df <- gov_rv$res$ale
-       ggplot(ale_df, aes(x = `_x_`, y = `_yhat_`)) +
-         geom_line(color = "purple", linewidth = 1) +
-         labs(title = paste("ALE Profile:", top_var_label), x = top_var_label, y = "ALE Effect") +
-         theme_minimal()
-     } else {
-       pdp_df <- gov_rv$res$pdp
-       ggplot(pdp_df, aes(x = `_x_`, y = `_yhat_`)) +
-         geom_line(color = "darkorange", linewidth = 1) + geom_rug(sides = "b", alpha = 0.3) +
-         labs(title = paste("PDP Profile:", top_var_label), x = top_var_label, y = "Partial Dependence") +
-         theme_minimal()
-     }
-     })
-
-     output$gov_plot_interaction_b <- renderPlot({
-     req(gov_rv$res, input$gov_target)
-     df <- rv_analytics_data()
-     
-     top_var_label <- (function(v) {
-        match <- Filter(function(x) x$actual == v, rv$mapping$vars)
-        if(length(match) > 0 && !is.null(match[[1]]$label) && match[[1]]$label != "") match[[1]]$label else v
-     })(gov_rv$res$top_var)
-     target_label <- (function(v) {
-        match <- Filter(function(x) x$actual == v, rv$mapping$vars)
-        if(length(match) > 0 && !is.null(match[[1]]$label) && match[[1]]$label != "") match[[1]]$label else v
-     })(input$gov_target)
-
-     # Ensure data has the selected variables
-     if (gov_rv$res$top_var %in% colnames(df) && input$gov_target %in% colnames(df)) {
-        ggplot(df, aes_string(x = paste0("`", gov_rv$res$top_var, "`"), y = paste0("`", input$gov_target, "`"))) +
-          geom_point(alpha = 0.5) +
-          geom_smooth(method = "lm", color = "red") +
-          labs(title = paste("Target vs Top Factor:", top_var_label), x = top_var_label, y = target_label) +
-          theme_minimal()
-     } else {
-        ggplot() + annotate("text", x=0, y=0, label="Data not available") + theme_void()
-     }
-     })
-
-     output$gov_summary_table <- DT::renderDataTable({
-     req(gov_rv$res)
-     vip_df <- gov_rv$res$importance
-     vip_df <- vip_df[order(vip_df$dropout_loss, decreasing = TRUE), ]
-     
-     vip_df$variable <- sapply(as.character(vip_df$variable), function(v) {
-        match <- Filter(function(x) x$actual == v, rv$mapping$vars)
-        if(length(match) > 0 && !is.null(match[[1]]$label) && match[[1]]$label != "") match[[1]]$label else v
-     })
-
-     colnames(vip_df) <- c("Governing Factor", "Importance (Dropout Loss)")
-     DT::datatable(vip_df, options = list(pageLength = 5, dom = 't', scrollX = TRUE), rownames = FALSE)
-     })
-
-     # --- Expanded View Handlers for Governing Factors ---
-     # Helper: get label for a variable
-     gov_get_label <- function(v) {
-       match <- Filter(function(x) x$actual == v, rv$mapping$vars)
-       if(length(match) > 0 && !is.null(match[[1]]$label) && match[[1]]$label != "") match[[1]]$label else v
-     }
-
-     # Helper: build ggplot for each gov panel (reused in static & plotly renderers)
-     gov_build_imp_plot <- function() {
-       vip_df <- gov_rv$res$importance
-       vip_df <- vip_df[order(vip_df$dropout_loss, decreasing = FALSE), ]
-       vip_df$variable_label <- sapply(as.character(vip_df$variable), gov_get_label)
-       vip_df$variable_label <- factor(vip_df$variable_label, levels = vip_df$variable_label)
-       ggplot(vip_df, aes(x = variable_label, y = dropout_loss)) + geom_bar(stat = "identity", fill = "steelblue") +
-         coord_flip() + labs(title = "Global Variable Importance", x = "Variable", y = "Dropout Loss (RMSE increase)") + theme_minimal(base_size=16)
-     }
-
-     gov_build_inta_plot <- function() {
-       shap_df <- gov_rv$res$shap
-       top_var_label <- gov_get_label(gov_rv$res$top_var)
-       ggplot(shap_df, aes(x = feature_value, y = contribution)) + geom_point(color = "darkred", alpha = 0.6, size=3) +
-         geom_smooth(method = "loess", color = "blue", se = FALSE, linewidth=1.5) +
-         labs(title = paste("SHAP Dependence:", top_var_label), x = paste(top_var_label, "Value"), y = "SHAP Contribution") + theme_minimal(base_size=16)
-     }
-
-     gov_build_eff_plot <- function() {
-       top_var_label <- gov_get_label(gov_rv$res$top_var)
-       if (!is.null(input$gov_effect_type) && input$gov_effect_type == "ale") {
-         ale_df <- gov_rv$res$ale
-         ggplot(ale_df, aes(x = `_x_`, y = `_yhat_`)) + geom_line(color = "purple", linewidth = 2) +
-           labs(title = paste("ALE Profile:", top_var_label), x = top_var_label, y = "ALE Effect") + theme_minimal(base_size=16)
-       } else {
-         pdp_df <- gov_rv$res$pdp
-         ggplot(pdp_df, aes(x = `_x_`, y = `_yhat_`)) + geom_line(color = "darkorange", linewidth = 2) + geom_rug(sides = "b", alpha = 0.3) +
-           labs(title = paste("PDP Profile:", top_var_label), x = top_var_label, y = "Partial Dependence") + theme_minimal(base_size=16)
-       }
-     }
-
-     gov_build_intb_plot <- function() {
-       df <- rv_analytics_data()
-       top_var_label <- gov_get_label(gov_rv$res$top_var)
-       target_label <- gov_get_label(input$gov_target)
-       if (gov_rv$res$top_var %in% colnames(df) && input$gov_target %in% colnames(df)) {
-          ggplot(df, aes_string(x = paste0("`", gov_rv$res$top_var, "`"), y = paste0("`", input$gov_target, "`"))) +
-            geom_point(alpha = 0.5, size=3) + geom_smooth(method = "lm", color = "red", linewidth=1.5) +
-            labs(title = paste("Target vs Top Factor:", top_var_label), x = top_var_label, y = target_label) + theme_minimal(base_size=16)
-       } else {
-          ggplot() + annotate("text", x=0, y=0, label="Data not available") + theme_void()
-       }
-     }
-
-     # Importance - expanded modal with interactive toggle
-     observeEvent(input$gov_expand_imp_btn, {
-       showModal(modalDialog(
-         title = "Expanded View: Global Importance", size = "l", easyClose = TRUE,
-         radioButtons("gov_imp_expand_mode", "View Mode:", choices=c("Static (High-Res)"="static", "Interactive (Hover/Zoom)"="interactive"), inline=TRUE),
-         uiOutput("gov_imp_expanded_ui"),
-         footer = modalButton("Close")
-       ))
-     })
-     output$gov_imp_expanded_ui <- renderUI({
-       if (!is.null(input$gov_imp_expand_mode) && input$gov_imp_expand_mode == "interactive") {
-         plotly::plotlyOutput("gov_plot_imp_exp_plotly", height = "700px")
-       } else {
-         plotOutput("gov_plot_imp_exp", height = "700px")
-       }
-     })
-     output$gov_plot_imp_exp <- renderPlot({ req(gov_rv$res); gov_build_imp_plot() })
-     output$gov_plot_imp_exp_plotly <- plotly::renderPlotly({ req(gov_rv$res); plotly::ggplotly(gov_build_imp_plot()) })
-
-     # Interaction A - expanded modal with interactive toggle
-     observeEvent(input$gov_expand_inta_btn, {
-       showModal(modalDialog(
-         title = "Expanded View: Interaction (A)", size = "l", easyClose = TRUE,
-         radioButtons("gov_inta_expand_mode", "View Mode:", choices=c("Static (High-Res)"="static", "Interactive (Hover/Zoom)"="interactive"), inline=TRUE),
-         uiOutput("gov_inta_expanded_ui"),
-         footer = modalButton("Close")
-       ))
-     })
-     output$gov_inta_expanded_ui <- renderUI({
-       if (!is.null(input$gov_inta_expand_mode) && input$gov_inta_expand_mode == "interactive") {
-         plotly::plotlyOutput("gov_plot_inta_exp_plotly", height = "700px")
-       } else {
-         plotOutput("gov_plot_inta_exp", height = "700px")
-       }
-     })
-     output$gov_plot_inta_exp <- renderPlot({ req(gov_rv$res); gov_build_inta_plot() })
-     output$gov_plot_inta_exp_plotly <- plotly::renderPlotly({ req(gov_rv$res); plotly::ggplotly(gov_build_inta_plot()) })
-
-     # Effect - expanded modal with interactive toggle
-     observeEvent(input$gov_expand_eff_btn, {
-       showModal(modalDialog(
-         title = "Expanded View: Functional Effect", size = "l", easyClose = TRUE,
-         radioButtons("gov_eff_expand_mode", "View Mode:", choices=c("Static (High-Res)"="static", "Interactive (Hover/Zoom)"="interactive"), inline=TRUE),
-         uiOutput("gov_eff_expanded_ui"),
-         footer = modalButton("Close")
-       ))
-     })
-     output$gov_eff_expanded_ui <- renderUI({
-       if (!is.null(input$gov_eff_expand_mode) && input$gov_eff_expand_mode == "interactive") {
-         plotly::plotlyOutput("gov_plot_eff_exp_plotly", height = "700px")
-       } else {
-         plotOutput("gov_plot_eff_exp", height = "700px")
-       }
-     })
-     output$gov_plot_eff_exp <- renderPlot({ req(gov_rv$res); gov_build_eff_plot() })
-     output$gov_plot_eff_exp_plotly <- plotly::renderPlotly({ req(gov_rv$res); plotly::ggplotly(gov_build_eff_plot()) })
-
-     # Interaction B - expanded modal with interactive toggle
-     observeEvent(input$gov_expand_intb_btn, {
-       showModal(modalDialog(
-         title = "Expanded View: Interaction (B)", size = "l", easyClose = TRUE,
-         radioButtons("gov_intb_expand_mode", "View Mode:", choices=c("Static (High-Res)"="static", "Interactive (Hover/Zoom)"="interactive"), inline=TRUE),
-         uiOutput("gov_intb_expanded_ui"),
-         footer = modalButton("Close")
-       ))
-     })
-     output$gov_intb_expanded_ui <- renderUI({
-       if (!is.null(input$gov_intb_expand_mode) && input$gov_intb_expand_mode == "interactive") {
-         plotly::plotlyOutput("gov_plot_intb_exp_plotly", height = "700px")
-       } else {
-         plotOutput("gov_plot_intb_exp", height = "700px")
-       }
-     })
-     output$gov_plot_intb_exp <- renderPlot({ req(gov_rv$res, input$gov_target); gov_build_intb_plot() })
-     output$gov_plot_intb_exp_plotly <- plotly::renderPlotly({ req(gov_rv$res, input$gov_target); plotly::ggplotly(gov_build_intb_plot()) })
+     gov_factors_server("gov", data_reactive = reactive(rv_analytics_data()), vars_metadata_reactive = reactive(rv$mapping$vars))
 
      active_theme_name <- theme_switcher_server("theme_mod")  
   output$dynamic_theme <- renderUI({
@@ -2398,11 +2050,17 @@ server <- function(input, output, session) {
   })
 
   # B4: Dynamic observers for archive restore/delete buttons
+  history_obs <- list()
   observe({
     hist <- rv$run_history
+    lapply(history_obs, function(o) {
+      if (!is.null(o)) o$destroy()
+    })
+    history_obs <<- list()
+    
     lapply(seq_along(hist), function(i) {
       # Restore observer
-      observeEvent(input[[paste0("restore_run_", i)]], {
+      obs_restore <- observeEvent(input[[paste0("restore_run_", i)]], {
         run <- isolate(rv$run_history[[i]])
         if (is.null(run)) return()
         # Archive current results first
@@ -2423,10 +2081,13 @@ server <- function(input, output, session) {
       }, ignoreInit = TRUE, once = TRUE)
 
       # Delete observer
-      observeEvent(input[[paste0("delete_run_", i)]], {
+      obs_delete <- observeEvent(input[[paste0("delete_run_", i)]], {
         rv$run_history <- isolate(rv$run_history[-i])
         showNotification("Archived run removed.", type = "warning")
       }, ignoreInit = TRUE, once = TRUE)
+      
+      history_obs[[paste0("restore_", i)]] <<- obs_restore
+      history_obs[[paste0("delete_", i)]] <<- obs_delete
     })
   })
 
@@ -3195,10 +2856,22 @@ server <- function(input, output, session) {
   
   observeEvent(input$user_file, {
     req(input$user_file)
-    ext <- tools::file_ext(input$user_file$datapath)
+    ext <- tools::file_ext(input$user_file$name)
+    
+    if (!(tolower(ext) %in% c("csv", "xls", "xlsx"))) {
+      showNotification("Invalid file type. Only CSV, XLS, and XLSX are supported.", type = "error")
+      return()
+    }
+    
+    fsize <- file.info(input$user_file$datapath)$size
+    if (!is.null(fsize) && fsize > 30 * 1024 * 1024) {
+      showNotification("File size exceeds 30MB limit.", type = "error")
+      return()
+    }
+    
     df <- tryCatch({
-      if (ext == "csv") read.csv(input$user_file$datapath)
-      else if (ext %in% c("xls", "xlsx")) readxl::read_excel(input$user_file$datapath)
+      if (tolower(ext) == "csv") read.csv(input$user_file$datapath)
+      else if (tolower(ext) %in% c("xls", "xlsx")) readxl::read_excel(input$user_file$datapath)
       else NULL
     }, error = function(e) { 
       showNotification(paste("Error reading file:", e$message), type = "error")
@@ -3247,7 +2920,12 @@ server <- function(input, output, session) {
     s <- tryCatch({ st_read(file.path(temp_dir, shp_file[1]), quiet = TRUE) }, error = function(e) { 
       showNotification(paste("Error reading shapefile:", e$message), type = "error"); NULL 
     })
-    req(s); rv$shp_bound <- s
+    req(s)
+    if (nrow(s) == 0) {
+      showNotification("Uploaded shapefile contains zero features.", type = "error")
+      return()
+    }
+    rv$shp_bound <- s
     showNotification("Custom shapefile loaded successfully!", type = "message")
     crs_val <- st_crs(s)$input
     if(!is.na(crs_val)) updateSelectizeInput(session, "crs_selection", selected = crs_val)
@@ -3391,9 +3069,21 @@ server <- function(input, output, session) {
 
   observeEvent(input$meta_file, {
     req(input$meta_file, rv$user_data)
-    ext <- tools::file_ext(input$meta_file$datapath)
+    ext <- tools::file_ext(input$meta_file$name)
+    
+    if (!(tolower(ext) %in% c("csv", "xls", "xlsx"))) {
+      showNotification("Invalid metadata file type. Only CSV, XLS, and XLSX are supported.", type = "error")
+      return()
+    }
+    
+    fsize <- file.info(input$meta_file$datapath)$size
+    if (!is.null(fsize) && fsize > 30 * 1024 * 1024) {
+      showNotification("Metadata file size exceeds 30MB limit.", type = "error")
+      return()
+    }
+    
     m_df <- tryCatch({
-      if (ext == "csv") read.csv(input$meta_file$datapath)
+      if (tolower(ext) == "csv") read.csv(input$meta_file$datapath)
       else readxl::read_excel(input$meta_file$datapath)
     }, error = function(e) NULL)
     
@@ -4072,8 +3762,8 @@ server <- function(input, output, session) {
       
       data.frame(Metric = c("Mean CV RMSE (Pooled)", "Mean Bias (ME)"), Value = c(round(avg_rmse, 4), round(avg_me, 4)))
     })
-    # --- Slider & UI Sync ---
-  observe({
+  # --- Slider & UI Sync ---
+  observeEvent(list(input$locality, rv$user_data, rv$mapping$loc), {
     req(input$locality, rv$user_data, rv$mapping$loc)
     loc_col <- rv$mapping$loc
     locs <- if("ALL" %in% input$locality) unique(rv$user_data[[loc_col]]) else input$locality
@@ -4091,11 +3781,11 @@ server <- function(input, output, session) {
     update_selector("tps_m_loc", locs)
   })
 
-  observe({
+  observeEvent(input$vgm_mode, {
     if(input$vgm_mode == "manual") shinyjs::disable("auto_fit") else shinyjs::enable("auto_fit")
   })
 
-  observe({
+  observeEvent(list(input$vgm_mode, input$m_loc, input$comp_mode, input$m_target, rv$v_fit_list), {
     req(input$vgm_mode == "manual", input$m_loc)
     loc <- input$m_loc
     
@@ -4123,7 +3813,7 @@ server <- function(input, output, session) {
   })
 
   # --- IDW Manual Sync & Apply ---
-  observe({
+  observeEvent(list(input$idw_mode, input$idw_m_loc, input$comp_mode, input$idw_m_target), {
     req(input$idw_mode == "manual", input$idw_m_loc)
     loc <- input$idw_m_loc
     target <- if(input$comp_mode && !is.null(input$idw_m_target)) input$idw_m_target else "act"
@@ -4140,7 +3830,7 @@ server <- function(input, output, session) {
   })
 
   # --- TPS Manual Sync & Apply ---
-  observe({
+  observeEvent(list(input$tps_mode, input$tps_m_loc, input$comp_mode, input$tps_m_target), {
     req(input$tps_mode == "manual", input$tps_m_loc)
     loc <- input$tps_m_loc
     target <- if(input$comp_mode && !is.null(input$tps_m_target)) input$tps_m_target else "act"
@@ -4640,20 +4330,20 @@ Error in ", l, ": ", e$message)
     valid_pr <- Filter(Negate(is.null), rv$rast_list_point_res)
     
     if(length(valid_a) > 0) {
-      rv$rast <- terra::wrap(if(length(valid_a) > 1) do.call(merge, lapply(unname(valid_a), terra::unwrap)) else terra::unwrap(valid_a[[1]]))
+      rv$rast <- merge_wrapped_rasters(valid_a)
       register_export_item("map_actual", paste(meta$label, "- Actual Map"), "map", rv$rast, meta$category)
     }
     if(length(valid_p) > 0) {
-      rv$rast_pred <- terra::wrap(if(length(valid_p) > 1) do.call(merge, lapply(unname(valid_p), terra::unwrap)) else terra::unwrap(valid_p[[1]]))
+      rv$rast_pred <- merge_wrapped_rasters(valid_p)
       rv$has_predictions <- TRUE
       register_export_item("map_predicted", paste(meta$label, "- Predicted Map"), "map", rv$rast_pred, meta$category)
     }
     if(length(valid_r) > 0) {
-      rv$rast_res <- terra::wrap(if(length(valid_r) > 1) do.call(merge, lapply(unname(valid_r), terra::unwrap)) else terra::unwrap(valid_r[[1]]))
+      rv$rast_res <- merge_wrapped_rasters(valid_r)
       register_export_item("map_residuals", paste(meta$label, "- Residual Map (Delta)"), "map", rv$rast_res, meta$category)
     }
     if(length(valid_pr) > 0) {
-      rv$rast_point_res <- terra::wrap(if(length(valid_pr) > 1) do.call(merge, lapply(unname(valid_pr), terra::unwrap)) else terra::unwrap(valid_pr[[1]]))
+      rv$rast_point_res <- merge_wrapped_rasters(valid_pr)
       register_export_item("map_point_residuals", paste(meta$label, "- Point Error Map"), "map", rv$rast_point_res, meta$category)
     }
     
@@ -4750,7 +4440,7 @@ Error in ", l, ": ", e$message)
 
     # 4. Total Area Coverage (if Agro)
     if(isTruthy(input$color_style == "agro") && !is.null(rv$rast)) {
-       area_total <- calc_area_df(terra::unwrap(rv$rast))
+       area_total <- area_df_total_act()
        if(is.data.frame(area_total)) register_export_item("table_area_total", paste(meta$label, "- Total Area Coverage"), "table", area_total, meta$category)
     }
 
@@ -5230,8 +4920,7 @@ Error in ", l, ": ", e$message)
     paste0(prefix, " - ", type_lab, method_lab)
   })
 
-  observe({
-    req(input$base_map_layer)
+  observeEvent(input$base_map_layer, {
     leafletProxy("main_map") %>%
       clearTiles() %>%
       addProviderTiles(input$base_map_layer, layerId="base_tiles", options = providerTileOptions(zIndex = -10))
@@ -5384,7 +5073,7 @@ Error in ", l, ": ", e$message)
                  "Linear trend summaries are computed per locality. Please select a specific locality from the analysis filter list above to view details."))
     }
     req(rv$model_summaries[[paste0(loc, "_act")]])
-    tagList(verbatimTextOutput(paste0("summ_act_", loc)))
+    tagList(verbatimTextOutput("summ_act_static"))
   })
   output$model_summary_ui_pre <- renderUI({
     loc <- input$sel_loc_stats; req(loc)
@@ -5393,16 +5082,23 @@ Error in ", l, ": ", e$message)
                  "Linear trend summaries are computed per locality. Please select a specific locality from the analysis filter list above to view details."))
     }
     req(rv$model_summaries[[paste0(loc, "_pre")]])
-    tagList(verbatimTextOutput(paste0("summ_pre_", loc)))
+    tagList(verbatimTextOutput("summ_pre_static"))
   })
-  observe({
-    loc <- input$sel_loc_stats; req(loc); if(loc == "Total (Combined)") return(NULL)
-    if(!is.null(rv$model_summaries[[paste0(loc, "_act")]])) {
-      output[[paste0("summ_act_", loc)]] <- renderPrint({ rv$model_summaries[[paste0(loc, "_act")]] })
-    }
-    if(!is.null(rv$model_summaries[[paste0(loc, "_pre")]])) {
-      output[[paste0("summ_pre_", loc)]] <- renderPrint({ rv$model_summaries[[paste0(loc, "_pre")]] })
-    }
+  
+  output$summ_act_static <- renderPrint({
+    loc <- input$sel_loc_stats
+    req(loc, loc != "Total (Combined)")
+    summary_obj <- rv$model_summaries[[paste0(loc, "_act")]]
+    req(summary_obj)
+    summary_obj
+  })
+  
+  output$summ_pre_static <- renderPrint({
+    loc <- input$sel_loc_stats
+    req(loc, loc != "Total (Combined)")
+    summary_obj <- rv$model_summaries[[paste0(loc, "_pre")]]
+    req(summary_obj)
+    summary_obj
   })
 
   # RFK Importance
@@ -5776,8 +5472,18 @@ Error in ", l, ": ", e$message)
       return(data.frame(Error = as.character(e$message)))
     })
   }
-  output$area_table_total_act <- renderTable({ req(rv$rast, input$color_style == "agro"); calc_area_df(terra::unwrap(rv$rast)) })
-  output$area_table_total_pre <- renderTable({ req(rv$rast_pred, input$color_style == "agro"); calc_area_df(terra::unwrap(rv$rast_pred)) })
+  area_df_total_act <- reactive({
+    req(rv$rast)
+    calc_area_df(terra::unwrap(rv$rast))
+  })
+  
+  area_df_total_pre <- reactive({
+    req(rv$rast_pred)
+    calc_area_df(terra::unwrap(rv$rast_pred))
+  })
+
+  output$area_table_total_act <- renderTable({ req(input$color_style == "agro"); area_df_total_act() })
+  output$area_table_total_pre <- renderTable({ req(input$color_style == "agro"); area_df_total_pre() })
   
   output$area_table_loc_act <- renderTable({
     req(rv$rast_list_act, input$color_style == "agro"); loc <- input$sel_loc_stats
@@ -5948,6 +5654,21 @@ Error in ", l, ": ", e$message)
   })
 
   output$log_output <- renderText({ rv$log })
+
+  # Scan rv$log for new warnings and display UI notifications
+  last_notified_warnings <- reactiveVal(character(0))
+  observe({
+    req(rv$log)
+    log_lines <- unlist(strsplit(rv$log, "\n", fixed = TRUE))
+    warn_lines <- grep("\\[WARN\\]", log_lines, value = TRUE)
+    new_warns <- setdiff(warn_lines, last_notified_warnings())
+    if (length(new_warns) > 0) {
+      for (w in new_warns) {
+        showNotification(gsub("\\[WARN\\]", "", w), type = "warning", duration = 8)
+      }
+      last_notified_warnings(union(last_notified_warnings(), new_warns))
+    }
+  })
 
   # --- Export ---
   build_export_plot <- function(target, title, vv_scale = NULL, subtitle = NULL) {

@@ -34,7 +34,7 @@ Whether you are mapping soil physicochemistry, analyzing topographical interacti
   ![Alternative Text](assets/4.png) 
 
 
-* **Descriptive & Exploratory Suite**: Understand your dataset with simultaneous descriptive, correlation, and principal component analyses with results that can be instantly generated and observed by simultaneous categorization and data popularization of choice. An additional variable importance -or maybe a factor- analysis section is included to possibly increase the understanding of observed spatial data.
+* **Descriptive & Exploratory Suite**: Understand your dataset with simultaneous descriptive, correlation, and principal component analyses with results that can be instantly generated and observed by simultaneous categorization and data popularization of choice. An additional Governing Factors module computes variable importance and effects via Random Forest models with ALE, PDP, and SHAP analyses, decoupled as of v0.9.5 for advanced performance and modularity.
 
   ![Alternative Text](assets/5.png) 
 
@@ -125,7 +125,7 @@ monolith/
 ├── spatial_helpers_0.9.5.R     # Spatial math & CV logic
 ├── ui_helpers_0.9.5.R          # Analytics & descriptive plots
 ├── theme_helpers_0.9.5.R       # Theming & export configurations
-├── run_command.r               # Convenience launcher script
+├── gov_module_0.9.5.R          # Governing Factors UI & Server Modules
 │
 ├── assets/                     # Screenshots & static assets
 ├── docs/                       # Guides & documentation
