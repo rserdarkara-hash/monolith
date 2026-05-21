@@ -44,18 +44,17 @@ library(progressr)
 library(promises)
 library(shinycssloaders)
 library(furrr)
-library(promises)
 library(showtext)
 library(openxlsx)
 library(officer)
 library(zip)
 showtext_auto()
 addResourcePath("assets", getwd())
-plan(multisession) # Enable standard async processing
+plan(list(multisession, multisession)) # Enable nested async processing
 # --- Improvements---
-source("ui_helpers_0.9.6.R")
-source("spatial_helpers_0.9.6.R")
-source("theme_helpers_0.9.6.R")
+source("improvements/ui_helpers_0.9.5.R")
+source("improvements/spatial_helpers_0.9.5.R")
+source("improvements/theme_helpers_0.9.5.R")
 
 # --- Helpers ---
 `%||%` <- function(a, b) if (!is.null(a)) a else b
@@ -194,192 +193,6 @@ robust_vgm_fit <- function(v_emp, v_data) {
   return(best_fit)
 }
 
-# --- Extracted Pure Function (top-level to avoid server closure capture) ---
-apply_interpolation <- function(data, target_var, method, grid_p, aux_vars, lags, method_params, l, prefix) {
-  res <- list(v_emp = NULL, fit = NULL, cv_metrics = NULL, model_summary = NULL, 
-              rf_model = NULL, gstat_obj = NULL, res_sf = NULL, log_msg = "", cv_obj = NULL)
-  
-  # Capture the current local environment for safe mutation inside handlers
-  env <- environment()
-  
-  data$target <- data[[target_var]]
-  
-  tryCatch({
-    if(method == "OK") {
-      res$v_emp <- variogram(target ~ 1, data, width = lags$width, cutoff = lags$cutoff)
-      res$fit <- if(!is.null(method_params$pre_fit)) method_params$pre_fit else robust_vgm_fit(res$v_emp, data$target)
-      cv_obj <- tryCatch(krige.cv(target ~ 1, data, model = res$fit, nfold = nrow(data), debug.level = 0), error = function(e) { env$res$log_msg <- paste0("OK CV Error: ", e$message); NULL })
-      res$cv_obj <- cv_obj
-      res$cv_metrics <- perform_cv(cv_obj)
-      res$res_sf <- krige(target ~ 1, data, grid_p, model = res$fit, debug.level = 0)
-      
-      # NaN Protection for unstable Kriging results (especially Iron/low-variance)
-      if (!is.null(res$res_sf)) {
-        res$res_sf$var1.pred[is.nan(res$res_sf$var1.pred) | is.infinite(res$res_sf$var1.pred)] <- NA
-        if ("var1.var" %in% colnames(res$res_sf)) {
-          res$res_sf$var1.var[is.nan(res$res_sf$var1.var) | is.infinite(res$res_sf$var1.var)] <- NA
-        }
-      }
-    } else if(method == "RK" && length(aux_vars) > 0) {
-      if(length(aux_vars) > 1) {
-        vif_res <- check_vif(st_drop_geometry(data)[, aux_vars, drop = FALSE])
-        if(length(vif_res$dropped) > 0) {
-          res$log_msg <- paste0(res$log_msg, " [VIF] Dropped: ", paste(vif_res$dropped, collapse=", "))
-          aux_vars <- vif_res$kept
-        }
-      }
-      grid_aux <- grid_p
-      for(av in aux_vars) {
-        tryCatch({
-          v_emp_av <- variogram(as.formula(paste0("`", av, "` ~ 1")), data, width = lags$width, cutoff = lags$cutoff)
-          fit_av <- robust_vgm_fit(v_emp_av, data[[av]])
-          res_av <- krige(as.formula(paste0("`", av, "` ~ 1")), data, grid_p, model = fit_av, debug.level = 0)
-          grid_aux[[av]] <- res_av$var1.pred
-        }, error = function(e) {
-          env$res$log_msg <- paste0(env$res$log_msg, sprintf(" [WARN] Covariate %s kriging failed, falling back to IDW. ", av))
-          idw_p <- if(!is.null(method_params$idw_p)) method_params$idw_p else 2
-          idw_nmax <- if(!is.null(method_params$idw_nmax)) method_params$idw_nmax else 12
-          res_av <- idw(as.formula(paste0("`", av, "` ~ 1")), data, grid_p, nmax = idw_nmax, idp = idw_p, debug.level = 0)
-          grid_aux[[av]] <- res_av$var1.pred
-        })
-      }
-      form_reg <- as.formula(paste("target ~", paste(paste0("`", aux_vars, "`"), collapse = " + ")))
-      lm_mod <- lm(form_reg, data = data)
-      res$model_summary <- summary(lm_mod)
-      data$residuals <- residuals(lm_mod)
-      res$residuals <- residuals(lm_mod)
-      res$v_emp <- variogram(residuals ~ 1, data, width = lags$width, cutoff = lags$cutoff)
-      res$fit <- robust_vgm_fit(res$v_emp, data$residuals)
-      res_krig <- krige(residuals ~ 1, data, grid_p, model = res$fit, debug.level = 0)
-      pred_trend <- predict(lm_mod, newdata = grid_aux, se.fit = TRUE)
-      trend_var <- (pred_trend$se.fit)^2
-      res$res_sf <- grid_p %>% mutate(var1.pred = as.vector(pred_trend$fit + res_krig$var1.pred), var1.var = as.vector(trend_var + res_krig$var1.var))
-      
-      # Correct Full-Pipeline CV
-      cv_obj <- tryCatch({
-        perform_rk_cv(data, "target", aux_vars, calc_scientific_lags, robust_vgm_fit)
-      }, error = function(e) { env$res$log_msg <- paste0("RK CV Error: ", e$message); NULL })
-      
-      res$cv_obj <- cv_obj
-      res$cv_metrics <- perform_cv(cv_obj)
-    } else if(method == "RFK" && length(aux_vars) > 0) {
-      grid_aux <- grid_p
-      for(av in aux_vars) {
-        tryCatch({
-          v_emp_av <- variogram(as.formula(paste0("`", av, "` ~ 1")), data, width = lags$width, cutoff = lags$cutoff)
-          fit_av <- robust_vgm_fit(v_emp_av, data[[av]])
-          res_av <- krige(as.formula(paste0("`", av, "` ~ 1")), data, grid_p, model = fit_av, debug.level = 0)
-          grid_aux[[av]] <- res_av$var1.pred
-        }, error = function(e) {
-          env$res$log_msg <- paste0(env$res$log_msg, sprintf(" [WARN] Covariate %s kriging failed, falling back to IDW. ", av))
-          idw_p <- if(!is.null(method_params$idw_p)) method_params$idw_p else 2
-          idw_nmax <- if(!is.null(method_params$idw_nmax)) method_params$idw_nmax else 12
-          res_av <- idw(as.formula(paste0("`", av, "` ~ 1")), data, grid_p, nmax = idw_nmax, idp = idw_p, debug.level = 0)
-          grid_aux[[av]] <- res_av$var1.pred
-        })
-      }
-      form_reg <- as.formula(paste("target ~", paste(paste0("`", aux_vars, "`"), collapse = " + ")))
-      rf_mod <- randomForest::randomForest(form_reg, data = data, ntree = 200, importance = TRUE)
-      res$rf_model <- rf_mod
-      data$residuals <- data$target - rf_mod$predicted
-      res$residuals <- data$target - rf_mod$predicted
-      res$v_emp <- variogram(residuals ~ 1, data, width = lags$width, cutoff = lags$cutoff)
-      res$fit <- robust_vgm_fit(res$v_emp, data$residuals)
-      res_krig <- krige(residuals ~ 1, data, grid_p, model = res$fit, debug.level = 0)
-      pred_trend_all <- predict(rf_mod, grid_aux, predict.all = TRUE)
-      trend_var <- apply(pred_trend_all$individual, 1, var)
-      res$res_sf <- grid_p %>% mutate(var1.pred = as.vector(pred_trend_all$aggregate + res_krig$var1.pred), var1.var = as.vector(trend_var + res_krig$var1.var))
-      
-      # Correct Full-Pipeline CV
-      cv_obj <- tryCatch({
-        perform_rfk_cv(data, "target", aux_vars, calc_scientific_lags, robust_vgm_fit)
-      }, error = function(e) { env$res$log_msg <- paste0("RFK CV Error: ", e$message); NULL })
-      
-      res$cv_obj <- cv_obj
-      res$cv_metrics <- perform_cv(cv_obj)
-    } else if(method == "CK" && length(aux_vars) > 0) {
-      # Standardize covariates to mean 0, var 1
-      for(av in aux_vars) {
-        data[[av]] <- scale(data[[av]])
-      }
-      g <- gstat(NULL, id = "target", formula = target ~ 1, data = data)
-      for(av in aux_vars) g <- gstat(g, id = av, formula = as.formula(paste0("`", av, "` ~ 1")), data = data)
-      vm <- variogram(g, width = lags$width, cutoff = lags$cutoff)
-      
-      # Adaptive LMC fitting
-      v_emp_ok <- variogram(target ~ 1, data, width = lags$width, cutoff = lags$cutoff)
-      fit_ok_init <- robust_vgm_fit(v_emp_ok, data$target)
-      m_type <- suggest_lmc_model(fit_ok_init)
-      
-      g <- tryCatch({
-        fit.lmc(vm, g, vgm(var(data$target), m_type, lags$cutoff / 2, 0), correct.diagonal = 1.01)
-      }, error = function(e) {
-        env$res$log_msg <- paste0("LMC Fit Failed: ", e$message, ". Falling back to OK.")
-        NULL
-      })
-      
-      if(!is.null(g)) {
-        res$gstat_obj <- g
-        cv_obj <- tryCatch(gstat.cv(g, nfold = nrow(data), debug.level = 0), error = function(e) { env$res$log_msg <- paste0("CK CV Error: ", e$message); NULL })
-        res$cv_obj <- cv_obj
-        res$cv_metrics <- perform_cv(cv_obj)
-        res$res_sf <- tryCatch({
-          predict(g, grid_p, debug.level = 0) %>% st_as_sf() %>% rename(var1.pred = target.pred, var1.var = target.var)
-        }, error = function(e) {
-          env$res$log_msg <- paste0("CK Prediction Failed: ", e$message, ". Falling back to OK.")
-          NULL
-        })
-      }
-      
-      # Fallback to OK if CK failed
-      if(is.null(res$res_sf)) {
-         v_emp_ok <- variogram(target ~ 1, data, width = lags$width, cutoff = lags$cutoff)
-         fit_ok <- robust_vgm_fit(v_emp_ok, data$target)
-         res$res_sf <- krige(target ~ 1, data, grid_p, model = fit_ok, debug.level = 0)
-      }
-    } else if(method == "IDW") {
-      cv_obj <- tryCatch(krige.cv(target ~ 1, data, nmax = method_params$idw_nmax, set = list(idp = method_params$idw_p), nfold = nrow(data), debug.level = 0), error = function(e) { env$res$log_msg <- paste0("IDW CV Error: ", e$message); NULL })
-      res$cv_obj <- cv_obj
-      res$cv_metrics <- perform_cv(cv_obj)
-      res$res_sf <- idw(target ~ 1, data, grid_p, nmax = method_params$idw_nmax, idp = method_params$idw_p, debug.level = 0)
-    } else {
-      res$res_sf <- tryCatch({
-        raw_pts <- st_coordinates(data)
-        xm <- min(raw_pts[,1]); xM <- max(raw_pts[,1])
-        ym <- min(raw_pts[,2]); yM <- max(raw_pts[,2])
-        max_range <- max(xM - xm, yM - ym)
-        if(max_range == 0) max_range <- 1
-        pts_sc <- cbind((raw_pts[,1]-xm)/max_range, (raw_pts[,2]-ym)/max_range)
-        gr_raw <- st_coordinates(grid_p)
-        gr_sc <- cbind((gr_raw[,1]-xm)/max_range, (gr_raw[,2]-ym)/max_range)
-        mod <- fields::Tps(pts_sc, data$target, lambda = method_params$tps_lambda)
-        p_v <- fields::predict.Krig(mod, gr_sc)
-        
-        # Calculate realistic CV predictions using LOOCV
-        n_pts <- nrow(data)
-        cv_vals <- vapply(1:n_pts, function(i) {
-          tryCatch({
-            tmp_mod <- fields::Tps(pts_sc[-i, , drop=FALSE], data$target[-i], lambda = method_params$tps_lambda)
-            as.numeric(fields::predict.Krig(tmp_mod, pts_sc[i, , drop=FALSE]))
-          }, error = function(e) NA_real_)
-        }, numeric(1))
-        
-        # Fallback for failed folds
-        if(any(is.na(cv_vals))) {
-          cv_vals[is.na(cv_vals)] <- mod$fitted.values[is.na(cv_vals)]
-        }
-        
-        cv_res <- data.frame(observed = data$target, var1.pred = cv_vals, x = raw_pts[,1], y = raw_pts[,2])
-        res$cv_obj <- cv_res
-        res$cv_metrics <- perform_cv(cv_res)
-        grid_p %>% mutate(var1.pred = as.vector(p_v))
-      }, error = function(e) idw(target ~ 1, data, grid_p, nmax = 12, idp = 2))
-    }
-  }, error = function(e) { env$res$log_msg <- paste0("Error in apply_interpolation: ", e$message) })
-  
-  return(res)
-}
-
 # --- UI ---
 ui <- fluidPage(
   useShinyjs(),
@@ -492,7 +305,7 @@ ui <- fluidPage(
                   div(h5(HTML(paste0("Manual Tuning", info_tooltip("m_tune", "Switch to the Scientific Analysis tab to view the Variogram plot interactively updating as you slide the Nugget, Partial Sill, and Range sliders.")))), style="margin-bottom:5px;"),
                   selectInput("k_mod", "Variogram Model", choices = c("Sph", "Exp", "Gau", "Mat")),
                   selectInput("m_loc", "Locality to Tune", choices = NULL),
-                  conditionalPanel(condition = "input.comp_mode == true || ['pred', 'pred_ss', 'resid'].includes(input.value_type)",
+                  conditionalPanel(condition = "input.comp_mode == true",
                     radioButtons("m_target", "Target", choices = c("Actual" = "act", "Predicted" = "pre"), inline = TRUE)
                   ),
                   sliderInput("m_nugget", "Nugget", min = 0, max = 1, value = 0, step = 0.01),
@@ -614,11 +427,11 @@ ui <- fluidPage(
         ),
                 tabPanel("2. Map Viewer", value = "tab_map",
                          div(style="position: relative;",
-                             div(id="map_reveal_overlay", style="position: absolute; top: 0; left: 0; width: 100%; height: 100%; background-color: #ffffff; z-index: 1000; display: none; align-items: center; justify-content: center; flex-direction: column;",
+                             div(id="map_reveal_overlay", style="position: absolute; top: 0; left: 0; width: 100%; height: 100%; background-color: rgba(255,255,255,0.9); z-index: 1000; display: none; align-items: center; justify-content: center; flex-direction: column;",
                                  h3("Map Generation Complete", style="margin-bottom: 20px; color: #333;"),
                                  actionButton("reveal_maps_btn", "Click here to view maps and enable scientific analysis", class="btn-primary btn-lg", style="box-shadow: 0 4px 8px rgba(0,0,0,0.2); transition: all 0.3s;")
                              ),
-                             div(id="map_progress_overlay", style="position: absolute; top: 0; left: 0; width: 100%; height: 100%; background-color: #ffffff; z-index: 1001; display: none; align-items: center; justify-content: center; flex-direction: column;",
+                             div(id="map_progress_overlay", style="position: absolute; top: 0; left: 0; width: 100%; height: 100%; background-color: rgba(255,255,255,0.8); z-index: 1001; display: none; align-items: center; justify-content: center; flex-direction: column;",
                                  h3("Generating Maps...", style="margin-bottom: 15px; color: #555;"),
                                  div(style="width: 50%; max-width: 400px; background-color: #f3f3f3; border-radius: 5px; overflow: hidden;",
                                      div(id="map_progress_bar_fill", style="height: 20px; width: 0%; background-color: #4CAF50; transition: width 0.3s ease;")
@@ -1015,8 +828,7 @@ server <- function(input, output, session) {
   # --- UI Visibility based on Prediction State ---
   observe({
     # 1. Elements requiring Interpolation
-    prediction_active <- isTRUE(input$comp_mode) || (isTruthy(input$value_type) && input$value_type != "actual")
-    has_interp <- prediction_active || rv$has_predictions
+    has_interp <- rv$has_predictions
     shinyjs::toggle(id = "predicted_data_structure_ui", condition = has_interp)
     shinyjs::toggle(id = "rk_pred_ui", condition = has_interp)
     shinyjs::toggle(id = "rk_internal_vgm_pre_ui", condition = has_interp)
@@ -3311,7 +3123,7 @@ server <- function(input, output, session) {
     if (nrow(df) < 2) return()
     
     # Check current CRS units
-    crs_obj <- tryCatch(st_crs(input$crs_selection), error = function(e) { showNotification(paste("Invalid CRS provided:", e$message), type = "error"); NULL })
+    crs_obj <- tryCatch(st_crs(input$crs_selection), error = function(e) NULL)
     req(crs_obj)
     is_degree <- grepl("degree", crs_obj$units_gdal %||% "meters", ignore.case = TRUE)
     
@@ -3358,7 +3170,7 @@ server <- function(input, output, session) {
             sub_df <- df_raw %>% filter(loc == l)
             if (nrow(sub_df) < 2) next
             
-            sub_pts <- tryCatch(st_as_sf(sub_df, coords=c("x","y"), crs=input$map_crs) %>% st_transform(input$crs_selection), error=function(e) { showNotification(paste("Projection failed for subset:", e$message), type = "error"); NULL })
+            sub_pts <- tryCatch(st_as_sf(sub_df, coords=c("x","y"), crs=input$map_crs) %>% st_transform(input$crs_selection), error=function(e) NULL)
             if(is.null(sub_pts)) next
             
             if (nrow(sub_pts) > 1) {
@@ -4259,6 +4071,193 @@ server <- function(input, output, session) {
   })
 
   # --- Engine ---
+  
+# --- Extracted Pure Function ---
+apply_interpolation <- function(data, target_var, method, grid_p, aux_vars, lags, method_params, l, prefix) {
+  res <- list(v_emp = NULL, fit = NULL, cv_metrics = NULL, model_summary = NULL, 
+              rf_model = NULL, gstat_obj = NULL, res_sf = NULL, log_msg = "")
+  
+  # Capture the current local environment for safe mutation inside handlers
+  env <- environment()
+  
+  data$target <- data[[target_var]]
+  
+  tryCatch({
+    if(method == "OK") {
+      res$v_emp <- variogram(target ~ 1, data, width = lags$width, cutoff = lags$cutoff)
+      res$fit <- if(!is.null(method_params$pre_fit)) method_params$pre_fit else robust_vgm_fit(res$v_emp, data$target)
+      cv_obj <- tryCatch(krige.cv(target ~ 1, data, model = res$fit, nfold = nrow(data), debug.level = 0), error = function(e) { env$res$log_msg <- paste0("OK CV Error: ", e$message); NULL })
+      res$cv_obj <- cv_obj
+      res$cv_metrics <- perform_cv(cv_obj)
+      res$res_sf <- krige(target ~ 1, data, grid_p, model = res$fit, debug.level = 0)
+      
+      # NaN Protection for unstable Kriging results (especially Iron/low-variance)
+      if (!is.null(res$res_sf)) {
+        res$res_sf$var1.pred[is.nan(res$res_sf$var1.pred) | is.infinite(res$res_sf$var1.pred)] <- NA
+        if ("var1.var" %in% colnames(res$res_sf)) {
+          res$res_sf$var1.var[is.nan(res$res_sf$var1.var) | is.infinite(res$res_sf$var1.var)] <- NA
+        }
+      }
+    } else if(method == "RK" && length(aux_vars) > 0) {
+      if(length(aux_vars) > 1) {
+        vif_res <- check_vif(st_drop_geometry(data)[, aux_vars, drop = FALSE])
+        if(length(vif_res$dropped) > 0) {
+          res$log_msg <- paste0(res$log_msg, " [VIF] Dropped: ", paste(vif_res$dropped, collapse=", "))
+          aux_vars <- vif_res$kept
+        }
+      }
+      grid_aux <- grid_p
+      for(av in aux_vars) {
+        tryCatch({
+          v_emp_av <- variogram(as.formula(paste0("`", av, "` ~ 1")), data, width = lags$width, cutoff = lags$cutoff)
+          fit_av <- robust_vgm_fit(v_emp_av, data[[av]])
+          res_av <- krige(as.formula(paste0("`", av, "` ~ 1")), data, grid_p, model = fit_av, debug.level = 0)
+          grid_aux[[av]] <- res_av$var1.pred
+        }, error = function(e) {
+          tryCatch({ showNotification(sprintf("Covariate %s kriging failed. Falling back to IDW.", av), type = "warning", duration = 8) }, error=function(err) NULL)
+          idw_p <- if(!is.null(method_params$idw_p)) method_params$idw_p else 2
+          idw_nmax <- if(!is.null(method_params$idw_nmax)) method_params$idw_nmax else 12
+          res_av <- idw(as.formula(paste(av, "~ 1")), data, grid_p, nmax = idw_nmax, idp = idw_p, debug.level = 0)
+          grid_aux[[av]] <- res_av$var1.pred
+        })
+      }
+      form_reg <- as.formula(paste("target ~", paste(aux_vars, collapse = " + ")))
+      lm_mod <- lm(form_reg, data = data)
+      res$model_summary <- summary(lm_mod)
+      data$residuals <- residuals(lm_mod)
+      v_emp_res <- variogram(residuals ~ 1, data, width = lags$width, cutoff = lags$cutoff)
+      fit_res <- robust_vgm_fit(v_emp_res, data$residuals)
+      res_krig <- krige(residuals ~ 1, data, grid_p, model = fit_res, debug.level = 0)
+      pred_trend <- predict(lm_mod, newdata = grid_aux, se.fit = TRUE)
+      trend_var <- (pred_trend$se.fit)^2
+      res$res_sf <- grid_p %>% mutate(var1.pred = as.vector(pred_trend$fit + res_krig$var1.pred), var1.var = as.vector(trend_var + res_krig$var1.var))
+      
+      # Correct Full-Pipeline CV
+      cv_obj <- tryCatch({
+        perform_rk_cv(data, "target", aux_vars, calc_scientific_lags, robust_vgm_fit)
+      }, error = function(e) { env$res$log_msg <- paste0("RK CV Error: ", e$message); NULL })
+      
+      res$cv_obj <- cv_obj
+      res$cv_metrics <- perform_cv(cv_obj)
+    } else if(method == "RFK" && length(aux_vars) > 0) {
+      grid_aux <- grid_p
+      for(av in aux_vars) {
+        tryCatch({
+          v_emp_av <- variogram(as.formula(paste0("`", av, "` ~ 1")), data, width = lags$width, cutoff = lags$cutoff)
+          fit_av <- robust_vgm_fit(v_emp_av, data[[av]])
+          res_av <- krige(as.formula(paste0("`", av, "` ~ 1")), data, grid_p, model = fit_av, debug.level = 0)
+          grid_aux[[av]] <- res_av$var1.pred
+        }, error = function(e) {
+          tryCatch({ showNotification(sprintf("Covariate %s kriging failed. Falling back to IDW.", av), type = "warning", duration = 8) }, error=function(err) NULL)
+          idw_p <- if(!is.null(method_params$idw_p)) method_params$idw_p else 2
+          idw_nmax <- if(!is.null(method_params$idw_nmax)) method_params$idw_nmax else 12
+          res_av <- idw(as.formula(paste(av, "~ 1")), data, grid_p, nmax = idw_nmax, idp = idw_p, debug.level = 0)
+          grid_aux[[av]] <- res_av$var1.pred
+        })
+      }
+      form_reg <- as.formula(paste("target ~", paste(aux_vars, collapse = " + ")))
+      rf_mod <- randomForest::randomForest(form_reg, data = data, ntree = 200, importance = TRUE)
+      res$rf_model <- rf_mod
+      data$residuals <- data$target - rf_mod$predicted
+      v_emp_res <- variogram(residuals ~ 1, data, width = lags$width, cutoff = lags$cutoff)
+      fit_res <- robust_vgm_fit(v_emp_res, data$residuals)
+      res_krig <- krige(residuals ~ 1, data, grid_p, model = fit_res, debug.level = 0)
+      pred_trend_all <- predict(rf_mod, grid_aux, predict.all = TRUE)
+      trend_var <- apply(pred_trend_all$individual, 1, var)
+      res$res_sf <- grid_p %>% mutate(var1.pred = as.vector(pred_trend_all$aggregate + res_krig$var1.pred), var1.var = as.vector(trend_var + res_krig$var1.var))
+      
+      # Correct Full-Pipeline CV
+      cv_obj <- tryCatch({
+        perform_rfk_cv(data, "target", aux_vars, calc_scientific_lags, robust_vgm_fit)
+      }, error = function(e) { env$res$log_msg <- paste0("RFK CV Error: ", e$message); NULL })
+      
+      res$cv_obj <- cv_obj
+      res$cv_metrics <- perform_cv(cv_obj)
+    } else if(method == "CK" && length(aux_vars) > 0) {
+      # Standardize covariates to mean 0, var 1
+      for(av in aux_vars) {
+        data[[av]] <- scale(data[[av]])
+      }
+      g <- gstat(NULL, id = "target", formula = target ~ 1, data = data)
+      for(av in aux_vars) g <- gstat(g, id = av, formula = as.formula(paste(av, "~ 1")), data = data)
+      vm <- variogram(g, width = lags$width, cutoff = lags$cutoff)
+      
+      # Adaptive LMC fitting
+      v_emp_ok <- variogram(target ~ 1, data, width = lags$width, cutoff = lags$cutoff)
+      fit_ok_init <- robust_vgm_fit(v_emp_ok, data$target)
+      m_type <- suggest_lmc_model(fit_ok_init)
+      
+      g <- tryCatch({
+        fit.lmc(vm, g, vgm(var(data$target), m_type, lags$cutoff / 2, 0), correct.diagonal = 1.01)
+      }, error = function(e) {
+        env$res$log_msg <- paste0("LMC Fit Failed: ", e$message, ". Falling back to OK.")
+        tryCatch({ showNotification(paste("Co-Kriging convergence failed. Falling back to Ordinary Kriging."), type = "warning", duration = 8) }, error=function(err) NULL)
+        NULL
+      })
+      
+      if(!is.null(g)) {
+        res$gstat_obj <- g
+        cv_obj <- tryCatch(gstat.cv(g, nfold = nrow(data), debug.level = 0), error = function(e) { env$res$log_msg <- paste0("CK CV Error: ", e$message); NULL })
+        res$cv_obj <- cv_obj
+      res$cv_metrics <- perform_cv(cv_obj)
+        res$res_sf <- tryCatch({
+          predict(g, grid_p, debug.level = 0) %>% st_as_sf() %>% rename(var1.pred = target.pred, var1.var = target.var)
+        }, error = function(e) {
+          env$res$log_msg <- paste0("CK Prediction Failed: ", e$message, ". Falling back to OK.")
+          NULL
+        })
+      }
+      
+      # Fallback to OK if CK failed
+      if(is.null(res$res_sf)) {
+         v_emp_ok <- variogram(target ~ 1, data, width = lags$width, cutoff = lags$cutoff)
+         fit_ok <- robust_vgm_fit(v_emp_ok, data$target)
+         res$res_sf <- krige(target ~ 1, data, grid_p, model = fit_ok, debug.level = 0)
+         # Re-calc CV for OK fallback if needed? 
+         # The UI might show CK selected but OK results. ideally we log this.
+      }
+    } else if(method == "IDW") {
+      cv_obj <- tryCatch(krige.cv(target ~ 1, data, nmax = method_params$idw_nmax, set = list(idp = method_params$idw_p), nfold = nrow(data), debug.level = 0), error = function(e) { env$res$log_msg <- paste0("IDW CV Error: ", e$message); NULL })
+      res$cv_obj <- cv_obj
+      res$cv_metrics <- perform_cv(cv_obj)
+      res$res_sf <- idw(target ~ 1, data, grid_p, nmax = method_params$idw_nmax, idp = method_params$idw_p, debug.level = 0)
+    } else {
+      res$res_sf <- tryCatch({
+        raw_pts <- st_coordinates(data)
+        xm <- min(raw_pts[,1]); xM <- max(raw_pts[,1])
+        ym <- min(raw_pts[,2]); yM <- max(raw_pts[,2])
+        max_range <- max(xM - xm, yM - ym)
+        if(max_range == 0) max_range <- 1
+        pts_sc <- cbind((raw_pts[,1]-xm)/max_range, (raw_pts[,2]-ym)/max_range)
+        gr_raw <- st_coordinates(grid_p)
+        gr_sc <- cbind((gr_raw[,1]-xm)/max_range, (gr_raw[,2]-ym)/max_range)
+        mod <- fields::Tps(pts_sc, data$target, lambda = method_params$tps_lambda)
+        p_v <- fields::predict.Krig(mod, gr_sc)
+        
+        # Calculate realistic CV predictions using LOOCV
+        n_pts <- nrow(data)
+        cv_vals <- vapply(1:n_pts, function(i) {
+          tryCatch({
+            tmp_mod <- fields::Tps(pts_sc[-i, , drop=FALSE], data$target[-i], lambda = method_params$tps_lambda)
+            as.numeric(fields::predict.Krig(tmp_mod, pts_sc[i, , drop=FALSE]))
+          }, error = function(e) NA_real_)
+        }, numeric(1))
+        
+        # Fallback for failed folds
+        if(any(is.na(cv_vals))) {
+          cv_vals[is.na(cv_vals)] <- mod$fitted.values[is.na(cv_vals)]
+        }
+        
+        cv_res <- data.frame(observed = data$target, var1.pred = cv_vals, x = raw_pts[,1], y = raw_pts[,2])
+        res$cv_obj <- cv_res
+        res$cv_metrics <- perform_cv(cv_res)
+        grid_p %>% mutate(var1.pred = as.vector(p_v))
+      }, error = function(e) idw(target ~ 1, data, grid_p, nmax = 12, idp = 2))
+    }
+  }, error = function(e) { env$res$log_msg <- paste0("Error in apply_interpolation: ", e$message) })
+  
+  return(res)
+}
 
   # B4: Modal dialog for archive choice when previous results exist
   observeEvent(input$run, {
@@ -4304,7 +4303,6 @@ server <- function(input, output, session) {
   # B4: Discard previous results then proceed
   observeEvent(input$discard_prev_run, {
     removeModal()
-    rv$v_fit_list <- list() # Clear variogram fits on discard
     rv$proceed_run <- runif(1)
   })
 
@@ -4314,11 +4312,6 @@ server <- function(input, output, session) {
     locs <- if("ALL" %in% input$locality) unique(rv$user_data[[rv$mapping$loc]]) else input$locality
     meta <- get_current_meta()
     req(meta)
-
-    # If the method has changed since the last run, clear the variogram fits
-    if (!is.null(rv$run_config_summary) && rv$run_config_summary$method != input$method) {
-      rv$v_fit_list <- list()
-    }
 
     # Automatically switch to Map Viewer tab to show progress
     updateTabsetPanel(session, "main_tabs", selected = "tab_map")
@@ -4428,8 +4421,7 @@ server <- function(input, output, session) {
     # C1: Clear rast lists before starting new run to prevent spatial interference
     rv$rast_list_act <- list(); rv$rast_list_pre <- list(); rv$rast_list_res <- list(); rv$rast_list_point_res <- list()
 
-    promises::future_promise({
-      res_all <- lapply(df_list, function(item) {
+    res_all <- furrr::future_map(df_list, function(item) {
       l <- item$l
       pts_data <- item$pts_data
       m_params <- item$m_params        
@@ -4484,7 +4476,7 @@ server <- function(input, output, session) {
                }
             } else {
                actual_res <- grid_res
-               crs_obj_target <- tryCatch(sf::st_crs(crs_sel), error = function(e) { showNotification(paste("Invalid CRS provided:", e$message), type = "error"); NULL })
+               crs_obj_target <- tryCatch(sf::st_crs(crs_sel), error = function(e) NULL)
                if (!is.null(crs_obj_target) && grepl("degree", crs_obj_target$units_gdal %||% "meters", ignore.case = TRUE)) {
                   coords_4326 <- sf::st_coordinates(sf::st_transform(pts_raw, 4326))
                   lat_c <- mean(coords_4326[,2])
@@ -4552,16 +4544,6 @@ server <- function(input, output, session) {
                 res_out$r_point_err <- terra::wrap(r_err)
             }
             
-            pts$model_resid_act <- NA_real_
-            if (nrow(pts_a) >= 3 && exists("res_a_list") && !is.null(res_a_list$residuals)) {
-              pts$model_resid_act[!is.na(pts$v)] <- res_a_list$residuals
-            }
-            
-            pts$model_resid_pre <- NA_real_
-            if ((comp_mode || val_type != "actual") && nrow(pts_p) >= 3 && exists("res_p_list") && !is.null(res_p_list$residuals)) {
-              pts$model_resid_pre[!is.na(pts$pv)] <- res_p_list$residuals
-            }
-
             res_out$bound <- sf::st_transform(bound, crs_sel)
             res_out$pts <- sf::st_transform(pts, crs_sel) %>% dplyr::mutate(loc = l, resid = v - pv)
             res_out$actual_res <- actual_res
@@ -4572,36 +4554,7 @@ Error in ", l, ": ", e$message)
         })
         
         return(res_out)
-      })
-      return(res_all)
-    }, seed = TRUE, packages = c("sf", "terra", "dplyr", "gstat", "randomForest", "fields", "concaveman", "FNN", "spdep"),
-      globals = list(
-        df_list = df_list,
-        current_method = current_method,
-        current_crs = current_crs,
-        aux_vars = aux_vars,
-        shp_bound = shp_bound,
-        b_type = b_type,
-        b_dist = b_dist,
-        res_mode = res_mode,
-        grid_res = grid_res,
-        crs_sel = crs_sel,
-        comp_mode = comp_mode,
-        val_type = val_type,
-        apply_interpolation = apply_interpolation,
-        calc_scientific_lags = calc_scientific_lags,
-        robust_vgm_fit = robust_vgm_fit,
-        perform_cv = perform_cv,
-        perform_rk_cv = perform_rk_cv,
-        perform_rfk_cv = perform_rfk_cv,
-        calc_ccc = calc_ccc,
-        augment_metrics = augment_metrics,
-        calc_moran = calc_moran,
-        check_vif = check_vif,
-        suggest_lmc_model = suggest_lmc_model,
-        `%||%` = `%||%`
-      )
-    ) %...>% (function(res_all) {
+      }, .options = furrr::furrr_options(seed = TRUE, packages = c("sf", "terra", "dplyr", "gstat", "randomForest", "fields", "concaveman", "FNN")))
       
       # Aggregate results back to rv
       for(res in res_all) {
@@ -4706,28 +4659,15 @@ Error in ", l, ": ", e$message)
         register_export_item("table_perf_uploaded_total", paste(meta$label, "- Total Prediction Performance"), "table", perf_total, meta$category)
       }
       
-      # 2. Total Descriptive Statistics (Actual)
-      v_all <- rv$sf$v[!is.na(rv$sf$v)]
-      if(length(v_all) > 0) {
-        s_a <- summary(v_all)
-        stats_total <- data.frame(Metric = names(s_a), Value = as.character(round(as.numeric(s_a), 3)))
-        register_export_item("table_stats_total", paste(meta$label, "- Total Descriptive Statistics (Actual)"), "table", stats_total, meta$category)
-      }
-      
-      # 2.5 Total Descriptive Statistics (Predicted)
-      if(comp_mode || val_type != "actual") {
-        pv_all <- rv$sf$pv[!is.na(rv$sf$pv)]
-        if(length(pv_all) > 0) {
-          s_p <- summary(pv_all)
-          stats_total_p <- data.frame(Metric = names(s_p), Value = as.character(round(as.numeric(s_p), 3)))
-          register_export_item("table_stats_pre_total", paste(meta$label, "- Total Descriptive Statistics (Predicted)"), "table", stats_total_p, meta$category)
-        }
-      }
+      # 2. Total Descriptive Statistics
+      s_a <- summary(df_perf$v)
+      stats_total <- data.frame(Metric = names(s_a), Value = as.character(round(as.numeric(s_a), 3)))
+      register_export_item("table_stats_total", paste(meta$label, "- Total Descriptive Statistics"), "table", stats_total, meta$category)
       
       # 3. Total Classification Performance (Kappa)
       # Using default 'agro' binning for registration
       params_k <- tryCatch(agro_params(), error = function(e) NULL)
-      if(!is.null(params_k) && (comp_mode || val_type != "actual")) {
+      if(!is.null(params_k)) {
         df_k <- df_perf
         brks_k <- c(-Inf, params_k$rcl_mat[-1, 1], Inf)
         df_k$act_bin <- cut(df_k$v, breaks = brks_k, labels = params_k$labels, include.lowest = TRUE)
@@ -4758,56 +4698,34 @@ Error in ", l, ": ", e$message)
     for(l in locs) {
        # A. Tables per locality
        if(!is.null(rv$sf)) {
-         # 1. Descriptive Stats (Actual)
-         df_l_act <- rv$sf %>% st_drop_geometry() %>% filter(loc == !!l, !is.na(v))
-         if(nrow(df_l_act) > 0) {
-           s_l <- summary(df_l_act$v)
-           stats_l <- data.frame(Metric = names(s_l), Value = as.character(round(as.numeric(s_l), 3)))
-           register_export_item(paste0("table_stats_loc_", l), paste(meta$label, "-", l, "- Descriptive Statistics (Actual)"), "table", stats_l, meta$category)
-         }
-         
-         # 1.5 Descriptive Stats (Predicted)
-         if(comp_mode || val_type != "actual") {
-           df_l_pre <- rv$sf %>% st_drop_geometry() %>% filter(loc == !!l, !is.na(pv))
-           if(nrow(df_l_pre) > 0) {
-             s_l_pre <- summary(df_l_pre$pv)
-             stats_l_pre <- data.frame(Metric = names(s_l_pre), Value = as.character(round(as.numeric(s_l_pre), 3)))
-             register_export_item(paste0("table_stats_pre_loc_", l), paste(meta$label, "-", l, "- Descriptive Statistics (Predicted)"), "table", stats_l_pre, meta$category)
-           }
-         }
-
-         # 2. Prediction Performance
-         if(comp_mode || val_type != "actual") {
-           df_l_perf <- rv$sf %>% st_drop_geometry() %>% filter(loc == !!l, !is.na(v), !is.na(pv))
-           if(nrow(df_l_perf) >= 3) {
-             perf_l <- data.frame(
-               Metric = c("R2 (Trad)", "R2 (Corr)", "RMSE", "MBE (Bias)", "CCC", "RPD"),
-               Value = c(
-                 round(yardstick::rsq_trad_vec(df_l_perf$v, df_l_perf$pv), 4),
-                 round(yardstick::rsq_vec(df_l_perf$v, df_l_perf$pv), 4),
-                 round(yardstick::rmse_vec(df_l_perf$v, df_l_perf$pv), 4),
-                 round(mean(df_l_perf$pv - df_l_perf$v, na.rm=TRUE), 4),
-                 round(yardstick::ccc_vec(df_l_perf$v, df_l_perf$pv), 4),
-                 round(yardstick::rpd_vec(df_l_perf$v, df_l_perf$pv), 4)
-               )
+         df_l <- rv$sf %>% st_drop_geometry() %>% filter(loc == !!l, !is.na(v), !is.na(pv))
+         if(nrow(df_l) >= 3) {
+           # 1. Prediction Performance
+           perf_l <- data.frame(
+             Metric = c("R2 (Trad)", "R2 (Corr)", "RMSE", "MBE (Bias)", "CCC", "RPD"),
+             Value = c(
+               round(yardstick::rsq_trad_vec(df_l$v, df_l$pv), 4),
+               round(yardstick::rsq_vec(df_l$v, df_l$pv), 4),
+               round(yardstick::rmse_vec(df_l$v, df_l$pv), 4),
+               round(mean(df_l$pv - df_l$v, na.rm=TRUE), 4),
+               round(yardstick::ccc_vec(df_l$v, df_l$pv), 4),
+               round(yardstick::rpd_vec(df_l$v, df_l$pv), 4)
              )
-             register_export_item(paste0("table_perf_loc_", l), paste(meta$label, "-", l, "- Prediction Performance"), "table", perf_l, meta$category)
-           }
+           )
+           register_export_item(paste0("table_perf_loc_", l), paste(meta$label, "-", l, "- Prediction Performance"), "table", perf_l, meta$category)
+           
+           # 2. Descriptive Stats
+           s_l <- summary(df_l$v)
+           stats_l <- data.frame(Metric = names(s_l), Value = as.character(round(as.numeric(s_l), 3)))
+           register_export_item(paste0("table_stats_loc_", l), paste(meta$label, "-", l, "- Descriptive Statistics"), "table", stats_l, meta$category)
          }
        }
        
-       # 3. Interpolation CV Metrics (Actual)
+       # 3. Interpolation CV Metrics
        if(!is.null(rv$cv_metrics_act[[l]])) {
          cv_l <- rv$cv_metrics_act[[l]]
          cv_table <- data.frame(Metric = names(cv_l), Value = as.character(round(as.numeric(cv_l), 4)))
-         register_export_item(paste0("table_cv_loc_", l), paste(meta$label, "-", l, "- Model CV Metrics (Actual)"), "table", cv_table, meta$category)
-       }
-       
-       # 3.5 Interpolation CV Metrics (Predicted)
-       if((comp_mode || val_type != "actual") && !is.null(rv$cv_metrics_pre[[l]])) {
-         cv_l_p <- rv$cv_metrics_pre[[l]]
-         cv_table_p <- data.frame(Metric = names(cv_l_p), Value = as.character(round(as.numeric(cv_l_p), 4)))
-         register_export_item(paste0("table_cv_pre_loc_", l), paste(meta$label, "-", l, "- Model CV Metrics (Predicted)"), "table", cv_table_p, meta$category)
+         register_export_item(paste0("table_cv_loc_", l), paste(meta$label, "-", l, "- Model CV Metrics"), "table", cv_table, meta$category)
        }
        
        # 4. Area Coverage
@@ -4816,133 +4734,53 @@ Error in ", l, ": ", e$message)
          if(is.data.frame(area_l)) register_export_item(paste0("table_area_loc_", l), paste(meta$label, "-", l, "- Area Coverage"), "table", area_l, meta$category)
        }
 
-       # B. Plots per locality
-       # 1. Variograms
+       # B. Plots per locality (Captured as objects)
+       # 1. Variogram (Actual)
        if(!is.null(rv$v_emp_list[[paste0(l, "_act")]])) {
          v_emp <- rv$v_emp_list[[paste0(l, "_act")]]
          v_fit <- rv$v_fit_list[[paste0(l, "_act")]]
+         # Store the plot object
          p_vgm <- plot(v_emp, v_fit, main = paste("Variogram (Actual):", l))
          register_export_item(paste0("plot_vgm_act_", l), paste(meta$label, "-", l, "- Variogram (Actual)"), "plot", p_vgm, meta$category)
+         
+         # NEW: Register Tabular Variogram Data
          df_vgm <- as.data.frame(v_emp) %>% select(np, dist, gamma, dir.hor, dir.ver)
          register_export_item(paste0("table_vgm_act_", l), paste(meta$label, "-", l, "- Variogram Data (Actual)"), "table", df_vgm, meta$category)
        }
-       if((comp_mode || val_type != "actual") && !is.null(rv$v_emp_list[[paste0(l, "_pre")]])) {
-         v_emp_p <- rv$v_emp_list[[paste0(l, "_pre")]]
-         v_fit_p <- rv$v_fit_list[[paste0(l, "_pre")]]
-         p_vgm_p <- plot(v_emp_p, v_fit_p, main = paste("Variogram (Predicted):", l))
-         register_export_item(paste0("plot_vgm_pre_", l), paste(meta$label, "-", l, "- Variogram (Predicted)"), "plot", p_vgm_p, meta$category)
-         df_vgm_p <- as.data.frame(v_emp_p) %>% select(np, dist, gamma, dir.hor, dir.ver)
-         register_export_item(paste0("table_vgm_pre_", l), paste(meta$label, "-", l, "- Variogram Data (Predicted)"), "table", df_vgm_p, meta$category)
-       }
        
-       # 2. Obs vs Pred
+       # 2. Obs vs Pred (Actual)
        if(!is.null(rv$cv_data_act[[l]])) {
          df_cv <- as.data.frame(rv$cv_data_act[[l]])
+         # Robust column finding
          o_col <- grep("\\.observed$|^observed$|^target$", colnames(df_cv), value = TRUE)[1]
          p_col <- grep("\\.pred$|^var1\\.pred$", colnames(df_cv), value = TRUE)[1]
+         
          if(!is.na(o_col) && !is.na(p_col)) {
+           # Use a local copy of data to ensure it's captured in the ggplot object
            df_p <- data.frame(Observed = df_cv[[o_col]], Predicted = df_cv[[p_col]])
            p_op <- ggplot(df_p, aes(x = Observed, y = Predicted)) +
              geom_point(alpha = 0.6) + geom_abline(intercept = 0, slope = 1, color = "red", linetype = "dashed") +
              geom_smooth(method = "lm", color = "blue", se = FALSE) +
-             labs(title = paste("Obs vs Pred (Actual):", l), x = "Observed", y = "Predicted") + theme_minimal()
-           register_export_item(paste0("plot_obs_pred_", l), paste(meta$label, "-", l, "- Obs vs Pred Scatter (Actual)"), "plot", p_op, meta$category)
-         }
-       }
-       if((comp_mode || val_type != "actual") && !is.null(rv$cv_data_pre[[l]])) {
-         df_cv_p <- as.data.frame(rv$cv_data_pre[[l]])
-         o_col_p <- grep("\\.observed$|^observed$|^target$", colnames(df_cv_p), value = TRUE)[1]
-         p_col_p <- grep("\\.pred$|^var1\\.pred$", colnames(df_cv_p), value = TRUE)[1]
-         if(!is.na(o_col_p) && !is.na(p_col_p)) {
-           df_p_p <- data.frame(Observed = df_cv_p[[o_col_p]], Predicted = df_cv_p[[p_col_p]])
-           p_op_p <- ggplot(df_p_p, aes(x = Observed, y = Predicted)) +
-             geom_point(alpha = 0.6) + geom_abline(intercept = 0, slope = 1, color = "red", linetype = "dashed") +
-             geom_smooth(method = "lm", color = "blue", se = FALSE) +
-             labs(title = paste("Obs vs Pred (Predicted Map):", l), x = "Observed", y = "Predicted") + theme_minimal()
-           register_export_item(paste0("plot_obs_pred_pre_", l), paste(meta$label, "-", l, "- Obs vs Pred Scatter (Predicted Map)"), "plot", p_op_p, meta$category)
+             labs(title = paste("Obs vs Pred:", l), x = "Observed", y = "Predicted") + theme_minimal()
+           
+           register_export_item(paste0("plot_obs_pred_", l), paste(meta$label, "-", l, "- Obs vs Pred Scatter"), "plot", p_op, meta$category)
          }
        }
        
-       # 3. TPS GCV Curves
+       # 3. TPS GCV (if applicable)
        if(input$method == "TPS" && !is.null(rv$tps_gcv_data[[paste0(l, "_act")]])) {
          df_gcv <- rv$tps_gcv_data[[paste0(l, "_act")]]
          p_gcv <- ggplot(df_gcv, aes(x = lambda, y = gcv)) + 
            geom_line(color = "steelblue") + geom_point() + scale_x_log10() +
-           labs(title = paste("TPS GCV Diagnostics (Actual):", l)) + theme_minimal()
-         register_export_item(paste0("plot_tps_gcv_", l), paste(meta$label, "-", l, "- TPS GCV Curve (Actual)"), "plot", p_gcv, meta$category)
-       }
-       if(input$method == "TPS" && (comp_mode || val_type != "actual") && !is.null(rv$tps_gcv_data[[paste0(l, "_pre")]])) {
-         df_gcv_p <- rv$tps_gcv_data[[paste0(l, "_pre")]]
-         p_gcv_p <- ggplot(df_gcv_p, aes(x = lambda, y = gcv)) + 
-           geom_line(color = "firebrick") + geom_point() + scale_x_log10() +
-           labs(title = paste("TPS GCV Diagnostics (Predicted):", l)) + theme_minimal()
-         register_export_item(paste0("plot_tps_gcv_pre_", l), paste(meta$label, "-", l, "- TPS GCV Curve (Predicted)"), "plot", p_gcv_p, meta$category)
+           labs(title = paste("TPS GCV Diagnostics:", l)) + theme_minimal()
+         register_export_item(paste0("plot_tps_gcv_", l), paste(meta$label, "-", l, "- TPS GCV Curve"), "plot", p_gcv, meta$category)
        }
        
-       # 4. RF Importance Plots & Tables
+       # 4. RF Importance (if applicable)
        if(input$method == "RFK" && !is.null(rv$rf_models[[paste0(l, "_act")]])) {
-         rf_mod <- rv$rf_models[[paste0(l, "_act")]]
-         imp_mat <- randomForest::importance(rf_mod)
-         imp_col <- colnames(imp_mat)[1]
-         df_imp <- data.frame(Variable = rownames(imp_mat), Importance = imp_mat[, imp_col])
-         df_imp <- df_imp[order(df_imp$Importance, decreasing = TRUE), ]
-         p_imp <- ggplot(df_imp, aes(x = reorder(Variable, Importance), y = Importance)) +
-           geom_bar(stat = "identity", fill = "steelblue") + coord_flip() +
-           labs(title = paste("Variable Importance (Actual):", l), x = "Variables", y = imp_col) + theme_minimal()
-         register_export_item(paste0("plot_rf_imp_act_", l), paste(meta$label, "-", l, "- RF Variable Importance (Actual)"), "plot", p_imp, meta$category)
-         register_export_item(paste0("table_rf_imp_act_", l), paste(meta$label, "-", l, "- RF Variable Importance Data (Actual)"), "table", df_imp, meta$category)
-       }
-       if(input$method == "RFK" && (comp_mode || val_type != "actual") && !is.null(rv$rf_models[[paste0(l, "_pre")]])) {
-         rf_mod_p <- rv$rf_models[[paste0(l, "_pre")]]
-         imp_mat_p <- randomForest::importance(rf_mod_p)
-         imp_col_p <- colnames(imp_mat_p)[1]
-         df_imp_p <- data.frame(Variable = rownames(imp_mat_p), Importance = imp_mat_p[, imp_col_p])
-         df_imp_p <- df_imp_p[order(df_imp_p$Importance, decreasing = TRUE), ]
-         p_imp_p <- ggplot(df_imp_p, aes(x = reorder(Variable, Importance), y = Importance)) +
-           geom_bar(stat = "identity", fill = "firebrick") + coord_flip() +
-           labs(title = paste("Variable Importance (Predicted):", l), x = "Variables", y = imp_col_p) + theme_minimal()
-         register_export_item(paste0("plot_rf_imp_pre_", l), paste(meta$label, "-", l, "- RF Variable Importance (Predicted)"), "plot", p_imp_p, meta$category)
-         register_export_item(paste0("table_rf_imp_pre_", l), paste(meta$label, "-", l, "- RF Variable Importance Data (Predicted)"), "table", df_imp_p, meta$category)
-       }
-
-       # 5. RK Coefficients Tables
-       if(input$method == "RK" && !is.null(rv$model_summaries[[paste0(l, "_act")]])) {
-         lm_sum <- rv$model_summaries[[paste0(l, "_act")]]
-         coef_df <- as.data.frame(lm_sum$coefficients)
-         coef_df$Variable <- rownames(coef_df)
-         coef_df <- coef_df[, c("Variable", "Estimate", "Std. Error", "t value", "Pr(>|t|)" )]
-         register_export_item(paste0("table_rk_coef_act_", l), paste(meta$label, "-", l, "- RK Regression Coefficients (Actual)"), "table", coef_df, meta$category)
-       }
-       if(input$method == "RK" && (comp_mode || val_type != "actual") && !is.null(rv$model_summaries[[paste0(l, "_pre")]])) {
-         lm_sum_p <- rv$model_summaries[[paste0(l, "_pre")]]
-         coef_df_p <- as.data.frame(lm_sum_p$coefficients)
-         coef_df_p$Variable <- rownames(coef_df_p)
-         coef_df_p <- coef_df_p[, c("Variable", "Estimate", "Std. Error", "t value", "Pr(>|t|)" )]
-         register_export_item(paste0("table_rk_coef_pre_", l), paste(meta$label, "-", l, "- RK Regression Coefficients (Predicted)"), "table", coef_df_p, meta$category)
-       }
-
-       # 6. CK Cross-Variogram Plots
-       if(input$method == "CK" && !is.null(rv$gstat_objs[[paste0(l, "_act")]])) {
-         g <- rv$gstat_objs[[paste0(l, "_act")]]
-         vm <- variogram(g)
-         p_ck <- plot(vm, model = g$model, main = paste("Cross-Variogram (Actual):", l))
-         register_export_item(paste0("plot_ck_vgm_act_", l), paste(meta$label, "-", l, "- CK Cross-Variogram (Actual)"), "plot", p_ck, meta$category)
-       }
-       if(input$method == "CK" && (comp_mode || val_type != "actual") && !is.null(rv$gstat_objs[[paste0(l, "_pre")]])) {
-         g_p <- rv$gstat_objs[[paste0(l, "_pre")]]
-         vm_p <- variogram(g_p)
-         p_ck_p <- plot(vm_p, model = g_p$model, main = paste("Cross-Variogram (Predicted):", l))
-         register_export_item(paste0("plot_ck_vgm_pre_", l), paste(meta$label, "-", l, "- CK Cross-Variogram (Predicted)"), "plot", p_ck_p, meta$category)
-       }
-       
-       # 7. Model Parameters (IDW/TPS)
-       if(input$method %in% c("IDW", "TPS")) {
-         param_df <- data.frame(
-           Param = if(input$method == "IDW") "Power (p)" else "Lambda",
-           Actual = as.character(round(get_regional_param(input$method, l, "act"), 6)),
-           Predicted = if(comp_mode || val_type != "actual") as.character(round(get_regional_param(input$method, l, "pre"), 6)) else "NA"
-         )
-         register_export_item(paste0("table_params_loc_", l), paste(meta$label, "-", l, "- Model Parameters"), "table", param_df, meta$category)
+         # varImpPlot doesn't return a ggplot easily, we'll try to convert or just store
+         # For now, let's keep it simple
+         rv$log <- paste0(rv$log, "\n[Registry] RF Importance plot skipped (non-ggplot)")
        }
     }
     
@@ -4957,14 +4795,6 @@ Error in ", l, ": ", e$message)
       shinyjs::hide("map_progress_overlay")
       shinyjs::show("map_reveal_overlay")
     })
-    }) %...!% (function(err) {
-      shinyjs::hide("map_progress_overlay")
-      showNotification(paste("Parallel interpolation failed:", err$message), type = "error")
-    })
-    
-    # CRITICAL: Return NULL so Shiny does NOT lock the session waiting for the promise.
-    # If the promise is the last expression, Shiny treats it as "wait for this before allowing interaction".
-    NULL
   })
 
   # Event to reveal maps and unlock analysis
@@ -5378,25 +5208,17 @@ Error in ", l, ": ", e$message)
     # --- Method-Specific Diagnostics ---
     # RK Summaries
     output$model_summary_ui_act <- renderUI({
-    loc <- input$sel_loc_stats; req(loc)
-    if (loc == "Total (Combined)") {
-      return(div(style="padding: 12px; background-color: #f8f9fa; border: 1px dashed #ced4da; border-radius: 6px; color: #6c757d; font-style: italic; text-align: center;", 
-                 "Linear trend summaries are computed per locality. Please select a specific locality from the analysis filter list above to view details."))
-    }
-    req(rv$model_summaries[[paste0(loc, "_act")]])
+    loc <- input$sel_loc_stats; req(rv$model_summaries[[paste0(loc, "_act")]])
+    s <- rv$model_summaries[[paste0(loc, "_act")]]
     tagList(verbatimTextOutput(paste0("summ_act_", loc)))
   })
   output$model_summary_ui_pre <- renderUI({
-    loc <- input$sel_loc_stats; req(loc)
-    if (loc == "Total (Combined)") {
-      return(div(style="padding: 12px; background-color: #f8f9fa; border: 1px dashed #ced4da; border-radius: 6px; color: #6c757d; font-style: italic; text-align: center;", 
-                 "Linear trend summaries are computed per locality. Please select a specific locality from the analysis filter list above to view details."))
-    }
-    req(rv$model_summaries[[paste0(loc, "_pre")]])
+    loc <- input$sel_loc_stats; req(rv$model_summaries[[paste0(loc, "_pre")]])
+    s <- rv$model_summaries[[paste0(loc, "_pre")]]
     tagList(verbatimTextOutput(paste0("summ_pre_", loc)))
   })
   observe({
-    loc <- input$sel_loc_stats; req(loc); if(loc == "Total (Combined)") return(NULL)
+    loc <- input$sel_loc_stats
     if(!is.null(rv$model_summaries[[paste0(loc, "_act")]])) {
       output[[paste0("summ_act_", loc)]] <- renderPrint({ rv$model_summaries[[paste0(loc, "_act")]] })
     }
@@ -5407,82 +5229,42 @@ Error in ", l, ": ", e$message)
 
   # RFK Importance
   output$rf_importance_plot_act <- renderPlot({
-    loc <- input$sel_loc_stats; req(loc)
-    if (loc == "Total (Combined)") {
-      return(ggplot() + annotate("text", x = 4, y = 4, label = "RF Variable Importance is generated per locality.\nPlease select a specific locality from the dropdown.", size = 5, color = "grey40") + theme_void())
-    }
-    req(rv$rf_models[[paste0(loc, "_act")]])
+    loc <- input$sel_loc_stats; req(rv$rf_models[[paste0(loc, "_act")]])
     randomForest::varImpPlot(rv$rf_models[[paste0(loc, "_act")]], main = paste("Variable Importance (Actual):", loc))
   })
   output$rf_importance_plot_pre <- renderPlot({
-    loc <- input$sel_loc_stats; req(loc)
-    if (loc == "Total (Combined)") {
-      return(ggplot() + annotate("text", x = 4, y = 4, label = "RF Variable Importance is generated per locality.\nPlease select a specific locality from the dropdown.", size = 5, color = "grey40") + theme_void())
-    }
-    req(rv$rf_models[[paste0(loc, "_pre")]])
+    loc <- input$sel_loc_stats; req(rv$rf_models[[paste0(loc, "_pre")]])
     randomForest::varImpPlot(rv$rf_models[[paste0(loc, "_pre")]], main = paste("Variable Importance (Predicted):", loc))
   })
   
   # RK/RFK Internal Variograms
   output$rk_internal_vgm_act <- renderPlot({
-    loc <- input$sel_loc_stats; req(loc)
-    if (loc == "Total (Combined)") {
-      req(rv$sf, "model_resid_act" %in% colnames(rv$sf))
-      plot(variogram(model_resid_act ~ 1, rv$sf %>% filter(!is.na(model_resid_act))), main = "Global Internal Residual Variogram (Actual)")
-    } else {
-      req(rv$v_emp_list[[paste0(loc, "_act")]], rv$v_fit_list[[paste0(loc, "_act")]])
-      plot(rv$v_emp_list[[paste0(loc, "_act")]], rv$v_fit_list[[paste0(loc, "_act")]], main = paste("Internal Residual Variogram (Actual):", loc))
-    }
+    loc <- input$sel_loc_stats; req(rv$v_emp_list[[paste0(loc, "_act")]], rv$v_fit_list[[paste0(loc, "_act")]])
+    plot(rv$v_emp_list[[paste0(loc, "_act")]], rv$v_fit_list[[paste0(loc, "_act")]], main = paste("Internal Residual Variogram (Actual):", loc))
   })
   output$rk_internal_vgm_pre <- renderPlot({
-    loc <- input$sel_loc_stats; req(loc)
-    if (loc == "Total (Combined)") {
-      req(rv$sf, "model_resid_pre" %in% colnames(rv$sf))
-      plot(variogram(model_resid_pre ~ 1, rv$sf %>% filter(!is.na(model_resid_pre))), main = "Global Internal Residual Variogram (Predicted)")
-    } else {
-      req(rv$v_emp_list[[paste0(loc, "_pre")]], rv$v_fit_list[[paste0(loc, "_pre")]])
-      plot(rv$v_emp_list[[paste0(loc, "_pre")]], rv$v_fit_list[[paste0(loc, "_pre")]], main = paste("Internal Residual Variogram (Predicted):", loc))
-    }
+    loc <- input$sel_loc_stats; req(rv$v_emp_list[[paste0(loc, "_pre")]], rv$v_fit_list[[paste0(loc, "_pre")]])
+    plot(rv$v_emp_list[[paste0(loc, "_pre")]], rv$v_fit_list[[paste0(loc, "_pre")]], main = paste("Internal Residual Variogram (Predicted):", loc))
   })
   
   output$rfk_internal_vgm_act <- renderPlot({
-    loc <- input$sel_loc_stats; req(loc)
-    if (loc == "Total (Combined)") {
-      req(rv$sf, "model_resid_act" %in% colnames(rv$sf))
-      plot(variogram(model_resid_act ~ 1, rv$sf %>% filter(!is.na(model_resid_act))), main = "Global Internal Residual Variogram (Actual)")
-    } else {
-      req(rv$v_emp_list[[paste0(loc, "_act")]], rv$v_fit_list[[paste0(loc, "_act")]])
-      plot(rv$v_emp_list[[paste0(loc, "_act")]], rv$v_fit_list[[paste0(loc, "_act")]], main = paste("Internal Residual Variogram (Actual):", loc))
-    }
+    loc <- input$sel_loc_stats; req(rv$v_emp_list[[paste0(loc, "_act")]], rv$v_fit_list[[paste0(loc, "_act")]])
+    plot(rv$v_emp_list[[paste0(loc, "_act")]], rv$v_fit_list[[paste0(loc, "_act")]], main = paste("Internal Residual Variogram (Actual):", loc))
   })
   output$rfk_internal_vgm_pre <- renderPlot({
-    loc <- input$sel_loc_stats; req(loc)
-    if (loc == "Total (Combined)") {
-      req(rv$sf, "model_resid_pre" %in% colnames(rv$sf))
-      plot(variogram(model_resid_pre ~ 1, rv$sf %>% filter(!is.na(model_resid_pre))), main = "Global Internal Residual Variogram (Predicted)")
-    } else {
-      req(rv$v_emp_list[[paste0(loc, "_pre")]], rv$v_fit_list[[paste0(loc, "_pre")]])
-      plot(rv$v_emp_list[[paste0(loc, "_pre")]], rv$v_fit_list[[paste0(loc, "_pre")]], main = paste("Internal Residual Variogram (Predicted):", loc))
-    }
+    loc <- input$sel_loc_stats; req(rv$v_emp_list[[paste0(loc, "_pre")]], rv$v_fit_list[[paste0(loc, "_pre")]])
+    plot(rv$v_emp_list[[paste0(loc, "_pre")]], rv$v_fit_list[[paste0(loc, "_pre")]], main = paste("Internal Residual Variogram (Predicted):", loc))
   })
 
   # CK Variograms
   output$ck_variogram_plot_act <- renderPlot({
-    loc <- input$sel_loc_stats; req(loc)
-    if (loc == "Total (Combined)") {
-      return(ggplot() + annotate("text", x = 4, y = 4, label = "Cross-variograms are generated per locality.\nPlease select a specific locality from the dropdown.", size = 5, color = "grey40") + theme_void())
-    }
-    req(rv$gstat_objs[[paste0(loc, "_act")]])
+    loc <- input$sel_loc_stats; req(rv$gstat_objs[[paste0(loc, "_act")]])
     g <- rv$gstat_objs[[paste0(loc, "_act")]]
     vm <- variogram(g)
     plot(vm, model = g$model, main = paste("Cross-Variogram (Actual):", loc))
   })
   output$ck_variogram_plot_pre <- renderPlot({
-    loc <- input$sel_loc_stats; req(loc)
-    if (loc == "Total (Combined)") {
-      return(ggplot() + annotate("text", x = 4, y = 4, label = "Cross-variograms are generated per locality.\nPlease select a specific locality from the dropdown.", size = 5, color = "grey40") + theme_void())
-    }
-    req(rv$gstat_objs[[paste0(loc, "_pre")]])
+    loc <- input$sel_loc_stats; req(rv$gstat_objs[[paste0(loc, "_pre")]])
     g <- rv$gstat_objs[[paste0(loc, "_pre")]]
     vm <- variogram(g)
     plot(vm, model = g$model, main = paste("Cross-Variogram (Predicted):", loc))
@@ -5509,9 +5291,7 @@ Error in ", l, ": ", e$message)
   })
   output$tps_gcv_plot_act <- renderPlot({
     loc <- input$sel_loc_stats; req(loc, input$method == "TPS")
-    if(loc == "Total (Combined)") {
-      return(ggplot() + annotate("text", x = 4, y = 4, label = "TPS GCV diagnostics are generated per locality.\nPlease select a specific locality from the dropdown.", size = 5, color = "grey40") + theme_void())
-    }
+    if(loc == "Total (Combined)") return(NULL)
     df <- rv$tps_gcv_data[[paste0(loc, "_act")]]
     req(df, nrow(df) > 0)
     tryCatch({
@@ -5670,9 +5450,7 @@ Error in ", l, ": ", e$message)
 
   output$tps_gcv_plot_pre <- renderPlot({
     loc <- input$sel_loc_stats; req(loc, input$method == "TPS")
-    if(loc == "Total (Combined)") {
-      return(ggplot() + annotate("text", x = 4, y = 4, label = "TPS GCV diagnostics are generated per locality.\nPlease select a specific locality from the dropdown.", size = 5, color = "grey40") + theme_void())
-    }
+    if(loc == "Total (Combined)") return(NULL)
     df <- rv$tps_gcv_data[[paste0(loc, "_pre")]]
     req(df, nrow(df) > 0)
     tryCatch({

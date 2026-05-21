@@ -122,11 +122,19 @@ Ensure your project directory maintains the following structure. The application
 monolith/
 │
 ├── monolith_ver_0.9.5.R        # Main Application Runner
-├── improvements/               # Modular Source Files
-│   ├── spatial_helpers_0.9.5.R # Spatial math & CV logic
-│   ├── ui_helpers_0.9.5.R      # Analytics & descriptive plots
-│   └── theme_helpers_0.9.5.R   # Theming & export configurations
-├── assets/                     # (Optional) Static assets, custom CSS
+├── spatial_helpers_0.9.5.R     # Spatial math & CV logic
+├── ui_helpers_0.9.5.R          # Analytics & descriptive plots
+├── theme_helpers_0.9.5.R       # Theming & export configurations
+├── run_command.r               # Convenience launcher script
+│
+├── assets/                     # Screenshots & static assets
+├── docs/                       # Guides & documentation
+├── sample_data/                # Demo datasets (restricted license)
+├── old_versions/               # Archived prior releases
+│
+├── banner.png                  # Repository banner image
+├── LICENSE                     # GPL-3.0 license
+└── .gitignore
 
 ```
 

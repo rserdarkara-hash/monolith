@@ -1,1 +1,1 @@
-shiny::runApp("monolith_ver_0.9.2.R")
+shiny::runApp("monolith_ver_0.9.6.R")
