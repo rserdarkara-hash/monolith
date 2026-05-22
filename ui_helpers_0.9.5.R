@@ -71,6 +71,14 @@ generate_styled_plot <- function(item, input, calibration = 1, agro_params = NUL
   
   font_f <- input$styler_font_family %||% "sans"
   
+  is_combined <- identical(item$type, "map_combined")
+  leg_pos <- input$styler_legend_pos %||% (if (is_combined) "bottom" else "right")
+  leg_dir <- input$styler_legend_dir %||% (if (is_combined) "horizontal" else "auto")
+  if (leg_dir == "auto") {
+    leg_dir <- if (leg_pos %in% c("bottom", "top")) "horizontal" else "vertical"
+  }
+  leg_text_angle <- as.numeric(input$styler_legend_text_angle %||% (if (is_combined) 90 else 0))
+
   # Helper to style a single pane
   style_pane <- function(p, label) {
     f_title <- label
@@ -84,10 +92,16 @@ generate_styled_plot <- function(item, input, calibration = 1, agro_params = NUL
         axis.title.x = element_text(size = s_x),
         axis.title.y = element_text(size = s_y),
         axis.text = element_text(size = s_lab),
-        legend.text = element_text(size = s_leg),
+        legend.text = element_text(
+          size = s_leg, 
+          angle = leg_text_angle,
+          hjust = if(leg_text_angle != 0) 0.5 else NULL,
+          vjust = if(leg_text_angle != 0) 0.5 else NULL
+        ),
         legend.title = element_text(size = s_leg, face = "bold"),
         legend.key.size = unit(input$styler_legend_key_size %||% 1.0, "cm"),
-        legend.position = input$styler_legend_pos %||% "right",
+        legend.position = leg_pos,
+        legend.direction = leg_dir,
         panel.grid.major = if(isTRUE(input$styler_show_grid)) element_line(color = "grey90") else element_blank(),
         panel.grid.minor = if(isTRUE(input$styler_show_grid)) element_line(color = "grey95") else element_blank(),
         plot.margin = ggplot2::margin(
@@ -178,7 +192,13 @@ generate_styled_plot <- function(item, input, calibration = 1, agro_params = NUL
       main_t <- if(isTruthy(input$styler_title)) input$styler_title else item$label
       
       return(p1 + p2 + plot_layout(ncol = 2, guides = "collect") & 
-             theme(legend.position = "bottom") & 
+             theme(legend.position = leg_pos, 
+                   legend.direction = leg_dir,
+                   legend.text = element_text(
+                     angle = leg_text_angle,
+                     hjust = if(leg_text_angle != 0) 0.5 else NULL,
+                     vjust = if(leg_text_angle != 0) 0.5 else NULL
+                   )) & 
              plot_annotation(title = main_t, theme = theme(plot.title = element_text(size = s_title, face = "bold", family = font_f))))
     }
     
@@ -977,10 +997,9 @@ generate_pca_biplot <- function(pca_res, original_df, pc_x = 1, pc_y = 2, group_
   loadings <- as.data.frame(pca_res$rotation)
   var_exp <- round(pca_res$sdev^2 / sum(pca_res$sdev^2) * 100, 1)
   
-  # Scale loadings to fit plot
   mult <- min(
-    (max(scores[, pc_x]) - min(scores[, pc_x]) / (max(loadings[, pc_x]) - min(loadings[, pc_x]))),
-    (max(scores[, pc_y]) - min(scores[, pc_y]) / (max(loadings[, pc_y]) - min(loadings[, pc_y])))
+    (max(scores[, pc_x]) - min(scores[, pc_x])) / (max(loadings[, pc_x]) - min(loadings[, pc_x])),
+    (max(scores[, pc_y]) - min(scores[, pc_y])) / (max(loadings[, pc_y]) - min(loadings[, pc_y]))
   ) * 0.7
   
   loadings_scaled <- loadings * mult

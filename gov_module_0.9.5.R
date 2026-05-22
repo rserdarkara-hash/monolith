@@ -217,7 +217,7 @@ gov_factors_server <- function(id, data_reactive, vars_metadata_reactive) {
       target_label <- gov_get_label(input$gov_target)
       
       if (gov_rv$res$top_var %in% colnames(df) && input$gov_target %in% colnames(df)) {
-        ggplot2::ggplot(df, ggplot2::aes_string(x = paste0("`", gov_rv$res$top_var, "`"), y = paste0("`", input$gov_target, "`"))) +
+        ggplot2::ggplot(df, ggplot2::aes(x = .data[[gov_rv$res$top_var]], y = .data[[input$gov_target]])) +
           ggplot2::geom_point(alpha = 0.5) +
           ggplot2::geom_smooth(method = "lm", color = "red") +
           ggplot2::labs(title = paste("Target vs Top Factor:", top_var_label), x = top_var_label, y = target_label) +
@@ -290,7 +290,7 @@ gov_factors_server <- function(id, data_reactive, vars_metadata_reactive) {
       target_label <- gov_get_label(input$gov_target)
       
       if (gov_rv$res$top_var %in% colnames(df) && input$gov_target %in% colnames(df)) {
-        ggplot2::ggplot(df, ggplot2::aes_string(x = paste0("`", gov_rv$res$top_var, "`"), y = paste0("`", input$gov_target, "`"))) +
+        ggplot2::ggplot(df, ggplot2::aes(x = .data[[gov_rv$res$top_var]], y = .data[[input$gov_target]])) +
           ggplot2::geom_point(alpha = 0.5, size = 3) + 
           ggplot2::geom_smooth(method = "lm", color = "red", linewidth = 1.5) +
           ggplot2::labs(title = paste("Target vs Top Factor:", top_var_label), x = top_var_label, y = target_label) + 

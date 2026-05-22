@@ -44,7 +44,6 @@ library(progressr)
 library(promises)
 library(shinycssloaders)
 library(furrr)
-library(promises)
 library(showtext)
 library(openxlsx)
 library(officer)
@@ -53,10 +52,10 @@ showtext_auto()
 addResourcePath("assets", getwd())
 plan(multisession) # Enable standard async processing
 # --- Improvements---
-source("ui_helpers_0.9.5.R")
-source("spatial_helpers_0.9.5.R")
-source("theme_helpers_0.9.5.R")
-source("gov_module_0.9.5.R")
+source("ui_helpers_0.9.6.R")
+source("spatial_helpers_0.9.6.R")
+source("theme_helpers_0.9.6.R")
+source("gov_module_0.9.6.R")
 
 # --- Helpers ---
 `%||%` <- function(a, b) if (!is.null(a)) a else b
@@ -418,16 +417,68 @@ ui <- fluidPage(
   div(class = "header-panel", style = "display: flex; justify-content: space-between; align-items: center; padding: 5px 20px;",
       img(src = "assets/banner.png", class = "header-banner", style = "max-height: 50px; width: auto; object-fit: contain; float: left;"),
       div(style = "flex-grow: 1;"),
-      div(class = "header-controls", style = "display: flex; align-items: center; gap: 15px; margin-left: auto;",
-          tags$style(HTML(".header-controls .form-group { margin-bottom: 0 !important; } .header-controls .checkbox { margin-top: 2px !important; margin-bottom: 2px !important; }")),
-          theme_switcher_ui("theme_mod"),
-          div(style = "display: flex; flex-direction: column; align-items: flex-start; font-size: 0.8em; line-height: 1;",
+      div(class = "header-controls", style = "display: flex; align-items: center; gap: 10px; margin-left: auto;",
+          tags$style(HTML("
+            .header-controls .shiny-input-container { width: auto !important; margin: 0 !important; }
+            .header-controls .form-group { margin-bottom: 0 !important; margin-right: 0 !important; }
+            .header-controls .checkbox { margin: 0 !important; padding: 0 !important; }
+            .header-controls .checkbox label { margin: 0 !important; padding-left: 20px !important; color: white !important; font-size: 11px !important; }
+            
+            .header-controls .btn-header-circle,
+            .header-controls .dropdown-toggle {
+              background: #ffffff !important;
+              color: #2c3e50 !important;
+              border: none !important;
+              width: 32px !important;
+              height: 32px !important;
+              border-radius: 50% !important;
+              padding: 0 !important;
+              display: inline-flex !important;
+              align-items: center !important;
+              justify-content: center !important;
+              font-size: 0 !important;
+              cursor: pointer !important;
+              box-shadow: 0 2px 4px rgba(0,0,0,0.1) !important;
+              transition: all 0.2s ease !important;
+              margin: 0 !important;
+            }
+            .header-controls .btn-header-circle:hover,
+            .header-controls .dropdown-toggle:hover {
+              background: #f1f3f5 !important;
+              transform: scale(1.08) !important;
+            }
+            .header-controls .dropdown {
+              margin: 0 !important;
+              padding: 0 !important;
+              display: inline-flex !important;
+              align-items: center !important;
+              justify-content: center !important;
+              width: 32px !important;
+              height: 32px !important;
+            }
+            .header-controls .dropdown-toggle::after,
+            .header-controls .dropdown-toggle .caret {
+              display: none !important;
+            }
+            .header-controls .btn-header-circle i,
+            .header-controls .dropdown-toggle i {
+              font-size: 15px !important;
+              line-height: 1 !important;
+              width: 1em !important;
+              text-align: center !important;
+              margin: 0 !important;
+              padding: 0 !important;
+              display: inline-block !important;
+            }
+          ")),
+          div(style = "display: flex; flex-direction: column; align-items: flex-start; font-size: 0.8em; line-height: 1; margin-right: 5px;",
               checkboxInput("show_north", "North Arrow", FALSE),
               checkboxInput("show_borders", "Borders", FALSE),
               checkboxInput("show_scale", "Map Scale", FALSE)
           ),
-          actionButton("info_btn", "", icon = icon("info-circle"), style = "background: none; border: none; color: white; font-size: 32px; padding: 0; cursor: pointer; margin-left: 10px;"),
-          actionButton("about_btn", "", icon = icon("question-circle"), style = "background: none; border: none; color: white; font-size: 32px; padding: 0; cursor: pointer; margin-left: 10px;")
+          theme_switcher_ui("theme_mod"),
+          actionButton("info_btn", "", icon = icon("info"), class = "btn-header-circle"),
+          actionButton("about_btn", "", icon = icon("question"), class = "btn-header-circle")
       )
   ),
   
@@ -600,13 +651,13 @@ ui <- fluidPage(
                         fluidRow(
                           column(4, selectizeInput("map_crs", "Input Data CRS", choices = common_crs, selected = "EPSG:32635", options = list(create = TRUE))),
                           column(4, selectizeInput("crs_selection", "Target Mapping CRS", choices = common_crs, selected = "EPSG:32635", options = list(create = TRUE))),
-                          column(4, style="margin-top: 25px;", tags$p(tags$b("Direction:"), "Wait for the sampling points to appear, and verify your coordinates on the map below. Then, upload your variable list if you would like to use one for automated data categorization."))
+                          column(4, style="margin-top: 25px;", tags$p(tags$b("Instructions:"), "Please wait for the sampling coordinates to render and verify their accuracy on the mini-map below. Optionally, upload a variable list to enable automated data categorization."))
                         ),
                         hr(),
                         h3("Step 3: Mini-Map Validation"),
                         leafletOutput("setup_minimap", height = "400px"),
                         hr(),
-                        h3("Step 4: Variable Mapping - confirm your variables at the bottom after the upload"),
+                        h3("Step 4: Variable Mapping & Verification (Confirm mapped variables below after uploading)"),
                         tags$p("Pair your Target (Actual) variables with their Predictions. You can map them manually or upload a metadata file."),
                         fileInput("meta_file", "Upload Variable List (Optional)", accept = c(".xlsx", ".xls", ".csv")),
                         uiOutput("var_mapping_ui")
@@ -2050,13 +2101,14 @@ server <- function(input, output, session) {
   })
 
   # B4: Dynamic observers for archive restore/delete buttons
-  history_obs <- list()
+  env_hist <- new.env(parent = emptyenv())
+  env_hist$history_obs <- list()
   observe({
     hist <- rv$run_history
-    lapply(history_obs, function(o) {
+    lapply(env_hist$history_obs, function(o) {
       if (!is.null(o)) o$destroy()
     })
-    history_obs <<- list()
+    env_hist$history_obs <- list()
     
     lapply(seq_along(hist), function(i) {
       # Restore observer
@@ -2086,8 +2138,8 @@ server <- function(input, output, session) {
         showNotification("Archived run removed.", type = "warning")
       }, ignoreInit = TRUE, once = TRUE)
       
-      history_obs[[paste0("restore_", i)]] <<- obs_restore
-      history_obs[[paste0("delete_", i)]] <<- obs_delete
+      env_hist$history_obs[[paste0("restore_", i)]] <- obs_restore
+      env_hist$history_obs[[paste0("delete_", i)]] <- obs_delete
     })
   })
 
@@ -2100,6 +2152,21 @@ server <- function(input, output, session) {
       active_styler_item(input$selected_assets[length(input$selected_assets)])
     }
   }, ignoreNULL = FALSE)
+  
+  observeEvent(active_styler_item(), {
+    req(active_styler_item(), rv$export_registry)
+    item <- rv$export_registry[[active_styler_item()]]
+    req(item)
+    if (item$type == "map_combined") {
+      updateSelectInput(session, "styler_legend_pos", selected = "bottom")
+      updateSelectInput(session, "styler_legend_dir", selected = "horizontal")
+      updateSelectInput(session, "styler_legend_text_angle", selected = 90)
+    } else {
+      updateSelectInput(session, "styler_legend_pos", selected = "right")
+      updateSelectInput(session, "styler_legend_dir", selected = "auto")
+      updateSelectInput(session, "styler_legend_text_angle", selected = 0)
+    }
+  }, ignoreInit = TRUE)
   
   # Reactive for the styled plot preview
   styled_preview_obj <- reactive({
@@ -2185,6 +2252,8 @@ server <- function(input, output, session) {
       font_family = input$styler_font_family,
       label_orient = input$styler_label_orient,
       legend_pos = input$styler_legend_pos,
+      legend_dir = input$styler_legend_dir,
+      legend_text_angle = input$styler_legend_text_angle,
       margin_t = input$styler_margin_t,
       margin_r = input$styler_margin_r,
       margin_b = input$styler_margin_b,
@@ -2258,6 +2327,10 @@ server <- function(input, output, session) {
                             h4("Layout & Spacing"),
                             selectInput("styler_legend_pos", "Legend Position", 
                                         choices = c("Right" = "right", "Bottom" = "bottom", "Left" = "left", "Top" = "top", "None" = "none")),
+                            selectInput("styler_legend_dir", "Legend Orientation", 
+                                        choices = c("Automatic" = "auto", "Horizontal" = "horizontal", "Vertical" = "vertical")),
+                            selectInput("styler_legend_text_angle", "Legend Text Orientation", 
+                                        choices = c("Horizontal" = 0, "Vertical" = 90, "Angled (45)" = 45)),
                             fluidRow(
                               column(3, numericInput("styler_margin_t", "Top", value = 10)),
                               column(3, numericInput("styler_margin_r", "Right", value = 10)),
@@ -2308,6 +2381,8 @@ server <- function(input, output, session) {
     if(!is.null(cfg$font_family)) updateSelectInput(session, "styler_font_family", selected = cfg$font_family)
     if(!is.null(cfg$label_orient)) updateSelectInput(session, "styler_label_orient", selected = cfg$label_orient)
     if(!is.null(cfg$legend_pos)) updateSelectInput(session, "styler_legend_pos", selected = cfg$legend_pos)
+    if(!is.null(cfg$legend_dir)) updateSelectInput(session, "styler_legend_dir", selected = cfg$legend_dir)
+    if(!is.null(cfg$legend_text_angle)) updateSelectInput(session, "styler_legend_text_angle", selected = cfg$legend_text_angle)
     if(!is.null(cfg$margin_t)) updateNumericInput(session, "styler_margin_t", value = cfg$margin_t)
     if(!is.null(cfg$margin_r)) updateNumericInput(session, "styler_margin_r", value = cfg$margin_r)
     if(!is.null(cfg$margin_b)) updateNumericInput(session, "styler_margin_b", value = cfg$margin_b)
@@ -2361,6 +2436,8 @@ server <- function(input, output, session) {
         styler_font_family = input$styler_font_family,
         styler_label_orient = input$styler_label_orient,
         styler_legend_pos = input$styler_legend_pos,
+        styler_legend_dir = input$styler_legend_dir,
+        styler_legend_text_angle = input$styler_legend_text_angle,
         styler_margin_t = input$styler_margin_t,
         styler_margin_r = input$styler_margin_r,
         styler_margin_b = input$styler_margin_b,
@@ -2390,6 +2467,8 @@ server <- function(input, output, session) {
       if(!is.null(cfg$styler_font_family)) updateSelectInput(session, "styler_font_family", selected = cfg$styler_font_family)
       if(!is.null(cfg$styler_label_orient)) updateSelectInput(session, "styler_label_orient", selected = cfg$styler_label_orient)
       if(!is.null(cfg$styler_legend_pos)) updateSelectInput(session, "styler_legend_pos", selected = cfg$styler_legend_pos)
+      if(!is.null(cfg$styler_legend_dir)) updateSelectInput(session, "styler_legend_dir", selected = cfg$styler_legend_dir)
+      if(!is.null(cfg$styler_legend_text_angle)) updateSelectInput(session, "styler_legend_text_angle", selected = cfg$styler_legend_text_angle)
       if(!is.null(cfg$styler_margin_t)) updateNumericInput(session, "styler_margin_t", value = cfg$styler_margin_t)
       if(!is.null(cfg$styler_margin_r)) updateNumericInput(session, "styler_margin_r", value = cfg$styler_margin_r)
       if(!is.null(cfg$styler_margin_b)) updateNumericInput(session, "styler_margin_b", value = cfg$styler_margin_b)
@@ -4119,7 +4198,7 @@ server <- function(input, output, session) {
     rv$rast_list_act <- list(); rv$rast_list_pre <- list(); rv$rast_list_res <- list(); rv$rast_list_point_res <- list()
 
     promises::future_promise({
-      res_all <- lapply(df_list, function(item) {
+      res_all <- furrr::future_map(df_list, function(item) {
       l <- item$l
       pts_data <- item$pts_data
       m_params <- item$m_params        
@@ -4262,9 +4341,9 @@ Error in ", l, ": ", e$message)
         })
         
         return(res_out)
-      })
+      }, .options = furrr::furrr_options(seed = TRUE))
       return(res_all)
-    }, seed = TRUE, packages = c("sf", "terra", "dplyr", "gstat", "randomForest", "fields", "concaveman", "FNN", "spdep"),
+    }, seed = TRUE, packages = c("sf", "terra", "dplyr", "gstat", "randomForest", "fields", "concaveman", "FNN", "spdep", "furrr"),
       globals = list(
         df_list = df_list,
         current_method = current_method,
