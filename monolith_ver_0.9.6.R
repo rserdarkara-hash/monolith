@@ -14,48 +14,7 @@
 # You should have received a copy of the GNU General Public License
 # along with this program. If not, see <https://www.gnu.org/licenses/>.
 
-library(shiny)
-library(leaflet)
-library(leaflet.extras)
-library(sf)
-library(terra)
-library(dplyr)
-library(ggplot2)
-library(readxl)
-library(gstat)
-library(yardstick)
-library(RColorBrewer)
-library(concaveman)
-library(tidyterra)
-library(fields)
-library(viridis)
-library(shinyFiles)
-library(latticeExtra)
-library(classInt)
-library(jsonlite)
-library(shinyWidgets)
-library(shinyjs)
-library(patchwork)
-library(automap)
-library(randomForest)
-library(ggspatial)
-library(future)
-library(progressr)
-library(promises)
-library(shinycssloaders)
-library(furrr)
-library(showtext)
-library(openxlsx)
-library(officer)
-library(zip)
-showtext_auto()
-addResourcePath("assets", getwd())
-plan(multisession) # Enable standard async processing
-# --- Improvements---
-source("ui_helpers_0.9.5.R")
-source("spatial_helpers_0.9.5.R")
-source("theme_helpers_0.9.5.R")
-source("gov_module_0.9.5.R")
+source("global.R")
 
 # --- Helpers ---
 `%||%` <- function(a, b) if (!is.null(a)) a else b
@@ -244,7 +203,7 @@ apply_interpolation <- function(data, target_var, method, grid_p, aux_vars, lags
         })
       }
       form_reg <- as.formula(paste("target ~", paste(paste0("`", aux_vars, "`"), collapse = " + ")))
-      lm_mod <- lm(form_reg, data = data)
+      lm_mod <- lm(form_reg, data = data, na.action = na.exclude)
       res$model_summary <- summary(lm_mod)
       data$residuals <- residuals(lm_mod)
       res$residuals <- residuals(lm_mod)
@@ -1001,6 +960,17 @@ ui <- fluidPage(
 # --- Server ---
 server <- function(input, output, session) {
 
+  # --- Centralized Variable Label Helper ---
+  get_var_label <- function(v) {
+    if (is.null(v) || v == "") return(NULL)
+    vars_metadata <- rv$mapping$vars
+    if (!is.null(vars_metadata)) {
+      match <- Filter(function(x) x$actual == v, vars_metadata)
+      if(length(match) > 0 && !is.null(match[[1]]$label) && match[[1]]$label != "") return(match[[1]]$label)
+    }
+    return(v)
+  }
+
   # --- Force Comparison Mode for Residuals ---
   observeEvent(input$value_type, {
     if (isTruthy(input$value_type) && input$value_type == "resid") {
@@ -1207,16 +1177,7 @@ server <- function(input, output, session) {
       return(p)
     }
     
-    # Overwrite axes with friendly labels by renaming df columns
-    get_var_label <- function(v) {
-      if (is.null(v) || v == "") return(NULL)
-      vars_metadata <- rv$mapping$vars
-      if (!is.null(vars_metadata)) {
-        match <- Filter(function(x) x$actual == v, vars_metadata)
-        if(length(match) > 0 && !is.null(match[[1]]$label) && match[[1]]$label != "") return(match[[1]]$label)
-      }
-      return(v)
-    }
+    
     
     var_x_label <- get_var_label(input$desc_var_x)
     var_y_label <- get_var_label(input$desc_var_y)
@@ -1469,15 +1430,7 @@ server <- function(input, output, session) {
     p_type <- input$corr_plot_type
     method <- input$corr_method %||% "pearson"
     
-    get_var_label <- function(v) {
-      if (is.null(v) || v == "") return(NULL)
-      vars_metadata <- rv$mapping$vars
-      if (!is.null(vars_metadata)) {
-        match <- Filter(function(x) x$actual == v, vars_metadata)
-        if(length(match) > 0 && !is.null(match[[1]]$label) && match[[1]]$label != "") return(match[[1]]$label)
-      }
-      return(v)
-    }
+    
     
     if (p_type == "lagged") {
       req(input$corr_var_1, input$corr_var_2)
@@ -1538,15 +1491,7 @@ server <- function(input, output, session) {
     p_type <- input$corr_plot_type
     method <- input$corr_method %||% "pearson"
     
-    get_var_label <- function(v) {
-      if (is.null(v) || v == "") return(NULL)
-      vars_metadata <- rv$mapping$vars
-      if (!is.null(vars_metadata)) {
-        match <- Filter(function(x) x$actual == v, vars_metadata)
-        if(length(match) > 0 && !is.null(match[[1]]$label) && match[[1]]$label != "") return(match[[1]]$label)
-      }
-      return(v)
-    }
+    
     
     if (p_type == "lagged") {
       req(input$corr_var_1, input$corr_var_2)
@@ -1750,13 +1695,7 @@ server <- function(input, output, session) {
       
       # Translate to labels
       vars_metadata <- rv$mapping$vars
-      get_var_label <- function(v) {
-        if (!is.null(vars_metadata)) {
-          match <- Filter(function(x) x$actual == v, vars_metadata)
-          if(length(match) > 0 && !is.null(match[[1]]$label) && match[[1]]$label != "") return(match[[1]]$label)
-        }
-        return(v)
-      }
+      
       vars_lab <- sapply(input$pca_vars, get_var_label)
       
       df_clean <- na.omit(df[, input$pca_vars, drop=FALSE])
@@ -1797,13 +1736,7 @@ server <- function(input, output, session) {
     }
     
     vars_metadata <- rv$mapping$vars
-    get_var_label <- function(v) {
-      if (!is.null(vars_metadata)) {
-        match <- Filter(function(x) x$actual == v, vars_metadata)
-        if(length(match) > 0 && !is.null(match[[1]]$label) && match[[1]]$label != "") return(match[[1]]$label)
-      }
-      return(v)
-    }
+    
     vars_lab <- sapply(input$pca_vars, get_var_label)
     
     df_clean <- na.omit(df[, input$pca_vars, drop=FALSE])
@@ -2929,7 +2862,7 @@ server <- function(input, output, session) {
     },
     content = function(file) {
       req(rv$user_data)
-      writexl::write_xlsx(rv$user_data, path = file)
+      openxlsx::write.xlsx(rv$user_data, file = file)
     }
   )
   
@@ -3302,8 +3235,7 @@ server <- function(input, output, session) {
     df_map <- rv$user_data %>% dplyr::select(dplyr::all_of(needed)) %>% na.omit()
     if (nrow(df_map) == 0) return(NULL)
 
-    # Rename coordinate columns to x/y for st_as_sf
-    coord_rename <- c(x = rv$mapping$x, y = rv$mapping$y)
+    
     pts <- tryCatch({
       st_as_sf(df_map, coords = c(rv$mapping$x, rv$mapping$y), crs = rv$mapping$crs) %>% st_transform(4326)
     }, error = function(e) NULL)
@@ -3401,7 +3333,7 @@ server <- function(input, output, session) {
       div(style = "text-align: center; padding: 20px;",
           img(src = "assets/banner.png", style = "max-width: 100%; height: auto; margin-bottom: 20px;"),
           h4("Workbench for statistics and optimized mapping in life sciences."),
-          p("Version: 0.9.0"),
+          p("Version: 0.9.6"),
           p("Integrated geostatistical modeling, classification and statistical interpretation."),
           hr(),
           p("Designed for high-performance parallel processing and spatial diagnostics, multi-scale interpolation via kriging, inverse distance weighting, and thin plate splines with practical multi-criteria optimization."),
@@ -3485,6 +3417,94 @@ server <- function(input, output, session) {
   # Pickers
   volumes <- c(Home = fs::path_home(), Project = getwd())
   shinyFileChoose(input, "load_config", roots = volumes, session = session, filetypes = c("json"))
+
+  # --- Sidebar Configuration Management: Save & Load Backend ---
+  
+  observeEvent(input$save_config, {
+    showModal(modalDialog(
+      title = "Save Session Configuration",
+      size = "m",
+      easyClose = TRUE,
+      footer = modalButton("Cancel"),
+      div(style = "padding: 10px;",
+          h4("Export active parameters to a local JSON file:"),
+          p("This configuration file saves active coordinate column pairings, variable lists, category associations, custom color palettes, and active spatial interpolation engines. You can load this file back in a future session."),
+          hr(),
+          div(style = "text-align: center; margin-top: 20px;",
+              downloadButton("download_config_json", "DOWNLOAD CONFIGURATION FILE", class = "btn-success btn-lg")
+          )
+      )
+    ))
+  })
+
+  output$download_config_json <- downloadHandler(
+    filename = function() {
+      paste0("monolith_config_", format(Sys.time(), "%Y%m%d_%H%M%S"), ".json")
+    },
+    content = function(file) {
+      config_list <- list(
+        # Coordinate selection
+        map_x = input$map_x,
+        map_y = input$map_y,
+        map_loc = input$map_loc,
+        map_crs = input$map_crs,
+        crs_selection = input$crs_selection,
+        # Variable category / Variable selector
+        var_category = input$var_category,
+        var_id = input$var_id,
+        value_type = input$value_type,
+        # Interpolation configurations
+        method = input$method,
+        boundary_type = input$boundary_type,
+        buff_dist = input$buff_dist,
+        res_mode = input$res_mode,
+        grid_res = input$grid_res,
+        color_style = input$color_style,
+        # Active variable mappings
+        vars_mapping = rv$mapping$vars
+      )
+      writeLines(jsonlite::toJSON(config_list, auto_unbox = TRUE, pretty = TRUE), file)
+    }
+  )
+
+  observeEvent(input$load_config, {
+    req(input$load_config)
+    file_info <- shinyFiles::parseFilePaths(volumes, input$load_config)
+    req(nrow(file_info) > 0)
+    config_path <- file_info$datapath[1]
+    
+    tryCatch({
+      cfg <- jsonlite::fromJSON(config_path, simplifyVector = FALSE)
+      
+      # Restore reactive values
+      if (!is.null(cfg$vars_mapping)) {
+        # Ensure mapping$vars gets formatted as list of elements matching our internal structure
+        rv$mapping$vars <- cfg$vars_mapping
+      }
+      
+      # Restore UI inputs
+      if (!is.null(cfg$map_x)) updateSelectInput(session, "map_x", selected = cfg$map_x)
+      if (!is.null(cfg$map_y)) updateSelectInput(session, "map_y", selected = cfg$map_y)
+      if (!is.null(cfg$map_loc)) updateSelectInput(session, "map_loc", selected = cfg$map_loc)
+      if (!is.null(cfg$map_crs)) updateSelectizeInput(session, "map_crs", selected = cfg$map_crs)
+      if (!is.null(cfg$crs_selection)) updateSelectizeInput(session, "crs_selection", selected = cfg$crs_selection)
+      
+      if (!is.null(cfg$var_category)) updateSelectInput(session, "var_category", selected = cfg$var_category)
+      if (!is.null(cfg$var_id)) updateSelectInput(session, "var_id", selected = cfg$var_id)
+      if (!is.null(cfg$value_type)) updateSelectInput(session, "value_type", selected = cfg$value_type)
+      
+      if (!is.null(cfg$method)) updateSelectInput(session, "method", selected = cfg$method)
+      if (!is.null(cfg$boundary_type)) updateSelectInput(session, "boundary_type", selected = cfg$boundary_type)
+      if (!is.null(cfg$buff_dist)) updateNumericInput(session, "buff_dist", value = cfg$buff_dist)
+      if (!is.null(cfg$res_mode)) updateRadioButtons(session, "res_mode", selected = cfg$res_mode)
+      if (!is.null(cfg$grid_res)) updateSliderInput(session, "grid_res", value = cfg$grid_res)
+      if (!is.null(cfg$color_style)) updateSelectInput(session, "color_style", selected = cfg$color_style)
+      
+      showNotification("Configuration loaded successfully!", type = "message", duration = 5)
+    }, error = function(e) {
+      showNotification(paste("Failed to load configuration:", e$message), type = "error", duration = 7)
+    })
+  })
 
   output$palette_ui <- renderUI({
     req(input$var_id, rv$mapping$vars)
@@ -4258,7 +4278,7 @@ server <- function(input, output, session) {
                   coords_4326 <- sf::st_coordinates(sf::st_transform(pts_raw, 4326))
                   lat_c <- mean(coords_4326[,2])
                   m_per_deg <- 111319 * cos(lat_c * pi / 180) 
-                  actual_res <- grid_res * m_per_deg
+                  actual_res <- grid_res / m_per_deg
                }
             }
             
