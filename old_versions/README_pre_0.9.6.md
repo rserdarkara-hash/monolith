@@ -1,4 +1,4 @@
-# Monolith 0.9.6: Advanced Spatial Analysis Dashboard
+# Monolith 0.9.5: Advanced Spatial Analysis Dashboard
 *Monolith* is a R Shiny application designed for proper (or a standardized, at least) spatial statistical analysis, geostatistical modeling, and mapping. It provides a comprehensive toolkit for exploring spatial variability, you may find it well-suited for research in soil science, life sciences, and agronomy.
 
 Whether you are mapping soil physicochemistry, analyzing topographical interactions, or generating publication-ready **spatial, descriptive and multi-criteria explorative metrics**, Monolith provides a seamless, parallel-processed environment to ingest, interpolate, interpret and export the data for continuous and classified maps.
@@ -34,7 +34,7 @@ Whether you are mapping soil physicochemistry, analyzing topographical interacti
   ![Alternative Text](assets/4.png) 
 
 
-* **Descriptive & Exploratory Suite**: Understand your dataset with simultaneous descriptive, correlation, and principal component analyses with results that can be instantly generated and observed by simultaneous categorization and data popularization of choice. An additional Governing Factors module computes variable importance and effects via Random Forest models with ALE, PDP, and SHAP analyses, decoupled as of v0.9.6 for advanced performance and modularity.
+* **Descriptive & Exploratory Suite**: Understand your dataset with simultaneous descriptive, correlation, and principal component analyses with results that can be instantly generated and observed by simultaneous categorization and data popularization of choice. An additional Governing Factors module computes variable importance and effects via Random Forest models with ALE, PDP, and SHAP analyses, decoupled as of v0.9.5 for advanced performance and modularity.
 
   ![Alternative Text](assets/5.png) 
 
@@ -89,26 +89,43 @@ Before installing the application, ensure you have the following software instal
 
 The Monolith dashboard relies on a comprehensive suite of R packages for its spatial engine, statistical analytics, and user interface. 
 
-> [!IMPORTANT]
-> **Automated Package Setup in v0.9.6:**
-> You **do not need** to execute any manual `install.packages(...)` console commands.
-> Sourcing the dashboard or launching `monolith_ver_0.9.6.R` automatically triggers a smart **Auto-Installation Hook** inside `global.R`. This hook scans your environment, identifies any missing packages from the required suite, and downloads them non-interactively from the cloud CRAN repository.
-> 
-> *The dependencies managed automatically by the loader include: shiny, leaflet, sf, terra, tidyterra, gstat, fields, randomForest, DALEX, ggplot2, ggpubr, plotly, fresh, future, furrr, and DT.*
+You can install all required packages by running the following script in your R console:
+
+```R
+# Core Shiny & UI Framework
+install.packages(c("shiny", "shinyjs", "shinyWidgets", "shinyFiles", "shinycssloaders"))
+
+# Spatial Data & Mapping
+install.packages(c("sf", "terra", "leaflet", "leaflet.extras", "concaveman", "FNN", "spdep"))
+
+# Geostatistics & Machine Learning
+install.packages(c("gstat", "automap", "randomForest", "fields", "DALEX", "agricolae"))
+
+# Data Manipulation & Metrics
+install.packages(c("dplyr", "tidyr", "readxl", "openxlsx", "yardstick"))
+
+# Data Visualization
+install.packages(c("ggplot2", "ggpubr", "patchwork", "tidyterra", "ggspatial", "plotly", "latticeExtra"))
+
+# Color Palettes & Theming
+install.packages(c("RColorBrewer", "viridis", "classInt", "showtext"))
+
+# Export & Asynchronous Processing
+install.packages(c("future", "furrr", "promises", "progressr", "officer", "zip", "jsonlite"))
+```
 
 ## 3. Application Structure
 
-Ensure your project directory maintains the following structure. The application consists of a centralized package loader, a main runner file, and several helper scripts:
+Ensure your project directory maintains the following structure. The application consists of a main runner file and several helper scripts:
 
 ```
 monolith/
 │
-├── global.R                    # Centralized package loader & environment configuration
-├── monolith_ver_0.9.6.R        # Main Application Runner (Sources global.R)
-├── spatial_helpers_0.9.6.R     # Spatial math & CV logic
-├── ui_helpers_0.9.6.R          # Analytics & descriptive plots
-├── theme_helpers_0.9.6.R       # Theming & export configurations
-├── gov_module_0.9.6.R          # Governing Factors UI & Server Modules
+├── monolith_ver_0.9.5.R        # Main Application Runner
+├── spatial_helpers_0.9.5.R     # Spatial math & CV logic
+├── ui_helpers_0.9.5.R          # Analytics & descriptive plots
+├── theme_helpers_0.9.5.R       # Theming & export configurations
+├── gov_module_0.9.5.R          # Governing Factors UI & Server Modules
 │
 ├── assets/                     # Screenshots & static assets
 ├── docs/                       # Guides & documentation
@@ -117,12 +134,13 @@ monolith/
 │
 ├── LICENSE                     # GPL-3.0 license
 └── .gitignore
+
 ```
 
 ## 4. Running the Application
 
 ### Option A: Using RStudio (Recommended)
-1. Open the `monolith_ver_0.9.6.R` file in RStudio.
+1. Open the `monolith_ver_0.9.5.R` file in RStudio.
 2. Ensure all required packages are installed and loaded without errors.
 3. Click the **"Run App"** button located at the top right of the source editor.
 
@@ -134,7 +152,7 @@ monolith/
    ```
 3. Launch the Shiny app:
    ```R
-   shiny::runApp("monolith_ver_0.9.6.R")
+   shiny::runApp("monolith_ver_0.9.5.R")
    ```
 
 ## License
