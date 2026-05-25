@@ -1,4 +1,4 @@
-# global_0.9.6b.R - Centralized Configuration & Dependencies for Monolith v0.9.6b
+# global_0.9.6a.R - Centralized Configuration & Dependencies for Monolith v0.9.6a
 # Copyright (c) 2026 Recep Serdar Kara. All rights reserved.
 
 # --- Smart Auto-Installation & Package Loading Hook ---
@@ -92,8 +92,8 @@ if (!inherits(future::plan(), "multisession")) {
   future::plan(future::multisession)
 }
 
-# --- Source v0.9.6b Helper Modules ---
-source("ui_helpers_0.9.6b.R")
-source("spatial_helpers_0.9.6b.R")
-source("theme_helpers_0.9.6b.R")
-source("gov_module_0.9.6b.R")
+# --- Source v0.9.6a Helper Modules ---
+source("ui_helpers_0.9.6a.R")
+source("spatial_helpers_0.9.6a.R")
+source("theme_helpers_0.9.6a.R")
+source("gov_module_0.9.6a.R")
