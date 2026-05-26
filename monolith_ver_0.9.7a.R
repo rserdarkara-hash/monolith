@@ -270,7 +270,7 @@ ui <- fluidPage(
     sidebarPanel(width = 3,
       div(style="background-color: #f8f9fa; padding: 10px; border: 1px solid #ddd;",
           h4("1. Context"),
-          selectInput("locality", "Locality", choices = "Upload data first...", multiple = TRUE),
+          selectInput("locality", "Locality", choices = NULL, multiple = TRUE),
           selectInput("subset", HTML(paste0("Data Subset", info_tooltip("data_subset_info", "Use this filter when mapping predicted parameters from single-split or similar models. Selecting 'Train', 'Test', or 'Validation' restricts the analysis to that specific data partition."))), choices = c("All" = "all", "Test" = "Test", "Train" = "Train", "Validation" = "Validation"), selected = "all"),
           selectInput("var_category", "Variable Category", choices = NULL),
           selectInput("var_id", "Variable", choices = NULL),
@@ -529,7 +529,7 @@ ui <- fluidPage(
                              div(style = "min-width: 130px;",
                                tags$label("Point Options", style = "font-size: 11px; color: #a0aec0; margin-bottom: 2px; display: block; text-transform: uppercase; letter-spacing: 0.5px;"),
                                sliderInput("pt_marker_size", "Point Size", min = 1, max = 12, value = 3, step = 1, width = "130px", ticks = FALSE),
-                               checkboxInput("pt_apply_minimap", "Apply to Mini Map", TRUE, width = "auto")
+                               checkboxInput("pt_apply_minimap", "Apply Colour Set to Mini Map", FALSE, width = "auto")
                              )
                            )
                          ),
@@ -692,13 +692,7 @@ server <- function(input, output, session) {
 
   # --- Centralized Variable Label Helper ---
   get_var_label <- function(v) {
-    if (is.null(v) || v == "") return(NULL)
-    vars_metadata <- rv$mapping$vars
-    if (!is.null(vars_metadata)) {
-      match <- Filter(function(x) x$actual == v, vars_metadata)
-      if(length(match) > 0 && !is.null(match[[1]]$label) && match[[1]]$label != "") return(match[[1]]$label)
-    }
-    return(v)
+    .GlobalEnv$get_var_label(v, rv$mapping$vars)
   }
 
   # --- Force Comparison Mode for Residuals ---
@@ -1672,11 +1666,14 @@ server <- function(input, output, session) {
     shinyjs::toggle("pt_style_toolbar", anim = TRUE, animType = "slide", time = 0.3)
   })
 
-  # Populate color-by and label-field dropdowns when data loads
+  # Populate color-by and label-field dropdowns when data loads or mapping changes
   observe({
     req(rv$user_data)
     df <- rv$user_data
     cols <- colnames(df)
+
+    # Establish reactive dependency on variable mappings
+    vars_meta <- rv$mapping$vars
 
     cat_cols <- cols[sapply(df, function(x) {
       is.character(x) || is.factor(x) || (is.integer(x) && length(unique(x)) <= 20)
@@ -1690,10 +1687,21 @@ server <- function(input, output, session) {
     if (length(other_cats) > 0) {
       color_choices <- c(color_choices, stats::setNames(other_cats, other_cats))
     }
-    updateSelectInput(session, "pt_color_by", choices = color_choices, selected = "none")
+    
+    # Preserve current selections if valid
+    curr_color_by <- isolate(input$pt_color_by)
+    selected_color_by <- if (!is.null(curr_color_by) && curr_color_by %in% color_choices) curr_color_by else "none"
+    updateSelectInput(session, "pt_color_by", choices = color_choices, selected = selected_color_by)
 
-    label_choices <- c("(none)" = "none", stats::setNames(cols, cols))
-    updateSelectInput(session, "pt_label_field", choices = label_choices, selected = "none")
+    # Translate column names to human-readable labels, falling back to raw names
+    col_labels <- sapply(cols, function(c) {
+      .GlobalEnv$get_var_label(c, vars_meta)
+    })
+    label_choices <- c("(none)" = "none", stats::setNames(cols, col_labels))
+    
+    curr_label_field <- isolate(input$pt_label_field)
+    selected_label_field <- if (!is.null(curr_label_field) && curr_label_field %in% label_choices) curr_label_field else "none"
+    updateSelectInput(session, "pt_label_field", choices = label_choices, selected = selected_label_field)
   })
 
   # Generate default palette when color-by or palette changes
@@ -2171,12 +2179,10 @@ server <- function(input, output, session) {
 
     # F2: Determine which extra columns are needed for styling
     color_by <- input$pt_color_by %||% "none"
-    label_field <- input$pt_label_field %||% "none"
     apply_mini <- isTRUE(input$pt_apply_minimap)
 
     needed <- c(rv$mapping$x, rv$mapping$y)
     if (apply_mini && color_by != "none" && color_by %in% colnames(rv$user_data)) needed <- c(needed, color_by)
-    if (apply_mini && isTRUE(input$pt_show_labels) && label_field != "none" && label_field %in% colnames(rv$user_data)) needed <- c(needed, label_field)
     needed <- unique(needed)
 
     df_map <- rv$user_data %>% dplyr::select(dplyr::all_of(needed)) %>% na.omit()
@@ -2197,9 +2203,9 @@ server <- function(input, output, session) {
       m <- add_styled_points(m, pts,
         color_by = color_by,
         custom_colors = rv$pt_style_colors,
-        show_labels = isTRUE(input$pt_show_labels),
-        label_field = label_field,
-        label_size = input$pt_label_size %||% 11,
+        show_labels = FALSE,
+        label_field = "none",
+        label_size = 11,
         marker_size = input$pt_marker_size %||% 3
       )
     } else {
@@ -3099,8 +3105,7 @@ server <- function(input, output, session) {
     shinyjs::show("map_spinner")
     shinyjs::hide("reveal_maps_btn")
     shinyjs::html("map_processing_title", "Processing...")
-    shinyjs::html("map_progress_text", "Initializing Spatial Analysis Engine...")
-    shinyjs::runjs("document.getElementById('map_progress_bar_inner').style.width = '5%';")
+    update_premium_progress(5, "Initializing Spatial Analysis Engine...")
 
     # Wipe any old progress files and start the timer
     old_files <- list.files(pattern = "^progress_.*_.*\\.txt$")
@@ -3147,14 +3152,12 @@ server <- function(input, output, session) {
     rv$cv_metrics_act <- list(); rv$cv_metrics_pre <- list() # Reset CV metrics
     rv$cv_data_act <- list(); rv$cv_data_pre <- list()
     
-    shinyjs::html("map_progress_text", "Validating and Cleaning Spatial Input Data...")
-    shinyjs::runjs("document.getElementById('map_progress_bar_inner').style.width = '15%';")
+    update_premium_progress(15, "Validating and Cleaning Spatial Input Data...")
     
     pred_col <- if(input$value_type == "pred_ss") meta$pred_ss else meta$pred
     aux_vars <- input$aux_vars
     
-    shinyjs::html("map_progress_text", "Preparing Neighborhood Search Grids...")
-    shinyjs::runjs("document.getElementById('map_progress_bar_inner').style.width = '25%';")
+    update_premium_progress(25, "Preparing Neighborhood Search Grids...")
     
     # Pre-extract reactive states
     current_method <- input$method
@@ -3184,7 +3187,7 @@ server <- function(input, output, session) {
       
       c_obj
     }, error = function(e) {
-      showNotification(paste("CRS Validation Error:", e$message), type = "error", duration = 8)
+      showNotification(paste("CRS Validation Error:", e$message), type = "error", duration = 15)
       NULL
     })
     req(safe_crs)
@@ -3195,8 +3198,7 @@ server <- function(input, output, session) {
     idw_nmax_val <- input$idw_nmax
     tps_lambda_val <- input$tps_lambda
     
-    shinyjs::html("map_progress_text", "Organizing Localized Data Chunks...")
-    shinyjs::runjs("document.getElementById('map_progress_bar_inner').style.width = '35%';")
+    update_premium_progress(35, "Organizing Localized Data Chunks...")
     
     df_list <- lapply(locs, function(l) {
       sub_df <- rv$user_data %>% filter(!!sym(current_loc_col) == l)
@@ -3223,8 +3225,7 @@ server <- function(input, output, session) {
       list(l = l, pts_data = pts_data, m_params = m_params)
     })
 
-    shinyjs::html("map_progress_text", "Executing Parallel Interpolation Algorithms...")
-    shinyjs::runjs("document.getElementById('map_progress_bar_inner').style.width = '50%';")
+    update_premium_progress(50, "Executing Parallel Interpolation Algorithms...")
 
     # C1: Clear rast lists before starting new run to prevent spatial interference
     rv$rast_list_act <- list(); rv$rast_list_pre <- list(); rv$rast_list_res <- list(); rv$rast_list_point_res <- list()
@@ -3518,7 +3519,7 @@ Error in ", l, ": ", e$message)
           l <- res$l
           if(res$log_msg != "") {
               rv$log <- paste0(rv$log, res$log_msg)
-              if(grepl("Error", res$log_msg)) showNotification(res$log_msg, type = "error", duration = 8)
+              if(grepl("Error", res$log_msg)) showNotification(res$log_msg, type = "error", duration = 15)
           }
           if(!is.null(res$r_a)) rv$rast_list_act[[l]] <- terra::unwrap(res$r_a)
           if(!is.null(res$r_p)) rv$rast_list_pre[[l]] <- terra::unwrap(res$r_p)
@@ -3875,8 +3876,7 @@ Error in ", l, ": ", e$message)
 
     shinyjs::hide("map_spinner")
     shinyjs::html("map_processing_title", "Map Generation Complete")
-    shinyjs::html("map_progress_text", "Click below to reveal the updated geostatistical surfaces.")
-    shinyjs::runjs("document.getElementById('map_progress_bar_inner').style.width = '100%';")
+    update_premium_progress(100, "Click below to reveal the updated geostatistical surfaces.")
     shinyjs::show("reveal_maps_btn")
     
     # Wipe the polling state and remove temporary files
@@ -3915,7 +3915,7 @@ Error in ", l, ": ", e$message)
       bar_width <- 50 + (avg_pct * 0.5)
       bar_width <- max(50, min(99, bar_width)) # Cap at 99% until complete handler resolves
       
-      shinyjs::runjs(sprintf("document.getElementById('map_progress_bar_inner').style.width = '%d%%';", round(bar_width)))
+      update_premium_progress(bar_width)
       
       # Build premium individual region status
       progress_msgs <- c()
@@ -4980,7 +4980,7 @@ Error in ", l, ": ", e$message)
     new_warns <- setdiff(warn_lines, last_notified_warnings())
     if (length(new_warns) > 0) {
       for (w in new_warns) {
-        showNotification(gsub("\\[WARN\\]", "", w), type = "warning", duration = 8)
+        showNotification(gsub("\\[WARN\\]", "", w), type = "warning", duration = 15)
       }
       last_notified_warnings(union(last_notified_warnings(), new_warns))
     }

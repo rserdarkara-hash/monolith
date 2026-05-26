@@ -72,42 +72,62 @@ generate_styled_plot <- function(item, input, calibration = 1, agro_params = NUL
   leg_text_angle <- as.numeric(input$styler_legend_text_angle %||% (if (is_combined) 90 else 0))
 
   # Helper to style a single pane
-  style_pane <- function(p, label) {
+  style_pane <- function(p, label, is_combined_pane = FALSE) {
     f_title <- label
     f_x <- if(isTruthy(input$styler_x_title)) input$styler_x_title else NULL
     f_y <- if(isTruthy(input$styler_y_title)) input$styler_y_title else NULL
     
+    # Scale down legend and margins for combined (side-by-side) maps
+    key_size <- input$styler_legend_key_size %||% 1.0
+    margin_t <- (input$styler_margin_t %||% 10) * calibration
+    margin_r <- (input$styler_margin_r %||% 10) * calibration
+    margin_b <- (input$styler_margin_b %||% 10) * calibration
+    margin_l <- (input$styler_margin_l %||% 15) * calibration
+    
+    if (is_combined_pane) {
+      key_size <- key_size * 0.6
+      margin_t <- margin_t * 0.3
+      margin_r <- margin_r * 0.3
+      margin_b <- margin_b * 0.3
+      margin_l <- margin_l * 0.3
+    }
+    
+    legend_theme <- if (is_combined_pane) {
+      list(
+        legend.key.size = unit(key_size, "cm"),
+        legend.key.width = unit(key_size * 2.5, "cm"),
+        legend.key.height = unit(key_size * 0.5, "cm")
+      )
+    } else {
+      list(legend.key.size = unit(key_size, "cm"))
+    }
+    
     p + theme_minimal(base_size = s_base, base_family = font_f) +
       theme(
-        plot.title = element_text(size = s_title, face = "bold"),
+        plot.title = element_text(size = if(is_combined_pane) s_title * 0.85 else s_title, face = "bold"),
         plot.subtitle = element_text(size = s_title * 0.8),
         axis.title.x = element_text(size = s_x),
         axis.title.y = element_text(size = s_y),
         axis.text = element_text(size = s_lab),
         legend.text = element_text(
-          size = s_leg, 
+          size = if(is_combined_pane) s_leg * 0.85 else s_leg, 
           angle = leg_text_angle,
           hjust = if(leg_text_angle != 0) 0.5 else NULL,
           vjust = if(leg_text_angle != 0) 0.5 else NULL
         ),
-        legend.title = element_text(size = s_leg, face = "bold"),
-        legend.key.size = unit(input$styler_legend_key_size %||% 1.0, "cm"),
+        legend.title = element_text(size = if(is_combined_pane) s_leg * 0.85 else s_leg, face = "bold"),
         legend.position = leg_pos,
         legend.direction = leg_dir,
         panel.grid.major = if(isTRUE(input$styler_show_grid)) element_line(color = "grey90") else element_blank(),
         panel.grid.minor = if(isTRUE(input$styler_show_grid)) element_line(color = "grey95") else element_blank(),
-        plot.margin = ggplot2::margin(
-          (input$styler_margin_t %||% 10) * calibration, 
-          (input$styler_margin_r %||% 10) * calibration, 
-          (input$styler_margin_b %||% 10) * calibration, 
-          (input$styler_margin_l %||% 15) * calibration, 
-          unit = "mm"),
+        plot.margin = ggplot2::margin(margin_t, margin_r, margin_b, margin_l, unit = "mm"),
         axis.text.x = element_text(
           angle = as.numeric(input$styler_label_orient %||% 0),
           hjust = if(as.numeric(input$styler_label_orient %||% 0) != 0) 1 else 0.5,
           vjust = if(as.numeric(input$styler_label_orient %||% 0) != 0) 1 else 0.5
         )
       ) +
+      do.call(theme, legend_theme) +
       labs(title = f_title, x = f_x, y = f_y)
   }
 
@@ -169,7 +189,7 @@ generate_styled_plot <- function(item, input, calibration = 1, agro_params = NUL
         }
         bp <- bp + coord_sf()
       }
-      style_pane(bp, label)
+      style_pane(bp, label, is_combined_pane = is_tiled)
     }
 
     if (item$type == "map") {
@@ -183,10 +203,19 @@ generate_styled_plot <- function(item, input, calibration = 1, agro_params = NUL
       
       main_t <- if(isTruthy(input$styler_title)) input$styler_title else item$label
       
+      # Compact legend sizing for side-by-side layout
+      comb_key_size <- (input$styler_legend_key_size %||% 1.0) * 0.6
+      
       return(p1 + p2 + plot_layout(ncol = 2, guides = "collect") & 
              theme(legend.position = leg_pos, 
                    legend.direction = leg_dir,
+                   legend.key.size = unit(comb_key_size, "cm"),
+                   legend.key.width = unit(comb_key_size * 2.5, "cm"),
+                   legend.key.height = unit(comb_key_size * 0.5, "cm"),
+                   legend.margin = ggplot2::margin(2, 2, 2, 2),
+                   legend.box.margin = ggplot2::margin(0, 0, 0, 0),
                    legend.text = element_text(
+                     size = s_leg * 0.85,
                      angle = leg_text_angle,
                      hjust = if(leg_text_angle != 0) 0.5 else NULL,
                      vjust = if(leg_text_angle != 0) 0.5 else NULL

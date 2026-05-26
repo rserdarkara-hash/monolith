@@ -135,13 +135,7 @@ desc_exploratory_server <- function(id, data_reactive, vars_metadata_reactive) {
     
     # Local variable label helper
     get_var_label <- function(v) {
-      if (is.null(v) || v == "") return(NULL)
-      vars_metadata <- vars_metadata_reactive()
-      if (!is.null(vars_metadata)) {
-        match <- Filter(function(x) x$actual == v, vars_metadata)
-        if(length(match) > 0 && !is.null(match[[1]]$label) && match[[1]]$label != "") return(match[[1]]$label)
-      }
-      return(v)
+      .GlobalEnv$get_var_label(v, vars_metadata_reactive())
     }
     
     # --- Grouping & Discretization Server Logic ---
@@ -347,14 +341,10 @@ desc_exploratory_server <- function(id, data_reactive, vars_metadata_reactive) {
             colnames(df_local)[colnames(df_local) == input$desc_var_z] <- var_z_label
         }
         
-        multi_labels <- sapply(input$desc_vars_multi, get_var_label)
+        multi_labels <- get_var_labels(input$desc_vars_multi, vars_metadata_reactive())
         if(!is.null(input$desc_vars_multi)) {
-            for (i in seq_along(input$desc_vars_multi)) {
-                orig <- input$desc_vars_multi[i]
-                newl <- multi_labels[i]
-                colnames(df_global)[colnames(df_global) == orig] <- newl
-                colnames(df_local)[colnames(df_local) == orig] <- newl
-            }
+            df_global <- apply_labels_to_df(df_global, input$desc_vars_multi, vars_metadata_reactive())
+            df_local <- apply_labels_to_df(df_local, input$desc_vars_multi, vars_metadata_reactive())
         }
         
         vars <- switch(p_type,
@@ -558,7 +548,7 @@ desc_exploratory_server <- function(id, data_reactive, vars_metadata_reactive) {
         if (length(vars) < 2) return(ggplot() + annotate("text", x=0, y=0, label="Need >=2 variables"))
         
         df <- apply_labels_to_df(df, vars, vars_metadata_reactive())
-        vars_lab <- sapply(vars, get_var_label)
+        vars_lab <- get_var_labels(vars, vars_metadata_reactive())
         
         if (p_type == "heatmap") {
           p <- generate_correlation_heatmap(df, vars_lab, method = method)
@@ -568,7 +558,7 @@ desc_exploratory_server <- function(id, data_reactive, vars_metadata_reactive) {
           c_vars <- input$corr_vars_control
           if(!is.null(c_vars) && length(c_vars) > 0) {
              df <- apply_labels_to_df(df, c_vars, vars_metadata_reactive())
-             c_vars_lab <- sapply(c_vars, get_var_label)
+             c_vars_lab <- get_var_labels(c_vars, vars_metadata_reactive())
           } else {
              c_vars_lab <- NULL
           }
@@ -612,13 +602,13 @@ desc_exploratory_server <- function(id, data_reactive, vars_metadata_reactive) {
         if (length(vars) < 2) return(NULL)
         
         df <- apply_labels_to_df(df, vars, vars_metadata_reactive())
-        vars_lab <- sapply(vars, get_var_label)
+        vars_lab <- get_var_labels(vars, vars_metadata_reactive())
         
         if (p_type == "partial") {
           c_vars <- input$corr_vars_control
           if(!is.null(c_vars) && length(c_vars) > 0) {
              df <- apply_labels_to_df(df, c_vars, vars_metadata_reactive())
-             c_vars_lab <- sapply(c_vars, get_var_label)
+             c_vars_lab <- get_var_labels(c_vars, vars_metadata_reactive())
              
              all_vars <- unique(c(vars_lab, c_vars_lab))
              df_clean <- na.omit(df[, all_vars, drop=FALSE])
@@ -716,7 +706,7 @@ desc_exploratory_server <- function(id, data_reactive, vars_metadata_reactive) {
         pca_rv$collinearity_warn <- FALSE
         pca_rv$collinear_pairs <- NULL
         
-        vars_lab <- sapply(input$pca_vars, get_var_label)
+        vars_lab <- get_var_labels(input$pca_vars, vars_metadata_reactive())
         df_clean <- na.omit(df[, input$pca_vars, drop=FALSE])
         colnames(df_clean) <- vars_lab
         
@@ -753,7 +743,7 @@ desc_exploratory_server <- function(id, data_reactive, vars_metadata_reactive) {
       active_groups <- input$analytics_active_group
       df <- filter_active_groups(df, active_groups)
       
-      vars_lab <- sapply(input$pca_vars, get_var_label)
+      vars_lab <- get_var_labels(input$pca_vars, vars_metadata_reactive())
       df_clean <- na.omit(df[, input$pca_vars, drop=FALSE])
       colnames(df_clean) <- vars_lab
       
