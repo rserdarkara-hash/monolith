@@ -93,9 +93,9 @@ if (!inherits(future::plan(), "multisession")) {
 }
 
 # --- Source v0.9.7 Helper Modules ---
-source("ui_helpers_0.9.7a.R")
-source("spatial_helpers_0.9.7a.R")
-source("theme_helpers_0.9.7a.R")
-source("gov_module_0.9.7a.R")
-source("desc_exploratory_module_0.9.7a.R")
+source("ui_helpers_0.9.7.R")
+source("spatial_helpers_0.9.7.R")
+source("theme_helpers_0.9.7.R")
+source("gov_module_0.9.7.R")
+source("desc_exploratory_module_0.9.7.R")
 
