@@ -1,4 +1,4 @@
-# Monolith 0.9.6b: Advanced Spatial Analysis Dashboard
+# Monolith 0.9.6c: Advanced Spatial Analysis Dashboard
 *Monolith* is a R Shiny application designed for proper (or a standardized, at least) spatial statistical analysis, geostatistical modeling, and mapping. It provides a comprehensive toolkit for exploring spatial variability, you may find it well-suited for research in soil science, life sciences, and agronomy.
 
 Whether you are mapping soil physicochemistry, analyzing topographical interactions, or generating publication-ready **spatial, descriptive and multi-criteria explorative metrics**, Monolith provides a seamless, parallel-processed environment to ingest, interpolate, interpret and export the data for continuous and classified maps.
@@ -92,7 +92,7 @@ The Monolith dashboard relies on a comprehensive suite of R packages for its spa
 > [!IMPORTANT]
 > **Automated Package Setup in v0.9.6:**
 > You **do not need** to execute any manual `install.packages(...)` console commands.
-> Sourcing the dashboard or launching `monolith_ver_0.9.6.R` automatically triggers a smart **Auto-Installation Hook** inside `global.R`. This hook scans your environment, identifies any missing packages from the required suite, and downloads them non-interactively from the cloud CRAN repository.
+> Sourcing the dashboard or launching `monolith_ver_0.9.6c.R` automatically triggers a smart **Auto-Installation Hook** inside `global.R`. This hook scans your environment, identifies any missing packages from the required suite, and downloads them non-interactively from the cloud CRAN repository.
 > 
 > *The dependencies managed automatically by the loader include: shiny, leaflet, sf, terra, tidyterra, gstat, fields, randomForest, DALEX, ggplot2, ggpubr, plotly, fresh, future, furrr, and DT.*
 
@@ -104,11 +104,11 @@ Ensure your project directory maintains the following structure. The application
 monolith/
 │
 ├── global.R                    # Centralized package loader & environment configuration
-├── monolith_ver_0.9.6b.R        # Main Application Runner (Sources global.R)
-├── spatial_helpers_0.9.6b.R     # Spatial math & CV logic
-├── ui_helpers_0.9.6b.R          # Analytics & descriptive plots
-├── theme_helpers_0.9.6b.R       # Theming & export configurations
-├── gov_module_0.9.6b.R          # Governing Factors UI & Server Modules
+├── monolith_ver_0.9.6c.R        # Main Application Runner (Sources global.R)
+├── spatial_helpers_0.9.6c.R     # Spatial math & CV logic
+├── ui_helpers_0.9.6c.R          # Analytics & descriptive plots
+├── theme_helpers_0.9.6c.R       # Theming & export configurations
+├── gov_module_0.9.6c.R          # Governing Factors UI & Server Modules
 │
 ├── assets/                     # Screenshots & static assets
 ├── docs/                       # Guides & documentation
