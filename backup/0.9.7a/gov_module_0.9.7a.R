@@ -1,10 +1,4 @@
 # gov_module_0.9.7a.R - Modularized Governing Factors Tab
-
-
-
-
-
-
 # --- UI Module ---
 gov_factors_ui <- function(id) {
   ns <- shiny::NS(id)

@@ -285,6 +285,48 @@ info_tooltip <- function(id, text) {
 }
 
 # --- Shared Helpers for Labels & Group Filtering ---
+
+get_var_label <- function(v, vars_metadata) {
+  if (is.null(v) || is.na(v) || v == "") return(v)
+  if (!is.null(vars_metadata)) {
+    match <- Filter(function(x) x$actual == v, vars_metadata)
+    if (length(match) > 0 && !is.null(match[[1]]$label) && match[[1]]$label != "") {
+      return(match[[1]]$label)
+    }
+    # Fallback to fuzzy match
+    all_actuals <- sapply(vars_metadata, function(x) x$actual)
+    fuzzy_actual <- fuzzy_match_column(v, all_actuals)
+    if (!is.null(fuzzy_actual)) {
+      match_fuzzy <- Filter(function(x) x$actual == fuzzy_actual, vars_metadata)
+      if (length(match_fuzzy) > 0 && !is.null(match_fuzzy[[1]]$label) && match_fuzzy[[1]]$label != "") {
+        return(match_fuzzy[[1]]$label)
+      }
+    }
+  }
+  return(v)
+}
+
+get_var_labels <- function(vars, vars_metadata) {
+  if (is.null(vars)) return(NULL)
+  sapply(vars, get_var_label, vars_metadata = vars_metadata)
+}
+
+update_premium_progress <- function(pct, message = NULL) {
+  width_val <- if (is.numeric(pct)) {
+    sprintf("%d%%", round(pct))
+  } else if (grepl("%$", pct)) {
+    pct
+  } else {
+    paste0(pct, "%")
+  }
+  
+  shinyjs::runjs(sprintf("document.getElementById('map_progress_bar_inner').style.width = '%s';", width_val))
+  
+  if (!is.null(message)) {
+    shinyjs::html("map_progress_text", message)
+  }
+}
+
 fuzzy_match_column <- function(act_name, user_cols) {
   if (act_name %in% user_cols) {
     return(act_name)
@@ -307,14 +349,7 @@ fuzzy_match_column <- function(act_name, user_cols) {
 apply_labels_to_df <- function(df, vars, vars_metadata) {
   if (is.null(df) || length(vars) == 0) return(df)
   
-  get_label <- function(v) {
-    if (is.null(v) || v == "") return("")
-    meta <- Filter(function(x) x$actual == v, vars_metadata)
-    if (length(meta) > 0) return(meta[[1]]$label)
-    return(v)
-  }
-  
-  labels <- sapply(vars, get_label)
+  labels <- get_var_labels(vars, vars_metadata)
   for (i in seq_along(vars)) {
     if (vars[i] %in% colnames(df)) {
       colnames(df)[colnames(df) == vars[i]] <- labels[i]
@@ -1277,7 +1312,12 @@ add_styled_points <- function(map, pts_sf, color_by = "none", custom_colors = NU
 
   # --- Labels (separate layer for clarity) ---
   if (show_labels && label_field != "none" && label_field %in% colnames(pts_view)) {
-    label_vals <- as.character(pts_view[[label_field]])
+    raw_vals <- pts_view[[label_field]]
+    label_vals <- if (is.numeric(raw_vals)) {
+      ifelse(is.na(raw_vals), NA_character_, sprintf("%.2f", raw_vals))
+    } else {
+      as.character(raw_vals)
+    }
     map <- map %>% leaflet::addLabelOnlyMarkers(
       data = pts_view,
       label = label_vals,

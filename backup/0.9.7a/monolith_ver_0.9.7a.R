@@ -1391,9 +1391,26 @@ server <- function(input, output, session) {
           excel_path <- file.path(temp_dir, excel_name)
           
           wb <- createWorkbook()
+          used_sheet_names <- c()
           for(item in table_items) {
-            # Sheet names must be <= 31 chars and unique
-            sheet_name <- substr(gsub("[^a-zA-Z0-9 ]", "_", item$label), 1, 31)
+            # Build a clean sheet name from the label, max 31 chars for Excel
+            clean_label <- gsub("[^a-zA-Z0-9 ]", "_", item$label)
+            sheet_name <- substr(clean_label, 1, 31)
+            
+            # Deduplicate: when actual & predicted labels truncate identically
+            if(sheet_name %in% used_sheet_names) {
+              # Determine a meaningful suffix from the registry ID
+              suffix <- if(grepl("_pre_|_pre$", item$id)) "_Pre" else "_2"
+              counter <- 2
+              candidate <- paste0(substr(sheet_name, 1, 31 - nchar(suffix)), suffix)
+              while(candidate %in% used_sheet_names) {
+                counter <- counter + 1
+                suffix <- paste0("_", counter)
+                candidate <- paste0(substr(sheet_name, 1, 31 - nchar(suffix)), suffix)
+              }
+              sheet_name <- candidate
+            }
+            used_sheet_names <- c(used_sheet_names, sheet_name)
             addWorksheet(wb, sheet_name)
             writeData(wb, sheet_name, item$obj)
           }
