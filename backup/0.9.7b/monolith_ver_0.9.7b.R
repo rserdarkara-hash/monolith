@@ -14,10 +14,9 @@
 # You should have received a copy of the GNU General Public License
 # along with this program. If not, see <https://www.gnu.org/licenses/>.
 
-source("global.R")
+source("global_0.9.7b.R")
 
 # --- Helpers ---
-`%||%` <- function(a, b) if (!is.null(a)) a else b
 
 # Universal Agronomical Colors
 agro_colors <- c("#E69F00", "#F0E442", "#009E73") # Orange, Yellow, Green
@@ -45,15 +44,22 @@ common_crs <- c(
 
 get_nut_key <- function(v) {
   v_up <- toupper(as.character(v))
-  if (grepl("\\bTN\\b|NITROGEN", v_up)) return("TN")
-  if (grepl("\\bP\\b|PHOSPHORUS|OLSEN", v_up)) return("P")
-  if (grepl("\\bK\\b|POTASSIUM", v_up)) return("K")
-  if (grepl("\\bCA\\b|CALCIUM", v_up)) return("Ca")
-  if (grepl("\\bMG\\b|MAGNESIUM", v_up)) return("Mg")
-  if (grepl("\\bFE\\b|IRON", v_up)) return("Fe")
-  if (grepl("\\bMN\\b|MANGANESE", v_up)) return("Mn")
-  if (grepl("\\bCU\\b|COPPER", v_up)) return("Cu")
-  if (grepl("\\bZN\\b|ZINC", v_up)) return("Zn")
+  if (length(v_up) == 0 || is.na(v_up) || v_up == "") return(NULL)
+  
+  patterns <- c(
+    TN = "\\bTN\\b|NITROGEN",
+    P  = "\\bP\\b|PHOSPHORUS|OLSEN",
+    K  = "\\bK\\b|POTASSIUM",
+    Ca = "\\bCA\\b|CALCIUM",
+    Mg = "\\bMG\\b|MAGNESIUM",
+    Fe = "\\bFE\\b|IRON",
+    Mn = "\\bMN\\b|MANGANESE",
+    Cu = "\\bCU\\b|COPPER",
+    Zn = "\\bZN\\b|ZINC"
+  )
+  
+  matches <- sapply(patterns, function(pat) grepl(pat, v_up))
+  if (any(matches)) return(names(patterns)[which(matches)[1]])
   return(NULL)
 }
 
@@ -97,6 +103,79 @@ render_palette_choices <- function() {
     sprintf('<div style="display: flex; justify-content: space-between; align-items: center; width: 100%%;"><span>%s</span><div style="display: flex;">%s</div></div>', display_name, swatches)
   })
   setNames(pals, labels)
+}
+
+# --- Dynamic Styler Config Sync Helper ---
+sync_styler_config <- function(cfg, session) {
+  fields <- list(
+    title_size = list(fn = updateSliderInput, name = "styler_title_size"),
+    base_size = list(fn = updateSliderInput, name = "styler_base_size"),
+    x_size = list(fn = updateSliderInput, name = "styler_x_size"),
+    y_size = list(fn = updateSliderInput, name = "styler_y_size"),
+    label_size = list(fn = updateSliderInput, name = "styler_label_size"),
+    legend_size = list(fn = updateSliderInput, name = "styler_legend_size"),
+    legend_key_size = list(fn = updateSliderInput, name = "styler_legend_key_size"),
+    font_family = list(fn = updateSelectInput, name = "styler_font_family", val_param = "selected"),
+    label_orient = list(fn = updateSelectInput, name = "styler_label_orient", val_param = "selected"),
+    legend_pos = list(fn = updateSelectInput, name = "styler_legend_pos", val_param = "selected"),
+    legend_dir = list(fn = updateSelectInput, name = "styler_legend_dir", val_param = "selected"),
+    legend_text_angle = list(fn = updateSelectInput, name = "styler_legend_text_angle", val_param = "selected"),
+    margin_t = list(fn = updateNumericInput, name = "styler_margin_t"),
+    margin_r = list(fn = updateNumericInput, name = "styler_margin_r"),
+    margin_b = list(fn = updateNumericInput, name = "styler_margin_b"),
+    margin_l = list(fn = updateNumericInput, name = "styler_margin_l"),
+    show_grid = list(fn = updateCheckboxInput, name = "styler_show_grid"),
+    high_contrast = list(fn = updateCheckboxInput, name = "styler_high_contrast"),
+    aspect_ratio = list(fn = updateNumericInput, name = "styler_aspect_ratio"),
+    width = list(fn = updateNumericInput, name = "styler_width"),
+    height = list(fn = updateNumericInput, name = "styler_height"),
+    dpi = list(fn = updateNumericInput, name = "styler_dpi"),
+    format = list(fn = updateSelectInput, name = "styler_format", val_param = "selected")
+  )
+  
+  for (key in names(fields)) {
+    val <- cfg[[key]]
+    if (is.null(val)) val <- cfg[[paste0("styler_", key)]]
+    
+    if (!is.null(val)) {
+      field <- fields[[key]]
+      args <- list(session = session, inputId = field$name)
+      val_param <- if (!is.null(field$val_param)) field$val_param else "value"
+      args[[val_param]] <- val
+      do.call(field$fn, args)
+    }
+  }
+}
+
+# --- Safe Concaveman Boundary Helper ---
+safe_concaveman <- function(pts) {
+  if (nrow(pts) < 3) {
+    return(sf::st_convex_hull(sf::st_union(pts)))
+  }
+  b <- tryCatch({
+    concaveman::concaveman(pts)
+  }, error = function(e) {
+    NULL
+  })
+  
+  if (is.null(b) || sf::st_is_empty(b) || sf::st_geometry_type(b) == "GEOMETRYCOLLECTION") {
+    return(sf::st_convex_hull(sf::st_union(pts)))
+  }
+  return(b)
+}
+
+# --- Clean gstat Environment Helper ---
+clean_gstat_env <- function(vgm_obj) {
+  if (is.null(vgm_obj)) return(NULL)
+  if (is.list(vgm_obj)) {
+    if (!is.null(attr(vgm_obj, "formula"))) {
+      environment(attr(vgm_obj, "formula")) <- emptyenv()
+    }
+    if (!is.null(attr(vgm_obj, "call"))) {
+      attr(vgm_obj, "call") <- NULL
+    }
+  }
+  return(vgm_obj)
 }
 
 # --- Scientific Variogram Parameters ---
@@ -193,6 +272,7 @@ ui <- fluidPage(
       #pt_style_toolbar .checkbox label { color: #e2e8f0; font-size: 12px; }
       #pt_style_toolbar label { font-weight: normal; color: #a0aec0; }
       #pt_style_toolbar .btn-xs { font-size: 11px; padding: 2px 8px; }
+      .map-toolbar-export-container .form-group { margin-bottom: 0 !important; }
     ")),
     uiOutput("dynamic_manual_style"),
     tags$script(HTML("$(function () { $('[data-toggle=\"popover\"]').popover({html: true}); });"))
@@ -423,8 +503,7 @@ ui <- fluidPage(
           shinyFilesButton("load_config", "Load", "Select Config", multiple = FALSE, class = "btn-info", style="flex:1;")
       ),
       br(),
-      actionButton("run", "GENERATE MODELS", class = "btn-success btn-lg", style="width:100%;"),
-      uiOutput("reset_archive_choice_ui")
+      actionButton("run", "GENERATE MODELS", class = "btn-success btn-lg", style="width:100%;")
     ),
     
     mainPanel(width = 9,
@@ -465,7 +544,7 @@ ui <- fluidPage(
                                "(Confirm mapped variables below after uploading)"),
                         tags$p("Pair your Target (Actual) variables with their Predictions. You can map them manually or upload a metadata file."),
                         fileInput("meta_file", "Upload Variable List (Optional)", accept = c(".xlsx", ".xls", ".csv")),
-                        uiOutput("var_mapping_ui")
+                        shinycssloaders::withSpinner(uiOutput("var_mapping_ui"), type = 6, color = "#2ecc71")
                      )
                  )
         ),
@@ -480,7 +559,8 @@ ui <- fluidPage(
                                  ),
                                  shinyjs::hidden(
                                      actionButton("reveal_maps_btn", "Reveal Maps & Enable Analysis", class="btn-success btn-lg", style="box-shadow: 0 4px 15px rgba(46, 204, 113, 0.4); border: none; font-weight: bold; padding: 12px 30px; border-radius: 30px; transition: all 0.3s;")
-                                 )
+                                 ),
+                                 actionButton("cancel_model_btn", "Cancel Generation", class="btn-danger btn-sm", style="margin-top: 15px; border-radius: 20px; font-weight: bold;")
                              ),
                              div(style="margin-bottom:10px; display: flex; align-items: center; gap: 10px; flex-wrap: wrap; background-color: #f8f9fa; padding: 10px; border-radius: 5px; border: 1px solid #ddd;",
                              div(style="display: flex; align-items: center; gap: 10px; margin-right: 15px;",
@@ -501,7 +581,7 @@ ui <- fluidPage(
                              actionButton("toggle_pt_style", NULL, icon = icon("palette"), class = "btn-sm",
                                           style = "background-color: #6c5ce7; color: white; border: none;",
                                           title = "Point Styling Options"),
-                             div(style="display: flex; align-items: center; gap: 5px; border-left: 1px solid #ccc; padding-left: 10px;",
+                             div(class="map-toolbar-export-container", style="display: flex; align-items: center; gap: 5px; border-left: 1px solid #ccc; padding-left: 10px;",
                                  selectInput("polygon_export_format", NULL, choices = c("Shapefile (ZIP)" = "shp", "GeoJSON" = "geojson", "KML" = "kml", "GPKG" = "gpkg"), selected = "shp", width = "120px", selectize = FALSE),
                                  downloadButton("polygon_download_btn", "Export Polygon", class = "btn-success btn-sm", style = "padding: 4px 10px; font-size: 12px; line-height: 1.5; border-radius: 3px;")
                              )
@@ -631,7 +711,7 @@ ui <- fluidPage(
                              h4("Data Summary Statistics"),
                              tags$p(style="font-size: 0.85em; opacity: 0.8; font-style: italic;", "Aggregated descriptive statistics and area coverage for the data."),
                              h5("Area Coverage"),
-                             conditionalPanel(condition = "input.locality.length > 1 || (input.locality.length == 1 && input.locality[0] == 'ALL')",
+                             conditionalPanel(condition = "input.locality && (typeof input.locality === 'string' ? input.locality === 'ALL' : (input.locality.length > 1 || input.locality.indexOf('ALL') > -1))",
                                fluidRow(
                                  column(6, h6("Total - Actual"), tableOutput("area_table_total_act")),
                                  column(6, div(id = "area_total_pred_col", h6("Total - Predicted"), tableOutput("area_table_total_pre")))
@@ -641,7 +721,7 @@ ui <- fluidPage(
                                column(6, div(id = "loc_pred_col", h6("Locality - Predicted"), tableOutput("area_table_loc_pre")))
                              ),                             hr(style="border-top: 1px solid #339af0;"),
                              h5("Descriptive Statistics"),
-                             conditionalPanel(condition = "input.locality.length > 1 || (input.locality.length == 1 && input.locality[0] == 'ALL')",
+                             conditionalPanel(condition = "input.locality && (typeof input.locality === 'string' ? input.locality === 'ALL' : (input.locality.length > 1 || input.locality.indexOf('ALL') > -1))",
                                tableOutput("stats_table_total")
                              ),
                              tableOutput("stats_table_loc")
@@ -677,7 +757,8 @@ ui <- fluidPage(
                      div(style = "background-color: #fff3cd; padding: 20px; border: 1px solid #ffc107; border-radius: 8px;",
                          h4(icon("archive"), "Run History Archive"),
                          tags$p(style="font-size: 0.85em; opacity: 0.8; font-style: italic;", "Previous model runs are archived here. You can restore or permanently remove them."),
-                         uiOutput("run_history_ui")
+                         uiOutput("run_history_ui"),
+                         uiOutput("reset_archive_choice_ui")
                      )
                                   )),
         tabPanel("5. Descriptive and Exploratory Suite",
@@ -693,6 +774,57 @@ server <- function(input, output, session) {
   # --- Centralized Variable Label Helper ---
   get_var_label <- function(v) {
     .GlobalEnv$get_var_label(v, rv$mapping$vars)
+  }
+
+  # --- Dynamic Residual Plot Factory ---
+  render_resid_plot <- function(cv_data_reactive, title_suffix = "") {
+    renderPlot({
+      req(input$sel_loc_stats, cv_data_reactive())
+      loc <- input$sel_loc_stats
+      df_list <- cv_data_reactive()
+      
+      if(loc == "Total (Combined)") {
+         sf_list <- lapply(df_list, function(x) {
+           if(inherits(x, "sf")) return(x)
+           if(is.data.frame(x) && "x" %in% colnames(x) && "y" %in% colnames(x)) return(st_as_sf(x, coords = c("x", "y"), crs = rv$mapping$crs))
+           return(NULL)
+         })
+         sf_list <- sf_list[!sapply(sf_list, is.null)]
+         req(length(sf_list) > 0)
+         cv_obj <- tryCatch(do.call(rbind, sf_list), error = function(e) sf_list[[1]])
+      } else {
+         cv_obj <- df_list[[loc]]
+      }
+      
+      req(cv_obj)
+      
+      if(!inherits(cv_obj, "sf") && !inherits(cv_obj, "Spatial")) {
+         if("x" %in% colnames(cv_obj) && "y" %in% colnames(cv_obj)) {
+            cv_obj <- st_as_sf(cv_obj, coords = c("x", "y"), crs = rv$mapping$crs)
+         } else {
+            return(NULL) 
+         }
+      }
+      
+      if(!("residual" %in% colnames(cv_obj))) {
+         obs_col <- grep("^var1\\.observed$|^observed$|^target\\.observed$", colnames(cv_obj), value = TRUE)[1]
+         if (is.na(obs_col)) obs_col <- grep("\\.observed$", colnames(cv_obj), value = TRUE)[1]
+         
+         pre_col <- grep("^var1\\.pred$|^target\\.pred$|^pred$", colnames(cv_obj), value = TRUE)[1]
+         if (is.na(pre_col)) pre_col <- grep("\\.pred$", colnames(cv_obj), value = TRUE)[1]
+         
+         req(obs_col, pre_col)
+         cv_obj$residual <- cv_obj[[obs_col]] - cv_obj[[pre_col]]
+      }
+      
+      tryCatch({
+         lags <- calc_scientific_lags(cv_obj)
+         v_res <- variogram(residual ~ 1, cv_obj, width = lags$width, cutoff = lags$cutoff)
+         plot(v_res, main = paste("Residual Variogram:", loc, title_suffix), sub = "Target: Pure Nugget (No structure)")
+      }, error = function(e) {
+         plot(1, 1, type="n", main=paste("Error:", e$message), axes=F)
+      })
+    })
   }
 
   # --- Force Comparison Mode for Residuals ---
@@ -1045,7 +1177,7 @@ server <- function(input, output, session) {
     active_styler_item(id)
     
     # Trigger the Open Styler logic (we can't just call it, but we can trigger the modal)
-    click("open_styler")
+    shinyjs::click("open_styler")
   })
   
   # Styler Configuration Persistence (Local Storage)
@@ -1181,29 +1313,7 @@ server <- function(input, output, session) {
   
   observeEvent(input$styler_local_config, {
     cfg <- input$styler_local_config
-    if(!is.null(cfg$title_size)) updateSliderInput(session, "styler_title_size", value = cfg$title_size)
-    if(!is.null(cfg$base_size)) updateSliderInput(session, "styler_base_size", value = cfg$base_size)
-    if(!is.null(cfg$x_size)) updateSliderInput(session, "styler_x_size", value = cfg$x_size)
-    if(!is.null(cfg$y_size)) updateSliderInput(session, "styler_y_size", value = cfg$y_size)
-    if(!is.null(cfg$label_size)) updateSliderInput(session, "styler_label_size", value = cfg$label_size)
-    if(!is.null(cfg$legend_size)) updateSliderInput(session, "styler_legend_size", value = cfg$legend_size)
-    if(!is.null(cfg$legend_key_size)) updateSliderInput(session, "styler_legend_key_size", value = cfg$legend_key_size)
-    if(!is.null(cfg$font_family)) updateSelectInput(session, "styler_font_family", selected = cfg$font_family)
-    if(!is.null(cfg$label_orient)) updateSelectInput(session, "styler_label_orient", selected = cfg$label_orient)
-    if(!is.null(cfg$legend_pos)) updateSelectInput(session, "styler_legend_pos", selected = cfg$legend_pos)
-    if(!is.null(cfg$legend_dir)) updateSelectInput(session, "styler_legend_dir", selected = cfg$legend_dir)
-    if(!is.null(cfg$legend_text_angle)) updateSelectInput(session, "styler_legend_text_angle", selected = cfg$legend_text_angle)
-    if(!is.null(cfg$margin_t)) updateNumericInput(session, "styler_margin_t", value = cfg$margin_t)
-    if(!is.null(cfg$margin_r)) updateNumericInput(session, "styler_margin_r", value = cfg$margin_r)
-    if(!is.null(cfg$margin_b)) updateNumericInput(session, "styler_margin_b", value = cfg$margin_b)
-    if(!is.null(cfg$margin_l)) updateNumericInput(session, "styler_margin_l", value = cfg$margin_l)
-    if(!is.null(cfg$show_grid)) updateCheckboxInput(session, "styler_show_grid", value = cfg$show_grid)
-    if(!is.null(cfg$high_contrast)) updateCheckboxInput(session, "styler_high_contrast", value = cfg$high_contrast)
-    if(!is.null(cfg$aspect_ratio)) updateNumericInput(session, "styler_aspect_ratio", value = cfg$aspect_ratio)
-    if(!is.null(cfg$width)) updateNumericInput(session, "styler_width", value = cfg$width)
-    if(!is.null(cfg$height)) updateNumericInput(session, "styler_height", value = cfg$height)
-    if(!is.null(cfg$dpi)) updateNumericInput(session, "styler_dpi", value = cfg$dpi)
-    if(!is.null(cfg$format)) updateSelectInput(session, "styler_format", selected = cfg$format)
+    sync_styler_config(cfg, session)
   })
 
   # Sync styler width, height and aspect ratio
@@ -1267,27 +1377,7 @@ server <- function(input, output, session) {
     tryCatch({
       cfg <- jsonlite::fromJSON(input$styler_upload_config$datapath)
       
-      if(!is.null(cfg$styler_title_size)) updateSliderInput(session, "styler_title_size", value = cfg$styler_title_size)
-      if(!is.null(cfg$styler_base_size)) updateSliderInput(session, "styler_base_size", value = cfg$styler_base_size)
-      if(!is.null(cfg$styler_x_size)) updateSliderInput(session, "styler_x_size", value = cfg$styler_x_size)
-      if(!is.null(cfg$styler_y_size)) updateSliderInput(session, "styler_y_size", value = cfg$styler_y_size)
-      if(!is.null(cfg$styler_label_size)) updateSliderInput(session, "styler_label_size", value = cfg$styler_label_size)
-      if(!is.null(cfg$styler_legend_size)) updateSliderInput(session, "styler_legend_size", value = cfg$styler_legend_size)
-      if(!is.null(cfg$styler_legend_key_size)) updateSliderInput(session, "styler_legend_key_size", value = cfg$styler_legend_key_size)
-      if(!is.null(cfg$styler_font_family)) updateSelectInput(session, "styler_font_family", selected = cfg$styler_font_family)
-      if(!is.null(cfg$styler_label_orient)) updateSelectInput(session, "styler_label_orient", selected = cfg$styler_label_orient)
-      if(!is.null(cfg$styler_legend_pos)) updateSelectInput(session, "styler_legend_pos", selected = cfg$styler_legend_pos)
-      if(!is.null(cfg$styler_legend_dir)) updateSelectInput(session, "styler_legend_dir", selected = cfg$styler_legend_dir)
-      if(!is.null(cfg$styler_legend_text_angle)) updateSelectInput(session, "styler_legend_text_angle", selected = cfg$styler_legend_text_angle)
-      if(!is.null(cfg$styler_margin_t)) updateNumericInput(session, "styler_margin_t", value = cfg$styler_margin_t)
-      if(!is.null(cfg$styler_margin_r)) updateNumericInput(session, "styler_margin_r", value = cfg$styler_margin_r)
-      if(!is.null(cfg$styler_margin_b)) updateNumericInput(session, "styler_margin_b", value = cfg$styler_margin_b)
-      if(!is.null(cfg$styler_margin_l)) updateNumericInput(session, "styler_margin_l", value = cfg$styler_margin_l)
-      if(!is.null(cfg$styler_show_grid)) updateCheckboxInput(session, "styler_show_grid", value = cfg$styler_show_grid)
-      if(!is.null(cfg$styler_high_contrast)) updateCheckboxInput(session, "styler_high_contrast", value = cfg$styler_high_contrast)
-      if(!is.null(cfg$styler_aspect_ratio)) updateNumericInput(session, "styler_aspect_ratio", value = cfg$styler_aspect_ratio)
-      if(!is.null(cfg$styler_dpi)) updateNumericInput(session, "styler_dpi", value = cfg$styler_dpi)
-      if(!is.null(cfg$styler_format)) updateSelectInput(session, "styler_format", selected = cfg$styler_format)
+      sync_styler_config(cfg, session)
       
       showNotification("Styler configuration loaded successfully.", type = "message")
     }, error = function(e) {
@@ -1843,7 +1933,7 @@ server <- function(input, output, session) {
     req(input$user_shp)
     temp_dir <- file.path(tempdir(), paste0("shp_upload_", as.integer(Sys.time())))
     dir.create(temp_dir, showWarnings = FALSE, recursive = TRUE)
-    on.exit(unlink(temp_dir, recursive = TRUE), add = TRUE)
+    session$onSessionEnded(function() { unlink(temp_dir, recursive = TRUE) })
     
     for(i in 1:nrow(input$user_shp)) {
       file.copy(input$user_shp$datapath[i], file.path(temp_dir, input$user_shp$name[i]), overwrite = TRUE)
@@ -3007,6 +3097,13 @@ server <- function(input, output, session) {
   # B4: Modal dialog for archive choice when previous results exist
   observeEvent(input$run, {
     req(rv$user_data, input$locality, rv$mapping$x, rv$mapping$y)
+    
+    # UI Guard: check if auxiliary variables are missing for RK/RFK/CK
+    if (input$method %in% c("RK", "RFK", "CK") && (is.null(input$aux_vars) || length(input$aux_vars) == 0)) {
+      showNotification("Please select at least one auxiliary variable for RK/RFK/CK model generation.", type = "error")
+      return()
+    }
+    
     meta <- get_current_meta()
     req(meta)
     
@@ -3108,21 +3205,22 @@ server <- function(input, output, session) {
     update_premium_progress(5, "Initializing Spatial Analysis Engine...")
 
     # Wipe any old progress files and start the timer
-    old_files <- list.files(pattern = "^progress_.*_.*\\.txt$")
-    if(length(old_files) > 0) tryCatch(file.remove(old_files), error = function(e) NULL)
-    rv$model_running <- TRUE
+     if(file.exists("cancel_flag.txt")) tryCatch(file.remove("cancel_flag.txt"), error = function(e) NULL)
+     old_files <- list.files(pattern = "^progress_.*_.*\\.txt$")
+     if(length(old_files) > 0) tryCatch(file.remove(old_files), error = function(e) NULL)
+     rv$model_running <- TRUE
 
     # B3: Capture run configuration before clearing
     rv$run_counter <- rv$run_counter + 1L
-    method_params_str <- switch(input$method,
+    method_params_list <- list(
       "IDW" = paste0("IDW Power: ", input$idw_p, " | Nmax: ", input$idw_nmax),
       "TPS" = paste0("TPS Lambda: ", input$tps_lambda),
       "OK"  = "Ordinary Kriging (auto variogram)",
       "RK"  = paste0("Regression Kriging | Aux: ", paste(input$aux_vars, collapse=", ")),
       "RFK" = paste0("Random Forest Kriging | Aux: ", paste(input$aux_vars, collapse=", ")),
-      "CK"  = paste0("Co-Kriging | Aux: ", paste(input$aux_vars, collapse=", ")),
-      ""
+      "CK"  = paste0("Co-Kriging | Aux: ", paste(input$aux_vars, collapse=", "))
     )
+    method_params_str <- method_params_list[[input$method]] %||% ""
     rv$run_config_summary <- list(
       run_id = rv$run_counter,
       timestamp = Sys.time(),
@@ -3142,10 +3240,11 @@ server <- function(input, output, session) {
       method_params = method_params_str
     )
 
-    # Clear current results for fresh run
-    rv$export_registry <- list()
-    rv$rast_list_act <- list(); rv$rast_list_pre <- list(); sf_list <- list(); b_list <- list()
-    rv$rast <- NULL; rv$rast_pred <- NULL; rv$rast_res <- NULL; rv$has_predictions <- FALSE
+    tryCatch({
+      # Clear current results for fresh run
+      rv$export_registry <- list()
+      rv$rast_list_act <- list(); rv$rast_list_pre <- list(); sf_list <- list(); b_list <- list()
+      rv$rast <- NULL; rv$rast_pred <- NULL; rv$rast_res <- NULL; rv$has_predictions <- FALSE
     rv$v_emp_list <- list(); rv$log <- paste0("[Run #", rv$run_counter, "] Starting spatial interpolation using method: ", input$method, "...")
     rv$run_method[[input$var_id]] <- input$method
     rv$model_summaries <- list(); rv$rf_models <- list(); rv$gstat_objs <- list()
@@ -3218,8 +3317,8 @@ server <- function(input, output, session) {
         idw_nmax = idw_nmax_val %||% 12,
         tps_lambda_act = get_regional_param("TPS", l, "act", default = tps_lambda_val),
         tps_lambda_pre = get_regional_param("TPS", l, "pre", default = tps_lambda_val),
-        pre_fit_act = rv$v_fit_list[[paste0(l, "_act")]],
-        pre_fit_pre = if(sep_fit) rv$v_fit_list[[paste0(l, "_pre")]] else rv$v_fit_list[[paste0(l, "_act")]]
+        pre_fit_act = clean_gstat_env(rv$v_fit_list[[paste0(l, "_act")]]),
+        pre_fit_pre = clean_gstat_env(if(sep_fit) rv$v_fit_list[[paste0(l, "_pre")]] else rv$v_fit_list[[paste0(l, "_act")]])
       )
       
       list(l = l, pts_data = pts_data, m_params = m_params)
@@ -3233,9 +3332,10 @@ server <- function(input, output, session) {
     main_wd <- getwd()
 
     promises::future_promise({
-      tryCatch(setwd(main_wd), error = function(e) NULL)
       res_all <- furrr::future_map(df_list, function(item) {
-        tryCatch(setwd(main_wd), error = function(e) NULL)
+        if (file.exists("cancel_flag.txt")) {
+          stop("Model generation cancelled by user.")
+        }
         l <- item$l
       pts_data <- item$pts_data
       m_params <- item$m_params        
@@ -3280,15 +3380,15 @@ server <- function(input, output, session) {
         }
         
         b_dist_local <- if (b_mode_safe == "dynamic" && b_type == "wrapped") {
-          val <- switch(current_method_safe,
+          buffer_multipliers <- list(
             "TPS" = 1.0 * local_res,
             "IDW" = 2.0 * local_res,
             "OK"  = 3.0 * local_res,
             "CK"  = 3.0 * local_res,
             "RK"  = 3.0 * local_res,
-            "RFK" = 3.0 * local_res,
-            2.0 * local_res
+            "RFK" = 3.0 * local_res
           )
+          val <- buffer_multipliers[[current_method_safe]] %||% (2.0 * local_res)
           # Make sure switch results are clean
           val <- if(is.numeric(val)) val else 2.0 * local_res
           max(5, min(2000, val))
@@ -3360,8 +3460,8 @@ server <- function(input, output, session) {
               bound <- tryCatch({
                 b <- switch(b_type,
                        "convex"  = sf::st_convex_hull(sf::st_union(pts)),
-                       "concave" = concaveman::concaveman(pts),
-                       "wrapped" = sf::st_buffer(concaveman::concaveman(pts), dist = b_dist_local),
+                       "concave" = safe_concaveman(pts),
+                       "wrapped" = sf::st_buffer(safe_concaveman(pts), dist = b_dist_local),
                        "strict"  = sf::st_union(sf::st_buffer(pts, dist = b_dist_local)))
                 sf::st_as_sf(sf::st_sfc(sf::st_geometry(b), crs = sf::st_crs(pts)))
               }, error = function(e) {
@@ -3406,6 +3506,7 @@ server <- function(input, output, session) {
             if(nrow(pts_a) >= 3) {
                 lags_a <- calc_scientific_lags(pts_a)
                 mp_a <- list(idw_p = m_params$idw_p_act, idw_nmax = m_params$idw_nmax, tps_lambda = m_params$tps_lambda_act, pre_fit = m_params$pre_fit_act)
+                if (file.exists("cancel_flag.txt")) stop("Model generation cancelled by user.")
                 res_a_list <- apply_interpolation(pts_a, "v", current_method, grid_p, aux_vars, lags_a, mp_a, l, "act")
                 res_out$v_emp_act <- res_a_list$v_emp; res_out$v_fit_act <- res_a_list$fit; res_out$cv_act <- res_a_list$cv_metrics; res_out$cv_obj_act <- res_a_list$cv_obj
                 res_out$summ_act <- res_a_list$model_summary; res_out$rf_act <- res_a_list$rf_model; res_out$gstat_act <- res_a_list$gstat_obj
@@ -3424,6 +3525,7 @@ server <- function(input, output, session) {
                 if(nrow(pts_p) >= 3) {
                     lags_p <- calc_scientific_lags(pts_p)
                     mp_p <- list(idw_p = m_params$idw_p_pre, idw_nmax = m_params$idw_nmax, tps_lambda = m_params$tps_lambda_pre, pre_fit = m_params$pre_fit_pre)
+                    if (file.exists("cancel_flag.txt")) stop("Model generation cancelled by user.")
                     res_p_list <- apply_interpolation(pts_p, "pv", current_method, grid_p, aux_vars, lags_p, mp_p, l, "pre")
                     res_out$v_emp_pre <- res_p_list$v_emp; res_out$v_fit_pre <- res_p_list$fit; res_out$cv_pre <- res_p_list$cv_metrics; res_out$cv_obj_pre <- res_p_list$cv_obj
                     res_out$summ_pre <- res_p_list$model_summary; res_out$rf_pre <- res_p_list$rf_model; res_out$gstat_pre <- res_p_list$gstat_obj
@@ -3507,6 +3609,9 @@ Error in ", l, ": ", e$message)
         apply_TPS = apply_TPS,
         krige_covariates = krige_covariates,
         get_cv_residuals = get_cv_residuals,
+        init_interpolation_res = init_interpolation_res,
+        safe_run_cv = safe_run_cv,
+        sanitize_spatial_predictions = sanitize_spatial_predictions,
         update_progress_file = update_progress_file,
         detect_multicollinearity_engine = detect_multicollinearity_engine,
         optimize_idw_p = optimize_idw_p,
@@ -3885,12 +3990,20 @@ Error in ", l, ": ", e$message)
     if(length(old_files) > 0) tryCatch(file.remove(old_files), error = function(e) NULL)
     }) %...!% (function(err) {
       shinyjs::hide("map_processing_overlay")
-      showNotification(paste("Parallel interpolation failed:", err$message), type = "error")
+      if (!grepl("cancelled", tolower(err$message))) {
+        showNotification(paste("Parallel interpolation failed:", err$message), type = "error")
+      }
       
       # Wipe the polling state and remove temporary files on failure
       rv$model_running <- FALSE
       old_files <- list.files(pattern = "^progress_.*_.*\\.txt$")
       if(length(old_files) > 0) tryCatch(file.remove(old_files), error = function(e) NULL)
+    })
+    
+    }, error = function(e) {
+      shinyjs::hide("map_processing_overlay")
+      showNotification(paste("Model preparation failed:", e$message), type = "error")
+      rv$model_running <- FALSE
     })
     
     # CRITICAL: Return NULL so Shiny does NOT lock the session waiting for the promise.
@@ -3930,6 +4043,18 @@ Error in ", l, ": ", e$message)
         shinyjs::html("map_progress_text", paste0("Executing Parallel Interpolation Algorithms...<br/><span style='font-size: 0.85em; opacity: 0.8;'>", paste(progress_msgs, collapse = " &nbsp;|&nbsp; "), "</span>"))
       }
     }
+  })
+
+  # Event to cancel model generation
+  observeEvent(input$cancel_model_btn, {
+    file.create("cancel_flag.txt")
+    rv$model_running <- FALSE
+    shinyjs::hide("map_processing_overlay")
+    showNotification("Model generation cancelled by user.", type = "warning")
+    
+    # Wipe the temporary progress files
+    old_files <- list.files(pattern = "^progress_.*_.*\\.txt$")
+    if(length(old_files) > 0) tryCatch(file.remove(old_files), error = function(e) NULL)
   })
 
   # Event to reveal maps and unlock analysis
@@ -4257,6 +4382,31 @@ Error in ", l, ": ", e$message)
       clearTiles() %>%
       addProviderTiles(input$base_map_layer, layerId="base_tiles", options = providerTileOptions(zIndex = -10))
       
+    # Reset to the initial reveal position (zoom/pan to bounding box)
+    if (!is.null(rv$bound)) {
+      tryCatch({
+        bbox <- sf::st_bbox(sf::st_transform(sf::st_as_sf(rv$bound), 4326))
+        leafletProxy("main_map") %>% fitBounds(as.numeric(bbox$xmin), as.numeric(bbox$ymin), as.numeric(bbox$xmax), as.numeric(bbox$ymax))
+        if (isTRUE(input$comp_mode)) {
+          leafletProxy("comp_map_left") %>% fitBounds(as.numeric(bbox$xmin), as.numeric(bbox$ymin), as.numeric(bbox$xmax), as.numeric(bbox$ymax))
+          leafletProxy("comp_map_right") %>% fitBounds(as.numeric(bbox$xmin), as.numeric(bbox$ymin), as.numeric(bbox$xmax), as.numeric(bbox$ymax))
+        }
+      }, error = function(e) NULL)
+    } else if (!is.null(rv$user_data) && !is.null(rv$mapping$x) && !is.null(rv$mapping$y)) {
+      tryCatch({
+        df_map <- rv$user_data %>% 
+          dplyr::select(x = !!sym(rv$mapping$x), y = !!sym(rv$mapping$y)) %>% 
+          na.omit()
+        pts <- st_as_sf(df_map, coords = c("x", "y"), crs = rv$mapping$crs) %>% st_transform(4326)
+        bbox <- st_bbox(pts)
+        leafletProxy("main_map") %>% fitBounds(as.numeric(bbox$xmin), as.numeric(bbox$ymin), as.numeric(bbox$xmax), as.numeric(bbox$ymax))
+        if (isTRUE(input$comp_mode)) {
+          leafletProxy("comp_map_left") %>% fitBounds(as.numeric(bbox$xmin), as.numeric(bbox$ymin), as.numeric(bbox$xmax), as.numeric(bbox$ymax))
+          leafletProxy("comp_map_right") %>% fitBounds(as.numeric(bbox$xmin), as.numeric(bbox$ymin), as.numeric(bbox$xmax), as.numeric(bbox$ymax))
+        }
+      }, error = function(e) NULL)
+    }
+      
     # Trigger window resize to force Leaflet invalidateSize which fixes gray tiles
     shinyjs::runjs("setTimeout(function() { window.dispatchEvent(new Event('resize')); }, 100);")
   })
@@ -4563,52 +4713,7 @@ Error in ", l, ": ", e$message)
       theme_minimal()
   })
 
-  output$resid_vgm_plot_act <- renderPlot({
-    req(input$sel_loc_stats, rv$cv_data_act)
-    loc <- input$sel_loc_stats
-    
-    if(loc == "Total (Combined)") {
-       df_list <- rv$cv_data_act
-       # Safely combine sf objects
-       sf_list <- lapply(df_list, function(x) {
-         if(inherits(x, "sf")) return(x)
-         if(is.data.frame(x) && "x" %in% colnames(x) && "y" %in% colnames(x)) return(st_as_sf(x, coords = c("x", "y"), crs = rv$mapping$crs))
-         return(NULL)
-       })
-       sf_list <- sf_list[!sapply(sf_list, is.null)]
-       req(length(sf_list) > 0)
-       
-       # Use base R rbind if do.call fails on sf, though dplyr::bind_rows is safer if available
-       cv_obj <- tryCatch(do.call(rbind, sf_list), error = function(e) sf_list[[1]])
-    } else {
-       cv_obj <- rv$cv_data_act[[loc]]
-    }
-    
-    req(cv_obj)
-    
-    if(!inherits(cv_obj, "sf") && !inherits(cv_obj, "Spatial")) {
-       if("x" %in% colnames(cv_obj) && "y" %in% colnames(cv_obj)) {
-          cv_obj <- st_as_sf(cv_obj, coords = c("x", "y"), crs = rv$mapping$crs)
-       } else {
-          return(NULL) 
-       }
-    }
-    
-    if(!("residual" %in% colnames(cv_obj))) {
-       obs_col <- grep("\\.observed$|^observed$", colnames(cv_obj), value = TRUE)[1]
-       pre_col <- grep("\\.pred$|^var1\\.pred$", colnames(cv_obj), value = TRUE)[1]
-       req(obs_col, pre_col)
-       cv_obj$residual <- cv_obj[[obs_col]] - cv_obj[[pre_col]]
-    }
-    
-    tryCatch({
-       lags <- calc_scientific_lags(cv_obj)
-       v_res <- variogram(residual ~ 1, cv_obj, width = lags$width, cutoff = lags$cutoff)
-       plot(v_res, main = paste("Residual Variogram:", loc), sub = "Target: Pure Nugget (No structure)")
-    }, error = function(e) {
-       plot(1, 1, type="n", main=paste("Error:", e$message), axes=F)
-    })
-  })
+  output$resid_vgm_plot_act <- render_resid_plot(reactive(rv$cv_data_act), "")
 
   output$obs_pred_plot_pre <- renderPlot({
     req(input$sel_loc_stats, rv$cv_data_pre)
@@ -4636,49 +4741,7 @@ Error in ", l, ": ", e$message)
       theme_minimal()
   })
 
-  output$resid_vgm_plot_pre <- renderPlot({
-    req(input$sel_loc_stats, rv$cv_data_pre)
-    loc <- input$sel_loc_stats
-    
-    if(loc == "Total (Combined)") {
-       df_list <- rv$cv_data_pre
-       sf_list <- lapply(df_list, function(x) {
-         if(inherits(x, "sf")) return(x)
-         if(is.data.frame(x) && "x" %in% colnames(x) && "y" %in% colnames(x)) return(st_as_sf(x, coords = c("x", "y"), crs = rv$mapping$crs))
-         return(NULL)
-       })
-       sf_list <- sf_list[!sapply(sf_list, is.null)]
-       req(length(sf_list) > 0)
-       cv_obj <- tryCatch(do.call(rbind, sf_list), error = function(e) sf_list[[1]])
-    } else {
-       cv_obj <- rv$cv_data_pre[[loc]]
-    }
-    
-    req(cv_obj)
-    
-    if(!inherits(cv_obj, "sf") && !inherits(cv_obj, "Spatial")) {
-       if("x" %in% colnames(cv_obj) && "y" %in% colnames(cv_obj)) {
-          cv_obj <- st_as_sf(cv_obj, coords = c("x", "y"), crs = rv$mapping$crs)
-       } else {
-          return(NULL) 
-       }
-    }
-    
-    if(!("residual" %in% colnames(cv_obj))) {
-       obs_col <- grep("\\.observed$|^observed$", colnames(cv_obj), value = TRUE)[1]
-       pre_col <- grep("\\.pred$|^var1\\.pred$", colnames(cv_obj), value = TRUE)[1]
-       req(obs_col, pre_col)
-       cv_obj$residual <- cv_obj[[obs_col]] - cv_obj[[pre_col]]
-    }
-    
-    tryCatch({
-       lags <- calc_scientific_lags(cv_obj)
-       v_res <- variogram(residual ~ 1, cv_obj, width = lags$width, cutoff = lags$cutoff)
-       plot(v_res, main = paste("Residual Variogram (Predicted Map):", loc), sub = "Target: Pure Nugget (No structure)")
-    }, error = function(e) {
-       plot(1, 1, type="n", main=paste("Error:", e$message), axes=F)
-    })
-  })
+  output$resid_vgm_plot_pre <- render_resid_plot(reactive(rv$cv_data_pre), "(Predicted Map)")
 
   output$tps_gcv_plot_pre <- renderPlot({
     loc <- input$sel_loc_stats; req(loc, input$method == "TPS")

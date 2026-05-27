@@ -1037,8 +1037,26 @@ generate_lagged_correlation <- function(df, var1, var2, max_lag = 10) {
 
 # --- Phase 5: PCA Logic ---
 check_collinearity <- function(df, vars, threshold = 0.95) {
-  res <- detect_multicollinearity_engine(df, vars = vars, pairwise_threshold = threshold)
-  return(list(has_collinearity = res$has_collinearity, pairs = res$pairs))
+  res <- detect_multicollinearity_engine(df, vars = vars, pairwise_threshold = threshold, vif_threshold = 10)
+  
+  has_coll <- res$has_collinearity || (length(res$dropped) > 0)
+  
+  pairs_df <- res$pairs
+  if (length(res$dropped) > 0) {
+    if (is.null(pairs_df)) {
+      pairs_df <- data.frame(var1 = character(), var2 = character(), r = numeric(), stringsAsFactors = FALSE)
+    }
+    for (d_var in res$dropped) {
+      pairs_df <- rbind(pairs_df, data.frame(
+        var1 = d_var,
+        var2 = "High VIF (> 10)",
+        r = NA,
+        stringsAsFactors = FALSE
+      ))
+    }
+  }
+  
+  return(list(has_collinearity = has_coll, pairs = pairs_df))
 }
 
 generate_pca_scree <- function(pca_res) {

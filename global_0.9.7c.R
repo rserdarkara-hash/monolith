@@ -1,4 +1,4 @@
-# global_0.9.6c.R - Centralized Configuration & Dependencies for Monolith v0.9.6c
+# global_0.9.7c.R - Centralized Configuration & Dependencies for Monolith v0.9.7c
 # Copyright (c) 2026 Recep Serdar Kara. All rights reserved.
 
 # --- Smart Auto-Installation & Package Loading Hook ---
@@ -10,7 +10,7 @@ required_packages <- c(
   "ggplot2", "ggpubr", "plotly", "RColorBrewer", "viridis", "latticeExtra",
   "patchwork", "fresh", "showtext", "scales", "commonmark",
   "randomForest", "DALEX", "yardstick", "agricolae", "mgcv",
-  "future", "furrr", "promises", "progressr"
+  "future", "furrr", "promises"
 )
 
 # Identify missing packages
@@ -78,7 +78,6 @@ library(mgcv)
 library(future)
 library(furrr)
 library(promises)
-library(progressr)
 
 # --- Enable Automatic Font Rendering ---
 showtext_auto()
@@ -93,9 +92,9 @@ if (!inherits(future::plan(), "multisession")) {
 }
 
 # --- Source v0.9.7 Helper Modules ---
-source("ui_helpers_0.9.7a.R")
-source("spatial_helpers_0.9.7a.R")
-source("theme_helpers_0.9.7a.R")
-source("gov_module_0.9.7a.R")
-source("desc_exploratory_module_0.9.7a.R")
+source("ui_helpers_0.9.7c.R")
+source("spatial_helpers_0.9.7c.R")
+source("theme_helpers_0.9.7c.R")
+source("gov_module_0.9.7c.R")
+source("desc_exploratory_module_0.9.7c.R")
 

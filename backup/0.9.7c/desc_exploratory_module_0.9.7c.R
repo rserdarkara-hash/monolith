@@ -1,4 +1,4 @@
-# desc_exploratory_module_0.9.7a.R - Descriptive & Exploratory Shiny Module
+# desc_exploratory_module_0.9.7c.R - Descriptive Exploratory Suite Server Module
 # Handles Tab 5 analytics: grouping, descriptive stats, correlation, and PCA
 
 desc_exploratory_ui <- function(id) {
@@ -96,6 +96,7 @@ desc_exploratory_ui <- function(id) {
                     shiny::selectInput(ns("pca_plot_type"), "Plot Type",
                       choices = c("Scree Plot" = "scree",
                                   "Biplot (2D)" = "biplot",
+                                  "Biplot (3D)" = "3d_biplot",
                                   "Loadings" = "loadings",
                                   "Contribution" = "contrib",
                                   "Cumulative Variance" = "cumvar",
@@ -132,11 +133,6 @@ desc_exploratory_ui <- function(id) {
 desc_exploratory_server <- function(id, data_reactive, vars_metadata_reactive) {
   shiny::moduleServer(id, function(input, output, session) {
     ns <- session$ns
-    
-    # Local variable label helper
-    get_var_label <- function(v) {
-      .GlobalEnv$get_var_label(v, vars_metadata_reactive())
-    }
     
     # --- Grouping & Discretization Server Logic ---
     shiny::observe({
@@ -201,7 +197,18 @@ desc_exploratory_server <- function(id, data_reactive, vars_metadata_reactive) {
         input[[paste0("grp_type_", i)]] %||% def
       })
       
-      process_grouping_vars(df, vars, types)
+      shiny::withProgress(message = "Applying Discretization and Grouping...", value = 0.5, {
+         res <- process_grouping_vars(df, vars, types)
+         res
+      })
+    })
+    
+    # Filtered dataset based on active groups (Cached)
+    rv_filtered_analytics_data <- shiny::reactive({
+      req(rv_analytics_data())
+      df_local <- rv_analytics_data()
+      active_groups <- input$analytics_active_group
+      filter_active_groups(df_local, active_groups)
     })
     
     output$analytics_group_filter_ui <- shiny::renderUI({
@@ -288,23 +295,22 @@ desc_exploratory_server <- function(id, data_reactive, vars_metadata_reactive) {
     
     desc_plot_obj <- shiny::reactive({
       req(rv_analytics_data())
-      df_global <- rv_analytics_data()
       p_type <- input$desc_plot_type
       if (!(p_type %in% c("parallel", "radar"))) {
         req(input$desc_var_x)
       }
       
-      df_local <- df_global
-      active_groups <- input$analytics_active_group
-      df_local <- filter_active_groups(df_local, active_groups)
+      shiny::withProgress(message = "Generating descriptive plot...", value = 0.5, {
+        df_global <- rv_analytics_data()
+        df_local <- rv_filtered_analytics_data()
       
       if (nrow(df_local) == 0) {
         p <- ggplot() + annotate("text", x=0, y=0, label="No data selected") + theme_void()
         return(p)
       }
       
-      var_x_label <- get_var_label(input$desc_var_x)
-      var_y_label <- get_var_label(input$desc_var_y)
+      var_x_label <- get_var_label(input$desc_var_x, vars_metadata_reactive())
+      var_y_label <- get_var_label(input$desc_var_y, vars_metadata_reactive())
       
       if(!is.null(input$desc_var_x) && input$desc_var_x != "") {
           colnames(df_global)[colnames(df_global) == input$desc_var_x] <- var_x_label
@@ -335,7 +341,7 @@ desc_exploratory_server <- function(id, data_reactive, vars_metadata_reactive) {
                                   stat_letter_pos = input$desc_stat_letter_pos)
         }
       } else {
-        var_z_label <- get_var_label(input$desc_var_z)
+        var_z_label <- get_var_label(input$desc_var_z, vars_metadata_reactive())
         if(!is.null(input$desc_var_z) && input$desc_var_z != "") {
             colnames(df_global)[colnames(df_global) == input$desc_var_z] <- var_z_label
             colnames(df_local)[colnames(df_local) == input$desc_var_z] <- var_z_label
@@ -349,7 +355,7 @@ desc_exploratory_server <- function(id, data_reactive, vars_metadata_reactive) {
         
         vars <- switch(p_type,
                        "qq" = var_x_label,
-                       "sinaplot" = if(isTruthy(input$desc_var_y)) c(var_x_label, get_var_label(input$desc_var_y)) else var_x_label,
+                       "sinaplot" = if(isTruthy(input$desc_var_y)) c(var_x_label, get_var_label(input$desc_var_y, vars_metadata_reactive())) else var_x_label,
                        "ridge" = var_x_label,
                        "density_heatmap" = c(var_x_label, var_y_label),
                        "xyz_surface" = c(var_x_label, var_y_label, var_z_label),
@@ -377,7 +383,8 @@ desc_exploratory_server <- function(id, data_reactive, vars_metadata_reactive) {
          }
       }
       
-      return(p)
+        p
+      })
     })
     
     shiny::observeEvent(input$clear_desc_vars, {
@@ -397,10 +404,7 @@ desc_exploratory_server <- function(id, data_reactive, vars_metadata_reactive) {
       if (!(p_type %in% c("parallel", "radar"))) {
         req(input$desc_var_x)
       }
-      df <- rv_analytics_data()
-      
-      active_groups <- input$analytics_active_group
-      df <- filter_active_groups(df, active_groups)
+      df <- rv_filtered_analytics_data()
       
       if (nrow(df) == 0) return(NULL)
       
@@ -522,10 +526,7 @@ desc_exploratory_server <- function(id, data_reactive, vars_metadata_reactive) {
     
     corr_plot_obj <- shiny::reactive({
       req(rv_analytics_data())
-      df <- rv_analytics_data()
-      
-      active_groups <- input$analytics_active_group
-      df <- filter_active_groups(df, active_groups)
+      df <- rv_filtered_analytics_data()
       
       if (nrow(df) == 0) {
         p <- ggplot() + annotate("text", x=0, y=0, label="No data selected") + theme_void()
@@ -537,8 +538,8 @@ desc_exploratory_server <- function(id, data_reactive, vars_metadata_reactive) {
       
       if (p_type == "lagged") {
         req(input$corr_var_1, input$corr_var_2)
-        v1_lab <- get_var_label(input$corr_var_1)
-        v2_lab <- get_var_label(input$corr_var_2)
+        v1_lab <- get_var_label(input$corr_var_1, vars_metadata_reactive())
+        v2_lab <- get_var_label(input$corr_var_2, vars_metadata_reactive())
         colnames(df)[colnames(df) == input$corr_var_1] <- v1_lab
         colnames(df)[colnames(df) == input$corr_var_2] <- v2_lab
         p <- generate_lagged_correlation(df, v1_lab, v2_lab, max_lag = input$corr_max_lag %||% 10)
@@ -576,10 +577,7 @@ desc_exploratory_server <- function(id, data_reactive, vars_metadata_reactive) {
     
     output$corr_summary_table <- DT::renderDataTable({
       req(rv_analytics_data())
-      df <- rv_analytics_data()
-      
-      active_groups <- input$analytics_active_group
-      df <- filter_active_groups(df, active_groups)
+      df <- rv_filtered_analytics_data()
       
       if (nrow(df) < 3) return(NULL)
       
@@ -685,10 +683,7 @@ desc_exploratory_server <- function(id, data_reactive, vars_metadata_reactive) {
     
     shiny::observeEvent(input$run_pca_btn, {
       req(rv_analytics_data(), input$pca_vars)
-      df <- rv_analytics_data()
-      
-      active_groups <- input$analytics_active_group
-      df <- filter_active_groups(df, active_groups)
+      df <- rv_filtered_analytics_data()
       
       if(nrow(df) < 5 || length(input$pca_vars) < 3) {
         showNotification("Insufficient data or variables for PCA.", type="error")
@@ -739,9 +734,7 @@ desc_exploratory_server <- function(id, data_reactive, vars_metadata_reactive) {
     
     shiny::observeEvent(input$pca_force_btn, {
       req(rv_analytics_data(), input$pca_vars)
-      df <- rv_analytics_data()
-      active_groups <- input$analytics_active_group
-      df <- filter_active_groups(df, active_groups)
+      df <- rv_filtered_analytics_data()
       
       vars_lab <- get_var_labels(input$pca_vars, vars_metadata_reactive())
       df_clean <- na.omit(df[, input$pca_vars, drop=FALSE])
@@ -785,7 +778,8 @@ desc_exploratory_server <- function(id, data_reactive, vars_metadata_reactive) {
   
     pca_plot_obj <- shiny::reactive({
        req(pca_rv$res)
-       p_type <- input$pca_plot_type %||% "scree"
+       shiny::withProgress(message = "Generating PCA plot...", value = 0.5, {
+         p_type <- input$pca_plot_type %||% "scree"
   
        if (p_type == "scree") {
           p <- generate_pca_scree(pca_rv$res)
@@ -808,8 +802,8 @@ desc_exploratory_server <- function(id, data_reactive, vars_metadata_reactive) {
        } else if (p_type == "3d_biplot") {
           p <- generate_pca_biplot_3d(pca_rv$res, rv_analytics_data(), pc_x = input$pca_pc_x, pc_y = input$pca_pc_y, pc_z = input$pca_pc_z, group_col="group_id")
        }
-  
-       return(p)
+          p
+       })
     })
   
     output$pca_main_plot_container <- shiny::renderUI({
