@@ -1,4 +1,4 @@
-# theme_helpers_0.9.7a.R - Dynamic Theme Helpers
+# theme_helpers_0.9.7c.R - UI Dashboard & Map Themes
 
 
 create_app_theme <- function(light_blue, dark_bg, content_bg, font_family, map_tiles, box_bg = "#ffffff", sidebar_text_color = "#ffffff", body_text_color = "#333333", header_text_color = "#ffffff", banner_style = "standard") {
@@ -276,7 +276,7 @@ themes_params <- list(
     map_tiles = "CartoDB.DarkMatter",
     box_bg = "#2d2d2d",
     sidebar_text_color = "#f0f0f0",
-    body_text_color = "#4b534d",
+    body_text_color = "#d4d4d4",
     header_text_color = "#000000",
     banner_style = "standard"
   ),

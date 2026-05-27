@@ -133,11 +133,6 @@ desc_exploratory_server <- function(id, data_reactive, vars_metadata_reactive) {
   shiny::moduleServer(id, function(input, output, session) {
     ns <- session$ns
     
-    # Local variable label helper
-    get_var_label <- function(v) {
-      .GlobalEnv$get_var_label(v, vars_metadata_reactive())
-    }
-    
     # --- Grouping & Discretization Server Logic ---
     shiny::observe({
       req(data_reactive())
@@ -303,8 +298,8 @@ desc_exploratory_server <- function(id, data_reactive, vars_metadata_reactive) {
         return(p)
       }
       
-      var_x_label <- get_var_label(input$desc_var_x)
-      var_y_label <- get_var_label(input$desc_var_y)
+      var_x_label <- get_var_label(input$desc_var_x, vars_metadata_reactive())
+      var_y_label <- get_var_label(input$desc_var_y, vars_metadata_reactive())
       
       if(!is.null(input$desc_var_x) && input$desc_var_x != "") {
           colnames(df_global)[colnames(df_global) == input$desc_var_x] <- var_x_label
@@ -335,7 +330,7 @@ desc_exploratory_server <- function(id, data_reactive, vars_metadata_reactive) {
                                   stat_letter_pos = input$desc_stat_letter_pos)
         }
       } else {
-        var_z_label <- get_var_label(input$desc_var_z)
+        var_z_label <- get_var_label(input$desc_var_z, vars_metadata_reactive())
         if(!is.null(input$desc_var_z) && input$desc_var_z != "") {
             colnames(df_global)[colnames(df_global) == input$desc_var_z] <- var_z_label
             colnames(df_local)[colnames(df_local) == input$desc_var_z] <- var_z_label
@@ -349,7 +344,7 @@ desc_exploratory_server <- function(id, data_reactive, vars_metadata_reactive) {
         
         vars <- switch(p_type,
                        "qq" = var_x_label,
-                       "sinaplot" = if(isTruthy(input$desc_var_y)) c(var_x_label, get_var_label(input$desc_var_y)) else var_x_label,
+                       "sinaplot" = if(isTruthy(input$desc_var_y)) c(var_x_label, get_var_label(input$desc_var_y, vars_metadata_reactive())) else var_x_label,
                        "ridge" = var_x_label,
                        "density_heatmap" = c(var_x_label, var_y_label),
                        "xyz_surface" = c(var_x_label, var_y_label, var_z_label),
@@ -537,8 +532,8 @@ desc_exploratory_server <- function(id, data_reactive, vars_metadata_reactive) {
       
       if (p_type == "lagged") {
         req(input$corr_var_1, input$corr_var_2)
-        v1_lab <- get_var_label(input$corr_var_1)
-        v2_lab <- get_var_label(input$corr_var_2)
+        v1_lab <- get_var_label(input$corr_var_1, vars_metadata_reactive())
+        v2_lab <- get_var_label(input$corr_var_2, vars_metadata_reactive())
         colnames(df)[colnames(df) == input$corr_var_1] <- v1_lab
         colnames(df)[colnames(df) == input$corr_var_2] <- v2_lab
         p <- generate_lagged_correlation(df, v1_lab, v2_lab, max_lag = input$corr_max_lag %||% 10)

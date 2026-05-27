@@ -1,4 +1,4 @@
-# gov_module_0.9.7a.R - Modularized Governing Factors Tab
+# gov_module_0.9.7c.R - Agronomical Evaluation Suite Module
 # --- UI Module ---
 gov_factors_ui <- function(id) {
   ns <- shiny::NS(id)
@@ -71,16 +71,9 @@ gov_factors_server <- function(id, data_reactive, vars_metadata_reactive) {
     # Internal state: decoupled from main server environment
     gov_rv <- shiny::reactiveValues(res = NULL, ready = FALSE)
     
-    # Helper to retrieve metadata-defined label or original name
+    # Helper to retrieve metadata-defined label or original name (delegates to centralized get_var_label)
     gov_get_label <- function(v) {
-      vars_metadata <- vars_metadata_reactive()
-      if (is.null(vars_metadata)) return(v)
-      match <- Filter(function(x) x$actual == v, vars_metadata)
-      if (length(match) > 0 && !is.null(match[[1]]$label) && match[[1]]$label != "") {
-        match[[1]]$label
-      } else {
-        v
-      }
+      get_var_label(v, vars_metadata_reactive())
     }
     
     # Generate Target Parameter dropdown
@@ -321,6 +314,7 @@ gov_factors_server <- function(id, data_reactive, vars_metadata_reactive) {
       
       output[[plot_plotly_id]] <- plotly::renderPlotly({
         shiny::req(gov_rv$res)
+        shiny::req(input[[mode_id]] == "interactive")
         if (btn_id == "gov_expand_intb_btn") shiny::req(input$gov_target)
         plotly::ggplotly(build_fn())
       })

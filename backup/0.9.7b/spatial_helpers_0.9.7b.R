@@ -115,9 +115,12 @@ perform_cv <- function(cv_obj) {
   if (nrow(df) == 0) return(res)
   cnames <- colnames(df)
   
-  # Robust column detection
-  pre_col <- grep("\\.pred$|^var1\\.pred$", cnames, value = TRUE)[1]
-  obs_col <- grep("\\.observed$|^observed$", cnames, value = TRUE)[1]
+  # Robust column detection with strict boundaries and fallbacks
+  pre_col <- grep("^var1\\.pred$|^target\\.pred$|^pred$", cnames, value = TRUE)[1]
+  if (is.na(pre_col)) pre_col <- grep("\\.pred$", cnames, value = TRUE)[1]
+  
+  obs_col <- grep("^var1\\.observed$|^observed$|^target\\.observed$", cnames, value = TRUE)[1]
+  if (is.na(obs_col)) obs_col <- grep("\\.observed$", cnames, value = TRUE)[1]
   
   if (is.na(pre_col) || is.na(obs_col)) return(res)
   
@@ -189,12 +192,10 @@ perform_rk_cv <- function(pts, target_var, aux_vars, lags_func, vgm_fit_func, l 
   if (n < 3) return(NULL)
   form_reg <- as.formula(paste0("`", target_var, "` ~ ", paste(paste0("`", aux_vars, "`"), collapse = " + ")))
   
-  update_progress_file(l, prefix, 0, n)
   results_list <- lapply(1:n, function(i) {
-    update_progress_file(l, prefix, i, n)
     train <- pts[-i, ]; test <- pts[i, ]
     
-    lm_mod <- lm(form_reg, data = train, na.action = na.exclude); train$residuals <- residuals(lm_mod)
+    lm_mod <- lm(form_reg, data = train); train$residuals <- residuals(lm_mod)
     lags <- lags_func(train)
     v_emp <- variogram(residuals ~ 1, train, width = lags$width, cutoff = lags$cutoff)
     v_fit <- vgm_fit_func(v_emp, train$residuals)
@@ -214,9 +215,7 @@ perform_rfk_cv <- function(pts, target_var, aux_vars, lags_func, vgm_fit_func, l
   if (n < 3) return(NULL)
   form_reg <- as.formula(paste0("`", target_var, "` ~ ", paste(paste0("`", aux_vars, "`"), collapse = " + ")))
   
-  update_progress_file(l, prefix, 0, n)
   results_list <- lapply(1:n, function(i) {
-    update_progress_file(l, prefix, i, n)
     train <- pts[-i, ]; test <- pts[i, ]
     
     rf_mod <- randomForest::randomForest(form_reg, data = train, ntree = 100); train$residuals <- train[[target_var]] - rf_mod$predicted
@@ -308,6 +307,10 @@ detect_multicollinearity_engine <- function(df, vars = NULL, vif_threshold = 10,
   
   if (length(kept) >= 2) {
     repeat {
+      if (length(kept) == 1) {
+        warning("VIF Iterative Pruning: only one covariate remains. Multicollinearity is extremely high.")
+        break
+      }
       if (length(kept) < 2) break
       df_clean_vif <- na.omit(df[, kept, drop = FALSE])
       if (nrow(df_clean_vif) < 3) break
@@ -382,8 +385,12 @@ get_cv_residuals <- function(cv_obj, n_rows) {
         else if (inherits(cv_obj, "sf")) st_drop_geometry(cv_obj)
         else as.data.frame(cv_obj)
   cnames <- colnames(df)
-  pre_col <- grep("\\.pred$|^var1\\.pred$", cnames, value = TRUE)[1]
-  obs_col <- grep("\\.observed$|^observed$", cnames, value = TRUE)[1]
+  pre_col <- grep("^var1\\.pred$|^target\\.pred$|^pred$", cnames, value = TRUE)[1]
+  if (is.na(pre_col)) pre_col <- grep("\\.pred$", cnames, value = TRUE)[1]
+  
+  obs_col <- grep("^var1\\.observed$|^observed$|^target\\.observed$", cnames, value = TRUE)[1]
+  if (is.na(obs_col)) obs_col <- grep("\\.observed$", cnames, value = TRUE)[1]
+  
   if (is.na(pre_col) || is.na(obs_col)) {
     res_col <- grep("^residual$", cnames, ignore.case = TRUE, value = TRUE)[1]
     if (!is.na(res_col)) return(df[[res_col]])
@@ -393,19 +400,17 @@ get_cv_residuals <- function(cv_obj, n_rows) {
 }
 
 # --- Method-Specific Interpolation Helpers ---
-apply_OK <- function(data, target_var, grid_p, lags, method_params, l = "region", prefix = "act") {
-  res <- list(v_emp = NULL, fit = NULL, cv_metrics = NULL, model_summary = NULL, 
-              rf_model = NULL, gstat_obj = NULL, res_sf = NULL, log_msg = "", cv_obj = NULL, residuals = NULL)
-  
-  update_progress_file(l, prefix, 20, 100)
-  res$v_emp <- variogram(target ~ 1, data, width = lags$width, cutoff = lags$cutoff)
-  res$fit <- if(!is.null(method_params$pre_fit)) method_params$pre_fit else robust_vgm_fit(res$v_emp, data$target)
-  
-  update_progress_file(l, prefix, 50, 100)
+
+init_interpolation_res <- function() {
+  list(v_emp = NULL, fit = NULL, cv_metrics = NULL, model_summary = NULL, 
+       rf_model = NULL, gstat_obj = NULL, res_sf = NULL, log_msg = "", cv_obj = NULL, residuals = NULL)
+}
+
+safe_run_cv <- function(res, expr, label, n_data) {
   cv_obj <- tryCatch({
-    krige.cv(target ~ 1, data, model = res$fit, nfold = nrow(data), debug.level = 0)
+    expr
   }, error = function(e) {
-    list(error_msg = paste0("OK CV Error: ", e$message))
+    list(error_msg = paste0(label, " CV Error: ", e$message))
   })
   
   if (is.list(cv_obj) && !is.null(cv_obj$error_msg)) {
@@ -415,23 +420,43 @@ apply_OK <- function(data, target_var, grid_p, lags, method_params, l = "region"
   
   res$cv_obj <- cv_obj
   res$cv_metrics <- perform_cv(cv_obj)
-  res$residuals <- get_cv_residuals(cv_obj, nrow(data))
-  res$res_sf <- krige(target ~ 1, data, grid_p, model = res$fit, debug.level = 0)
-  
-  if (!is.null(res$res_sf)) {
-    res$res_sf$var1.pred[is.nan(res$res_sf$var1.pred) | is.infinite(res$res_sf$var1.pred)] <- NA
-    if ("var1.var" %in% colnames(res$res_sf)) {
-      res$res_sf$var1.var[is.nan(res$res_sf$var1.var) | is.infinite(res$res_sf$var1.var)] <- NA
+  if (!is.null(cv_obj)) {
+    res$residuals <- get_cv_residuals(cv_obj, n_data)
+  }
+  return(res)
+}
+
+sanitize_spatial_predictions <- function(res_sf) {
+  if (!is.null(res_sf)) {
+    if ("var1.pred" %in% colnames(res_sf)) {
+      res_sf$var1.pred[is.nan(res_sf$var1.pred) | is.infinite(res_sf$var1.pred)] <- NA
+    }
+    if ("var1.var" %in% colnames(res_sf)) {
+      res_sf$var1.var[is.nan(res_sf$var1.var) | is.infinite(res_sf$var1.var)] <- NA
     }
   }
+  return(res_sf)
+}
+
+apply_OK <- function(data, target_var, grid_p, lags, method_params, l = "region", prefix = "act") {
+  res <- init_interpolation_res()
+  
+  update_progress_file(l, prefix, 20, 100)
+  form_ok <- reformulate("1", response = target_var)
+  res$v_emp <- variogram(form_ok, data, width = lags$width, cutoff = lags$cutoff)
+  res$fit <- if(!is.null(method_params$pre_fit)) method_params$pre_fit else robust_vgm_fit(res$v_emp, data[[target_var]])
+  
+  update_progress_file(l, prefix, 50, 100)
+  res <- safe_run_cv(res, krige.cv(form_ok, data, model = res$fit, nfold = nrow(data), debug.level = 0), "OK", nrow(data))
+  res$res_sf <- krige(form_ok, data, grid_p, model = res$fit, debug.level = 0)
+  res$res_sf <- sanitize_spatial_predictions(res$res_sf)
   
   update_progress_file(l, prefix, 100, 100)
   return(res)
 }
 
 apply_RK <- function(data, target_var, grid_p, lags, method_params, aux_vars, l = "region", prefix = "act") {
-  res <- list(v_emp = NULL, fit = NULL, cv_metrics = NULL, model_summary = NULL, 
-              rf_model = NULL, gstat_obj = NULL, res_sf = NULL, log_msg = "", cv_obj = NULL, residuals = NULL)
+  res <- init_interpolation_res()
   
   update_progress_file(l, prefix, 10, 100)
   if (length(aux_vars) > 1) {
@@ -446,8 +471,8 @@ apply_RK <- function(data, target_var, grid_p, lags, method_params, aux_vars, l 
   grid_aux <- krig_cov$grid_aux
   res$log_msg <- paste0(res$log_msg, krig_cov$log_msg)
   
-  form_reg <- as.formula(paste("target ~", paste(paste0("`", aux_vars, "`"), collapse = " + ")))
-  lm_mod <- lm(form_reg, data = data, na.action = na.exclude)
+  form_reg <- as.formula(paste(paste0("`", target_var, "`"), "~", paste(paste0("`", aux_vars, "`"), collapse = " + ")))
+  lm_mod <- lm(form_reg, data = data)
   res$model_summary <- summary(lm_mod)
   
   data$residuals <- residuals(lm_mod)
@@ -464,40 +489,28 @@ apply_RK <- function(data, target_var, grid_p, lags, method_params, aux_vars, l 
     var1.pred = as.vector(pred_trend$fit + res_krig$var1.pred), 
     var1.var = as.vector(trend_var + res_krig$var1.var)
   )
+  res$res_sf <- sanitize_spatial_predictions(res$res_sf)
   
-  cv_obj <- tryCatch({
-    perform_rk_cv(data, "target", aux_vars, calc_scientific_lags, robust_vgm_fit, l, prefix)
-  }, error = function(e) {
-    list(error_msg = paste0("RK CV Error: ", e$message))
-  })
-  
-  if (is.list(cv_obj) && !is.null(cv_obj$error_msg)) {
-    res$log_msg <- paste0(res$log_msg, cv_obj$error_msg)
-    cv_obj <- NULL
-  }
-  
-  res$cv_obj <- cv_obj
-  res$cv_metrics <- perform_cv(cv_obj)
+  res <- safe_run_cv(res, perform_rk_cv(data, target_var, aux_vars, calc_scientific_lags, robust_vgm_fit, l, prefix), "RK", nrow(data))
   
   update_progress_file(l, prefix, 100, 100)
   return(res)
 }
 
 apply_RFK <- function(data, target_var, grid_p, lags, method_params, aux_vars, l = "region", prefix = "act") {
-  res <- list(v_emp = NULL, fit = NULL, cv_metrics = NULL, model_summary = NULL, 
-              rf_model = NULL, gstat_obj = NULL, res_sf = NULL, log_msg = "", cv_obj = NULL, residuals = NULL)
+  res <- init_interpolation_res()
   
   update_progress_file(l, prefix, 10, 100)
   krig_cov <- krige_covariates(data, grid_p, aux_vars, lags, method_params)
   grid_aux <- krig_cov$grid_aux
   res$log_msg <- paste0(res$log_msg, krig_cov$log_msg)
   
-  form_reg <- as.formula(paste("target ~", paste(paste0("`", aux_vars, "`"), collapse = " + ")))
+  form_reg <- as.formula(paste(paste0("`", target_var, "`"), "~", paste(paste0("`", aux_vars, "`"), collapse = " + ")))
   rf_mod <- randomForest::randomForest(form_reg, data = data, ntree = 200, importance = TRUE)
   res$rf_model <- rf_mod
   
-  data$residuals <- data$target - rf_mod$predicted
-  res$residuals <- data$target - rf_mod$predicted
+  data$residuals <- data[[target_var]] - rf_mod$predicted
+  res$residuals <- data[[target_var]] - rf_mod$predicted
   
   res$v_emp <- variogram(residuals ~ 1, data, width = lags$width, cutoff = lags$cutoff)
   res$fit <- robust_vgm_fit(res$v_emp, data$residuals)
@@ -510,47 +523,36 @@ apply_RFK <- function(data, target_var, grid_p, lags, method_params, aux_vars, l
     var1.pred = as.vector(pred_trend_all$aggregate + res_krig$var1.pred), 
     var1.var = as.vector(trend_var + res_krig$var1.var)
   )
+  res$res_sf <- sanitize_spatial_predictions(res$res_sf)
   
-  cv_obj <- tryCatch({
-    perform_rfk_cv(data, "target", aux_vars, calc_scientific_lags, robust_vgm_fit, l, prefix)
-  }, error = function(e) {
-    list(error_msg = paste0("RFK CV Error: ", e$message))
-  })
-  
-  if (is.list(cv_obj) && !is.null(cv_obj$error_msg)) {
-    res$log_msg <- paste0(res$log_msg, cv_obj$error_msg)
-    cv_obj <- NULL
-  }
-  
-  res$cv_obj <- cv_obj
-  res$cv_metrics <- perform_cv(cv_obj)
+  res <- safe_run_cv(res, perform_rfk_cv(data, target_var, aux_vars, calc_scientific_lags, robust_vgm_fit, l, prefix), "RFK", nrow(data))
   
   update_progress_file(l, prefix, 100, 100)
   return(res)
 }
 
 apply_CK <- function(data, target_var, grid_p, lags, method_params, aux_vars, l = "region", prefix = "act") {
-  res <- list(v_emp = NULL, fit = NULL, cv_metrics = NULL, model_summary = NULL, 
-              rf_model = NULL, gstat_obj = NULL, res_sf = NULL, log_msg = "", cv_obj = NULL, residuals = NULL)
+  res <- init_interpolation_res()
   
   update_progress_file(l, prefix, 10, 100)
   for(av in aux_vars) {
     data[[av]] <- scale(data[[av]])
   }
   
-  g <- gstat(NULL, id = "target", formula = target ~ 1, data = data)
+  form_ok <- reformulate("1", response = target_var)
+  g <- gstat(NULL, id = target_var, formula = form_ok, data = data)
   for(av in aux_vars) {
     g <- gstat(g, id = av, formula = as.formula(paste0("`", av, "` ~ 1")), data = data)
   }
   
   vm <- variogram(g, width = lags$width, cutoff = lags$cutoff)
   
-  v_emp_ok <- variogram(target ~ 1, data, width = lags$width, cutoff = lags$cutoff)
-  fit_ok_init <- robust_vgm_fit(v_emp_ok, data$target)
+  v_emp_ok <- variogram(form_ok, data, width = lags$width, cutoff = lags$cutoff)
+  fit_ok_init <- robust_vgm_fit(v_emp_ok, data[[target_var]])
   m_type <- suggest_lmc_model(fit_ok_init)
   
   g_or_err <- tryCatch({
-    fit.lmc(vm, g, vgm(var(data$target), m_type, lags$cutoff / 2, 0), correct.diagonal = 1.01)
+    fit.lmc(vm, g, vgm(var(data[[target_var]]), m_type, lags$cutoff / 2, 0), correct.diagonal = 1.01)
   }, error = function(e) {
     list(error_msg = paste0("LMC Fit Failed: ", e$message, ". Falling back to OK."))
   })
@@ -564,23 +566,13 @@ apply_CK <- function(data, target_var, grid_p, lags, method_params, aux_vars, l 
   
   if(!is.null(g)) {
     res$gstat_obj <- g
-    cv_obj <- tryCatch({
-      gstat.cv(g, nfold = nrow(data), debug.level = 0)
-    }, error = function(e) {
-      list(error_msg = paste0("CK CV Error: ", e$message))
-    })
-    
-    if (is.list(cv_obj) && !is.null(cv_obj$error_msg)) {
-      res$log_msg <- paste0(res$log_msg, cv_obj$error_msg)
-      cv_obj <- NULL
-    }
-    
-    res$cv_obj <- cv_obj
-    res$cv_metrics <- perform_cv(cv_obj)
-    res$residuals <- get_cv_residuals(cv_obj, nrow(data))
+    res <- safe_run_cv(res, gstat.cv(g, nfold = nrow(data), debug.level = 0), "CK", nrow(data))
     
     res_sf_or_err <- tryCatch({
-      predict(g, grid_p, debug.level = 0) %>% st_as_sf() %>% rename(var1.pred = target.pred, var1.var = target.var)
+      pred_obj <- predict(g, grid_p, debug.level = 0) %>% st_as_sf()
+      pred_col <- paste0(target_var, ".pred")
+      var_col <- paste0(target_var, ".var")
+      pred_obj %>% rename(var1.pred = !!pred_col, var1.var = !!var_col)
     }, error = function(e) {
       list(error_msg = paste0("CK Prediction Failed: ", e$message, ". Falling back to OK."))
     })
@@ -594,43 +586,33 @@ apply_CK <- function(data, target_var, grid_p, lags, method_params, aux_vars, l 
   }
   
   if(is.null(res$res_sf)) {
-    v_emp_ok <- variogram(target ~ 1, data, width = lags$width, cutoff = lags$cutoff)
-    fit_ok <- robust_vgm_fit(v_emp_ok, data$target)
-    res$res_sf <- krige(target ~ 1, data, grid_p, model = fit_ok, debug.level = 0)
+    v_emp_ok <- variogram(form_ok, data, width = lags$width, cutoff = lags$cutoff)
+    fit_ok <- robust_vgm_fit(v_emp_ok, data[[target_var]])
+    res$res_sf <- krige(form_ok, data, grid_p, model = fit_ok, debug.level = 0)
   }
+  
+  res$res_sf <- sanitize_spatial_predictions(res$res_sf)
   
   update_progress_file(l, prefix, 100, 100)
   return(res)
 }
 
 apply_IDW <- function(data, target_var, grid_p, method_params, l = "region", prefix = "act") {
-  res <- list(v_emp = NULL, fit = NULL, cv_metrics = NULL, model_summary = NULL, 
-              rf_model = NULL, gstat_obj = NULL, res_sf = NULL, log_msg = "", cv_obj = NULL, residuals = NULL)
+  res <- init_interpolation_res()
   
   update_progress_file(l, prefix, 20, 100)
-  cv_obj <- tryCatch({
-    krige.cv(target ~ 1, data, nmax = method_params$idw_nmax, set = list(idp = method_params$idw_p), nfold = nrow(data), debug.level = 0)
-  }, error = function(e) {
-    list(error_msg = paste0("IDW CV Error: ", e$message))
-  })
+  form_ok <- reformulate("1", response = target_var)
+  res <- safe_run_cv(res, krige.cv(form_ok, data, nmax = method_params$idw_nmax, set = list(idp = method_params$idw_p), nfold = nrow(data), debug.level = 0), "IDW", nrow(data))
   
-  if (is.list(cv_obj) && !is.null(cv_obj$error_msg)) {
-    res$log_msg <- paste0(res$log_msg, cv_obj$error_msg)
-    cv_obj <- NULL
-  }
-  
-  res$cv_obj <- cv_obj
-  res$cv_metrics <- perform_cv(cv_obj)
-  res$residuals <- get_cv_residuals(cv_obj, nrow(data))
-  res$res_sf <- idw(target ~ 1, data, grid_p, nmax = method_params$idw_nmax, idp = method_params$idw_p, debug.level = 0)
+  res$res_sf <- idw(form_ok, data, grid_p, nmax = method_params$idw_nmax, idp = method_params$idw_p, debug.level = 0)
+  res$res_sf <- sanitize_spatial_predictions(res$res_sf)
   
   update_progress_file(l, prefix, 100, 100)
   return(res)
 }
 
 apply_TPS <- function(data, target_var, grid_p, method_params, l = "region", prefix = "act") {
-  res <- list(v_emp = NULL, fit = NULL, cv_metrics = NULL, model_summary = NULL, 
-              rf_model = NULL, gstat_obj = NULL, res_sf = NULL, log_msg = "", cv_obj = NULL, residuals = NULL)
+  res <- init_interpolation_res()
   
   update_progress_file(l, prefix, 10, 100)
   res$res_sf <- tryCatch({
@@ -642,14 +624,14 @@ apply_TPS <- function(data, target_var, grid_p, method_params, l = "region", pre
     pts_sc <- cbind((raw_pts[,1]-xm)/max_range, (raw_pts[,2]-ym)/max_range)
     gr_raw <- st_coordinates(grid_p)
     gr_sc <- cbind((gr_raw[,1]-xm)/max_range, (gr_raw[,2]-ym)/max_range)
-    mod <- fields::Tps(pts_sc, data$target, lambda = method_params$tps_lambda)
+    mod <- fields::Tps(pts_sc, data[[target_var]], lambda = method_params$tps_lambda)
     p_v <- fields::predict.Krig(mod, gr_sc)
     
     n_pts <- nrow(data)
     update_progress_file(l, prefix, 40, 100)
     cv_vals <- vapply(1:n_pts, function(i) {
       tryCatch({
-        tmp_mod <- fields::Tps(pts_sc[-i, , drop=FALSE], data$target[-i], lambda = method_params$tps_lambda)
+        tmp_mod <- fields::Tps(pts_sc[-i, , drop=FALSE], data[[target_var]][-i], lambda = method_params$tps_lambda)
         as.numeric(fields::predict.Krig(tmp_mod, pts_sc[i, , drop=FALSE]))
       }, error = function(e) NA_real_)
     }, numeric(1))
@@ -658,7 +640,7 @@ apply_TPS <- function(data, target_var, grid_p, method_params, l = "region", pre
       cv_vals[is.na(cv_vals)] <- mod$fitted.values[is.na(cv_vals)]
     }
     
-    cv_res <- data.frame(observed = data$target, var1.pred = cv_vals, x = raw_pts[,1], y = raw_pts[,2])
+    cv_res <- data.frame(observed = data[[target_var]], var1.pred = cv_vals, x = raw_pts[,1], y = raw_pts[,2])
     res$cv_obj <- cv_res
     res$cv_metrics <- perform_cv(cv_res)
     res$residuals <- get_cv_residuals(cv_res, nrow(data))
@@ -667,10 +649,11 @@ apply_TPS <- function(data, target_var, grid_p, method_params, l = "region", pre
   }, error = function(e) {
     idw_p <- if(!is.null(method_params$idw_p)) method_params$idw_p else 2
     idw_nmax <- if(!is.null(method_params$idw_nmax)) method_params$idw_nmax else 12
-    idw_res <- idw(target ~ 1, data, grid_p, nmax = idw_nmax, idp = idw_p, debug.level = 0)
+    form_ok <- reformulate("1", response = target_var)
+    idw_res <- idw(form_ok, data, grid_p, nmax = idw_nmax, idp = idw_p, debug.level = 0)
     
     cv_obj_fallback <- tryCatch({
-      krige.cv(target ~ 1, data, nmax = idw_nmax, set = list(idp = idw_p), nfold = nrow(data), debug.level = 0)
+      krige.cv(form_ok, data, nmax = idw_nmax, set = list(idp = idw_p), nfold = nrow(data), debug.level = 0)
     }, error = function(e) NULL)
     res$cv_obj <- cv_obj_fallback
     res$cv_metrics <- perform_cv(cv_obj_fallback)
@@ -679,17 +662,14 @@ apply_TPS <- function(data, target_var, grid_p, method_params, l = "region", pre
     idw_res
   })
   
+  res$res_sf <- sanitize_spatial_predictions(res$res_sf)
+  
   update_progress_file(l, prefix, 100, 100)
   return(res)
 }
 
 # --- Main Dispatcher apply_interpolation ---
 apply_interpolation <- function(data, target_var, method, grid_p, aux_vars, lags, method_params, l, prefix) {
-  res <- list(v_emp = NULL, fit = NULL, cv_metrics = NULL, model_summary = NULL, 
-              rf_model = NULL, gstat_obj = NULL, res_sf = NULL, log_msg = "", cv_obj = NULL, residuals = NULL)
-  
-  data$target <- data[[target_var]]
-  
   res <- tryCatch({
     if(method == "OK") {
       apply_OK(data, target_var, grid_p, lags, method_params, l, prefix)

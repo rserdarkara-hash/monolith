@@ -1,4 +1,44 @@
-# ui_helpers_0.9.7a.R - Modularized UI Helper Functions
+# ui_helpers_0.9.7c.R - Modularized UI Helper Functions
+
+`%||%` <- function(a, b) {
+  if (!is.null(a)) a else b
+}
+
+method_labels <- c(
+  "OK"  = "Ordinary Kriging",
+  "UK"  = "Universal Kriging",
+  "RK"  = "Regression Kriging",
+  "RFK" = "Random Forest Kriging",
+  "CK"  = "Co-Kriging",
+  "IDW" = "IDW",
+  "TPS" = "Thin Plate Spline"
+)
+
+get_method_label <- function(method) {
+  if (is.null(method) || length(method) == 0 || is.na(method) || method == "") return("")
+  if (method %in% names(method_labels)) {
+    return(method_labels[[method]])
+  }
+  return(method)
+}
+
+buffer_multipliers <- c(
+  "TPS" = 1.0,
+  "IDW" = 2.0,
+  "OK"  = 3.0,
+  "CK"  = 3.0,
+  "RK"  = 3.0,
+  "RFK" = 3.0
+)
+
+get_buffer_multiplier <- function(method) {
+  if (is.null(method) || length(method) == 0 || is.na(method) || method == "") return(2.0)
+  if (method %in% names(buffer_multipliers)) {
+    return(buffer_multipliers[[method]])
+  }
+  return(2.0)
+}
+
 tuning_ui <- function(id, label, 
                       global_slider_id, manual_slider_id, 
                       global_slider_args, manual_slider_args, 
@@ -339,10 +379,18 @@ fuzzy_match_column <- function(act_name, user_cols) {
   if (clean_act %in% clean_user) {
     return(user_cols[clean_user == clean_act][1])
   }
-  first_word <- tolower(strsplit(act_name, " ")[[1]][1])
-  if (!is.na(first_word) && first_word %in% clean_user) {
-    return(user_cols[clean_user == first_word][1])
+  
+  # Levenshtein distance based matching
+  dists <- as.vector(adist(clean_act, clean_user))
+  min_idx <- which.min(dists)
+  if (length(min_idx) > 0) {
+    min_dist <- dists[min_idx]
+    # Allow small edits (up to 2 character differences) if it's not a huge fraction of the word length
+    if (min_dist <= 2 && (min_dist / max(1, nchar(clean_act))) <= 0.3) {
+      return(user_cols[min_idx])
+    }
   }
+  
   return(NULL)
 }
 
@@ -720,9 +768,9 @@ generate_advanced_plot <- function(df, vars, group_col = NULL, plot_type = "qq",
   }
   
   p <- ggplot() + theme_minimal()
-  v1 <- if(length(vars) > 0) vars[1] else NULL
-  v2 <- if(length(vars) > 1) vars[2] else NULL
-  v3 <- if(length(vars) > 2) vars[3] else NULL
+  v1 <- if(length(vars) > 0 && isTruthy(vars[1]) && vars[1] != "") vars[1] else NULL
+  v2 <- if(length(vars) > 1 && isTruthy(vars[2]) && vars[2] != "") vars[2] else NULL
+  v3 <- if(length(vars) > 2 && isTruthy(vars[3]) && vars[3] != "") vars[3] else NULL
   
   if (plot_type == "qq") {
     p <- ggplot(df, aes(sample = .data[[v1]], color = .data[[group_col]])) + 
@@ -792,7 +840,7 @@ generate_advanced_plot <- function(df, vars, group_col = NULL, plot_type = "qq",
       p <- ggplot() + annotate("text", x=0, y=0, label="Radar requires >=3 vars")
     }
   } else if (plot_type == "xyz_surface") {
-    if (!is.null(v2) && !is.null(v3)) {
+    if (!is.null(v1) && !is.null(v2) && !is.null(v3)) {
       df_clean <- na.omit(df[, c(v1, v2, v3)])
       if(nrow(df_clean) > 10) {
         grid_x <- seq(min(df_clean[[v1]]), max(df_clean[[v1]]), length.out=50)
@@ -848,7 +896,7 @@ generate_advanced_plot <- function(df, vars, group_col = NULL, plot_type = "qq",
         p <- ggplot() + annotate("text", x=0, y=0, label="Not enough data for surface")
       }
     } else {
-      p <- ggplot() + annotate("text", x=0, y=0, label="XYZ Surface requires 3 numeric variables")
+      p <- ggplot() + annotate("text", x=0, y=0, label="XYZ Surface requires 3 numeric variables.\nPlease select 3 variables in the sidebar.") + theme_void()
     }
   }
   
@@ -1037,8 +1085,26 @@ generate_lagged_correlation <- function(df, var1, var2, max_lag = 10) {
 
 # --- Phase 5: PCA Logic ---
 check_collinearity <- function(df, vars, threshold = 0.95) {
-  res <- detect_multicollinearity_engine(df, vars = vars, pairwise_threshold = threshold)
-  return(list(has_collinearity = res$has_collinearity, pairs = res$pairs))
+  res <- detect_multicollinearity_engine(df, vars = vars, pairwise_threshold = threshold, vif_threshold = 10)
+  
+  has_coll <- res$has_collinearity || (length(res$dropped) > 0)
+  
+  pairs_df <- res$pairs
+  if (length(res$dropped) > 0) {
+    if (is.null(pairs_df)) {
+      pairs_df <- data.frame(var1 = character(), var2 = character(), r = numeric(), stringsAsFactors = FALSE)
+    }
+    for (d_var in res$dropped) {
+      pairs_df <- rbind(pairs_df, data.frame(
+        var1 = d_var,
+        var2 = "High VIF (> 10)",
+        r = NA,
+        stringsAsFactors = FALSE
+      ))
+    }
+  }
+  
+  return(list(has_collinearity = has_coll, pairs = pairs_df))
 }
 
 generate_pca_scree <- function(pca_res) {
@@ -1221,9 +1287,12 @@ generate_pca_biplot_3d <- function(pca_res, df, pc_x=1, pc_y=2, pc_z=3, group_co
 
 # --- Map Viewer UI Components ---
 render_locality_pan_input <- function(loc_names) {
-  if (length(loc_names) <= 1) return(NULL)
+  choices <- c("Global View" = "global")
+  if (length(loc_names) > 0) {
+    choices <- c(choices, loc_names)
+  }
   selectInput("locality_pan", NULL,
-              choices = c("Global View" = "global", loc_names),
+              choices = choices,
               selected = "global", width = "160px", selectize = FALSE)
 }
 
