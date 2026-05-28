@@ -1,4 +1,4 @@
-# theme_helpers_0.9.7c.R - UI Dashboard & Map Themes
+# theme_helpers_0.9.8.R - UI Dashboard & Map Themes
 
 
 create_app_theme <- function(light_blue, dark_bg, content_bg, font_family, map_tiles, box_bg = "#ffffff", sidebar_text_color = "#ffffff", body_text_color = "#333333", header_text_color = "#ffffff", banner_style = "standard") {
@@ -63,69 +63,69 @@ create_app_theme <- function(light_blue, dark_bg, content_bg, font_family, map_t
     ".header-banner { max-height: 50px; width: auto; object-fit: contain; }"
   }
 
-  manual_style <- sprintf(
+  manual_style <- glue::glue(
     "
-    @import url('https://fonts.googleapis.com/css2?family=%s:wght@300;400;700&display=swap');
+    @import url('https://fonts.googleapis.com/css2?family={{font_url_name}}:wght@300;400;700&display=swap');
     
     body, h1, h2, h3, h4, h5, h6, .header-title, .well, select, input, button, table, .nav-tabs {
-      font-family: '%s', sans-serif !important;
+      font-family: '{{font_family}}', sans-serif !important;
     }
     
     /* Header Banner Integrated */
-    %s
+    {{banner_css}}
  
     /* Global Body and Text */
     body {
-      background-color: %s !important;
-      color: %s !important;
+      background-color: {{content_bg}} !important;
+      color: {{body_text_color}} !important;
     }
     
     /* Sidebar Emulation */
     .well {
-      background-color: %s !important;
-      color: %s !important;
-      border: 1px solid %s !important;
+      background-color: {{dark_bg}} !important;
+      color: {{sidebar_text_color}} !important;
+      border: 1px solid {{panel_bg}} !important;
     }
     
     /* Header Panel */
     .header-panel {
-      background-color: %s !important;
-      color: %s !important;
-      border-bottom: 3px solid %s !important;
+      background-color: {{light_blue}} !important;
+      color: {{header_text_color}} !important;
+      border-bottom: 3px solid {{light_blue}} !important;
     }
     
     /* Sidebar Panels */
     .well div[style*='background-color'] {
-      background-color: %s !important;
-      color: %s !important;
-      border-color: %s !important;
+      background-color: {{panel_bg}} !important;
+      color: {{sidebar_text_color}} !important;
+      border-color: {{light_blue}} !important;
     }
     
     /* Custom Boxes */
     .custom-box {
-      background-color: %s !important;
-      color: %s !important;
+      background-color: {{box_bg}} !important;
+      color: {{body_text_color}} !important;
       padding: 15px;
       border-radius: 5px;
-      border-left: 5px solid %s;
+      border-left: 5px solid {{light_blue}};
       box-shadow: 0 1px 1px rgba(0,0,0,0.1);
       margin-bottom: 15px;
     }
     
     /* Table styling for visibility */
     table, .table, th, td {
-      color: %s !important;
+      color: {{body_text_color}} !important;
     }
     
     /* Dashboard Tabs Readability */
     .nav-tabs > li > a {
-      color: %s !important;
+      color: {{body_text_color}} !important;
       font-weight: bold !important;
       opacity: 0.7;
     }
     .nav-tabs > li.active > a {
-      color: %s !important;
-      background-color: %s !important;
+      color: {{body_text_color}} !important;
+      background-color: {{box_bg}} !important;
       opacity: 1 !important;
       border-bottom-color: transparent !important;
     }
@@ -140,18 +140,18 @@ create_app_theme <- function(light_blue, dark_bg, content_bg, font_family, map_t
       right: -600px;
       top: 0;
       width: 600px;
-      height: 100%%;
-      background-color: %s !important;
-      color: %s !important;
+      height: 100%;
+      background-color: {{box_bg}} !important;
+      color: {{body_text_color}} !important;
       z-index: 1050;
       transition: right 0.3s ease;
       box-shadow: -2px 0 5px rgba(0,0,0,0.2);
       overflow-y: auto;
       padding: 20px;
-      border-left: 2px solid %s !important;
+      border-left: 2px solid {{light_blue}} !important;
     }
     .docs-drawer .nav-tabs > li.active > a {
-      background-color: %s !important;
+      background-color: {{panel_bg}} !important;
     }
     
     /* Map Processing Overlay */
@@ -159,13 +159,13 @@ create_app_theme <- function(light_blue, dark_bg, content_bg, font_family, map_t
       position: absolute;
       top: 0;
       left: 0;
-      width: 100%%;
-      height: 100%%;
+      width: 100%;
+      height: 100%;
       min-height: 750px;
-      background-color: %s !important;
-      color: %s !important;
+      background-color: {{box_bg}} !important;
+      color: {{body_text_color}} !important;
       z-index: 2000;
-      display: none;
+      display: flex;
       align-items: center;
       justify-content: center;
       flex-direction: column;
@@ -179,20 +179,20 @@ create_app_theme <- function(light_blue, dark_bg, content_bg, font_family, map_t
       width: 60px;
       height: 60px;
       border: 5px solid rgba(0, 0, 0, 0.05);
-      border-top: 5px solid %s;
-      border-radius: 50%%;
+      border-top: 5px solid {{light_blue}};
+      border-radius: 50%;
       animation: premium-spin 1.2s cubic-bezier(0.5, 0, 0.5, 1) infinite;
       margin-bottom: 20px;
     }
     
     @keyframes premium-spin {
-      0%% { transform: rotate(0deg); }
-      100%% { transform: rotate(360deg); }
+      0% { transform: rotate(0deg); }
+      100% { transform: rotate(360deg); }
     }
     
     /* Premium Progress Bar */
     .premium-progress-bar-container {
-      width: 60%%;
+      width: 60%;
       max-width: 500px;
       background-color: rgba(0,0,0,0.05);
       height: 12px;
@@ -204,49 +204,32 @@ create_app_theme <- function(light_blue, dark_bg, content_bg, font_family, map_t
     }
     
     .premium-progress-bar-inner {
-      width: 5%%;
-      height: 100%%;
-      background-color: %s;
+      width: 5%;
+      height: 100%;
+      background-color: {{light_blue}};
       transition: width 0.4s cubic-bezier(0.4, 0, 0.2, 1);
     }
     
     /* Popover inherit colors */
     .popover {
-      background-color: %s !important;
-      color: %s !important;
-      border: 1px solid %s !important;
+      background-color: {{box_bg}} !important;
+      color: {{body_text_color}} !important;
+      border: 1px solid {{light_blue}} !important;
     }
     .popover-header {
-      background-color: %s !important;
-      color: %s !important;
-      border-bottom: 1px solid %s !important;
+      background-color: {{panel_bg}} !important;
+      color: {{body_text_color}} !important;
+      border-bottom: 1px solid {{light_blue}} !important;
     }
     .popover-body {
-      color: %s !important;
+      color: {{body_text_color}} !important;
     }
     .popover.right > .arrow:after {
-      border-right-color: %s !important;
+      border-right-color: {{box_bg}} !important;
     }
     ",
-    font_url_name, font_family, 
-    banner_css,
-    content_bg, body_text_color,
-    dark_bg, sidebar_text_color, panel_bg,
-    light_blue, header_text_color, light_blue,
-    panel_bg, sidebar_text_color, light_blue,
-    box_bg, body_text_color, light_blue,
-    body_text_color,
-    body_text_color,
-    body_text_color, box_bg,
-    # Drawer args
-    box_bg, body_text_color, light_blue,
-    panel_bg,
-    # Overlay & Spinner args
-    box_bg, body_text_color, light_blue, light_blue,
-    # Popover args
-    box_bg, body_text_color, light_blue,
-    panel_bg, body_text_color, light_blue,
-    body_text_color, box_bg
+    .open = "{{",
+    .close = "}}"
   )
   
   list(
@@ -430,4 +413,35 @@ theme_switcher_server <- function(id) {
     
     return(active_theme)
   })
+}
+
+# --- Centralized Export Rendering Helper (Issue n) ---
+export_plot_to_file <- function(p, filepath, ext, input) {
+  width <- input$styler_width %||% 10
+  height <- if(isTruthy(input$styler_height)) input$styler_height else 8
+  dpi <- input$styler_dpi %||% 300
+  
+  if (inherits(p, "trellis")) {
+    if (ext == "png") {
+      png(filepath, width = width, height = height, units = "in", res = dpi)
+    } else if (ext == "tiff") {
+      tiff(filepath, width = width, height = height, units = "in", res = dpi)
+    } else if (ext == "pdf") {
+      pdf(filepath, width = width, height = height)
+    } else {
+      jpeg(filepath, width = width, height = height, units = "in", res = dpi)
+    }
+    print(p)
+    dev.off()
+  } else {
+    ggplot2::ggsave(
+      filename = filepath,
+      plot = p,
+      device = if(ext == "pdf") "pdf" else (if(ext == "tiff") "tiff" else NULL),
+      dpi = dpi,
+      width = width,
+      height = height,
+      units = "in"
+    )
+  }
 }
