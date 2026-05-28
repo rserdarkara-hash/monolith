@@ -1,4 +1,4 @@
-# desc_exploratory_module_0.9.7c.R - Descriptive Exploratory Suite Server Module
+# desc_exploratory_module_0.9.8.R - Descriptive Exploratory Suite Server Module
 # Handles Tab 5 analytics: grouping, descriptive stats, correlation, and PCA
 
 desc_exploratory_ui <- function(id) {
@@ -143,14 +143,7 @@ desc_exploratory_server <- function(id, data_reactive, vars_metadata_reactive) {
       
       vars_metadata <- vars_metadata_reactive()
       if (!is.null(vars_metadata)) {
-        choices_named <- setNames(valid_cols, sapply(valid_cols, function(v) {
-          match <- Filter(function(x) x$actual == v, vars_metadata)
-          if(length(match) > 0 && !is.null(match[[1]]$label) && match[[1]]$label != "") {
-            match[[1]]$label
-          } else {
-            v
-          }
-        }))
+        choices_named <- setNames(valid_cols, get_var_labels(valid_cols, vars_metadata))
       } else {
         choices_named <- valid_cols
       }
@@ -166,7 +159,7 @@ desc_exploratory_server <- function(id, data_reactive, vars_metadata_reactive) {
       df <- data_reactive()
       lapply(seq_along(vars), function(i) {
         v <- vars[i]
-        is_num <- is.numeric(df[[v]])
+        is_num <- is.numeric(df[[v]]) && length(unique(na.omit(df[[v]]))) > 10
         
         shiny::div(style="margin-bottom: 5px;",
             shiny::selectInput(ns(paste0("grp_type_", i)), paste("Type/Binning for:", v),
@@ -193,7 +186,7 @@ desc_exploratory_server <- function(id, data_reactive, vars_metadata_reactive) {
       
       types <- sapply(seq_along(vars), function(i) {
         v <- vars[i]
-        def <- if(is.numeric(df[[v]])) "numeric_median" else "categorical"
+        def <- if(is.numeric(df[[v]]) && length(unique(na.omit(df[[v]]))) > 10) "numeric_median" else "categorical"
         input[[paste0("grp_type_", i)]] %||% def
       })
       
@@ -233,14 +226,8 @@ desc_exploratory_server <- function(id, data_reactive, vars_metadata_reactive) {
       
       vars_metadata <- vars_metadata_reactive()
       if (!is.null(vars_metadata)) {
-        valid_named <- setNames(valid_cols, sapply(valid_cols, function(v) {
-          match <- Filter(function(x) x$actual == v, vars_metadata)
-          if(length(match) > 0 && !is.null(match[[1]]$label) && match[[1]]$label != "") match[[1]]$label else v
-        }))
-        num_named <- setNames(num_cols, sapply(num_cols, function(v) {
-          match <- Filter(function(x) x$actual == v, vars_metadata)
-          if(length(match) > 0 && !is.null(match[[1]]$label) && match[[1]]$label != "") match[[1]]$label else v
-        }))
+        valid_named <- setNames(valid_cols, get_var_labels(valid_cols, vars_metadata))
+        num_named <- setNames(num_cols, get_var_labels(num_cols, vars_metadata))
       } else {
         valid_named <- valid_cols
         num_named <- num_cols
@@ -301,8 +288,8 @@ desc_exploratory_server <- function(id, data_reactive, vars_metadata_reactive) {
       }
       
       shiny::withProgress(message = "Generating descriptive plot...", value = 0.5, {
-        df_global <- rv_analytics_data()
-        df_local <- rv_filtered_analytics_data()
+        df_global <- data.frame(rv_analytics_data(), check.names = FALSE)
+        df_local <- data.frame(rv_filtered_analytics_data(), check.names = FALSE)
       
       if (nrow(df_local) == 0) {
         p <- ggplot() + annotate("text", x=0, y=0, label="No data selected") + theme_void()
@@ -490,10 +477,7 @@ desc_exploratory_server <- function(id, data_reactive, vars_metadata_reactive) {
       
       vars_metadata <- vars_metadata_reactive()
       num_named <- if (!is.null(vars_metadata)) {
-        setNames(num_cols, sapply(num_cols, function(v) {
-          match <- Filter(function(x) x$actual == v, vars_metadata)
-          if(length(match) > 0 && !is.null(match[[1]]$label) && match[[1]]$label != "") match[[1]]$label else v
-        }))
+        setNames(num_cols, get_var_labels(num_cols, vars_metadata))
       } else { num_cols }
       
       p_type <- input$corr_plot_type %||% "heatmap"
@@ -524,6 +508,20 @@ desc_exploratory_server <- function(id, data_reactive, vars_metadata_reactive) {
       }
     })
     
+    corr_matrix_reactive <- shiny::reactive({
+      req(rv_analytics_data())
+      df <- rv_filtered_analytics_data()
+      vars <- input$corr_vars_multi
+      req(vars)
+      if (length(vars) < 2) return(NULL)
+      method <- input$corr_method %||% "pearson"
+      df_labeled <- apply_labels_to_df(df, vars, vars_metadata_reactive())
+      vars_lab <- get_var_labels(vars, vars_metadata_reactive())
+      df_clean <- na.omit(df_labeled[, vars_lab, drop=FALSE])
+      if (nrow(df_clean) < 3) return(NULL)
+      cor(df_clean, method = method)
+    })
+    
     corr_plot_obj <- shiny::reactive({
       req(rv_analytics_data())
       df <- rv_filtered_analytics_data()
@@ -552,9 +550,9 @@ desc_exploratory_server <- function(id, data_reactive, vars_metadata_reactive) {
         vars_lab <- get_var_labels(vars, vars_metadata_reactive())
         
         if (p_type == "heatmap") {
-          p <- generate_correlation_heatmap(df, vars_lab, method = method)
+          p <- generate_correlation_heatmap(df, vars_lab, method = method, cormat = corr_matrix_reactive())
         } else if (p_type == "network") {
-          p <- generate_correlation_network(df, vars_lab, threshold = input$corr_net_thresh %||% 0.3, method = method)
+          p <- generate_correlation_network(df, vars_lab, threshold = input$corr_net_thresh %||% 0.3, method = method, cormat = corr_matrix_reactive())
         } else if (p_type == "partial") {
           c_vars <- input$corr_vars_control
           if(!is.null(c_vars) && length(c_vars) > 0) {
@@ -565,7 +563,7 @@ desc_exploratory_server <- function(id, data_reactive, vars_metadata_reactive) {
           }
           p <- generate_partial_correlation(df, vars_lab, control_vars = c_vars_lab, method = method)
         } else if (p_type == "correlogram") {
-          p <- generate_correlogram(df, vars_lab, method = method)
+          p <- generate_correlogram(df, vars_lab, method = method, cormat = corr_matrix_reactive())
         }
       }
       return(p)
@@ -651,7 +649,9 @@ desc_exploratory_server <- function(id, data_reactive, vars_metadata_reactive) {
            }
         }
         
-        cormat <- round(cor(df_clean, method = method), 3)
+        cormat <- corr_matrix_reactive()
+        req(cormat)
+        cormat <- round(cormat, 3)
         cormat_df <- as.data.frame(cormat)
         
         return(DT::datatable(cormat_df, options = list(pageLength = 10, dom = 't', scrollX = TRUE)))
@@ -667,10 +667,7 @@ desc_exploratory_server <- function(id, data_reactive, vars_metadata_reactive) {
       
       vars_metadata <- vars_metadata_reactive()
       num_named <- if (!is.null(vars_metadata)) {
-        setNames(num_cols, sapply(num_cols, function(v) {
-          match <- Filter(function(x) x$actual == v, vars_metadata)
-          if(length(match) > 0 && !is.null(match[[1]]$label) && match[[1]]$label != "") match[[1]]$label else v
-        }))
+        setNames(num_cols, get_var_labels(num_cols, vars_metadata))
       } else { num_cols }
       
       shiny::tagList(
@@ -843,115 +840,40 @@ desc_exploratory_server <- function(id, data_reactive, vars_metadata_reactive) {
     })
     
     # --- Expandable Modal Dialogs Server Logic ---
-    shiny::observeEvent(input$desc_expand_plot_btn, {
-      shiny::showModal(shiny::modalDialog(
-        title = "Expanded View: Descriptive Suite",
-        size = "l",
-        easyClose = TRUE,
-        shiny::radioButtons(ns("desc_expand_mode"), "View Mode:", choices=c("Static (High-Res)"="static", "Interactive (Hover/Zoom)"="interactive"), inline=TRUE),
-        shiny::uiOutput(ns("desc_expanded_ui")),
-        footer = shiny::modalButton("Close")
-      ))
-    })
+    register_expanded_modal(
+      input, output, session,
+      btn_id = "desc_expand_plot_btn",
+      mode_id = "desc_expand_mode",
+      ui_id = "desc_expanded_ui",
+      plot_static_id = "desc_main_plot_expanded",
+      plot_plotly_id = "desc_main_plot_expanded_plotly",
+      title_text = "Descriptive Suite",
+      build_fn = desc_plot_obj,
+      radar_special = TRUE
+    )
     
-    output$desc_expanded_ui <- shiny::renderUI({
-       if (input$desc_expand_mode == "interactive") {
-          plotly::plotlyOutput(ns("desc_main_plot_expanded_plotly"), height = "700px")
-       } else {
-          shiny::plotOutput(ns("desc_main_plot_expanded"), height = "700px")
-       }
-    })
+    register_expanded_modal(
+      input, output, session,
+      btn_id = "corr_expand_plot_btn",
+      mode_id = "corr_expand_mode",
+      ui_id = "corr_expanded_ui",
+      plot_static_id = "corr_main_plot_expanded",
+      plot_plotly_id = "corr_main_plot_expanded_plotly",
+      title_text = "Correlation Analysis",
+      build_fn = corr_plot_obj
+    )
     
-    output$desc_main_plot_expanded <- shiny::renderPlot({
-       desc_plot_obj()
-    })
-    
-    output$desc_main_plot_expanded_plotly <- plotly::renderPlotly({
-       p <- desc_plot_obj()
-       if (input$desc_plot_type == "radar" && inherits(p, "ggplot") && nrow(p$data) > 0 && "variable" %in% colnames(p$data)) {
-          d <- p$data
-          fig <- plotly::plot_ly(type = 'scatterpolar', mode = 'lines+markers')
-          for(g in unique(d$group)) {
-              dg <- d[d$group == g, ]
-              dg <- rbind(dg, dg[1, ])
-              fig <- plotly::add_trace(fig, r = dg$value, theta = dg$variable, name = g, fill = 'toself')
-          }
-          fig <- plotly::layout(fig, 
-                                polar = list(radialaxis = list(visible = TRUE, range = c(0, max(d$value, na.rm=TRUE)))), 
-                                showlegend = TRUE, 
-                                title = list(text = "Radar Chart (Normalized Means)<br><sup>Note: Native plotly style used for interactive mode</sup>", x = 0.5))
-          return(fig)
-       }
-       if(inherits(p, "ggplot")) plotly::ggplotly(p) else p
-    })
-  
-    shiny::observeEvent(input$corr_expand_plot_btn, {
-      shiny::showModal(shiny::modalDialog(
-        title = "Expanded View: Correlation Analysis",
-        size = "l",
-        easyClose = TRUE,
-        shiny::radioButtons(ns("corr_expand_mode"), "View Mode:", choices=c("Static (High-Res)"="static", "Interactive (Hover/Zoom)"="interactive"), inline=TRUE),
-        shiny::uiOutput(ns("corr_expanded_ui")),
-        footer = shiny::modalButton("Close")
-      ))
-    })
-    
-    output$corr_expanded_ui <- shiny::renderUI({
-       if (input$corr_expand_mode == "interactive") {
-          plotly::plotlyOutput(ns("corr_main_plot_expanded_plotly"), height = "700px")
-       } else {
-          shiny::plotOutput(ns("corr_main_plot_expanded"), height = "700px")
-       }
-    })
-    
-    output$corr_main_plot_expanded <- shiny::renderPlot({
-       corr_plot_obj()
-    })
-    
-    output$corr_main_plot_expanded_plotly <- plotly::renderPlotly({
-       p <- corr_plot_obj()
-       if(inherits(p, "ggplot")) plotly::ggplotly(p) else p
-    })
-  
-    shiny::observeEvent(input$pca_expand_plot_btn, {
-      shiny::showModal(shiny::modalDialog(
-        title = "Expanded View: PCA",
-        size = "l",
-        easyClose = TRUE,
-        if (input$pca_plot_type != "3d_biplot") {
-           shiny::radioButtons(ns("pca_expand_mode"), "View Mode:", choices=c("Static (High-Res)"="static", "Interactive (Hover/Zoom)"="interactive"), inline=TRUE)
-        },
-        shiny::uiOutput(ns("pca_expanded_ui")),
-        footer = shiny::modalButton("Close")
-      ))
-    })
-  
-    output$pca_expanded_ui <- shiny::renderUI({
-       if (input$pca_plot_type == "3d_biplot") {
-          plotly::plotlyOutput(ns("pca_main_plot_expanded_plotly_3d"), height = "700px")
-       } else {
-          if (!is.null(input$pca_expand_mode) && input$pca_expand_mode == "interactive") {
-             plotly::plotlyOutput(ns("pca_main_plot_expanded_plotly"), height = "700px")
-          } else {
-             shiny::plotOutput(ns("pca_main_plot_expanded"), height = "700px")
-          }
-       }
-    })
-  
-    output$pca_main_plot_expanded <- shiny::renderPlot({
-       p <- pca_plot_obj()
-       if(inherits(p, "ggplot")) return(p)
-    })
-  
-    output$pca_main_plot_expanded_plotly <- plotly::renderPlotly({
-       p <- pca_plot_obj()
-       if(inherits(p, "ggplot")) plotly::ggplotly(p) else p
-    })
-  
-    output$pca_main_plot_expanded_plotly_3d <- plotly::renderPlotly({
-       p <- pca_plot_obj()
-       if(inherits(p, "plotly")) return(p)
-    })
+    register_expanded_modal(
+      input, output, session,
+      btn_id = "pca_expand_plot_btn",
+      mode_id = "pca_expand_mode",
+      ui_id = "pca_expanded_ui",
+      plot_static_id = "pca_main_plot_expanded",
+      plot_plotly_id = "pca_main_plot_expanded_plotly",
+      title_text = "PCA",
+      build_fn = pca_plot_obj,
+      pca_3d_special = shiny::reactive({ input$pca_plot_type == "3d_biplot" })
+    )
     
     # Governing Factors Module integration
     gov_factors_server("gov", data_reactive = shiny::reactive(rv_analytics_data()), vars_metadata_reactive = vars_metadata_reactive)

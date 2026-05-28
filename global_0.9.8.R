@@ -1,26 +1,17 @@
-# global_0.9.7c.R - Centralized Configuration & Dependencies for Monolith v0.9.7c
+# global_0.9.8.R - Centralized Configuration & Dependencies for Monolith v0.9.8
 # Copyright (c) 2026 Recep Serdar Kara. All rights reserved.
 
-# --- Smart Auto-Installation & Package Loading Hook ---
+# --- Required Package Suite ---
 required_packages <- c(
   "shiny", "shinyjs", "shinyWidgets", "shinyFiles", "shinycssloaders", "DT",
   "sf", "terra", "tidyterra", "leaflet", "leaflet.extras", "ggspatial", "fields",
   "classInt", "gstat", "automap", "concaveman", "spdep", "FNN",
   "dplyr", "tidyr", "jsonlite", "readxl", "openxlsx", "officer", "zip",
   "ggplot2", "ggpubr", "plotly", "RColorBrewer", "viridis", "latticeExtra",
-  "patchwork", "fresh", "showtext", "scales", "commonmark",
+  "patchwork", "fresh", "showtext", "scales", "commonmark", "glue",
   "randomForest", "DALEX", "yardstick", "agricolae", "mgcv",
   "future", "furrr", "promises"
 )
-
-# Identify missing packages
-missing_packages <- required_packages[!(required_packages %in% installed.packages()[, "Package"])]
-
-# Install missing ones using a default cloud repository (non-interactively)
-if (length(missing_packages) > 0) {
-  message("Installing missing packages: ", paste(missing_packages, collapse = ", "))
-  install.packages(missing_packages, repos = "https://cloud.r-project.org")
-}
 
 # --- Core R/Shiny Dependencies ---
 library(shiny)
@@ -66,6 +57,7 @@ library(fresh)
 library(showtext)
 library(scales)
 library(commonmark)
+library(glue)
 
 # --- Machine Learning & Diagnostics Dependencies ---
 library(randomForest)
@@ -91,10 +83,10 @@ if (!inherits(future::plan(), "multisession")) {
   future::plan(future::multisession)
 }
 
-# --- Source v0.9.7 Helper Modules ---
-source("ui_helpers_0.9.7c.R")
-source("spatial_helpers_0.9.7c.R")
-source("theme_helpers_0.9.7c.R")
-source("gov_module_0.9.7c.R")
-source("desc_exploratory_module_0.9.7c.R")
+# --- Source v0.9.8 Helper Modules ---
+source("ui_helpers_0.9.8.R")
+source("spatial_helpers_0.9.8.R")
+source("theme_helpers_0.9.8.R")
+source("gov_module_0.9.8.R")
+source("desc_exploratory_module_0.9.8.R")
 

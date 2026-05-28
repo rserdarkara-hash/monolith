@@ -1,4 +1,4 @@
-# Monolith: Advanced Spatial Analysis Dashboard v0.9.7c
+# Monolith: Advanced Spatial Analysis Dashboard v0.9.7d
 # Copyright (c) 2026 Recep Serdar Kara. All rights reserved.
 #
 # This program is free software: you can redistribute it and/or modify
@@ -14,7 +14,7 @@
 # You should have received a copy of the GNU General Public License
 # along with this program. If not, see <https://www.gnu.org/licenses/>.
 
-source("global_0.9.7c.R")
+source("global_0.9.7d.R")
 
 # --- Helpers ---
 
@@ -2568,7 +2568,7 @@ server <- function(input, output, session) {
       div(style = "text-align: center; padding: 20px;",
           img(src = "assets/banner.png", style = "max-width: 100%; height: auto; margin-bottom: 20px;"),
           h4("Workbench for statistics and optimized mapping in life sciences."),
-          p("Version: 0.9.7c"),
+          p("Version: 0.9.7d"),
           p("Integrated geostatistical modeling, classification and statistical interpretation."),
           hr(),
           p("Designed for high-performance parallel processing and spatial diagnostics, multi-scale interpolation via kriging, inverse distance weighting, and thin plate splines with practical multi-criteria optimization."),
@@ -3925,6 +3925,7 @@ server <- function(input, output, session) {
         calc_scientific_lags = calc_scientific_lags,
         robust_vgm_fit = robust_vgm_fit,
         perform_cv = perform_cv,
+        perform_kriging_loocv = perform_kriging_loocv,
         perform_rk_cv = perform_rk_cv,
         perform_rfk_cv = perform_rfk_cv,
         calc_ccc = calc_ccc,
@@ -3939,6 +3940,7 @@ server <- function(input, output, session) {
         apply_CK = apply_CK,
         apply_IDW = apply_IDW,
         apply_TPS = apply_TPS,
+        apply_kriging_pipeline = apply_kriging_pipeline,
         krige_covariates = krige_covariates,
         get_cv_residuals = get_cv_residuals,
         init_interpolation_res = init_interpolation_res,
@@ -4932,8 +4934,10 @@ server <- function(input, output, session) {
     
     # Get actual and predicted data from raw frame
     df <- rv$user_data
-    v_act <- df[[meta$actual]]
-    v_pre <- if(!is.null(meta$pred)) df[[meta$pred]] else if(!is.null(meta$pred_ss)) df[[meta$pred_ss]] else NULL
+    v_act <- if(!is.null(meta$actual) && !is.na(meta$actual) && meta$actual %in% colnames(df)) df[[meta$actual]] else NULL
+    if (is.null(v_act)) return(NULL)
+    
+    v_pre <- if(!is.null(meta$pred) && !is.na(meta$pred) && meta$pred %in% colnames(df)) df[[meta$pred]] else if(!is.null(meta$pred_ss) && !is.na(meta$pred_ss) && meta$pred_ss %in% colnames(df)) df[[meta$pred_ss]] else NULL
     
     s_a <- summary(v_act)
     res <- data.frame(Metric = names(s_a), Total_Actual = as.character(round(as.numeric(s_a), 3)))
@@ -4953,8 +4957,10 @@ server <- function(input, output, session) {
     
     # Filter raw data by mapped locality column
     df <- rv$user_data %>% filter(!!sym(rv$mapping$loc) == input$sel_loc_stats)
-    v_act <- df[[meta$actual]]
-    v_pre <- if(!is.null(meta$pred)) df[[meta$pred]] else if(!is.null(meta$pred_ss)) df[[meta$pred_ss]] else NULL
+    v_act <- if(!is.null(meta$actual) && !is.na(meta$actual) && meta$actual %in% colnames(df)) df[[meta$actual]] else NULL
+    if (is.null(v_act)) return(NULL)
+    
+    v_pre <- if(!is.null(meta$pred) && !is.na(meta$pred) && meta$pred %in% colnames(df)) df[[meta$pred]] else if(!is.null(meta$pred_ss) && !is.na(meta$pred_ss) && meta$pred_ss %in% colnames(df)) df[[meta$pred_ss]] else NULL
     
     s_a <- summary(v_act)
     res <- data.frame(Metric = names(s_a), Selected_Actual = as.character(round(as.numeric(s_a), 3)))

@@ -1,4 +1,4 @@
-# spatial_helpers_0.9.7c.R - Geospatial & Interpolation Engine
+# spatial_helpers_0.9.8.R - Geospatial & Interpolation Engine
 
 # Calculate Concordance Correlation Coefficient (CCC)
 calc_ccc <- function(observed, predicted) {
@@ -59,6 +59,14 @@ calc_moran <- function(residuals, coords) {
   if (n < 3 || nrow(coords) != n) return(NA)
   
   tryCatch({
+    # Jitter coordinates slightly if there are duplicate coordinates to prevent distance = 0 issues
+    coords_matrix <- as.matrix(coords)
+    if (any(duplicated(coords_matrix))) {
+      coords_matrix[,1] <- jitter(coords_matrix[,1], amount = 1e-8)
+      coords_matrix[,2] <- jitter(coords_matrix[,2], amount = 1e-8)
+      coords <- coords_matrix
+    }
+    
     # Safe check to ensure we have enough rows for k=1
     knn_res <- if(nrow(coords) > 1) {
       tryCatch({ FNN::get.knn(coords, k = 1) }, error = function(e) list(nn.dist = mean(dist(coords), na.rm = TRUE)))
@@ -197,9 +205,24 @@ update_progress_file <- function(l, prefix, step, total) {
   })
 }
 
-# --- Regression Kriging Full-Pipeline CV ---
-perform_rk_cv <- function(pts, target_var, aux_vars, lags_func, vgm_fit_func, l = "region", prefix = "act") {
-  # Pre-filter to complete cases of target and covariates to prevent NA crashes in the loop
+write_warning_file <- function(l, prefix, message) {
+  clean_l <- gsub("[^a-zA-Z0-9_]", "_", as.character(l))
+  progress_dir <- getOption("monolith_progress_dir", tempdir())
+  session_id <- getOption("monolith_session_id", "default")
+  
+  if (!dir.exists(progress_dir)) {
+    tryCatch(dir.create(progress_dir, recursive = TRUE, showWarnings = FALSE), error = function(e) NULL)
+  }
+  
+  file_name <- file.path(progress_dir, paste0("warn_", session_id, "_", clean_l, "_", prefix, ".txt"))
+  tryCatch({
+    writeLines(as.character(message), file_name)
+  }, error = function(e) NULL)
+}
+
+# --- Unified Kriging Full-Pipeline CV ---
+perform_kriging_loocv <- function(pts, target_var, aux_vars, lags_func, vgm_fit_func, model_type = c("lm", "rf"), l = "region", prefix = "act") {
+  model_type <- match.arg(model_type)
   pts <- pts[complete.cases(sf::st_drop_geometry(pts)[, c(target_var, aux_vars), drop=FALSE]), ]
   n <- nrow(pts)
   if (n < 3) return(NULL)
@@ -208,39 +231,34 @@ perform_rk_cv <- function(pts, target_var, aux_vars, lags_func, vgm_fit_func, l 
   results_list <- lapply(1:n, function(i) {
     train <- pts[-i, ]; test <- pts[i, ]
     
-    lm_mod <- lm(form_reg, data = train); train$residuals <- residuals(lm_mod)
+    if (model_type == "lm") {
+      lm_mod <- lm(form_reg, data = train)
+      train$residuals <- residuals(lm_mod)
+      pred_trend <- predict(lm_mod, newdata = test)
+    } else {
+      rf_mod <- randomForest::randomForest(form_reg, data = train, ntree = 100)
+      train$residuals <- train[[target_var]] - rf_mod$predicted
+      pred_trend <- predict(rf_mod, test)
+    }
+    
     lags <- lags_func(train)
     v_emp <- variogram(residuals ~ 1, train, width = lags$width, cutoff = lags$cutoff)
     v_fit <- vgm_fit_func(v_emp, train$residuals)
     res_krig <- krige(residuals ~ 1, train, test, model = v_fit, debug.level = 0)
-    pred_trend <- predict(lm_mod, newdata = test)
     data.frame(observed = test[[target_var]], var1.pred = as.numeric(pred_trend) + res_krig$var1.pred)
   })
   
   return(do.call(rbind, results_list))
 }
 
+# --- Regression Kriging Full-Pipeline CV ---
+perform_rk_cv <- function(pts, target_var, aux_vars, lags_func, vgm_fit_func, l = "region", prefix = "act") {
+  perform_kriging_loocv(pts, target_var, aux_vars, lags_func, vgm_fit_func, model_type = "lm", l, prefix)
+}
+
 # --- RF Kriging Full-Pipeline CV ---
 perform_rfk_cv <- function(pts, target_var, aux_vars, lags_func, vgm_fit_func, l = "region", prefix = "act") {
-  # Pre-filter to complete cases of target and covariates to prevent NA crashes in the loop
-  pts <- pts[complete.cases(sf::st_drop_geometry(pts)[, c(target_var, aux_vars), drop=FALSE]), ]
-  n <- nrow(pts)
-  if (n < 3) return(NULL)
-  form_reg <- as.formula(paste0("`", target_var, "` ~ ", paste(paste0("`", aux_vars, "`"), collapse = " + ")))
-  
-  results_list <- lapply(1:n, function(i) {
-    train <- pts[-i, ]; test <- pts[i, ]
-    
-    rf_mod <- randomForest::randomForest(form_reg, data = train, ntree = 100); train$residuals <- train[[target_var]] - rf_mod$predicted
-    lags <- lags_func(train)
-    v_emp <- variogram(residuals ~ 1, train, width = lags$width, cutoff = lags$cutoff)
-    v_fit <- vgm_fit_func(v_emp, train$residuals)
-    res_krig <- krige(residuals ~ 1, train, test, model = v_fit, debug.level = 0)
-    pred_trend <- predict(rf_mod, test)
-    data.frame(observed = test[[target_var]], var1.pred = as.numeric(pred_trend) + res_krig$var1.pred)
-  })
-  
-  return(do.call(rbind, results_list))
+  perform_kriging_loocv(pts, target_var, aux_vars, lags_func, vgm_fit_func, model_type = "rf", l, prefix)
 }
 
 # --- Adaptive LMC Model Suggester ---
@@ -451,97 +469,96 @@ sanitize_spatial_predictions <- function(res_sf) {
   return(res_sf)
 }
 
-apply_OK <- function(data, target_var, grid_p, lags, method_params, l = "region", prefix = "act") {
+# --- Centralized Kriging Interpolation Pipeline ---
+apply_kriging_pipeline <- function(engine = c("OK", "RK", "RFK"), data, target_var, grid_p, lags, method_params, aux_vars = NULL, l = "region", prefix = "act") {
+  engine <- match.arg(engine)
   res <- init_interpolation_res()
   
-  update_progress_file(l, prefix, 20, 100)
-  form_ok <- reformulate("1", response = target_var)
-  res$v_emp <- variogram(form_ok, data, width = lags$width, cutoff = lags$cutoff)
-  res$fit <- if(!is.null(method_params$pre_fit)) method_params$pre_fit else robust_vgm_fit(res$v_emp, data[[target_var]])
-  
-  update_progress_file(l, prefix, 50, 100)
-  res <- safe_run_cv(res, krige.cv(form_ok, data, model = res$fit, nfold = nrow(data), debug.level = 0), "OK", nrow(data))
-  res$res_sf <- krige(form_ok, data, grid_p, model = res$fit, debug.level = 0)
-  res$res_sf <- sanitize_spatial_predictions(res$res_sf)
-  
-  update_progress_file(l, prefix, 100, 100)
-  return(res)
-}
-
-apply_RK <- function(data, target_var, grid_p, lags, method_params, aux_vars, l = "region", prefix = "act") {
-  res <- init_interpolation_res()
-  
-  update_progress_file(l, prefix, 10, 100)
-  if (length(aux_vars) > 1) {
-    vif_res <- check_vif(st_drop_geometry(data)[, aux_vars, drop = FALSE])
-    if (length(vif_res$dropped) > 0) {
-      res$log_msg <- paste0(res$log_msg, " [VIF] Dropped: ", paste(vif_res$dropped, collapse=", "))
-      aux_vars <- vif_res$kept
+  if (engine == "OK") {
+    update_progress_file(l, prefix, 20, 100)
+    form_ok <- reformulate("1", response = target_var)
+    res$v_emp <- variogram(form_ok, data, width = lags$width, cutoff = lags$cutoff)
+    res$fit <- if(!is.null(method_params$pre_fit)) method_params$pre_fit else robust_vgm_fit(res$v_emp, data[[target_var]])
+    
+    update_progress_file(l, prefix, 50, 100)
+    res <- safe_run_cv(res, krige.cv(form_ok, data, model = res$fit, nfold = nrow(data), debug.level = 0), "OK", nrow(data))
+    res$res_sf <- krige(form_ok, data, grid_p, model = res$fit, debug.level = 0)
+  } else {
+    update_progress_file(l, prefix, 10, 100)
+    if (engine == "RK" && length(aux_vars) > 1) {
+      vif_res <- check_vif(st_drop_geometry(data)[, aux_vars, drop = FALSE])
+      if (length(vif_res$dropped) > 0) {
+        res$log_msg <- paste0(res$log_msg, " [VIF] Dropped: ", paste(vif_res$dropped, collapse=", "))
+        aux_vars <- vif_res$kept
+      }
+    }
+    
+    krig_cov <- krige_covariates(data, grid_p, aux_vars, lags, method_params)
+    grid_aux <- krig_cov$grid_aux
+    res$log_msg <- paste0(res$log_msg, krig_cov$log_msg)
+    
+    form_reg <- as.formula(paste(paste0("`", target_var, "`"), "~", paste(paste0("`", aux_vars, "`"), collapse = " + ")))
+    
+    if (engine == "RK") {
+      lm_mod <- lm(form_reg, data = data)
+      res$model_summary <- summary(lm_mod)
+      
+      data$residuals <- residuals(lm_mod)
+      res$residuals <- residuals(lm_mod)
+      
+      res$v_emp <- variogram(residuals ~ 1, data, width = lags$width, cutoff = lags$cutoff)
+      res$fit <- robust_vgm_fit(res$v_emp, data$residuals)
+      res_krig <- krige(residuals ~ 1, data, grid_p, model = res$fit, debug.level = 0)
+      
+      pred_trend <- predict(lm_mod, newdata = grid_aux, se.fit = TRUE)
+      trend_var <- (pred_trend$se.fit)^2
+      
+      res$res_sf <- grid_p %>% mutate(
+        var1.pred = as.vector(pred_trend$fit + res_krig$var1.pred), 
+        var1.var = as.vector(trend_var + res_krig$var1.var)
+      )
+      res <- safe_run_cv(res, perform_rk_cv(data, target_var, aux_vars, calc_scientific_lags, robust_vgm_fit, l, prefix), "RK", nrow(data))
+    } else if (engine == "RFK") {
+      rf_mod <- randomForest::randomForest(form_reg, data = data, ntree = 200, importance = TRUE)
+      res$rf_model <- rf_mod
+      
+      residuals_val <- data[[target_var]] - rf_mod$predicted
+      data$residuals <- residuals_val
+      res$residuals <- residuals_val
+      
+      res$v_emp <- variogram(residuals ~ 1, data, width = lags$width, cutoff = lags$cutoff)
+      res$fit <- robust_vgm_fit(res$v_emp, data$residuals)
+      res_krig <- krige(residuals ~ 1, data, grid_p, model = res$fit, debug.level = 0)
+      
+      pred_trend_all <- predict(rf_mod, grid_aux, predict.all = TRUE)
+      trend_var <- apply(pred_trend_all$individual, 1, var)
+      
+      res$res_sf <- grid_p %>% mutate(
+        var1.pred = as.vector(pred_trend_all$aggregate + res_krig$var1.pred), 
+        var1.var = as.vector(trend_var + res_krig$var1.var)
+      )
+      res <- safe_run_cv(res, perform_rfk_cv(data, target_var, aux_vars, calc_scientific_lags, robust_vgm_fit, l, prefix), "RFK", nrow(data))
     }
   }
   
-  krig_cov <- krige_covariates(data, grid_p, aux_vars, lags, method_params)
-  grid_aux <- krig_cov$grid_aux
-  res$log_msg <- paste0(res$log_msg, krig_cov$log_msg)
-  
-  form_reg <- as.formula(paste(paste0("`", target_var, "`"), "~", paste(paste0("`", aux_vars, "`"), collapse = " + ")))
-  lm_mod <- lm(form_reg, data = data)
-  res$model_summary <- summary(lm_mod)
-  
-  data$residuals <- residuals(lm_mod)
-  res$residuals <- residuals(lm_mod)
-  
-  res$v_emp <- variogram(residuals ~ 1, data, width = lags$width, cutoff = lags$cutoff)
-  res$fit <- robust_vgm_fit(res$v_emp, data$residuals)
-  res_krig <- krige(residuals ~ 1, data, grid_p, model = res$fit, debug.level = 0)
-  
-  pred_trend <- predict(lm_mod, newdata = grid_aux, se.fit = TRUE)
-  trend_var <- (pred_trend$se.fit)^2
-  
-  res$res_sf <- grid_p %>% mutate(
-    var1.pred = as.vector(pred_trend$fit + res_krig$var1.pred), 
-    var1.var = as.vector(trend_var + res_krig$var1.var)
-  )
   res$res_sf <- sanitize_spatial_predictions(res$res_sf)
-  
-  res <- safe_run_cv(res, perform_rk_cv(data, target_var, aux_vars, calc_scientific_lags, robust_vgm_fit, l, prefix), "RK", nrow(data))
-  
   update_progress_file(l, prefix, 100, 100)
   return(res)
 }
 
+# --- Ordinary Kriging API ---
+apply_OK <- function(data, target_var, grid_p, lags, method_params, l = "region", prefix = "act") {
+  apply_kriging_pipeline("OK", data, target_var, grid_p, lags, method_params, NULL, l, prefix)
+}
+
+# --- Regression Kriging API ---
+apply_RK <- function(data, target_var, grid_p, lags, method_params, aux_vars, l = "region", prefix = "act") {
+  apply_kriging_pipeline("RK", data, target_var, grid_p, lags, method_params, aux_vars, l, prefix)
+}
+
+# --- Random Forest Kriging API ---
 apply_RFK <- function(data, target_var, grid_p, lags, method_params, aux_vars, l = "region", prefix = "act") {
-  res <- init_interpolation_res()
-  
-  update_progress_file(l, prefix, 10, 100)
-  krig_cov <- krige_covariates(data, grid_p, aux_vars, lags, method_params)
-  grid_aux <- krig_cov$grid_aux
-  res$log_msg <- paste0(res$log_msg, krig_cov$log_msg)
-  
-  form_reg <- as.formula(paste(paste0("`", target_var, "`"), "~", paste(paste0("`", aux_vars, "`"), collapse = " + ")))
-  rf_mod <- randomForest::randomForest(form_reg, data = data, ntree = 200, importance = TRUE)
-  res$rf_model <- rf_mod
-  
-  data$residuals <- data[[target_var]] - rf_mod$predicted
-  res$residuals <- data[[target_var]] - rf_mod$predicted
-  
-  res$v_emp <- variogram(residuals ~ 1, data, width = lags$width, cutoff = lags$cutoff)
-  res$fit <- robust_vgm_fit(res$v_emp, data$residuals)
-  res_krig <- krige(residuals ~ 1, data, grid_p, model = res$fit, debug.level = 0)
-  
-  pred_trend_all <- predict(rf_mod, grid_aux, predict.all = TRUE)
-  trend_var <- apply(pred_trend_all$individual, 1, var)
-  
-  res$res_sf <- grid_p %>% mutate(
-    var1.pred = as.vector(pred_trend_all$aggregate + res_krig$var1.pred), 
-    var1.var = as.vector(trend_var + res_krig$var1.var)
-  )
-  res$res_sf <- sanitize_spatial_predictions(res$res_sf)
-  
-  res <- safe_run_cv(res, perform_rfk_cv(data, target_var, aux_vars, calc_scientific_lags, robust_vgm_fit, l, prefix), "RFK", nrow(data))
-  
-  update_progress_file(l, prefix, 100, 100)
-  return(res)
+  apply_kriging_pipeline("RFK", data, target_var, grid_p, lags, method_params, aux_vars, l, prefix)
 }
 
 apply_CK <- function(data, target_var, grid_p, lags, method_params, aux_vars, l = "region", prefix = "act") {
@@ -573,19 +590,35 @@ apply_CK <- function(data, target_var, grid_p, lags, method_params, aux_vars, l 
   if (is.list(g_or_err) && !is.null(g_or_err$error_msg)) {
     res$log_msg <- paste0(res$log_msg, g_or_err$error_msg)
     g <- NULL
+    write_warning_file(l, prefix, "LMC model fit failed, using Ordinary Kriging fallback.")
   } else {
     g <- g_or_err
   }
   
   if(!is.null(g)) {
     res$gstat_obj <- g
-    res <- safe_run_cv(res, gstat.cv(g, nfold = nrow(data), debug.level = 0), "CK", nrow(data))
+    res <- safe_run_cv(res, {
+      cv_val <- gstat.cv(g, nfold = nrow(data), debug.level = 0)
+      if (!is.null(cv_val)) {
+        cnames <- names(cv_val)
+        pred_col_src <- paste0(target_var, ".pred")
+        obs_col_src <- paste0(target_var, ".observed")
+        
+        if (pred_col_src %in% cnames) {
+          names(cv_val)[names(cv_val) == pred_col_src] <- "var1.pred"
+        }
+        if (obs_col_src %in% cnames) {
+          names(cv_val)[names(cv_val) == obs_col_src] <- "var1.observed"
+        }
+      }
+      cv_val
+    }, "CK", nrow(data))
     
     res_sf_or_err <- tryCatch({
       pred_obj <- predict(g, grid_p, debug.level = 0) %>% st_as_sf()
       pred_col <- paste0(target_var, ".pred")
       var_col <- paste0(target_var, ".var")
-      pred_obj %>% rename(var1.pred = !!pred_col, var1.var = !!var_col)
+      pred_obj %>% dplyr::rename(var1.pred = !!rlang::sym(pred_col), var1.var = !!rlang::sym(var_col))
     }, error = function(e) {
       list(error_msg = paste0("CK Prediction Failed: ", e$message, ". Falling back to OK."))
     })
@@ -601,7 +634,10 @@ apply_CK <- function(data, target_var, grid_p, lags, method_params, aux_vars, l 
   if(is.null(res$res_sf)) {
     v_emp_ok <- variogram(form_ok, data, width = lags$width, cutoff = lags$cutoff)
     fit_ok <- robust_vgm_fit(v_emp_ok, data[[target_var]])
+    res$v_emp <- v_emp_ok
+    res$fit <- fit_ok
     res$res_sf <- krige(form_ok, data, grid_p, model = fit_ok, debug.level = 0)
+    res <- safe_run_cv(res, krige.cv(form_ok, data, model = fit_ok, nfold = nrow(data), debug.level = 0), "OK Fallback", nrow(data))
   }
   
   res$res_sf <- sanitize_spatial_predictions(res$res_sf)
@@ -808,4 +844,256 @@ merge_wrapped_rasters <- function(raster_list) {
     unwrap_if_needed(valid_list[[1]])
   }
   merged
+}
+
+# --- Centralized Spatial Projection Helper (Issue a) ---
+validate_and_project_sf <- function(pts_sf, current_crs = NULL) {
+  if (is.null(pts_sf) || nrow(pts_sf) == 0) return(NULL)
+  
+  if (sf::st_is_longlat(pts_sf)) {
+    coords_4326 <- sf::st_coordinates(sf::st_transform(pts_sf, 4326))
+    lon_c <- mean(coords_4326[, 1], na.rm = TRUE)
+    lat_c <- mean(coords_4326[, 2], na.rm = TRUE)
+    if (is.na(lon_c) || is.na(lat_c)) {
+      stop("Calculated geographic center contains NA.")
+    }
+    utm_zone <- floor((lon_c + 180) / 6) + 1
+    utm_crs <- paste0("+proj=utm +zone=", utm_zone, " +datum=WGS84 +units=m +no_defs")
+    if (lat_c < 0) utm_crs <- paste0(utm_crs, " +south")
+    
+    pts_sf <- sf::st_transform(pts_sf, utm_crs)
+  }
+  
+  return(pts_sf)
+}
+
+# --- Wrapped regional model engine dispatcher (Issue c) ---
+run_regional_interpolation <- function(item, current_method, current_crs, aux_vars, shp_bound, b_type, buff_mode, b_dist, res_mode, grid_res, crs_sel, comp_mode, val_type, progress_dir_val = tempdir(), session_id_val = "default", cancel_file_val = NULL) {
+  options(monolith_progress_dir = progress_dir_val)
+  options(monolith_session_id = session_id_val)
+  
+  if (!is.null(cancel_file_val) && file.exists(cancel_file_val)) {
+    stop("Model generation cancelled by user.")
+  }
+  
+  l <- item$l
+  pts_data <- item$pts_data
+  m_params <- item$m_params        
+  
+  res_out <- list(l = l, r_a = NULL, r_p = NULL, r_res = NULL, bound = NULL, pts = NULL, 
+                  v_emp_act = NULL, v_fit_act = NULL, cv_act = NULL, cv_obj_act = NULL, summ_act = NULL, rf_act = NULL, gstat_act = NULL,
+                  v_emp_pre = NULL, v_fit_pre = NULL, cv_pre = NULL, cv_obj_pre = NULL, summ_pre = NULL, rf_pre = NULL, gstat_pre = NULL, log_msg = "", actual_res = NULL)
+  
+  res_out <- tryCatch({
+    # Ensure x and y coordinates are numeric
+    if (!is.numeric(pts_data$x)) pts_data$x <- as.numeric(as.character(pts_data$x))
+    if (!is.numeric(pts_data$y)) pts_data$y <- as.numeric(as.character(pts_data$y))
+    
+    pts_raw <- pts_data %>% dplyr::filter(!is.na(x), !is.na(y))
+    if (nrow(pts_raw) < 3) {
+      res_out$log_msg <- paste0("Warning in ", l, ": Insufficient data points after cleaning (needed >= 3, got ", nrow(pts_raw), ").")
+      return(res_out)
+    }
+    
+    pts_raw <- pts_raw %>% sf::st_as_sf(coords=c("x","y"), crs=current_crs)
+    if (current_method %in% c("RK", "RFK", "CK") && length(aux_vars) > 0) {
+       pts_raw <- pts_raw %>% dplyr::filter(dplyr::if_all(dplyr::all_of(aux_vars), ~!is.na(.)))
+    }
+    
+    if (nrow(pts_raw) < 3) {
+      res_out$log_msg <- paste0("Warning in ", l, ": Insufficient data points after covariate filtering (needed >= 3, got ", nrow(pts_raw), ").")
+      return(res_out)
+    }
+    
+    # Centralized Spatial Projection Handling (Issue a)
+    pts_projected <- validate_and_project_sf(pts_raw)
+    utm_crs <- sf::st_crs(pts_projected)$wkt
+    pts <- pts_projected
+    
+    if(nrow(pts) < 3) {
+      res_out$log_msg <- paste0("Warning in ", l, ": Insufficient data points after UTM conversion (needed >= 3, got ", nrow(pts), ").")
+      return(res_out)
+    }
+    
+    c_round <- round(sf::st_coordinates(pts), 2)
+    pts <- pts[!duplicated(cbind(c_round[,1], c_round[,2])),]
+    if(nrow(pts) < 3) {
+      res_out$log_msg <- paste0("Warning in ", l, ": Insufficient unique points after duplicate coordinate removal (needed >= 3, got ", nrow(pts), ").")
+      return(res_out)
+    }
+    
+    # Calculate local spatial density and dynamic buffer distance with robust safety fallbacks
+    b_mode_safe <- if (!is.null(buff_mode) && length(buff_mode) > 0) buff_mode else "dynamic"
+    b_dist_safe <- if (!is.null(b_dist) && length(b_dist) > 0) b_dist else 250
+    grid_res_safe <- if (!is.null(grid_res) && length(grid_res) > 0) grid_res else 50
+    current_method_safe <- if (!is.null(current_method) && length(current_method) > 0) current_method else "OK"
+
+    coords_local <- sf::st_coordinates(pts)
+    if (!is.null(res_mode) && res_mode == "fixed") {
+      local_res <- grid_res_safe
+    } else if (nrow(coords_local) > 1) {
+      knn_res <- FNN::get.knn(coords_local, k = 1)
+      local_res <- mean(knn_res$nn.dist) * 0.5
+    } else {
+      local_res <- grid_res_safe
+    }
+    
+    b_dist_local <- if (b_mode_safe == "dynamic" && b_type == "wrapped") {
+      buffer_multipliers <- list(
+        "TPS" = 1.0 * local_res,
+        "IDW" = 2.0 * local_res,
+        "OK"  = 3.0 * local_res,
+        "CK"  = 3.0 * local_res,
+        "RK"  = 3.0 * local_res,
+        "RFK" = 3.0 * local_res
+      )
+      val <- buffer_multipliers[[current_method_safe]] %||% (2.0 * local_res)
+      val <- if(is.numeric(val)) val else 2.0 * local_res
+      max(5, min(2000, val))
+    } else {
+      b_dist_safe
+    }
+    
+    local_shp <- NULL
+    if (!is.null(shp_bound)) {
+      match_col <- NULL
+      for(col_name in colnames(shp_bound)) {
+        if (any(as.character(shp_bound[[col_name]]) == l)) {
+          match_col <- col_name
+          break
+        }
+      }
+      
+      if (!is.null(match_col)) {
+        local_shp <- shp_bound %>% dplyr::filter(!!sym(match_col) == l)
+        local_shp <- sf::st_transform(local_shp, sf::st_crs(pts)) %>% sf::st_union()
+      } else {
+        local_shp <- tryCatch({
+          shp_trans <- tryCatch(sf::st_transform(shp_bound, sf::st_crs(pts)), error = function(e) NULL)
+          if (!is.null(shp_trans)) {
+            intersects <- sf::st_intersects(shp_trans, sf::st_union(pts), sparse = FALSE)
+            if (any(intersects)) {
+              shp_trans[which(intersects)[1], ] %>% sf::st_union()
+            } else {
+              NULL
+            }
+          } else NULL
+        }, error = function(e) NULL)
+      }
+    }
+    
+    bound <- NULL
+    if (!is.null(local_shp)) {
+      bound <- local_shp
+    } else {
+      bound <- tryCatch({
+        b <- switch(b_type,
+               "convex"  = sf::st_convex_hull(sf::st_union(pts)),
+               "concave" = concaveman::concaveman(pts),
+               "wrapped" = sf::st_buffer(concaveman::concaveman(pts), dist = b_dist_local),
+               "strict"  = sf::st_union(sf::st_buffer(pts, dist = b_dist_local)))
+        sf::st_as_sf(sf::st_sfc(sf::st_geometry(b), crs = sf::st_crs(pts)))
+      }, error = function(e) {
+        sf::st_as_sf(sf::st_sfc(sf::st_convex_hull(sf::st_union(pts)), crs = sf::st_crs(pts)))
+      })
+    }
+    
+    bbox <- sf::st_bbox(bound)
+    area_m2 <- as.numeric(sf::st_area(bound))
+    cell_area_target <- area_m2 / 100000 
+    
+    if (!is.null(res_mode) && res_mode == "fixed") {
+      actual_res <- grid_res_safe
+    } else {
+      actual_res <- sqrt(cell_area_target)
+      actual_res <- max(5, min(1000, actual_res)) 
+    }
+    
+    min_res_safe <- grid_res_safe * 0.1
+    if (actual_res < min_res_safe) actual_res <- max(0.1, min_res_safe)
+
+    grid_r <- terra::rast(terra::ext(bbox), res=actual_res, crs=sf::st_crs(pts)$wkt)
+    grid_p <- terra::as.points(grid_r, values=FALSE) %>% sf::st_as_sf() %>%
+      dplyr::mutate(x = sf::st_coordinates(.)[,1], y = sf::st_coordinates(.)[,2])
+    
+    r_a <- NULL; r_p <- NULL
+    
+    pts_a <- pts %>% dplyr::filter(!is.na(v)) %>% dplyr::mutate(x = sf::st_coordinates(.)[,1], y = sf::st_coordinates(.)[,2])
+    if(nrow(pts_a) >= 3) {
+        lags_a <- calc_scientific_lags(pts_a)
+        mp_a <- list(idw_p = m_params$idw_p_act, idw_nmax = m_params$idw_nmax, tps_lambda = m_params$tps_lambda_act, pre_fit = m_params$pre_fit_act)
+        if (!is.null(cancel_file_val) && file.exists(cancel_file_val)) stop("Model generation cancelled by user.")
+        res_a_list <- apply_interpolation(pts_a, "v", current_method, grid_p, aux_vars, lags_a, mp_a, l, "act")
+        res_out$v_emp_act <- res_a_list$v_emp; res_out$v_fit_act <- res_a_list$fit; res_out$cv_act <- res_a_list$cv_metrics; res_out$cv_obj_act <- res_a_list$cv_obj
+        res_out$summ_act <- res_a_list$model_summary; res_out$rf_act <- res_a_list$rf_model; res_out$gstat_act <- res_a_list$gstat_obj
+        res_out$log_msg <- paste0(res_out$log_msg, "\n", res_a_list$log_msg)
+        
+        if(!is.null(res_a_list$res_sf)) {
+            fields_a <- if("var1.var" %in% colnames(res_a_list$res_sf)) c("var1.pred", "var1.var") else "var1.pred"
+            r_a <- terra::rasterize(res_a_list$res_sf, grid_r, field=fields_a) %>% terra::mask(terra::vect(bound)) %>% terra::project(crs_sel)
+            res_out$r_a <- terra::wrap(r_a)
+        }
+    }
+    
+    if(comp_mode || val_type != "actual") {
+        pts_p <- pts %>% dplyr::filter(!is.na(pv)) %>% dplyr::mutate(x = sf::st_coordinates(.)[,1], y = sf::st_coordinates(.)[,2])
+        if(nrow(pts_p) >= 3) {
+            lags_p <- calc_scientific_lags(pts_p)
+            mp_p <- list(idw_p = m_params$idw_p_pre, idw_nmax = m_params$idw_nmax, tps_lambda = m_params$tps_lambda_pre, pre_fit = m_params$pre_fit_pre)
+            if (!is.null(cancel_file_val) && file.exists(cancel_file_val)) stop("Model generation cancelled by user.")
+            res_p_list <- apply_interpolation(pts_p, "pv", current_method, grid_p, aux_vars, lags_p, mp_p, l, "pre")
+            res_out$v_emp_pre <- res_p_list$v_emp; res_out$v_fit_pre <- res_p_list$fit; res_out$cv_pre <- res_p_list$cv_metrics; res_out$cv_obj_pre <- res_p_list$cv_obj
+            res_out$summ_pre <- res_p_list$model_summary; res_out$rf_pre <- res_p_list$rf_model; res_out$gstat_pre <- res_p_list$gstat_obj
+            res_out$log_msg <- paste0(res_out$log_msg, "\n", res_p_list$log_msg)
+            
+            if(!is.null(res_p_list$res_sf)) {
+                fields_p <- if("var1.var" %in% colnames(res_p_list$res_sf)) c("var1.pred", "var1.var") else "var1.pred"
+                r_p <- terra::rasterize(res_p_list$res_sf, grid_r, field=fields_p) %>% terra::mask(terra::vect(bound)) %>% terra::project(crs_sel)
+                res_out$r_p <- terra::wrap(r_p)
+            }
+        }
+    }
+    
+    if(!is.null(r_a) && !is.null(r_p)) res_out$r_res <- terra::wrap(r_a - r_p)
+    
+    # --- Extended Residuals: Kriged Point Errors ---
+    pts_err_raw <- pts_data %>% dplyr::filter(!is.na(v), !is.na(pv))
+    if(nrow(pts_err_raw) >= 3) {
+        pts_err <- sf::st_as_sf(pts_err_raw, coords=c("x","y"), crs=utm_crs) %>%
+                   dplyr::mutate(err = v - pv)
+        err_mod <- gstat::idw(err ~ 1, pts_err, grid_p, nmax = m_params$idw_nmax, idp = 2, debug.level = 0)
+        r_err <- terra::rasterize(err_mod, grid_r, field="var1.pred") %>% terra::mask(terra::vect(bound)) %>% terra::project(crs_sel)
+        res_out$r_point_err <- terra::wrap(r_err)
+    }
+    
+    pts$model_resid_act <- NA_real_
+    if (nrow(pts_a) >= 3 && exists("res_a_list") && !is.null(res_a_list$residuals)) {
+      pts$model_resid_act[!is.na(pts$v)] <- res_a_list$residuals
+    }
+    
+    pts$model_resid_pre <- NA_real_
+    if ((comp_mode || val_type != "actual") && nrow(pts_p) >= 3 && exists("res_p_list") && !is.null(res_p_list$residuals)) {
+      pts$model_resid_pre[!is.na(pts$pv)] <- res_p_list$residuals
+    }
+
+    res_out$bound <- sf::st_transform(bound, crs_sel)
+    res_out$pts <- sf::st_transform(pts, crs_sel) %>% dplyr::mutate(loc = l, resid = v - pv)
+    res_out$actual_res <- actual_res
+    
+    res_out
+  }, error = function(e) {
+    res_out$log_msg <- paste0(res_out$log_msg, "\nError in ", l, ": ", e$message)
+    res_out
+  })
+  
+  return(res_out)
+}
+
+# --- Scientific Variogram Parameters ---
+calc_scientific_lags <- function(sf_pts) {
+  # Reputable heuristic: cutoff = max distance / 2, width = cutoff / 15
+  bbox <- sf::st_bbox(sf_pts)
+  max_dist <- as.numeric(sqrt((bbox$xmax - bbox$xmin)^2 + (bbox$ymax - bbox$ymin)^2))
+  cutoff <- max_dist / 2
+  list(width = cutoff / 15, cutoff = cutoff)
 }
