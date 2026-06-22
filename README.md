@@ -103,7 +103,7 @@ Ensure your project directory maintains the following structure. The application
 ```
 monolith/
 │
-├── global.R                          # Centralized package loader & environment configuration
+├── global_0.9.8b.R                          # Centralized package loader & environment configuration
 ├── monolith_ver_0.9.8b.R            # Main Application Runner (Sources global.R)
 ├── spatial_helpers_0.9.8b.R         # Spatial math, interpolation methods & CV logic
 ├── ui_helpers_0.9.8b.R              # Analytics, descriptive plots & fuzzy matching helpers
@@ -135,7 +135,7 @@ monolith/
    ```
 3. Launch the Shiny app:
    ```R
-   shiny::runApp("monolith_ver_0.9.8b.R")
+   source("dev/run_dev.R")
    ```
 
 ## License
