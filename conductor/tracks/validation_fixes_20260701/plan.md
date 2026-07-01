@@ -8,12 +8,12 @@
     - [x] Replace `grepl` regex with exact match in `compute_governing_factors` inside `spatial_helpers_0.9.8b.R`
     - [x] Verify that metrics are correctly computed excluding failed folds and SHAP names are matched exactly
 
-- [~] Task: Implement seed for Governing Factors reproducibility
-    - [ ] Write a verification script to run two identical governing factors models and compare feature importances
-    - [ ] Add `set.seed(12345)` before randomForest fit and SHAP sampling in `spatial_helpers_0.9.8b.R`
-    - [ ] Verify that repeated runs yield 100% identical importance and plot outputs
+- [x] Task: Implement seed for Governing Factors reproducibility [efc9951]
+    - [x] Write a verification script to run two identical governing factors models and compare feature importances
+    - [x] Add `set.seed(12345)` before randomForest fit and SHAP sampling in `spatial_helpers_0.9.8b.R`
+    - [x] Verify that repeated runs yield 100% identical importance and plot outputs
 
-- [ ] Task: Conductor - User Manual Verification 'Phase 1: Geostatistical and Validation Fixes' (Protocol in workflow.md)
+- [~] Task: Conductor - User Manual Verification 'Phase 1: Geostatistical and Validation Fixes' (Protocol in workflow.md)
 
 ## Phase 2: UI Re-entrancy and Sync Fixes
 
