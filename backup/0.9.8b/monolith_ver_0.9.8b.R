@@ -2548,7 +2548,7 @@ server <- function(input, output, session) {
       div(style = "text-align: center; padding: 20px;",
           img(src = "assets/banner.png", style = "max-width: 100%; height: auto; margin-bottom: 20px;"),
           h4("Workbench for statistics and optimized mapping in life sciences."),
-          p("Version: 0.9.8b"),
+          p("Version: 0.9.8a"),
           p("Integrated geostatistical modeling, classification and statistical interpretation."),
           hr(),
           p("Designed for high-performance parallel processing and spatial diagnostics, multi-scale interpolation via kriging, inverse distance weighting, and thin plate splines with practical multi-criteria optimization."),
