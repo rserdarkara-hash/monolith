@@ -1,6 +1,6 @@
 # Implementation Plan: Resolve Geostatistical Validation, SHAP Analysis, and Theme Sync Issues
 
-## Phase 1: Geostatistical and Validation Fixes
+## Phase 1: Geostatistical and Validation Fixes [checkpoint: b3bf151]
 
 - [x] Task: Fix TPS CV backfill and SHAP regex matching [0158ba0]
     - [x] Write unit/verification test scripts for TPS fold NA propagation and SHAP name matching
@@ -13,7 +13,7 @@
     - [x] Add `set.seed(12345)` before randomForest fit and SHAP sampling in `spatial_helpers_0.9.8b.R`
     - [x] Verify that repeated runs yield 100% identical importance and plot outputs
 
-- [~] Task: Conductor - User Manual Verification 'Phase 1: Geostatistical and Validation Fixes' (Protocol in workflow.md)
+- [x] Task: Conductor - User Manual Verification 'Phase 1: Geostatistical and Validation Fixes' (Protocol in workflow.md)
 
 ## Phase 2: UI Re-entrancy and Sync Fixes
 
