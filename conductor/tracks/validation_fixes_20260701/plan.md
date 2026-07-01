@@ -15,7 +15,7 @@
 
 - [x] Task: Conductor - User Manual Verification 'Phase 1: Geostatistical and Validation Fixes' (Protocol in workflow.md)
 
-## Phase 2: UI Re-entrancy and Sync Fixes
+## Phase 2: UI Re-entrancy and Sync Fixes [checkpoint: 1480dff]
 
 - [x] Task: Implement Governing Factors re-entrancy guard [5f0c1b3]
     - [x] Write verification plan to simulate rapid clicks on the run analysis button
@@ -27,4 +27,4 @@
     - [x] Remove `once = TRUE` from `observeEvent(input$saved_theme_js, ...)` in `theme_helpers_0.9.8b.R`
     - [x] Verify that theme localStorage sync persists after websocket reconnect
 
-- [~] Task: Conductor - User Manual Verification 'Phase 2: UI Re-entrancy and Sync Fixes' (Protocol in workflow.md)
+- [x] Task: Conductor - User Manual Verification 'Phase 2: UI Re-entrancy and Sync Fixes' (Protocol in workflow.md)
