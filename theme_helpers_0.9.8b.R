@@ -143,12 +143,20 @@ create_app_theme <- function(light_blue, dark_bg, content_bg, font_family, map_t
       height: 100%;
       background-color: {{box_bg}} !important;
       color: {{body_text_color}} !important;
-      z-index: 1050;
+      z-index: 2500;
       transition: right 0.3s ease;
       box-shadow: -2px 0 5px rgba(0,0,0,0.2);
       overflow-y: auto;
       padding: 20px;
       border-left: 2px solid {{light_blue}} !important;
+    }
+    
+    /* Bootstrap Modal Overrides for Correct Layering on Top of Map Viewer Covers */
+    .modal {
+      z-index: 2610 !important;
+    }
+    .modal-backdrop {
+      z-index: 2600 !important;
     }
     .docs-drawer .nav-tabs > li.active > a {
       background-color: {{panel_bg}} !important;
