@@ -12,14 +12,14 @@
 
 ## Phase 2: Async Re-entrancy Guards and Cancellation
 
-- [ ] Task: Implement re-entrancy guard for overlapping model runs
-    - [ ] Write a verification plan to simulate rapid clicking on the interpolation run button
-    - [ ] Implement checks for `rv$model_running` at the top of `observeEvent(rv$proceed_run, ...)` and show warning notifications
-    - [ ] Verify that double clicks do not trigger overlapping runs
+- [x] Task: Implement re-entrancy guard for overlapping model runs [6861a0b]
+    - [x] Write a verification plan to simulate rapid clicking on the interpolation run button
+    - [x] Implement checks for `rv$model_running` at the top of `observeEvent(rv$proceed_run, ...)` and show warning notifications
+    - [x] Verify that double clicks do not trigger overlapping runs
 
-- [ ] Task: Implement run token logic for async cancellation
-    - [ ] Write a verification plan to simulate cancelling a model run while async tasks are active
-    - [ ] Implement `rv$run_token` session-level tracking and callback token matching in `future_promise` handlers
-    - [ ] Verify that stale results from cancelled runs do not write back to the active session state
+- [x] Task: Implement run token logic for async cancellation [6861a0b]
+    - [x] Write a verification plan to simulate cancelling a model run while async tasks are active
+    - [x] Implement `rv$run_token` session-level tracking and callback token matching in `future_promise` handlers
+    - [x] Verify that stale results from cancelled runs do not write back to the active session state
 
 - [ ] Task: Conductor - User Manual Verification 'Phase 2: Async Re-entrancy Guards and Cancellation' (Protocol in workflow.md)
