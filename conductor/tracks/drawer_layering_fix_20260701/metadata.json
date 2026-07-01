@@ -1,0 +1,8 @@
+{
+  "track_id": "drawer_layering_fix_20260701",
+  "type": "bug",
+  "status": "new",
+  "created_at": "2026-07-01T17:33:38Z",
+  "updated_at": "2026-07-01T17:33:38Z",
+  "description": "the cover in map viewer section before revealing the maps and analysis, also comes over the guides when they are opened from the right side. but the guides and documentation when active should be always at top."
+}
