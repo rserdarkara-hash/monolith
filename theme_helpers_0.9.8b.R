@@ -399,7 +399,7 @@ theme_switcher_server <- function(id) {
         shiny::updateSelectInput(session, "theme_selector", selected = input$saved_theme_js)
         active_theme(input$saved_theme_js)
       }
-    }, ignoreInit = FALSE, once = TRUE)
+    }, ignoreInit = FALSE)
     
     # Observe changes from the UI dropdown and save to localStorage
     shiny::observeEvent(input$theme_selector, {
