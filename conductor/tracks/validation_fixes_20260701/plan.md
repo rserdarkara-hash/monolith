@@ -17,12 +17,12 @@
 
 ## Phase 2: UI Re-entrancy and Sync Fixes
 
-- [ ] Task: Implement Governing Factors re-entrancy guard
-    - [ ] Write verification plan to simulate rapid clicks on the run analysis button
-    - [ ] Add re-entrancy status checks and button disabling/enabling in `gov_module_0.9.8b.R`
-    - [ ] Verify that multiple clicks are blocked and the UI handles completion and error cases cleanly
+- [x] Task: Implement Governing Factors re-entrancy guard [5f0c1b3]
+    - [x] Write verification plan to simulate rapid clicks on the run analysis button
+    - [x] Add re-entrancy status checks and button disabling/enabling in `gov_module_0.9.8b.R`
+    - [x] Verify that multiple clicks are blocked and the UI handles completion and error cases cleanly
 
-- [ ] Task: Fix Theme localStorage reconnection sync
+- [~] Task: Fix Theme localStorage reconnection sync
     - [ ] Write manual verification steps for theme sync after reconnecting websocket
     - [ ] Remove `once = TRUE` from `observeEvent(input$saved_theme_js, ...)` in `theme_helpers_0.9.8b.R`
     - [ ] Verify that theme localStorage sync persists after websocket reconnect
