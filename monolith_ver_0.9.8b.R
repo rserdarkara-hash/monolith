@@ -1136,7 +1136,8 @@ server <- function(input, output, session) {
     pt_style_colors = NULL, # F2: Named vector group_value -> hex_color
     pt_style_palette = "Set1", # F2: Current qualitative palette name
     auto_archive_choice = "none", # "none", "archive", or "discard"
-    model_running = FALSE # True when parallel model calculations are active
+    model_running = FALSE, # True when parallel model calculations are active
+    run_token = 0L # Incremental run token for async cancellation
   )
   
   # --- Export Registry Core ---
@@ -3341,6 +3342,10 @@ server <- function(input, output, session) {
 
   # B4: Modal dialog for archive choice when previous results exist
   observeEvent(input$run, {
+    if (isTRUE(rv$model_running)) {
+      showNotification("A model run is already in progress.", type = "warning")
+      return()
+    }
     req(rv$user_data, input$locality, rv$mapping$x, rv$mapping$y)
     
     # UI Guard: check if auxiliary variables are missing for RK/RFK/CK
@@ -3533,6 +3538,10 @@ server <- function(input, output, session) {
 
   # Main model generation logic (triggered after archive decision)
   observeEvent(rv$proceed_run, {
+    if (isTRUE(rv$model_running)) {
+      showNotification("A model run is already in progress.", type = "warning")
+      return()
+    }
     req(rv$user_data, input$locality, rv$mapping$x, rv$mapping$y);
     meta <- get_current_meta()
     req(meta)
@@ -3748,6 +3757,10 @@ server <- function(input, output, session) {
     session_id_val <- session_id
     cancel_file_val <- file.path(session_progress_dir, "cancel_flag.txt")
 
+    # Increment run token and capture it locally for this async job
+    rv$run_token <- rv$run_token + 1L
+    this_token <- rv$run_token
+
     promises::future_promise({
       # Set working directory to match the main session so the source relative path resolves correctly
       setwd(main_wd)
@@ -3809,6 +3822,7 @@ server <- function(input, output, session) {
       ))
       return(res_all)
     }, seed = 12345) %...>% (function(res_all) {
+      if (this_token != rv$run_token) return()
       
       # Aggregate results back to rv
       for(res in res_all) {
@@ -4029,6 +4043,7 @@ server <- function(input, output, session) {
     old_files <- list.files(path = session_progress_dir, pattern = paste0("^(progress|warn)_", session_id, "_.*_.*\\.txt$"), full.names = TRUE)
     if(length(old_files) > 0) tryCatch(file.remove(old_files), error = function(e) NULL)
     }) %...!% (function(err) {
+      if (this_token != rv$run_token) return()
       shinyjs::hide("map_spinner")
       shinyjs::hide("map_progress_bar_container")
       shinyjs::hide("cancel_model_btn")
