@@ -811,9 +811,6 @@ apply_TPS <- function(data, target_var, grid_p, method_params, l = "region", pre
       }, numeric(1))
     }
     
-    if(any(is.na(cv_vals))) {
-      cv_vals[is.na(cv_vals)] <- mod$fitted.values[is.na(cv_vals)]
-    }
     
     cv_res <- data.frame(observed = data[[target_var]], var1.pred = cv_vals, x = raw_pts[,1], y = raw_pts[,2])
     res$cv_obj <- cv_res
@@ -898,6 +895,7 @@ compute_governing_factors <- function(df, target_col, predictors, n_permutations
   
   # 2. Fit Random Forest
   formula_str <- paste(target_col, "~ .")
+  set.seed(12345)
   rf_model <- randomForest::randomForest(as.formula(formula_str), data = df_clean, ntree = 100, importance = TRUE)
   
   # 3. Create DALEX explainer
@@ -926,6 +924,7 @@ compute_governing_factors <- function(df, target_col, predictors, n_permutations
   pdp_df <- as.data.frame(pdp_prof$agr_profiles)
 
   # 7. SHAP profile (using sample) - used for Causality/Interaction (A)
+  set.seed(12345)
   sample_idx <- sample(1:nrow(df_clean), min(20, nrow(df_clean)))
   shap_list <- lapply(sample_idx, function(i) {
     sp <- DALEX::predict_parts(explainer_rf, new_observation = df_clean[i, predictors, drop = FALSE], type = "shap")
@@ -939,7 +938,7 @@ compute_governing_factors <- function(df, target_col, predictors, n_permutations
   shap_val_df <- data.frame(
     feature_value = df_clean[[top_var]][sample_idx],
     contribution = sapply(sample_idx, function(i) {
-      sub <- shap_df[shap_df$obs_id == i & grepl(paste0("^", top_var), shap_df$variable_name), ]
+      sub <- shap_df[shap_df$obs_id == i & shap_df$variable_name == top_var, ]
       if(nrow(sub) > 0) sum(sub$contribution) else 0
     })
   )
