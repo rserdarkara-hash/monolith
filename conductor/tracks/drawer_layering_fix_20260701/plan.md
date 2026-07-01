@@ -1,6 +1,6 @@
 # Implementation Plan - Resolve Map Viewer Overlay and Documentation Drawer Layering Conflict
 
-## Phase 1: Test Setup (Red Phase)
+## Phase 1: Test Setup (Red Phase) [checkpoint: 0dc2b56]
 - [x] Task: Create Failing Test for Z-Index Styles (dad0052)
     - [x] Create a new unit test file at `tests/test_theme_z_index.R`.
     - [x] Write asserts checking that the `.docs-drawer` class has a `z-index` of `2500` in the manual theme CSS.
@@ -8,7 +8,7 @@
 - [x] Task: Expand Test for Modals and Backdrops (Red Phase) (854ea26)
     - [x] Update `tests/test_theme_z_index.R` to check `.modal` and `.modal-backdrop` z-index values (2610 and 2600 respectively).
     - [x] Run the test and verify it fails on the new assertions (Red Phase).
-- [ ] Task: Conductor - User Manual Verification 'Phase 1: Test Setup' (Protocol in workflow.md)
+- [x] Task: Conductor - User Manual Verification 'Phase 1: Test Setup' (Protocol in workflow.md)
 
 ## Phase 2: Theme Style Implementation (Green Phase)
 - [ ] Task: Update Z-Index Values in CSS
