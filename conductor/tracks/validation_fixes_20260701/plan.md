@@ -2,13 +2,13 @@
 
 ## Phase 1: Geostatistical and Validation Fixes
 
-- [ ] Task: Fix TPS CV backfill and SHAP regex matching
-    - [ ] Write unit/verification test scripts for TPS fold NA propagation and SHAP name matching
-    - [ ] Remove full-model fitted values substitution inside `perform_cv` in `spatial_helpers_0.9.8b.R`
-    - [ ] Replace `grepl` regex with exact match in `compute_governing_factors` inside `spatial_helpers_0.9.8b.R`
-    - [ ] Verify that metrics are correctly computed excluding failed folds and SHAP names are matched exactly
+- [x] Task: Fix TPS CV backfill and SHAP regex matching [0158ba0]
+    - [x] Write unit/verification test scripts for TPS fold NA propagation and SHAP name matching
+    - [x] Remove full-model fitted values substitution inside `perform_cv` in `spatial_helpers_0.9.8b.R`
+    - [x] Replace `grepl` regex with exact match in `compute_governing_factors` inside `spatial_helpers_0.9.8b.R`
+    - [x] Verify that metrics are correctly computed excluding failed folds and SHAP names are matched exactly
 
-- [ ] Task: Implement seed for Governing Factors reproducibility
+- [~] Task: Implement seed for Governing Factors reproducibility
     - [ ] Write a verification script to run two identical governing factors models and compare feature importances
     - [ ] Add `set.seed(12345)` before randomForest fit and SHAP sampling in `spatial_helpers_0.9.8b.R`
     - [ ] Verify that repeated runs yield 100% identical importance and plot outputs
