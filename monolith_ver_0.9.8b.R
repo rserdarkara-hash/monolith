@@ -4206,6 +4206,7 @@ server <- function(input, output, session) {
     cancel_file <- file.path(session_progress_dir, "cancel_flag.txt")
     file.create(cancel_file)
     rv$model_running <- FALSE
+    rv$run_token <- rv$run_token + 1L
     
     # Hide generation elements, keep overlay visible with help text
     shinyjs::hide("map_spinner")
