@@ -1,10 +1,10 @@
 # Implementation Plan - Resolve Map Viewer Overlay and Documentation Drawer Layering Conflict
 
 ## Phase 1: Test Setup (Red Phase)
-- [ ] Task: Create Failing Test for Z-Index Styles
-    - [ ] Create a new unit test file at `tests/test_theme_z_index.R`.
-    - [ ] Write asserts checking that the `.docs-drawer` class has a `z-index` of `2500` in the manual theme CSS.
-    - [ ] Run the test using Rscript and verify that it fails (Confirm Red Phase).
+- [x] Task: Create Failing Test for Z-Index Styles (dad0052)
+    - [x] Create a new unit test file at `tests/test_theme_z_index.R`.
+    - [x] Write asserts checking that the `.docs-drawer` class has a `z-index` of `2500` in the manual theme CSS.
+    - [x] Run the test using Rscript and verify that it fails (Confirm Red Phase).
 - [ ] Task: Conductor - User Manual Verification 'Phase 1: Test Setup' (Protocol in workflow.md)
 
 ## Phase 2: Theme Style Implementation (Green Phase)
