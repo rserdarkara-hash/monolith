@@ -1,4 +1,4 @@
-# Scientific & Analytical Methodology Guide (v0.9.6b)
+# Scientific & Analytical Methodology Guide (v0.9.8b)
 
 The Monolith Spatial Analysis Dashboard provides agronomists, soil scientists, and geostatisticians with a toolkit for exploring spatial variability. This guide briefly elaborates on the mathematical intuition, structural assumptions, and practical applications of the underlying spatial methods and evaluation metrics.
 
