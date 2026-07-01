@@ -22,9 +22,9 @@
     - [x] Add re-entrancy status checks and button disabling/enabling in `gov_module_0.9.8b.R`
     - [x] Verify that multiple clicks are blocked and the UI handles completion and error cases cleanly
 
-- [~] Task: Fix Theme localStorage reconnection sync
-    - [ ] Write manual verification steps for theme sync after reconnecting websocket
-    - [ ] Remove `once = TRUE` from `observeEvent(input$saved_theme_js, ...)` in `theme_helpers_0.9.8b.R`
-    - [ ] Verify that theme localStorage sync persists after websocket reconnect
+- [x] Task: Fix Theme localStorage reconnection sync [8ea0c46]
+    - [x] Write manual verification steps for theme sync after reconnecting websocket
+    - [x] Remove `once = TRUE` from `observeEvent(input$saved_theme_js, ...)` in `theme_helpers_0.9.8b.R`
+    - [x] Verify that theme localStorage sync persists after websocket reconnect
 
-- [ ] Task: Conductor - User Manual Verification 'Phase 2: UI Re-entrancy and Sync Fixes' (Protocol in workflow.md)
+- [~] Task: Conductor - User Manual Verification 'Phase 2: UI Re-entrancy and Sync Fixes' (Protocol in workflow.md)
