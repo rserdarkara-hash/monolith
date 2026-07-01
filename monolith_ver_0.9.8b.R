@@ -3749,6 +3749,8 @@ server <- function(input, output, session) {
     cancel_file_val <- file.path(session_progress_dir, "cancel_flag.txt")
 
     promises::future_promise({
+      # Set working directory to match the main session so the source relative path resolves correctly
+      setwd(main_wd)
       # Dynamically source helpers to guarantee 100% function availability on the worker
       source("spatial_helpers_0.9.8b.R", local = FALSE)
       
@@ -3757,7 +3759,7 @@ server <- function(input, output, session) {
         run_regional_interpolation, calc_scientific_lags, robust_vgm_fit, 
         apply_interpolation, apply_OK, apply_RK, apply_RFK, apply_CK, 
         apply_IDW, apply_TPS, perform_kriging_loocv, safe_run_cv, 
-        optimize_idw_p, get_regional_param, clean_gstat_env,
+        optimize_idw_p, clean_gstat_env,
         apply_kriging_pipeline, check_vif, krige_covariates, get_buffer_multiplier,
         sanitize_spatial_predictions, validate_and_project_sf, suggest_lmc_model,
         .cv_to_df, detect_cv_columns
@@ -3769,7 +3771,7 @@ server <- function(input, output, session) {
           run_regional_interpolation, calc_scientific_lags, robust_vgm_fit, 
           apply_interpolation, apply_OK, apply_RK, apply_RFK, apply_CK, 
           apply_IDW, apply_TPS, perform_kriging_loocv, safe_run_cv, 
-          optimize_idw_p, get_regional_param, clean_gstat_env,
+          optimize_idw_p, clean_gstat_env,
           apply_kriging_pipeline, check_vif, krige_covariates, get_buffer_multiplier,
           sanitize_spatial_predictions, validate_and_project_sf, suggest_lmc_model,
           .cv_to_df, detect_cv_columns
@@ -3799,7 +3801,7 @@ server <- function(input, output, session) {
           "run_regional_interpolation", "calc_scientific_lags", "robust_vgm_fit",
           "apply_interpolation", "apply_OK", "apply_RK", "apply_RFK", "apply_CK",
           "apply_IDW", "apply_TPS", "perform_kriging_loocv", "safe_run_cv",
-          "optimize_idw_p", "get_regional_param", "clean_gstat_env",
+          "optimize_idw_p", "clean_gstat_env",
           "apply_kriging_pipeline", "check_vif", "krige_covariates", "get_buffer_multiplier",
           "sanitize_spatial_predictions", "validate_and_project_sf", "suggest_lmc_model",
           ".cv_to_df", "detect_cv_columns"
