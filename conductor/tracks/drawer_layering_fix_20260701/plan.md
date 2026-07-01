@@ -11,11 +11,11 @@
 - [x] Task: Conductor - User Manual Verification 'Phase 1: Test Setup' (Protocol in workflow.md)
 
 ## Phase 2: Theme Style Implementation (Green Phase)
-- [ ] Task: Update Z-Index Values in CSS
-    - [ ] Modify the z-index of `.docs-drawer` to `2500` inside `theme_helpers_0.9.8b.R`.
-    - [ ] Add `.modal` and `.modal-backdrop` z-index overrides to `theme_helpers_0.9.8b.R` (z-index 2610 and 2600 respectively).
-    - [ ] Rerun `tests/test_theme_z_index.R` and confirm it passes (Confirm Green Phase).
-    - [ ] Run the full test suite (`tests/test_async_guards.R`, `tests/test_gov_factors.R`, etc.) to verify no regressions.
+- [x] Task: Update Z-Index Values in CSS (7946efd)
+    - [x] Modify the z-index of `.docs-drawer` to `2500` inside `theme_helpers_0.9.8b.R`.
+    - [x] Add `.modal` and `.modal-backdrop` z-index overrides to `theme_helpers_0.9.8b.R` (z-index 2610 and 2600 respectively).
+    - [x] Rerun `tests/test_theme_z_index.R` and confirm it passes (Confirm Green Phase).
+    - [x] Run the full test suite (`tests/test_async_guards.R`, `tests/test_gov_factors.R`, etc.) to verify no regressions.
 - [ ] Task: Conductor - User Manual Verification 'Phase 2: Theme Style Implementation' (Protocol in workflow.md)
 
 ## Phase 3: Quality Gates & Verification
