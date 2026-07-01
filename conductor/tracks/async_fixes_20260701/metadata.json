@@ -1,0 +1,8 @@
+{
+  "track_id": "async_fixes_20260701",
+  "type": "bug",
+  "status": "new",
+  "created_at": "2026-07-01T09:38:00Z",
+  "updated_at": "2026-07-01T09:38:00Z",
+  "description": "Resolve Parallel Worker Serialization and Async Race Conditions"
+}
