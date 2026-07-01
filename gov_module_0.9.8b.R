@@ -124,6 +124,10 @@ gov_factors_server <- function(id, data_reactive, vars_metadata_reactive) {
     
     # Run random forest analysis asynchronously
     shiny::observeEvent(input$gov_run_btn, {
+      if (identical(gov_rv$ready, "running")) {
+        return(NULL)
+      }
+      
       df <- data_reactive()
       shiny::req(df, input$gov_target, input$gov_predictors)
       
@@ -134,6 +138,9 @@ gov_factors_server <- function(id, data_reactive, vars_metadata_reactive) {
         shiny::showNotification("Insufficient data or predictors for analysis.", type = "error")
         return()
       }
+      
+      # Disable button to prevent double-clicks
+      shinyjs::disable(ns("gov_run_btn"))
       
       # Set status to running (displays beautiful in-tab progress view)
       gov_rv$ready <- "running"
@@ -150,6 +157,7 @@ gov_factors_server <- function(id, data_reactive, vars_metadata_reactive) {
           n_permutations = n_perms
         )
       }) %...>% (function(res) {
+        shinyjs::enable(ns("gov_run_btn"))
         if (!is.null(res)) {
           gov_rv$res <- res
           gov_rv$ready <- "yes"
@@ -159,6 +167,7 @@ gov_factors_server <- function(id, data_reactive, vars_metadata_reactive) {
           shiny::showNotification("Failed to calculate governing factors. Check data quality.", type = "error")
         }
       }) %...!% (function(err) {
+        shinyjs::enable(ns("gov_run_btn"))
         gov_rv$ready <- "no"
         shiny::showNotification(paste("Error running ML analysis:", err$message), type = "error")
       })
