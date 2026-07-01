@@ -10,7 +10,7 @@
 
 - [x] Task: Conductor - User Manual Verification 'Phase 1: Parallel Worker Environment & Serialization' (Protocol in workflow.md)
 
-## Phase 2: Async Re-entrancy Guards and Cancellation
+## Phase 2: Async Re-entrancy Guards and Cancellation [checkpoint: e6893fb]
 
 - [x] Task: Implement re-entrancy guard for overlapping model runs [6861a0b]
     - [x] Write a verification plan to simulate rapid clicking on the interpolation run button
@@ -22,4 +22,4 @@
     - [x] Implement `rv$run_token` session-level tracking and callback token matching in `future_promise` handlers
     - [x] Verify that stale results from cancelled runs do not write back to the active session state
 
-- [ ] Task: Conductor - User Manual Verification 'Phase 2: Async Re-entrancy Guards and Cancellation' (Protocol in workflow.md)
+- [x] Task: Conductor - User Manual Verification 'Phase 2: Async Re-entrancy Guards and Cancellation' (Protocol in workflow.md)
