@@ -18,8 +18,8 @@
     - [x] Run the full test suite (`tests/test_async_guards.R`, `tests/test_gov_factors.R`, etc.) to verify no regressions.
 - [x] Task: Conductor - User Manual Verification 'Phase 2: Theme Style Implementation' (Protocol in workflow.md)
 
-## Phase 3: Quality Gates & Verification
-- [ ] Task: Run Final Diagnostics & Checks
-    - [ ] Execute all test scripts under `tests/` to guarantee everything is clean.
-    - [ ] Perform a self-review checklist comparison against Quality Gates.
-- [ ] Task: Conductor - User Manual Verification 'Phase 3: Quality Gates & Verification' (Protocol in workflow.md)
+## Phase 3: Quality Gates & Verification [checkpoint: 3711840]
+- [x] Task: Run Final Diagnostics & Checks
+    - [x] Execute all test scripts under `tests/` to guarantee everything is clean.
+    - [x] Perform a self-review checklist comparison against Quality Gates.
+- [x] Task: Conductor - User Manual Verification 'Phase 3: Quality Gates & Verification' (Protocol in workflow.md)
