@@ -135,7 +135,7 @@ monolith/
    ```
 3. Launch the Shiny app:
    ```R
-   source("dev/run_dev.R")
+   shiny::runApp("monolith_ver_0.9.8b.R")
    ```
 
 ## License
