@@ -2,11 +2,11 @@
 
 ## Phase 1: Parallel Worker Environment & Serialization
 
-- [ ] Task: Fix parallel worker serialization and working directory
-    - [ ] Write verification script to simulate future/multisession serialization of helper globals
-    - [ ] Remove `get_regional_param` closure from exports in `monolith_ver_0_9_8b.R` (lines 3760, 3772, 3802)
-    - [ ] Resolve worker working directory issue by using absolute path or `setwd(main_wd)` before sourcing `spatial_helpers_0.9.8b.R`
-    - [ ] Run verification tests and confirm multisession workers initialize without errors
+- [x] Task: Fix parallel worker serialization and working directory [360087b]
+    - [x] Write verification script to simulate future/multisession serialization of helper globals
+    - [x] Remove `get_regional_param` closure from exports in `monolith_ver_0_9_8b.R` (lines 3760, 3772, 3802)
+    - [x] Resolve worker working directory issue by using absolute path or `setwd(main_wd)` before sourcing `spatial_helpers_0.9.8b.R`
+    - [x] Run verification tests and confirm multisession workers initialize without errors
 
 - [ ] Task: Conductor - User Manual Verification 'Phase 1: Parallel Worker Environment & Serialization' (Protocol in workflow.md)
 
