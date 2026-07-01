@@ -159,7 +159,7 @@ gov_factors_server <- function(id, data_reactive, vars_metadata_reactive) {
         )
       }) %...>% (function(res) {
         shinyjs::enable("gov_run_btn")
-        shiny::updateActionButton(session, "gov_run_btn", label = "Run Analysis", icon = NULL)
+        shiny::updateActionButton(session, "gov_run_btn", label = "Run Analysis", icon = character(0))
         if (!is.null(res)) {
           gov_rv$res <- res
           gov_rv$ready <- "yes"
@@ -170,7 +170,7 @@ gov_factors_server <- function(id, data_reactive, vars_metadata_reactive) {
         }
       }) %...!% (function(err) {
         shinyjs::enable("gov_run_btn")
-        shiny::updateActionButton(session, "gov_run_btn", label = "Run Analysis", icon = NULL)
+        shiny::updateActionButton(session, "gov_run_btn", label = "Run Analysis", icon = character(0))
         gov_rv$ready <- "no"
         shiny::showNotification(paste("Error running ML analysis:", err$message), type = "error")
       })
