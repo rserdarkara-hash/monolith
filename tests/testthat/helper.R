@@ -1,0 +1,142 @@
+# helper.R — sourced automatically by testthat before each test file.
+#
+# This file:
+#   1. Sources all application R files so every function is available.
+#   2. Provides shared factory functions for synthetic test fixtures.
+#   3. Sets up test-local options (timezone, seed policy, etc.).
+#
+# Individual test files should NOT re-source the app; helper.R handles it
+# once per session so repeated `source()` calls are avoided.
+
+# ── Source application code (idempotent guard) ──────────────────────────────
+if (!exists(".monolith_sourced") || !isTRUE(.monolith_sourced)) {
+  proj_root <- normalizePath(
+    file.path(testthat::test_path(), "..", ".."),
+    winslash = "/"
+  )
+
+  # global.R calls addResourcePath("assets", ...) which uses getwd().
+  # It also calls source() for helpers using relative paths.  Both require
+  # the working directory to be the project root.
+  old_wd <- getwd()
+  setwd(proj_root)
+  on.exit(setwd(old_wd), add = TRUE)
+
+  suppressPackageStartupMessages({
+    suppressMessages({
+      source(file.path(proj_root, "global.R"))
+    })
+  })
+
+  # monolith.R defines validate_crs, estimate_run_duration, and the Shiny
+  # app.  Source it with shinyApp temporarily no-opped so it doesn't launch.
+  if (requireNamespace("shiny", quietly = TRUE)) {
+    .real_shinyApp <- shiny::shinyApp
+    utils::assignInNamespace("shinyApp", function(ui, server, ...) {}, "shiny")
+    on.exit(utils::assignInNamespace("shinyApp", .real_shinyApp, "shiny"),
+            add = TRUE)
+  }
+  suppressMessages({
+    source(file.path(proj_root, "monolith.R"))
+  })
+
+  setwd(old_wd)
+  on.exit()  # clear the on.exit handlers now that we've restored state
+
+  .monolith_sourced <- TRUE
+}
+
+# ── Synthetic data factories (no external file dependencies) ────────────────
+
+#' Create a small sf POINT dataframe for spatial tests.
+#'
+#' @param n Number of points (min 3).
+#' @param target_mean Mean of the target variable `v`.
+#' @param seed RNG seed for reproducibility.
+#' @return An sf object with columns `x`, `y`, `v`, `pv`, `aux1`, `aux2`.
+make_test_points <- function(n = 20, target_mean = 50, seed = 42) {
+  set.seed(seed)
+  coords <- data.frame(
+    x = runif(n, 450000, 451000),
+    y = runif(n, 5800000, 5801000)
+  )
+  pts <- cbind(coords, data.frame(
+    v    = rnorm(n, mean = target_mean, sd = 10),
+    pv   = rnorm(n, mean = target_mean, sd = 10),
+    aux1 = runif(n, 0, 100),
+    aux2 = runif(n, 0, 50)
+  ))
+  sf::st_as_sf(pts, coords = c("x", "y"), crs = 32633)
+}
+
+#' Create a small regular prediction grid.
+#'
+#' @param pts_sf sf point object used to derive the bounding box.
+#' @param res Cell resolution in metres.
+#' @return An sf POINT grid with columns `x`, `y`.
+make_test_grid_safe <- function(pts_sf, res = 50) {
+  bbox <- sf::st_bbox(pts_sf)
+  r <- terra::rast(terra::ext(bbox), resolution = res, crs = sf::st_crs(pts_sf)$wkt)
+  grid_pts <- terra::as.points(r, values = FALSE)
+  grid_sf  <- sf::st_as_sf(grid_pts)
+  coords   <- sf::st_coordinates(grid_sf)
+  grid_sf$x <- coords[, 1]
+  grid_sf$y <- coords[, 2]
+  grid_sf
+}
+
+#' Create a small variogram-like data.frame for testing variogram helpers.
+make_mock_vgm <- function(model = "Sph", psill = 0.5, range = 200, nugget = 0.1) {
+  gstat::vgm(psill = psill, model = model, range = range, nugget = nugget)
+}
+
+#' Create a numeric data.frame suitable for PCA / correlation / multicollinearity
+#' tests.
+#'
+#' @param n Number of rows.
+#' @param seed RNG seed.
+#' @return data.frame with columns `a`, `b`, `c`, `d`, `e`.
+make_test_df <- function(n = 50, seed = 123) {
+  set.seed(seed)
+  data.frame(
+    a = rnorm(n, 10, 3),
+    b = rnorm(n, 20, 5),
+    c = rnorm(n, 15, 2),
+    d = rnorm(n, 30, 7),
+    e = rnorm(n, 8,  1),
+    cat1 = factor(sample(c("Low", "Med", "High"), n, replace = TRUE)),
+    cat2 = factor(sample(c("A", "B"), n, replace = TRUE))
+  )
+}
+
+#' Create a highly collinear data.frame for multicollinearity tests.
+make_collinear_df <- function(n = 50, seed = 456) {
+  set.seed(seed)
+  x <- rnorm(n, 10, 2)
+  data.frame(
+    v1 = x,
+    v2 = x + rnorm(n, 0, 0.01),      # near-perfect correlation with v1
+    v3 = rnorm(n, 20, 5),             # independent
+    v4 = rnorm(n, 15, 3)              # independent
+  )
+}
+
+#' Create a known-answer pair for Lin's CCC.
+make_ccc_known <- function() {
+  list(
+    observed  = c(10, 20, 30, 40, 50),
+    predicted = c(12, 19, 31, 38, 52),
+    # CCC computed externally with DescTools::CCC(obs, pre)$rho.c$est
+    expected  = 0.9937
+  )
+}
+
+#' Create a known-answer pair for NSE / RMSE.
+make_metrics_known <- function() {
+  list(
+    observed  = c(1, 2, 4, 5),
+    predicted = c(1, 2, 4, 5),    # perfect → NSE = 1, RMSE = 0
+    nse       = 1.0,
+    rmse      = 0.0
+  )
+}

@@ -1,0 +1,17 @@
+Package: monolith
+Title: Spatial Analysis Dashboard
+Version: 0.9.8
+Description: A Shiny application for spatial statistical analysis, geostatistical
+    modeling, and mapping. Provides deterministic and geostatistical interpolation
+    (IDW, TPS, OK, CK, RK, RFK), cross-validation diagnostics, descriptive
+    analytics, PCA, and governing factors analysis via Random Forest + DALEX.
+Authors@R: c(
+    person("Serda", role = c("aut", "cre"))
+    )
+License: GPL-3
+URL: https://github.com/serda/monolith
+Suggests:
+    testthat (>= 3.0.0),
+    shinytest2
+Encoding: UTF-8
+RoxygenNote: 7.3.2
