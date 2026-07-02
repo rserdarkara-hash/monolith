@@ -18,7 +18,7 @@
     - [x] Run the tests in `tests/test_normality_testing.R` and confirm they pass (Green Phase)
 - [x] Task: Conductor - User Manual Verification 'Phase 2: Core Normality Test Implementation' (Protocol in workflow.md)
 
-## Phase 3: UI Integration and Tooltip Render
+## Phase 3: UI Integration and Tooltip Render [checkpoint: 7866837]
 - [x] Task: Add Normality Indicator to descriptive module UI [6089e00]
     - [x] Add a `shiny::uiOutput` or inline conditional rendering for the normality icon next to the "Statistical Significance Tests" heading in `desc_plot_vars_ui` of `desc_exploratory_module_0.9.8b.R`
     - [x] Create server logic to render the icon with dynamic coloring (green for normal, red/orange for not normal, gray for edge cases)
@@ -26,4 +26,4 @@
 - [x] Task: Verification and Styling Polish [6089e00]
     - [x] Verify reactive responsiveness (changing variables or plot types dynamically updates the normality icon and tooltip)
     - [x] Add CSS style tweaks to align the icon nicely next to the heading
-- [~] Task: Conductor - User Manual Verification 'Phase 3: UI Integration and Tooltip Render' (Protocol in workflow.md)
+- [x] Task: Conductor - User Manual Verification 'Phase 3: UI Integration and Tooltip Render' (Protocol in workflow.md)
