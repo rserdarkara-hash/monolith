@@ -11,7 +11,7 @@
     - [x] Update `render_docs_drawer()` in `ui_helpers_0.9.8b.R` to define three tabs
     - [x] Update server-side renderUI hooks in `monolith_ver_0.9.8b.R` to load and compile `docs/desc_exploratory_guide.md` as `output$render_desc_exploratory_guide`
     - [x] Run test suite to confirm tests pass (Green Phase)
-- [ ] Task: Conductor - User Manual Verification 'Phase 1: Setup and Documentation Drawer Restructuring' (Protocol in workflow.md)
+- [~] Task: Conductor - User Manual Verification 'Phase 1: Setup and Documentation Drawer Restructuring' (Protocol in workflow.md)
 
 ## Phase 2: Documentation Migration and Accuracy Review
 - [ ] Task: Content migration and validation tests
