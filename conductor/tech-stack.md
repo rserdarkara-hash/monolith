@@ -14,6 +14,8 @@
   * `tidyterra`: ggplot2 integration for terra spatial objects.
   * `gstat`: Variogram modeling and Kriging (Ordinary, Co-Kriging, Regression).
   * `fields`: Thin Plate Splines (TPS) interpolation.
+* **Statistical Testing**:
+  * `nortest`: Lilliefors normality test (Kolmogorov-Smirnov correction) for sample sizes n >= 50.
 * **Machine Learning**:
   * `randomForest`: Random Forest classification and regression modeling.
   * `DALEX`: Model-agnostic explanations (ALE, PDP, SHAP).
