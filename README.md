@@ -114,6 +114,7 @@ monolith/
 ├── assets/                          # Screenshots & static assets
 ├── docs/                            # Guides & documentation
 ├── sample_data/                     # Demo datasets (restricted license)
+├── tests/                           # Testthat infrastructure
 │
 ├── LICENSE                          # GPL-3.0 license
 └── .gitignore
