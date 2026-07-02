@@ -352,6 +352,17 @@ desc_exploratory_server <- function(id, data_reactive, vars_metadata_reactive) {
       }
       
       val <- df[[var_name]]
+      
+      # Correct statistical approach: Test the residuals of the group model (ANOVA assumption)
+      # to prevent different group means from artificially failing the normality test.
+      if ("group_id" %in% colnames(df) && length(unique(df$group_id)) > 1) {
+        tryCatch({
+          val <- residuals(lm(val ~ group_id, data = df, na.action = na.exclude))
+        }, error = function(e) {
+          # Fallback to raw values on model error
+        })
+      }
+      
       res <- compute_normality(val)
       
       # Determine icon and styling
@@ -364,7 +375,7 @@ desc_exploratory_server <- function(id, data_reactive, vars_metadata_reactive) {
       } else if (res$status == "normal") {
         icon_element <- shiny::icon("check-circle", style = "color: #28a745; font-size: 14px; cursor: help;")
         tooltip_title <- sprintf(
-          "Normality Passed: %s\nStatistic: %s = %.4f\np-value = %.4f\nSample Size: n = %d\nData appears to be normally distributed (p >= 0.05).",
+          "Normality Passed: %s (on residuals)\nStatistic: %s = %.4f\np-value = %.4f\nSample Size: n = %d\nWithin-group residuals appear to be normally distributed (p >= 0.05).",
           res$method,
           ifelse(grepl("Shapiro-Wilk", res$method), "W", "D"),
           res$statistic,
@@ -375,7 +386,7 @@ desc_exploratory_server <- function(id, data_reactive, vars_metadata_reactive) {
         icon_element <- shiny::icon("exclamation-triangle", style = "color: #dc3545; font-size: 14px; cursor: help;")
         p_str <- if (res$p_value < 0.0001) "< 0.0001" else sprintf("= %.4f", res$p_value)
         tooltip_title <- sprintf(
-          "Normality Failed: %s\nStatistic: %s = %.4f\np-value %s\nSample Size: n = %d\nData deviates significantly from normality (p < 0.05).",
+          "Normality Failed: %s (on residuals)\nStatistic: %s = %.4f\np-value %s\nSample Size: n = %d\nWithin-group residuals deviate significantly from normality (p < 0.05).",
           res$method,
           ifelse(grepl("Shapiro-Wilk", res$method), "W", "D"),
           res$statistic,
