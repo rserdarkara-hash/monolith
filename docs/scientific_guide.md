@@ -20,7 +20,7 @@ Unlike simple kriging, OK assumes an unknown, constant global mean (<i>&mu;</i>)
 
 **Agronomical Example:** Predicting soil pH across a relatively uniform field where variations are driven by natural soil-forming processes rather than abrupt topographical changes or human intervention.
 
-**Algorithmic Stability (Epsilon-Nugget):** For variables with extremely low variance (e.g., specific micro-nutrients like Iron), the codebase strictly enforces a tiny nugget (`1e-6 * initial_sill`) when the initial empirical nugget is exactly zero. This prevents singular matrix inversion failures during Kriging.
+**Algorithmic Stability (Epsilon-Nugget):** For variables with extremely low variance (e.g., specific micro-nutrients like Iron), the codebase strictly enforces a tiny nugget (`max(initial_sill * 1e-6, 1e-6)`) when the initial empirical nugget is exactly zero. This prevents singular matrix inversion failures during Kriging.
 
 ### 1.2 Regression Kriging (RK)
 
