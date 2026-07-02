@@ -1,6 +1,58 @@
 # desc_exploratory_module_0.9.8a.R - Descriptive Exploratory Suite Server Module
 # Handles Tab 5 analytics: grouping, descriptive stats, correlation, and PCA
 
+# Utility to compute normality of a numeric vector
+compute_normality <- function(x) {
+  default_res <- list(
+    status = "insufficient",
+    method = "None",
+    statistic = NA,
+    p_value = NA,
+    n = 0
+  )
+  
+  if (is.null(x) || !is.numeric(x)) {
+    return(default_res)
+  }
+  
+  clean_x <- x[!is.na(x)]
+  n <- length(clean_x)
+  default_res$n <- n
+  
+  if (n < 3) {
+    return(default_res)
+  }
+  
+  if (var(clean_x) == 0) {
+    return(default_res)
+  }
+  
+  tryCatch({
+    if (n < 50) {
+      test_res <- shapiro.test(clean_x)
+      method_name <- "Shapiro-Wilk Normality Test"
+      stat_val <- unname(test_res$statistic)
+    } else {
+      test_res <- nortest::lillie.test(clean_x)
+      method_name <- "Lilliefors (Kolmogorov-Smirnov) Normality Test"
+      stat_val <- unname(test_res$statistic)
+    }
+    
+    p_val <- test_res$p.value
+    status_val <- if (p_val >= 0.05) "normal" else "not_normal"
+    
+    list(
+      status = status_val,
+      method = method_name,
+      statistic = stat_val,
+      p_value = p_val,
+      n = n
+    )
+  }, error = function(e) {
+    default_res
+  })
+}
+
 desc_exploratory_ui <- function(id) {
   ns <- shiny::NS(id)
   
