@@ -1,4 +1,3 @@
-# theme_helpers_0.9.8.R - UI Dashboard & Map Themes
 
 
 create_app_theme <- function(light_blue, dark_bg, content_bg, font_family, map_tiles, box_bg = "#ffffff", sidebar_text_color = "#ffffff", body_text_color = "#333333", header_text_color = "#ffffff", banner_style = "standard") {
@@ -19,14 +18,11 @@ create_app_theme <- function(light_blue, dark_bg, content_bg, font_family, map_t
     )
   )
   
-  # Ensure the font family is applied universally in manual_style
   font_url_name <- gsub(" ", "+", font_family)
   
-  # Calculate a slightly lighter version of the dark_bg for panels
   rgb_dark <- col2rgb(dark_bg)
   panel_bg <- rgb(min(255, rgb_dark[1] + 20)/255, min(255, rgb_dark[2] + 20)/255, min(255, rgb_dark[3] + 20)/255)
   
-  # Banner Styling Alternatives
   banner_css <- if (banner_style == "standard") {
     sprintf("
     .header-banner {
@@ -143,12 +139,20 @@ create_app_theme <- function(light_blue, dark_bg, content_bg, font_family, map_t
       height: 100%;
       background-color: {{box_bg}} !important;
       color: {{body_text_color}} !important;
-      z-index: 1050;
+      z-index: 2500;
       transition: right 0.3s ease;
       box-shadow: -2px 0 5px rgba(0,0,0,0.2);
       overflow-y: auto;
       padding: 20px;
       border-left: 2px solid {{light_blue}} !important;
+    }
+    
+    /* Bootstrap Modal Overrides for Correct Layering on Top of Map Viewer Covers */
+    .modal {
+      z-index: 2610 !important;
+    }
+    .modal-backdrop {
+      z-index: 2600 !important;
     }
     .docs-drawer .nav-tabs > li.active > a {
       background-color: {{panel_bg}} !important;
@@ -239,7 +243,6 @@ create_app_theme <- function(light_blue, dark_bg, content_bg, font_family, map_t
   )
 }
 
-# --- Data-Driven Theme Configurations ---
 themes_params <- list(
   "Deep Forest" = list(
     light_blue = "#2d5a27",
@@ -354,7 +357,6 @@ app_themes <- lapply(themes_params, function(params) {
   do.call(create_app_theme, params)
 })
 
-# UI Module for Theme Switcher
 theme_switcher_ui <- function(id) {
   ns <- shiny::NS(id)
   shiny::tagList(
@@ -385,28 +387,23 @@ theme_switcher_ui <- function(id) {
   )
 }
 
-# Server Module for Theme Switcher
 theme_switcher_server <- function(id) {
   shiny::moduleServer(id, function(input, output, session) {
     
-    # Reactive value to store the currently active theme
     active_theme <- shiny::reactiveVal("Muted Sage")
     
-    # Observe the localStorage theme on connection
     shiny::observeEvent(input$saved_theme_js, {
       req(input$saved_theme_js)
       if (input$saved_theme_js %in% names(app_themes)) {
         shiny::updateSelectInput(session, "theme_selector", selected = input$saved_theme_js)
         active_theme(input$saved_theme_js)
       }
-    }, ignoreInit = FALSE, once = TRUE)
+    }, ignoreInit = FALSE)
     
-    # Observe changes from the UI dropdown and save to localStorage
     shiny::observeEvent(input$theme_selector, {
       req(input$theme_selector)
       if (input$theme_selector != active_theme()) {
         active_theme(input$theme_selector)
-        # Save to local storage
         shinyjs::runjs(sprintf("localStorage.setItem('app_selected_theme', '%s');", input$theme_selector))
       }
     }, ignoreInit = TRUE)
@@ -415,7 +412,6 @@ theme_switcher_server <- function(id) {
   })
 }
 
-# --- Centralized Export Rendering Helper (Issue n) ---
 export_plot_to_file <- function(p, filepath, ext, input) {
   width <- input$styler_width %||% 10
   height <- if(isTruthy(input$styler_height)) input$styler_height else 8

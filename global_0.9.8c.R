@@ -1,7 +1,4 @@
-# global_0.9.8.R - Centralized Configuration & Dependencies for Monolith v0.9.8
-# Copyright (c) 2026 Recep Serdar Kara. All rights reserved.
 
-# --- Required Package Suite ---
 required_packages <- c(
   "shiny", "shinyjs", "shinyWidgets", "shinyFiles", "shinycssloaders", "DT",
   "sf", "terra", "tidyterra", "leaflet", "leaflet.extras", "ggspatial", "fields",
@@ -10,10 +7,14 @@ required_packages <- c(
   "ggplot2", "ggpubr", "plotly", "RColorBrewer", "viridis", "latticeExtra",
   "patchwork", "fresh", "showtext", "scales", "commonmark", "glue",
   "randomForest", "DALEX", "yardstick", "agricolae", "mgcv",
-  "future", "furrr", "promises"
+  "future", "furrr", "promises", "nortest"
 )
 
-# --- Core R/Shiny Dependencies ---
+missing_packages <- required_packages[!(required_packages %in% installed.packages()[, "Package"])]
+if (length(missing_packages) > 0) {
+  install.packages(missing_packages, repos = "https://cloud.r-project.org")
+}
+
 library(shiny)
 library(shinyjs)
 library(shinyWidgets)
@@ -21,7 +22,6 @@ library(shinyFiles)
 library(shinycssloaders)
 library(DT)
 
-# --- Spatial & Mapping Dependencies ---
 library(sf)
 library(terra)
 library(tidyterra)
@@ -36,7 +36,6 @@ library(concaveman)
 library(spdep)
 library(FNN)
 
-# --- Data Manipulation & Formatting Dependencies ---
 library(dplyr)
 library(tidyr)
 library(jsonlite)
@@ -45,7 +44,6 @@ library(openxlsx)
 library(officer)
 library(zip)
 
-# --- Visualization & Theme Dependencies ---
 library(ggplot2)
 library(ggpubr)
 library(plotly)
@@ -59,34 +57,28 @@ library(scales)
 library(commonmark)
 library(glue)
 
-# --- Machine Learning & Diagnostics Dependencies ---
 library(randomForest)
 library(DALEX)
 library(yardstick)
 library(agricolae)
 library(mgcv)
+library(nortest)
 
-# --- Async & Parallel Core Dependencies ---
 library(future)
 library(furrr)
 library(promises)
 
-# --- Enable Automatic Font Rendering ---
 showtext_auto()
 
-# --- Register Static Asset Path ---
 addResourcePath("assets", file.path(getwd(), "assets"))
 
-# --- Configure Safe Multisession Future Plan ---
-# Prevents leaking socket connections during hot reloads or multiple user sessions
 if (!inherits(future::plan(), "multisession")) {
   future::plan(future::multisession)
 }
 
-# --- Source v0.9.8 Helper Modules ---
-source("ui_helpers_0.9.8.R")
-source("spatial_helpers_0.9.8.R")
-source("theme_helpers_0.9.8.R")
-source("gov_module_0.9.8.R")
-source("desc_exploratory_module_0.9.8.R")
+source("ui_helpers_0.9.8c.R")
+source("spatial_helpers_0.9.8c.R")
+source("theme_helpers_0.9.8c.R")
+source("gov_module_0.9.8c.R")
+source("desc_exploratory_module_0.9.8c.R")
 

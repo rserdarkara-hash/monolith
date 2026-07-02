@@ -1,6 +1,17 @@
-# ui_helpers_0.9.8.R - Modularized UI Helper Functions
 
-# Universal Agronomical Colors
+melt_cormat <- function(cormat, value_name = "Corr") {
+  rn <- rownames(cormat)
+  cn <- colnames(cormat)
+  df <- data.frame(
+    Var1 = rep(rn, each = length(cn)),
+    Var2 = rep(cn, times = length(rn)),
+    Value = as.vector(t(cormat)),
+    stringsAsFactors = FALSE
+  )
+  colnames(df)[3] <- value_name
+  df
+}
+
 agro_colors <- c("#E69F00", "#F0E442", "#009E73") # Orange, Yellow, Green
 
 get_agro_colors <- function(n) {
@@ -17,13 +28,11 @@ get_agro_colors <- function(n) {
   }
 }
 
-# Classic Nutrient Palettes
 nutrient_palettes <- list(
   TN = "Greens", P = "Blues", K = "Oranges", Ca = "YlOrRd", 
   Mg = "PuBuGn", Fe = "Purples", Mn = "GnBu", Cu = "YlGn", Zn = "YlOrBr"
 )
 
-# Classic Agronomical Limits
 nutrient_limits <- list(
   TN = c(0.05, 0.10), P = c(8, 25), K = c(150, 300), Ca = c(1428, 2857),
   Mg = c(80, 160), Fe = c(4, 6), Mn = c(1.2, 3.5), Cu = c(0.3, 0.8), Zn = c(1, 3)
@@ -51,13 +60,11 @@ get_nut_key <- function(v) {
 }
 
 get_default_palette <- function(var_name, category = "Soil", label = NULL) {
-  # Match nutrient shorthand robustly (check name then label)
   nut <- get_nut_key(var_name)
   if (is.null(nut) && !is.null(label)) nut <- get_nut_key(label)
   
   if (!is.null(nut)) return(nutrient_palettes[[nut]])
   
-  # Category-based defaults
   if (is.null(category)) {
     return("YlOrRd")
   } else if (category == "Environmental Data") {
@@ -126,7 +133,6 @@ tuning_ui <- function(id, label,
     
     top_extra_ui,
     
-    # Auto Panel
     conditionalPanel(
       condition = sprintf("input.%s_mode == 'auto'", id),
       actionButton(paste0("opt_", id), optimize_btn_label, class = "btn-info btn-block"),
@@ -134,7 +140,6 @@ tuning_ui <- function(id, label,
       do.call(sliderInput, c(list(inputId = global_slider_id), global_slider_args))
     ),
     
-    # Manual Panel
     conditionalPanel(
       condition = sprintf("input.%s_mode == 'manual'", id),
       div(style = manual_style,
@@ -160,7 +165,6 @@ tuning_ui <- function(id, label,
   }
 }
 
-# --- Unified Styling Engine (WYSIWYG) ---
 generate_base_plot <- function(item, input, agro_params = NULL) {
   req(item)
   
@@ -170,13 +174,12 @@ generate_base_plot <- function(item, input, agro_params = NULL) {
       if (inherits(obj, "PackedSpatRaster")) obj <- terra::unwrap(obj)
       pal_name <- input$palette_select %||% "YlOrRd"
       is_resid <- grepl("Residual", label)
-      is_agro <- input$color_style == "agro" && !is_resid
+      is_class <- input$color_style %in% c("agro", "bin") && !is_resid
       
       if (isTruthy(input$styler_high_contrast)) {
-          if (!is_agro && !is_resid) pal_name <- "viridis"
+          if (!is_class && !is_resid) pal_name <- "viridis"
       }
       
-      # Strip redundant legend titles to maximize layout space
       leg_name <- NULL
       
       bp <- ggplot() + geom_spatraster(data = obj[[1]])
@@ -188,13 +191,12 @@ generate_base_plot <- function(item, input, agro_params = NULL) {
         resid_pal <- if (isTruthy(input$styler_high_contrast)) "PuOr" else "RdBu"
         bp <- bp + scale_fill_distiller(palette = resid_pal, direction = 1, limits = c(-abs_max, abs_max), na.value = "transparent", name = leg_name) +
           coord_sf()
-      } else if (is_agro && !is.null(agro_params)) {
-        # Classification for agronomical maps
+      } else if (is_class && !is.null(agro_params)) {
         obj_c <- terra::classify(obj[[1]], agro_params$rcl_mat, right = FALSE)
         names(obj_c) <- "category"
         
-        # Add levels to help tidyterra/ggplot2 recognize it as categorical
-        lvls <- data.frame(value = 1:agro_params$n_c, category = agro_params$labels)
+        labels_to_use <- if(input$color_style == "bin") agro_params$leg_labels else agro_params$labels
+        lvls <- data.frame(value = 1:agro_params$n_c, category = labels_to_use)
         levels(obj_c) <- lvls
         
         a_cols <- agro_params$colors
@@ -225,7 +227,6 @@ generate_base_plot <- function(item, input, agro_params = NULL) {
     if (item$type == "map") {
       return(build_map(item$obj, item$label))
     } else {
-      # map_combined
       p1 <- build_map(item$obj$act, "Actual", is_tiled = TRUE)
       p2 <- build_map(item$obj$pre, "Predicted", is_tiled = TRUE)
       return(list(p1 = p1, p2 = p2))
@@ -239,7 +240,6 @@ generate_base_plot <- function(item, input, agro_params = NULL) {
 apply_styler_theme <- function(p_obj, input, calibration = 1, item_label = "", item_type = "plot") {
   req(p_obj)
   
-  # 1. Scaling Logic
   s_title <- (input$styler_title_size %||% 16) * calibration
   s_base  <- (input$styler_base_size %||% 12) * calibration
   s_x     <- (input$styler_x_size %||% 12) * calibration
@@ -364,11 +364,9 @@ generate_styled_plot <- function(item, input, calibration = 1, agro_params = NUL
   apply_styler_theme(base_p, input, calibration, item_label = item$label, item_type = item$type)
 }
 
-# --- Shared Expanded Modal Factory (Deduplication) ---
 register_expanded_modal <- function(input, output, session, btn_id, mode_id, ui_id, plot_static_id, plot_plotly_id, title_text, build_fn, radar_special = FALSE, pca_3d_special = FALSE) {
   ns <- session$ns
   
-  # Dynamic evaluation helper
   is_pca_3d <- function() {
     if (is.function(pca_3d_special)) {
       pca_3d_special()
@@ -379,9 +377,7 @@ register_expanded_modal <- function(input, output, session, btn_id, mode_id, ui_
     }
   }
   
-  # Observer for button click
   shiny::observeEvent(input[[btn_id]], {
-    # Special logic for 3D biplot where we don't want a View Mode selector
     mode_selector <- if (is_pca_3d()) {
       NULL
     } else {
@@ -396,7 +392,6 @@ register_expanded_modal <- function(input, output, session, btn_id, mode_id, ui_
     ))
   })
   
-  # UI output
   output[[ui_id]] <- shiny::renderUI({
     if (is_pca_3d()) {
       plotly::plotlyOutput(ns(paste0(plot_plotly_id, "_3d")), height = "700px")
@@ -409,18 +404,15 @@ register_expanded_modal <- function(input, output, session, btn_id, mode_id, ui_
     }
   })
   
-  # Static plot
   output[[plot_static_id]] <- shiny::renderPlot({
     p <- build_fn()
     shiny::req(p)
     p
   })
   
-  # Interactive plot
   output[[plot_plotly_id]] <- plotly::renderPlotly({
     p <- build_fn()
     shiny::req(p)
-    # Radar chart special conversion
     if (radar_special && inherits(p, "ggplot") && nrow(p$data) > 0 && "variable" %in% colnames(p$data)) {
       d <- p$data
       fig <- plotly::plot_ly(type = 'scatterpolar', mode = 'lines+markers')
@@ -438,7 +430,6 @@ register_expanded_modal <- function(input, output, session, btn_id, mode_id, ui_
     if (inherits(p, "ggplot")) plotly::ggplotly(p) else p
   })
   
-  # 3D plotly special
   output[[paste0(plot_plotly_id, "_3d")]] <- plotly::renderPlotly({
     p <- build_fn()
     shiny::req(p)
@@ -446,7 +437,6 @@ register_expanded_modal <- function(input, output, session, btn_id, mode_id, ui_
   })
 }
 
-# --- Documentation UI Components ---
 render_docs_drawer <- function() {
   div(
     id = "docs_drawer",
@@ -457,11 +447,14 @@ render_docs_drawer <- function() {
     ),
     tabsetPanel(
       id = "docs_tabs",
+      tabPanel("User Guide", 
+               uiOutput("render_user_guide")
+      ),
       tabPanel("Scientific Guide", 
                uiOutput("render_scientific_guide")
       ),
-      tabPanel("UI/UX Guide", 
-               uiOutput("render_ui_ux_guide")
+      tabPanel("Descriptive & Exploratory Suite", 
+               uiOutput("render_desc_exploratory_guide")
       )
     )
   )
@@ -480,21 +473,20 @@ info_tooltip <- function(id, text) {
     `data-trigger` = "focus",
     `data-content` = content_html,
     `data-html` = "true",
-    onclick = "event.stopPropagation(); event.preventDefault();",
+    `data-bs-toggle` = "popover",
+    `data-bs-placement` = "auto",
+    `data-bs-trigger` = "focus",
+    `data-bs-content` = content_html,
+    `data-bs-html` = "true",
+    onclick = "event.stopPropagation(); event.preventDefault(); if (typeof bootstrap !== 'undefined' && bootstrap.Popover) { new bootstrap.Popover(this).show(); }",
     icon("info-circle")
   )
 }
 
-# --- Shared Helpers for Labels & Group Filtering ---
 
 get_var_label <- function(v, vars_metadata) {
   if (is.null(v) || is.na(v) || v == "") return(v)
   if (!is.null(vars_metadata)) {
-    match <- Filter(function(x) x$actual == v, vars_metadata)
-    if (length(match) > 0 && !is.null(match[[1]]$label) && match[[1]]$label != "") {
-      return(match[[1]]$label)
-    }
-    # Fallback to fuzzy match
     all_actuals <- sapply(vars_metadata, function(x) x$actual)
     fuzzy_actual <- fuzzy_match_column(v, all_actuals)
     if (!is.null(fuzzy_actual)) {
@@ -541,12 +533,10 @@ fuzzy_match_column <- function(act_name, user_cols) {
     return(user_cols[clean_user == clean_act][1])
   }
   
-  # Levenshtein distance based matching
   dists <- as.vector(adist(clean_act, clean_user))
   min_idx <- which.min(dists)
   if (length(min_idx) > 0) {
     min_dist <- dists[min_idx]
-    # Allow small edits (up to 2 character differences) if it's not a huge fraction of the word length
     if (min_dist <= 2 && (min_dist / max(1, nchar(clean_act))) <= 0.3) {
       return(user_cols[min_idx])
     }
@@ -579,7 +569,6 @@ filter_active_groups <- function(df, active_groups) {
   return(df)
 }
 
-# Smart auto-detection helper for predicted columns
 detect_pred_column <- function(target, candidates, type = "cve") {
   if (is.null(target) || is.na(target) || length(candidates) == 0) return(NA)
   
@@ -651,7 +640,6 @@ match_metadata_columns <- function(m_df, user_cols) {
   return(new_vars)
 }
 
-# --- Grouping & Discretization Logic (Phase 2) ---
 discretize_numeric_var <- function(x, method = "median", custom_breaks = NULL, var_name = "") {
   prefix <- if(nchar(var_name) > 0) paste0(var_name, ": ") else ""
   if (all(is.na(x))) return(factor(rep(NA, length(x))))
@@ -699,7 +687,6 @@ process_grouping_vars <- function(df, vars, types) {
   for (i in seq_along(vars)) {
     v <- vars[i]
     t <- types[i]
-    # Handle extended types like 'numeric_mean', 'numeric_tertiles', etc.
     if (t == "categorical") {
       group_list[[v]] <- as.factor(df[[v]])
     } else if (grepl("^numeric", t)) {
@@ -718,11 +705,9 @@ process_grouping_vars <- function(df, vars, types) {
   return(df)
 }
 
-# --- Plotting Logic (Phase 3) ---
 
 
 get_stat_letters <- function(df, var_name, group_col, test_type) {
-  # Standardize column names for processing
   df_proc <- df[!is.na(df[[var_name]]) & !is.na(df[[group_col]]), ]
   if (nrow(df_proc) < 3) return(NULL)
   
@@ -755,7 +740,6 @@ get_stat_letters <- function(df, var_name, group_col, test_type) {
       f_label <- if(is.null(f_val) || is.na(f_val)) "F = N/A" else paste0("F(", df1, ",", df2, ") = ", round(f_val, 2))
       full_label <- paste0("ANOVA: ", f_label, ", ", p_label)
       
-      # Return for all groups but we will handle positioning in add_stat_layer
       df_let <- data.frame(group = levels(df_proc[[group_col]]), letter = as.character(full_label))
       colnames(df_let)[1] <- group_col
       return(df_let)
@@ -776,7 +760,6 @@ add_stat_layer <- function(p, df, var_name, group_col, stat_test, stat_letter_po
            l_df <- get_stat_letters(sub_df, "Value", group_col, stat_test[1])
            if (!is.null(l_df)) {
                if (stat_test[1] == "anova") {
-                   # For ANOVA, only keep one label per facet to avoid clutter
                    l_df <- l_df[1, , drop=FALSE]
                    max_y <- max(sub_df$Value, na.rm = TRUE)
                    l_df$y_pos <- max_y + (max_y - min(sub_df$Value, na.rm=TRUE)) * 0.15
@@ -793,7 +776,6 @@ add_stat_layer <- function(p, df, var_name, group_col, stat_test, stat_letter_po
            }
        }
        if (nrow(all_letters) > 0) {
-           # Position ANOVA in the center-top of each facet, Post-hocs above groups
            if (stat_test[1] == "anova") {
               p <- p + geom_text(data = all_letters, aes(x = -Inf, y = y_pos, label = letter), hjust = -0.1, vjust = 1, size = 3.5, fontface = "italic", inherit.aes = FALSE)
            } else {
@@ -839,7 +821,6 @@ generate_core_plot <- function(df, var_name, y_var = NULL, group_col = NULL, plo
   p <- ggplot() + theme_minimal()
   
   if (plot_type %in% c("boxplot", "violin") && !is.null(y_var) && y_var != "") {
-    # Dual variable facet for different scales
 
     df_long <- pivot_longer(df, cols = c(all_of(var_name), all_of(y_var)), names_to = "Variable", values_to = "Value")
     
@@ -852,7 +833,6 @@ generate_core_plot <- function(df, var_name, y_var = NULL, group_col = NULL, plo
          labs(title = paste(tools::toTitleCase(plot_type), "Comparison"), x = "Group", y = "Value", fill = "Group")
     p <- add_stat_layer(p, df_long, "Value", group_col, stat_test, stat_letter_pos, facet_var = "Variable")
   } else {
-    # Normal plotting
     p <- ggplot(df) + theme_minimal()
     
     if (plot_type == "histogram") {
@@ -871,7 +851,6 @@ generate_core_plot <- function(df, var_name, y_var = NULL, group_col = NULL, plo
         p <- p + geom_point(aes(x = .data[["index_seq"]], y = .data[[var_name]], color = .data[[group_col]]), alpha = 0.8)
       }
       
-      # Add fit line if requested
       if (!is.null(scatter_fit) && scatter_fit != "none") {
          fit_methods <- list(
            linear = list(method = "lm", se = FALSE),
@@ -966,7 +945,6 @@ generate_advanced_plot <- function(df, vars, group_col = NULL, plot_type = "qq",
          stat_qq() + stat_qq_line() + labs(x="Theoretical", y="Sample", title="QQ Plot")
   } else if (plot_type == "sinaplot") {
     if (!is.null(v2) && v2 != "") {
-       # Secondary Variable Faceting Mode for Sina
        df_long <- tidyr::pivot_longer(df, cols = c(all_of(v1), all_of(v2)), names_to = "Variable", values_to = "Value")
        p <- ggplot(df_long, aes(x = .data[[group_col]], y = Value, fill = .data[[group_col]])) + 
             geom_violin(alpha=0.5, color=NA) + 
@@ -1035,11 +1013,9 @@ generate_advanced_plot <- function(df, vars, group_col = NULL, plot_type = "qq",
         grid_x <- seq(min(df_clean[[v1]]), max(df_clean[[v1]]), length.out=50)
         grid_y <- seq(min(df_clean[[v2]]), max(df_clean[[v2]]), length.out=50)
         grid <- expand.grid(x=grid_x, y=grid_y)
-        # Safe names for modeling to avoid mgcv/loess parsing errors with special chars
         df_safe <- df_clean
         colnames(df_safe) <- c("var1_safe", "var2_safe", "var3_safe")
         
-        # Grid prediction
         x_seq <- seq(min(df_safe[["var1_safe"]]), max(df_safe[["var1_safe"]]), length.out=50)
         y_seq <- seq(min(df_safe[["var2_safe"]]), max(df_safe[["var2_safe"]]), length.out=50)
         grid <- expand.grid(var1_safe=x_seq, var2_safe=y_seq)
@@ -1069,10 +1045,8 @@ generate_advanced_plot <- function(df, vars, group_col = NULL, plot_type = "qq",
             grid[["var3_safe"]] <- as.vector(predict(mod, newdata=grid))
           }
           
-          # Map safe names back to original for plotting
           colnames(grid) <- c(v1, v2, v3)
           
-          # Use geom_tile + geom_contour instead of geom_contour_filled for Plotly compatibility
           p <- ggplot(grid, aes(x=.data[[v1]], y=.data[[v2]], z=.data[[v3]])) +
                geom_tile(aes(fill=.data[[v3]])) +
                geom_contour(color="white", alpha=0.5) +
@@ -1092,7 +1066,6 @@ generate_advanced_plot <- function(df, vars, group_col = NULL, plot_type = "qq",
   return(p)
 }
 
-# --- Phase 4: Correlation Logic ---
 
 generate_correlation_heatmap <- function(df, vars, method = "pearson", cormat = NULL) {
 
@@ -1105,18 +1078,11 @@ generate_correlation_heatmap <- function(df, vars, method = "pearson", cormat = 
     cormat <- cor(df_clean, method = method)
   }
   
-  # Hierarchical clustering
   distmat <- as.dist(1 - abs(cormat))
   hc <- hclust(distmat)
   ordered_vars <- vars[hc$order]
   
-  # Melt manually
-  cormat_df <- data.frame(Var1 = character(), Var2 = character(), Corr = numeric())
-  for(i in 1:nrow(cormat)) {
-    for(j in 1:ncol(cormat)) {
-      cormat_df <- rbind(cormat_df, data.frame(Var1 = rownames(cormat)[i], Var2 = colnames(cormat)[j], Corr = cormat[i, j]))
-    }
-  }
+  cormat_df <- melt_cormat(cormat, "Corr")
   
   cormat_df$Var1 <- factor(cormat_df$Var1, levels = ordered_vars)
   cormat_df$Var2 <- factor(cormat_df$Var2, levels = rev(ordered_vars))
@@ -1190,7 +1156,6 @@ generate_partial_correlation <- function(df, vars, control_vars = NULL, method =
   if (nrow(df_clean) < 5) return(ggplot() + annotate("text", x=0, y=0, label="Insufficient data"))
   
   if (!is.null(control_vars) && length(control_vars) > 0) {
-    # Partial out control_vars from vars using lm residuals
     res_list <- list()
     formula_rhs <- paste(control_vars, collapse=" + ")
     for (v in vars) {
@@ -1202,12 +1167,7 @@ generate_partial_correlation <- function(df, vars, control_vars = NULL, method =
   
   cormat <- cor(df_clean[, vars, drop=FALSE], method = method)
   
-  cormat_df <- data.frame(Var1 = character(), Var2 = character(), pCorr = numeric())
-  for(i in 1:nrow(cormat)) {
-    for(j in 1:ncol(cormat)) {
-      cormat_df <- rbind(cormat_df, data.frame(Var1 = rownames(cormat)[i], Var2 = colnames(cormat)[j], pCorr = cormat[i, j]))
-    }
-  }
+  cormat_df <- melt_cormat(cormat, "pCorr")
   
   cormat_df$Var1 <- factor(cormat_df$Var1, levels = vars)
   cormat_df$Var2 <- factor(cormat_df$Var2, levels = rev(vars))
@@ -1235,12 +1195,7 @@ generate_correlogram <- function(df, vars, method = "pearson", cormat = NULL) {
     cormat <- cor(df_clean, method = method)
   }
   
-  cormat_df <- data.frame(Var1 = character(), Var2 = character(), Corr = numeric())
-  for(i in 1:nrow(cormat)) {
-    for(j in 1:ncol(cormat)) {
-      cormat_df <- rbind(cormat_df, data.frame(Var1 = rownames(cormat)[i], Var2 = colnames(cormat)[j], Corr = cormat[i, j]))
-    }
-  }
+  cormat_df <- melt_cormat(cormat, "Corr")
   
   cormat_df$Var1 <- factor(cormat_df$Var1, levels = vars)
   cormat_df$Var2 <- factor(cormat_df$Var2, levels = rev(vars))
@@ -1278,7 +1233,6 @@ generate_lagged_correlation <- function(df, var1, var2, max_lag = 10) {
   return(p)
 }
 
-# --- Phase 5: PCA Logic ---
 check_collinearity <- function(df, vars, threshold = 0.95) {
   res <- detect_multicollinearity_engine(df, vars = vars, pairwise_threshold = threshold, vif_threshold = 10)
   
@@ -1367,8 +1321,6 @@ generate_pca_loadings <- function(pca_res, pc = 1) {
 
 generate_pca_contribution <- function(pca_res, pc = 1) {
 
-  # Contribution = (loading^2 / eigenvalue^2) * 100
-  # For prcomp, sdev is sqrt(eigenvalue), rotation is loadings
   loadings <- pca_res$rotation[, pc]
   eig <- pca_res$sdev[pc]^2
   contrib <- (loadings^2 / eig) * 100
@@ -1377,7 +1329,6 @@ generate_pca_contribution <- function(pca_res, pc = 1) {
   df_cont <- df_cont[order(df_cont$Contribution, decreasing = TRUE), ]
   df_cont$Variable <- factor(df_cont$Variable, levels = rev(df_cont$Variable))
   
-  # Expected average contribution
   exp_cont <- 100 / length(contrib)
   
   p <- ggplot(df_cont, aes(x = Variable, y = Contribution)) +
@@ -1394,7 +1345,6 @@ generate_pca_contribution <- function(pca_res, pc = 1) {
 
 generate_pca_cos2 <- function(pca_res, axes = 1:2) {
 
-  # cos2 = loading^2 * eigenvalue / sum(eigenvalues) -> wait, cos2 = loading^2 for standardized PCA
   loadings <- pca_res$rotation[, axes, drop=FALSE]
   cos2 <- rowSums(loadings^2)
   
@@ -1433,7 +1383,6 @@ generate_pca_cumvar <- function(pca_res) {
 
 generate_pca_mahalanobis <- function(pca_res) {
 
-  # Mahalanobis distance of observations in PCA space
   scores <- as.data.frame(pca_res$x)
   center <- colMeans(scores)
   cov_mat <- cov(scores)
@@ -1441,7 +1390,6 @@ generate_pca_mahalanobis <- function(pca_res) {
   md <- mahalanobis(scores, center, cov_mat)
   df_md <- data.frame(Index = 1:length(md), Distance = md)
   
-  # Threshold based on Chi-Square distribution
   thresh <- qchisq(0.975, df = ncol(scores))
   
   p <- ggplot(df_md, aes(x = Index, y = Distance)) +
@@ -1480,7 +1428,6 @@ generate_pca_biplot_3d <- function(pca_res, df, pc_x=1, pc_y=2, pc_z=3, group_co
   return(p)
 }
 
-# --- Map Viewer UI Components ---
 render_locality_pan_input <- function(loc_names) {
   choices <- c("Global View" = "global")
   if (length(loc_names) > 0) {
@@ -1491,11 +1438,9 @@ render_locality_pan_input <- function(loc_names) {
               selected = "global", width = "160px", selectize = FALSE)
 }
 
-# F2: Tableau10 palette constant (not in RColorBrewer)
 TABLEAU10 <- c("#4e79a7","#f28e2b","#e15759","#76b7b2","#59a14f",
                "#edc948","#b07aa1","#ff9da7","#9c755f","#bab0ac")
 
-# F2: Generate palette colors for a set of groups
 generate_group_palette <- function(groups, palette_name = "Set1") {
   n <- length(groups)
   if (n == 0) return(character(0))
@@ -1511,7 +1456,6 @@ generate_group_palette <- function(groups, palette_name = "Set1") {
   stats::setNames(colors, groups)
 }
 
-# F2: Add styled sample points to a leaflet map
 add_styled_points <- function(map, pts_sf, color_by = "none", custom_colors = NULL,
                               show_labels = FALSE, label_field = "none",
                               label_size = 11, marker_size = 3,
@@ -1520,13 +1464,11 @@ add_styled_points <- function(map, pts_sf, color_by = "none", custom_colors = NU
   pts_view <- if (sf::st_crs(pts_sf)$epsg != 4326) sf::st_transform(pts_sf, 4326) else pts_sf
   if (nrow(pts_view) == 0) return(map)
 
-  # --- Determine point colors ---
   use_groups <- color_by != "none" && color_by %in% colnames(pts_view)
 
   if (use_groups && !is.null(custom_colors)) {
     grp_vals <- as.character(pts_view[[color_by]])
     groups <- sort(unique(grp_vals))
-    # Ensure all groups have a color (fallback for unexpected values)
     missing <- setdiff(groups, names(custom_colors))
     if (length(missing) > 0) {
       extra <- generate_group_palette(missing, "Set1")
@@ -1540,7 +1482,6 @@ add_styled_points <- function(map, pts_sf, color_by = "none", custom_colors = NU
     border_color <- "white"
     fill_opacity <- 0.85
 
-    # Add legend
     map <- map %>% leaflet::addLegend(
       position = "bottomleft",
       colors = unname(custom_colors[groups]),
@@ -1554,14 +1495,12 @@ add_styled_points <- function(map, pts_sf, color_by = "none", custom_colors = NU
     fill_opacity <- 0.5
   }
 
-  # --- Popups ---
   popups <- NULL
   if (!is.null(popup_fn)) {
     df_clean <- sf::st_drop_geometry(pts_view)
     popups <- vapply(seq_len(nrow(df_clean)), function(i) popup_fn(df_clean[i, ]), character(1))
   }
 
-  # --- Add circle markers ---
   map <- map %>% leaflet::addCircleMarkers(
     data = pts_view,
     radius = marker_size,
@@ -1574,7 +1513,6 @@ add_styled_points <- function(map, pts_sf, color_by = "none", custom_colors = NU
     group = "styled_points"
   )
 
-  # --- Labels (separate layer for clarity) ---
   if (show_labels && label_field != "none" && label_field %in% colnames(pts_view)) {
     raw_vals <- pts_view[[label_field]]
     label_vals <- if (is.numeric(raw_vals)) {

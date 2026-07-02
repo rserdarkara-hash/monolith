@@ -1,51 +1,21 @@
-# Monolith: Advanced Spatial Analysis Dashboard v0.9.7c
-# Copyright (c) 2026 Recep Serdar Kara. All rights reserved.
-#
-# This program is free software: you can redistribute it and/or modify
-# it under the terms of the GNU General Public License as published by
-# the Free Software Foundation, either version 3 of the License, or
-# (at your option) any later version.
-#
-# This program is distributed in the hope that it will be useful,
-# but WITHOUT ANY WARRANTY; without even the implied warranty of
-# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
-# GNU General Public License for more details.
-#
-# You should have received a copy of the GNU General Public License
-# along with this program. If not, see <https://www.gnu.org/licenses/>.
 
-source("global_0.9.7c.R")
+source("global_0.9.8c.R")
 
-# --- Helpers ---
 
-# Universal Agronomical Colors
-agro_colors <- c("#E69F00", "#F0E442", "#009E73") # Orange, Yellow, Green
-
-get_agro_colors <- function(n) {
-  if (n == 2) {
-    c("#E69F00", "#009E73")
-  } else if (n == 3) {
-    c("#E69F00", "#F0E442", "#009E73")
-  } else if (n == 4) {
-    c("#E69F00", "#F0E442", "#56B4E9", "#009E73")
-  } else if (n == 5) {
-    c("#D55E00", "#E69F00", "#F0E442", "#56B4E9", "#009E73")
-  } else {
-    colorRampPalette(c("#E69F00", "#F0E442", "#009E73"))(n)
-  }
+validate_crs <- function(crs_selection, error_prefix = "Invalid CRS provided", duration = NULL) {
+  tryCatch({
+    c_obj <- sf::st_crs(crs_selection)
+    if (is.na(c_obj)) stop("Invalid CRS format.")
+    
+    t_obj <- terra::crs(crs_selection)
+    if (t_obj == "") stop("Invalid CRS for terra.")
+    
+    c_obj
+  }, error = function(e) {
+    showNotification(paste(error_prefix, e$message), type = "error", duration = duration)
+    NULL
+  })
 }
-
-# Classic Nutrient Palettes
-nutrient_palettes <- list(
-  TN = "Greens", P = "Blues", K = "Oranges", Ca = "YlOrRd", 
-  Mg = "PuBuGn", Fe = "Purples", Mn = "GnBu", Cu = "YlGn", Zn = "YlOrBr"
-)
-
-# Classic Agronomical Limits
-nutrient_limits <- list(
-  TN = c(0.05, 0.10), P = c(8, 25), K = c(150, 300), Ca = c(1428, 2857),
-  Mg = c(80, 160), Fe = c(4, 6), Mn = c(1.2, 3.5), Cu = c(0.3, 0.8), Zn = c(1, 3)
-)
 
 common_crs <- c(
   "WGS 84 (EPSG:4326)" = "EPSG:4326",
@@ -56,60 +26,19 @@ common_crs <- c(
   "Pseudo-Mercator (EPSG:3857)" = "EPSG:3857"
 )
 
-get_nut_key <- function(v) {
-  v_up <- toupper(as.character(v))
-  if (length(v_up) == 0 || is.na(v_up) || v_up == "") return(NULL)
-  
-  patterns <- c(
-    TN = "\\bTN\\b|NITROGEN",
-    P  = "\\bP\\b|PHOSPHORUS|OLSEN",
-    K  = "\\bK\\b|POTASSIUM",
-    Ca = "\\bCA\\b|CALCIUM",
-    Mg = "\\bMG\\b|MAGNESIUM",
-    Fe = "\\bFE\\b|IRON",
-    Mn = "\\bMN\\b|MANGANESE",
-    Cu = "\\bCU\\b|COPPER",
-    Zn = "\\bZN\\b|ZINC"
-  )
-  
-  matches <- sapply(patterns, function(pat) grepl(pat, v_up))
-  if (any(matches)) return(names(patterns)[which(matches)[1]])
-  return(NULL)
-}
-
-get_default_palette <- function(var_name, category = "Soil", label = NULL) {
-  # Match nutrient shorthand robustly (check name then label)
-  nut <- get_nut_key(var_name)
-  if (is.null(nut) && !is.null(label)) nut <- get_nut_key(label)
-  
-  if (!is.null(nut)) return(nutrient_palettes[[nut]])
-  
-  # Category-based defaults
-  case_when(
-    category == "Environmental Data" ~ "RdYlBu",
-    category == "Landsat Data" ~ "viridis",
-    category == "Sentinel Data" ~ "plasma",
-    category == "Merged Data" ~ "inferno",
-    category == "Terrain Data" ~ "BrBG",
-    TRUE ~ "YlOrRd"
-  )
-}
-
-# --- Palette Helpers ---
-# Mandatory palettes for (Simplified + Earthy colors)
 dashboard_palettes <- c("viridis", "Greens", "Blues", "Oranges", "YlOrRd", "RdYlBu", "BrBG", "YlOrBr", "Greys", "Spectral")
 
-# Precompute palette choices once to avoid expensive HTML rendering inside UI loops
 palette_choices_precomputed <- (function() {
   pals <- dashboard_palettes
   labels <- sapply(pals, function(p) {
-    # Generate a few colors for the visual preview
     cols <- if (p == "viridis") {
       viridis::viridis(5)
     } else {
-      RColorBrewer::brewer.pal(5, p)
+      info <- RColorBrewer::brewer.pal.info
+      max_cols <- if (p %in% rownames(info)) info[p, "maxcolors"] else 5
+      n_cols <- max(3, min(5, max_cols))
+      RColorBrewer::brewer.pal(n_cols, p)
     }
-    # Create the HTML swatch row
     swatches <- paste0(sapply(cols, function(c) {
       sprintf('<div style="width: 15px; height: 15px; background-color: %s !important; border: 0.5px solid #ccc; display: inline-block; margin-left: 2px;"></div>', c)
     }), collapse = "")
@@ -160,7 +89,6 @@ sync_styler_config <- function(cfg, session) {
   }
 }
 
-# --- Safe Concaveman Boundary Helper ---
 safe_concaveman <- function(pts) {
   if (nrow(pts) < 3) {
     return(sf::st_convex_hull(sf::st_union(pts)))
@@ -177,7 +105,6 @@ safe_concaveman <- function(pts) {
   return(b)
 }
 
-# --- Clean gstat Environment Helper ---
 clean_gstat_env <- function(vgm_obj) {
   if (is.null(vgm_obj)) return(NULL)
   if (is.list(vgm_obj)) {
@@ -191,37 +118,31 @@ clean_gstat_env <- function(vgm_obj) {
   return(vgm_obj)
 }
 
-# --- Scientific Variogram Parameters ---
-calc_scientific_lags <- function(sf_pts) {
-  # Reputable heuristic: cutoff = max distance / 2, width = cutoff / 15
-  bbox <- st_bbox(sf_pts)
-  max_dist <- as.numeric(sqrt((bbox$xmax - bbox$xmin)^2 + (bbox$ymax - bbox$ymin)^2))
-  cutoff <- max_dist / 2
-  list(width = cutoff / 15, cutoff = cutoff)
-}
 
-# --- Robust Variogram Fitting ---
 robust_vgm_fit <- function(v_emp, v_data) {
   initial_sill <- var(v_data, na.rm=TRUE)
   if (is.na(initial_sill) || initial_sill == 0) initial_sill <- 1
   
   initial_nugget <- min(v_emp$gamma)
-  # Stability fix: Ensure a tiny nugget to prevent singular matrices in krige()
-  if (initial_nugget == 0) initial_nugget <- initial_sill * 1e-6
+  if (initial_nugget == 0) initial_nugget <- max(initial_sill * 1e-6, 1e-6)
   
   if (initial_nugget > initial_sill) initial_nugget <- initial_sill * 0.9
   initial_psill <- max(initial_sill - initial_nugget, initial_sill * 0.1)
   
-  initial_range <- max(v_emp$dist) / 4
+  max_dist <- max(v_emp$dist, na.rm = TRUE)
+  if (is.na(max_dist) || is.infinite(max_dist) || max_dist <= 0) {
+    max_dist <- 1.0 # Safe default positive distance fallback
+  }
+  
+  initial_range <- max_dist / 4
   models <- c("Sph", "Exp", "Gau", "Mat") # Added Matern
   
   fits <- lapply(models, function(m) {
     tryCatch({
-      # Try fitting with initial guesses
       start_kappa <- if(m == "Mat") 1.5 else 0.5
       f <- gstat::fit.variogram(v_emp, gstat::vgm(psill = initial_psill, model = m, range = initial_range, nugget = initial_nugget, kappa = start_kappa))
       sse <- attr(f, "SSErr")
-      if (!is.null(sse) && f$range[2] > (max(v_emp$dist)/100) && f$range[2] < max(v_emp$dist) * 2 && f$psill[2] > 0) {
+      if (!is.null(sse) && f$range[2] > (max_dist/100) && f$range[2] < max_dist * 2 && f$psill[2] > 0) {
         return(list(fit = f, sse = sse))
       }
       return(NULL)
@@ -237,23 +158,22 @@ robust_vgm_fit <- function(v_emp, v_data) {
   
   if (is.null(best_fit)) {
     if (initial_nugget > initial_sill * 0.8) {
-      best_fit <- gstat::vgm(psill = initial_sill * 0.05, "Sph", range = max(v_emp$dist)/10, nugget = initial_sill * 0.95)
+      best_fit <- gstat::vgm(psill = initial_sill * 0.05, "Sph", range = max_dist/10, nugget = initial_sill * 0.95)
     } else {
-      best_fit <- gstat::vgm(psill = initial_sill * 0.8, "Sph", range = max(v_emp$dist)/2, nugget = initial_sill * 0.2)
+      best_fit <- gstat::vgm(psill = initial_sill * 0.8, "Sph", range = max_dist/2, nugget = initial_sill * 0.2)
     }
-    tryCatch({ showNotification("Variogram auto-fit failed. Using fallback.", type = "warning", duration = 5) }, error=function(e) NULL)
+    if (!is.null(shiny::getDefaultReactiveDomain())) {
+      tryCatch({ showNotification("Variogram auto-fit failed. Using fallback.", type = "warning", duration = 5) }, error=function(e) NULL)
+    }
   }
   return(best_fit)
 }
 
-# 
 
-# --- UI ---
 ui <- fluidPage(
   useShinyjs(),
   render_docs_drawer(),
   
-  # Static default theme to prevent FOUC (flash of unstyled content) on startup
   fresh::use_theme(app_themes[["Muted Sage"]]$theme),
   tags$head(
     tags$style(HTML(app_themes[["Muted Sage"]]$manual_style))
@@ -263,7 +183,7 @@ ui <- fluidPage(
   tags$head(
     tags$style(HTML("
       .bootstrap-select .dropdown-menu li a span.text { display: flex !important; width: 100% !important; align-items: center; justify-content: space-between; }
-      .shiny-notification { position:fixed; top: 50%; left: 50%; transform: translate(-50%, -50%); width: 350px; z-index: 9999; }
+      .shiny-notification { width: 100% !important; }
       .well { padding: 15px; }
       .header-panel { background-color: #2c3e50; color: white; padding: 10px 20px; margin-bottom: 20px; border-radius: 0 0 10px 10px; display: flex; justify-content: space-between; align-items: center; }
       .header-title { margin: 0; font-weight: bold; font-size: 24px; }
@@ -277,14 +197,6 @@ ui <- fluidPage(
       .popover-body { color: #333 !important; }
       .expand-icon-btn { position: absolute; top: 10px; right: 10px; z-index: 100; opacity: 0.8; width: 32px; height: 32px; padding: 0 !important; display: inline-flex !important; align-items: center !important; justify-content: center !important; }
       .expand-icon-btn > * { margin: 0 !important; padding: 0 !important; }
-      #pt_style_toolbar .form-group { margin-bottom: 4px !important; }
-      #pt_style_toolbar select, #pt_style_toolbar .form-control { background-color: #4a5568; color: #e2e8f0; border-color: #2d3748; font-size: 12px; height: 28px; padding: 2px 6px; }
-      #pt_style_toolbar .irs--shiny .irs-bar { background: #6c5ce7; }
-      #pt_style_toolbar .irs--shiny .irs-handle { border-color: #6c5ce7; }
-      #pt_style_toolbar .irs--shiny .irs-single { background: #6c5ce7; }
-      #pt_style_toolbar .checkbox label { color: #e2e8f0; font-size: 12px; }
-      #pt_style_toolbar label { font-weight: normal; color: #a0aec0; }
-      #pt_style_toolbar .btn-xs { font-size: 11px; padding: 2px 8px; }
       .map-toolbar-export-container .form-group { margin-bottom: 0 !important; }
     ")),
     uiOutput("dynamic_manual_style"),
@@ -367,7 +279,7 @@ ui <- fluidPage(
           selectInput("subset", HTML(paste0("Data Subset", info_tooltip("data_subset_info", "Use this filter when mapping predicted parameters from single-split or similar models. Selecting 'Train', 'Test', or 'Validation' restricts the analysis to that specific data partition."))), choices = c("All" = "all", "Test" = "Test", "Train" = "Train", "Validation" = "Validation"), selected = "all"),
           selectInput("var_category", "Variable Category", choices = NULL),
           selectInput("var_id", "Variable", choices = NULL),
-                     selectInput("value_type", "Primary View", choices = c("Actual Values" = "actual", "Best Predictions (_cve)" = "pred", "Single Split Predictions (_ss)" = "pred_ss", "Residuals (v - pv)" = "resid")),
+          selectInput("value_type", HTML(paste0("Primary View", info_tooltip("primary_view_info", "<b>Actual Values (observed):</b> Maps the raw observed/measured ground-truth data points directly without any machine learning predictions.<br><br><span style='border-top: 1px solid #ddd; display: block; margin: 8px 0;'></span><b>Machine Learning Predictions:</b> Use these options if you want to map predicted parameters from your machine learning models:<br><br>• <b>Best Predictions (_cve):</b> Maps predicted values from the cross-validation ensemble (CVE), which represent the best overall ML predictions.<br><br>• <b>Single Split Predictions (_ss):</b> Maps predicted values from a single train/test split partition.<br><br>• <b>Residuals (v - pv):</b> Maps model residuals (difference between observed Actual and ML Predicted values) to study local spatial error patterns."))), choices = c("Actual Values" = "actual", "Best Predictions (_cve)" = "pred", "Single Split Predictions (_ss)" = "pred_ss", "Residuals (v - pv)" = "resid")),
                      conditionalPanel(
                        condition = "['pred', 'pred_ss', 'resid'].includes(input.value_type)",
                        checkboxInput("comp_mode", HTML(paste0("Comparison Mode", info_tooltip("comp_mode", "Splits the viewer to compare Actual vs. Predicted maps. Useful for visual validation."))), FALSE)
@@ -375,7 +287,6 @@ ui <- fluidPage(
                            checkboxInput("sep_fit", HTML(paste0("Fit Actual/Predicted Separately", info_tooltip("sep_fit_info", "If checked, optimizes variograms separately for actual and predicted data. If unchecked, applies actual variogram to predictions."))), TRUE),
                            checkboxInput("match_scales", HTML(paste0("Match Scales", info_tooltip("match_info", "Forces the map legends for Actual and Predicted data to use the same color range."))), FALSE))
       ),
-      # Only show spatial parameters when NOT on the Descriptive Suite tab
       conditionalPanel(
         condition = "input.main_tabs !== '5. Descriptive and Exploratory Suite'",
         br(),
@@ -389,7 +300,6 @@ ui <- fluidPage(
                                     "IDW" = "IDW", 
                                     "Thin Plate Spline (TPS)" = "TPS")),
             
-                       # Advanced Kriging Controls (RK, RFK, CK)
                        conditionalPanel(condition = "['RK', 'RFK', 'CK'].includes(input.method)",
                          div(style = "background-color: #f3f0ff; padding: 10px; border: 1px solid #d0bfff; border-radius: 4px; margin-bottom: 10px;",
                            h5(HTML(paste0("Auxiliary Variables", info_tooltip("aux_info", "Select secondary variables to assist interpolation (e.g. Elevation). Ensure they are strongly correlated with the target. If VIF > 10, they are dropped to avoid multicollinearity.")))),
@@ -402,7 +312,6 @@ ui <- fluidPage(
                          )
                        ),
              
-                       # Residual Information Section
                        conditionalPanel(condition = "input.value_type == 'resid'",
                          div(style = "background-color: #fff5f5; padding: 10px; border: 1px solid #ffc9c9; border-radius: 4px; margin-bottom: 10px;",
                            div(style = "display: flex; justify-content: space-between; align-items: center;",
@@ -413,7 +322,6 @@ ui <- fluidPage(
                            tags$p(style="font-size: 0.85em; margin-bottom: 0;", tags$b("Interpolated Point Errors:"), " Kriged map of local prediction errors. Acts as an 'Uncertainty Map' highlighting exact points of model failure.")
                          )
                        ),          
-            # Static Kriging Controls
             conditionalPanel(condition = "['OK', 'RK', 'RFK', 'CK'].includes(input.method)",
               radioButtons("vgm_mode", "Fitting Mode", choices = c("Auto-Fit" = "auto", "Manual" = "manual"), inline = TRUE),
               conditionalPanel(condition = "input.vgm_mode == 'auto'",
@@ -435,7 +343,6 @@ ui <- fluidPage(
               )
             ),
             
-            # Static IDW Controls
             conditionalPanel(condition = "input.method == 'IDW'",
                 tuning_ui(
                     id = "idw", label = "IDW FACTORS",
@@ -450,7 +357,6 @@ ui <- fluidPage(
                 )
             ),
             
-            # Static TPS Controls
             conditionalPanel(condition = "input.method == 'TPS'",
                 tuning_ui(
                     id = "tps", label = "TPS LAMBDA",
@@ -519,10 +425,9 @@ ui <- fluidPage(
             shinyFilesButton("load_config", "Load", "Select Config", multiple = FALSE, class = "btn-info", style="flex:1;")
         ),
         br(),
-        actionButton("run", "GENERATE MODELS", class = "btn-success btn-lg", style="width:100%;")
+        actionButton("run", "Run Interpolation", class = "btn-success btn-lg", style="width:100%;")
       ),
       
-      # Friendly descriptive placeholder in sidebar when Analytics Suite is active
       conditionalPanel(
         condition = "input.main_tabs === '5. Descriptive and Exploratory Suite'",
         div(style="background-color: rgba(255, 255, 255, 0.08); padding: 12px; border: 1px solid rgba(255, 255, 255, 0.15); border-radius: 6px; margin-top: 10px;",
@@ -578,16 +483,20 @@ ui <- fluidPage(
                 tabPanel("2. Map Viewer", value = "tab_map",
                          div(style="position: relative;",
                              div(id="map_processing_overlay", class="map-processing-overlay",
-                                 div(id="map_spinner", class="premium-spinner"),
-                                 h3(id="map_processing_title", "Processing...", style="margin-bottom:10px; font-weight:bold;"),
-                                 p(id="map_progress_text", "Initializing Spatial Analysis Engine...", style="font-size:16px; font-weight:bold; margin-bottom:20px; color:#555;"),
-                                 div(id="map_progress_bar_container", class="premium-progress-bar-container",
-                                     div(id="map_progress_bar_inner", class="premium-progress-bar-inner")
+                                 shinyjs::hidden(div(id="map_spinner", class="premium-spinner")),
+                                 h3(id="map_processing_title", "Awaiting Spatial Interpolation", style="margin-bottom:10px; font-weight:bold;"),
+                                 p(id="map_progress_text", HTML("Please configure parameters in the left panel and click <b>'Run Interpolation'</b> to generate geostatistical maps and review diagnostic results."), style="font-size:15px; margin-bottom:20px; color:#555; text-align: center; max-width: 500px; line-height: 1.45;"),
+                                 shinyjs::hidden(
+                                   div(id="map_progress_bar_container", class="premium-progress-bar-container",
+                                       div(id="map_progress_bar_inner", class="premium-progress-bar-inner")
+                                   )
                                  ),
                                  shinyjs::hidden(
                                      actionButton("reveal_maps_btn", "Reveal Maps & Enable Analysis", class="btn-success btn-lg", style="box-shadow: 0 4px 15px rgba(46, 204, 113, 0.4); border: none; font-weight: bold; padding: 12px 30px; border-radius: 30px; transition: all 0.3s;")
                                  ),
-                                 actionButton("cancel_model_btn", "Cancel Generation", class="btn-danger btn-sm", style="margin-top: 15px; border-radius: 20px; font-weight: bold;")
+                                 shinyjs::hidden(
+                                     actionButton("cancel_model_btn", "Cancel Generation", class="btn-danger btn-sm", style="margin-top: 15px; border-radius: 20px; font-weight: bold;")
+                                 )
                              ),
                              div(style="margin-bottom:10px; display: flex; align-items: center; gap: 10px; flex-wrap: wrap; background-color: #f8f9fa; padding: 10px; border-radius: 5px; border: 1px solid #ddd;",
                              div(style="display: flex; align-items: center; gap: 10px; margin-right: 15px;",
@@ -613,11 +522,9 @@ ui <- fluidPage(
                                  downloadButton("polygon_download_btn", "Export Polygon", class = "btn-success btn-sm", style = "padding: 4px 10px; font-size: 12px; line-height: 1.5; border-radius: 3px;")
                              )
                          ),
-                         # F2: Collapsible Point Styling Toolbar
                          shinyjs::hidden(
                            div(id = "pt_style_toolbar",
                              style = "margin-bottom:10px; padding: 12px 15px; background: linear-gradient(135deg, #2d3436 0%, #1e272e 100%); border-radius: 6px; border: 1px solid #636e72; color: #dfe6e9; display: flex; flex-wrap: wrap; align-items: flex-start; gap: 18px;",
-                             # Column 1: Color-by controls
                              div(style = "min-width: 160px;",
                                tags$label("Color By", style = "font-size: 11px; color: #a0aec0; margin-bottom: 2px; display: block; text-transform: uppercase; letter-spacing: 0.5px;"),
                                selectInput("pt_color_by", NULL, choices = c("None (Cyan)" = "none"), selected = "none", width = "160px", selectize = FALSE),
@@ -625,14 +532,12 @@ ui <- fluidPage(
                                actionButton("pt_custom_colors", "Custom Colors...", icon = icon("paint-brush"), class = "btn-xs btn-default",
                                             style = "margin-top: 4px; background-color: #4a5568; color: #e2e8f0; border-color: #2d3748;")
                              ),
-                             # Column 2: Label controls
                              div(style = "min-width: 160px;",
                                tags$label("Labels", style = "font-size: 11px; color: #a0aec0; margin-bottom: 2px; display: block; text-transform: uppercase; letter-spacing: 0.5px;"),
                                checkboxInput("pt_show_labels", "Show Labels", FALSE, width = "auto"),
                                selectInput("pt_label_field", "Label Field", choices = c("(none)" = "none"), selected = "none", width = "160px", selectize = FALSE),
                                sliderInput("pt_label_size", "Label Size", min = 8, max = 18, value = 11, step = 1, width = "150px", ticks = FALSE)
                              ),
-                             # Column 3: Point size & options
                              div(style = "min-width: 130px;",
                                tags$label("Point Options", style = "font-size: 11px; color: #a0aec0; margin-bottom: 2px; display: block; text-transform: uppercase; letter-spacing: 0.5px;"),
                                sliderInput("pt_marker_size", "Point Size", min = 1, max = 12, value = 3, step = 1, width = "130px", ticks = FALSE),
@@ -659,105 +564,123 @@ ui <- fluidPage(
                          "))
                  )),
         tabPanel("3. Scientific Analysis & Summary",
-                  uiOutput("locality_selector_ui"),
-                  fluidRow(
-                    column(8,
-                           conditionalPanel(condition = "input.method == 'OK'",
-                             h4("Actual Data Structure"), plotOutput("vgm_plot_main", height = "350px"),
-                             div(id = "predicted_data_structure_ui",
-                               h4("Predicted Data Structure"), plotOutput("vgm_plot_pred", height = "350px")
-                             )
-                           ),                           conditionalPanel(condition = "input.method == 'RK'",
-                              h4("Linear Trend Performance (Actual)"), uiOutput("model_summary_ui_act"),
-                              div(id = "rk_pred_ui", h4("Linear Trend Performance (Predicted)"), uiOutput("model_summary_ui_pre")),
-                              hr(),
-                              h4("Internal Residual Variogram (Actual)"), plotOutput("rk_internal_vgm_act", height = "350px"),
-                              div(id = "rk_internal_vgm_pre_ui", h4("Internal Residual Variogram (Predicted)"), plotOutput("rk_internal_vgm_pre", height = "350px"))
+                 conditionalPanel(
+                   condition = "output.model_ready == 'no'",
+                   div(style = "text-align: center; padding: 120px 50px; color: #888;",
+                       icon("microscope", class = "fa-4x", style = "margin-bottom: 20px; color: #ccc;"),
+                       h3("Awaiting Scientific Analysis", style = "font-weight: 300; margin-bottom: 10px;"),
+                       p("Fit spatial interpolation models on the left pane and click 'Run Interpolation' to discover spatial structures and diagnostics.")
+                   )
+                 ),
+                 conditionalPanel(
+                   condition = "output.model_ready == 'yes'",
+                   uiOutput("locality_selector_ui"),
+                   fluidRow(
+                     column(8,
+                            conditionalPanel(condition = "input.method == 'OK'",
+                              h4("Actual Data Structure"), plotOutput("vgm_plot_main", height = "350px"),
+                              div(id = "predicted_data_structure_ui",
+                                h4("Predicted Data Structure"), plotOutput("vgm_plot_pred", height = "350px")
+                              )
                             ),
-                            conditionalPanel(condition = "input.method == 'RFK'",
-                              h4("RF Variable Importance (Actual)"), plotOutput("rf_importance_plot_act", height = "350px"),
-                              div(id = "rfk_pred_ui", h4("RF Variable Importance (Predicted)"), plotOutput("rf_importance_plot_pre", height = "350px")),
-                              hr(),
-                              h4("Internal Residual Variogram (Actual)"), plotOutput("rfk_internal_vgm_act", height = "350px"),
-                              div(id = "rfk_internal_vgm_pre_ui", h4("Internal Residual Variogram (Predicted)"), plotOutput("rfk_internal_vgm_pre", height = "350px"))
-                            ),
-                            conditionalPanel(condition = "input.method == 'CK'",
-                              h4("Cross-Variogram (Actual)"), plotOutput("ck_variogram_plot_act", height = "350px"),
-                              div(id = "ck_pred_ui", h4("Cross-Variogram (Predicted)"), plotOutput("ck_variogram_plot_pre", height = "350px"))
-                            ),
-                            conditionalPanel(condition = "input.method == 'TPS'",
-                              h4("TPS GCV Diagnostics (Actual)"), plotOutput("tps_gcv_plot_act", height = "350px"),
-                              div(id = "tps_pred_ui", h4("TPS GCV Diagnostics (Predicted)"), plotOutput("tps_gcv_plot_pre", height = "350px"))
-                            ),                           conditionalPanel(condition = "!['OK', 'RK', 'RFK', 'CK', 'TPS'].includes(input.method)",
-                             div(style="padding: 20px; text-align: center; color: #666;",
-                                 h4("Diagnostic Mode Active"),
-                                 p("Detailed spatial diagnostics are currently optimized for Kriging and TPS."))
-                           ),
-                           hr(),
-                           h4("Validation Diagnostics (Actual)"),
-                           fluidRow(
-                             column(6, plotOutput("obs_pred_plot_act", height = "300px")),
-                             column(6, plotOutput("resid_vgm_plot_act", height = "300px"))
-                           ),
-                           conditionalPanel(condition = "input.comp_mode || input.value_type != 'actual'",
-                             div(id = "validation_diagnostics_pre_ui",
+                            conditionalPanel(condition = "input.method == 'RK'",
+                               h4("Linear Trend Performance (Actual)"), uiOutput("model_summary_ui_act"),
+                               div(id = "rk_pred_ui", h4("Linear Trend Performance (Predicted)"), uiOutput("model_summary_ui_pre")),
                                hr(),
-                               h4("Validation Diagnostics (Predicted)"),
+                               h4("Internal Residual Variogram (Actual)"), plotOutput("rk_internal_vgm_act", height = "350px"),
+                               div(id = "rk_internal_vgm_pre_ui", h4("Internal Residual Variogram (Predicted)"), plotOutput("rk_internal_vgm_pre", height = "350px"))
+                             ),
+                            conditionalPanel(condition = "input.method == 'RFK'",
+                               h4("RF Variable Importance (Actual)"), plotOutput("rf_importance_plot_act", height = "350px"),
+                               div(id = "rfk_pred_ui", h4("RF Variable Importance (Predicted)"), plotOutput("rf_importance_plot_pre", height = "350px")),
+                               hr(),
+                               h4("Internal Residual Variogram (Actual)"), plotOutput("rfk_internal_vgm_act", height = "350px"),
+                               div(id = "rfk_internal_vgm_pre_ui", h4("Internal Residual Variogram (Predicted)"), plotOutput("rfk_internal_vgm_pre", height = "350px"))
+                             ),
+                            conditionalPanel(condition = "input.method == 'CK'",
+                               h4("Cross-Variogram (Actual)"), plotOutput("ck_variogram_plot_act", height = "350px"),
+                               div(id = "ck_pred_ui", h4("Cross-Variogram (Predicted)"), plotOutput("ck_variogram_plot_pred", height = "350px"))
+                             ),
+                            conditionalPanel(condition = "input.method == 'TPS'",
+                               h4("TPS GCV Diagnostics (Actual)"), plotOutput("tps_gcv_plot_act", height = "350px"),
+                               div(id = "tps_pred_ui", h4("TPS GCV Diagnostics (Predicted)"), plotOutput("tps_gcv_plot_pre", height = "350px"))
+                             ),
+                            conditionalPanel(condition = "!['OK', 'RK', 'RFK', 'CK', 'TPS'].includes(input.method)",
+                              div(style="padding: 20px; text-align: center; color: #666;",
+                                  h4("Diagnostic Mode Active"),
+                                  p("Detailed spatial diagnostics are currently optimized for Kriging and TPS."))
+                            ),
+                            div(id = "validation_diagnostics_act_ui",
+                               hr(),
+                               h4("Validation Diagnostics (Actual)"),
                                fluidRow(
-                                 column(6, plotOutput("obs_pred_plot_pre", height = "300px")),
-                                 column(6, plotOutput("resid_vgm_plot_pre", height = "300px"))
+                                 column(6, plotOutput("obs_pred_plot_act", height = "300px")),
+                                 column(6, plotOutput("resid_vgm_plot_act", height = "300px"))
                                )
-                             )
-                           )                    ),
-                    column(4,
-                           div(style = "background-color: #fff9db; padding: 15px; border: 2px solid #fab005; border-radius: 8px; margin-bottom: 20px;",
-                             h4("Spatial Interpolation Statistics"),
-                             tags$p(style="font-size: 0.85em; opacity: 0.8; font-style: italic;", "Model-specific diagnostics and performance metrics (RMSE, R )."),
-                             conditionalPanel(condition = "input.method == 'OK'",
-                               h5("Variogram Parameters"), div(class="table-container", tableOutput("vgm_params_table")),
-                               hr(style="opacity: 0.3;")
-                             ),
-                             conditionalPanel(condition = "['IDW', 'TPS'].includes(input.method)",
-                               h5("Regional Parameters"), div(class="table-container", tableOutput("regional_params_table")),
-                               hr(style="opacity: 0.3;")
-                             ),
-                             h5("Model Performance"), div(class="table-container", tableOutput("metrics_table"))
-                           ),
-                           div(id = "prediction_performance_ui",
-                             style = "background-color: #f3e8ff; padding: 15px; border: 2px solid #9b59b6; border-radius: 8px; margin-bottom: 20px;",
-                             h4("Variable Prediction Statistics"),
-                             tags$p(style="font-size: 0.85em; opacity: 0.8; font-style: italic;", "Prediction accuracy and classification agreement metrics for uploaded data."),
-                             h5("Prediction Performance (Uploaded Data)"),
-                             div(class="table-container", tableOutput("uploaded_metrics_table")),
-                             hr(style="opacity: 0.3;"),
-                             h5("Classification Performance (Uploaded Predictions)"),
-                             selectInput("kappa_bin_method", "Binning Method:", choices = c("Agronomical Classes" = "agro", "Quartiles" = "quartile")),
-                             div(class="table-container", tableOutput("kappa_table"))
-                           ),
-                           div(style = "background-color: #e7f5ff; padding: 15px; border: 2px solid #339af0; border-radius: 8px;",
-                             h4("Data Summary Statistics"),
-                             tags$p(style="font-size: 0.85em; opacity: 0.8; font-style: italic;", "Aggregated descriptive statistics and area coverage for the data."),
-                             h5("Area Coverage"),
-                             conditionalPanel(condition = "input.locality && (typeof input.locality === 'string' ? input.locality === 'ALL' : (input.locality.length > 1 || input.locality.indexOf('ALL') > -1))",
-                               fluidRow(
-                                 column(6, h6("Total - Actual"), tableOutput("area_table_total_act")),
-                                 column(6, div(id = "area_total_pred_col", h6("Total - Predicted"), tableOutput("area_table_total_pre")))
-                               )
-                             ),                             fluidRow(
-                               column(6, h6("Locality - Actual"), tableOutput("area_table_loc_act")),
-                               column(6, div(id = "loc_pred_col", h6("Locality - Predicted"), tableOutput("area_table_loc_pre")))
-                             ),                             hr(style="border-top: 1px solid #339af0;"),
-                             h5("Descriptive Statistics"),
-                             conditionalPanel(condition = "input.locality && (typeof input.locality === 'string' ? input.locality === 'ALL' : (input.locality.length > 1 || input.locality.indexOf('ALL') > -1))",
-                               tableOutput("stats_table_total")
-                             ),
-                             tableOutput("stats_table_loc")
-                           )
-                    )
-                  ),
-                  hr(),
-                  uiOutput("run_config_display"),
-                  verbatimTextOutput("log_output")),
+                            ),
+                            conditionalPanel(condition = "input.comp_mode || input.value_type != 'actual'",
+                              div(id = "validation_diagnostics_pre_ui",
+                                hr(),
+                                h4("Validation Diagnostics (Predicted)"),
+                                fluidRow(
+                                  column(6, plotOutput("obs_pred_plot_pre", height = "300px")),
+                                  column(6, plotOutput("resid_vgm_plot_pre", height = "300px"))
+                                )
+                              )
+                            )
+                     ),
+                     column(4,
+                            div(style = "background-color: #fff9db; padding: 15px; border: 2px solid #fab005; border-radius: 8px; margin-bottom: 20px;",
+                              h4("Spatial Interpolation Statistics"),
+                              tags$p(style="font-size: 0.85em; opacity: 0.8; font-style: italic;", "Model-specific diagnostics and performance metrics (RMSE, R )."),
+                              conditionalPanel(condition = "input.method == 'OK'",
+                                h5("Variogram Parameters"), div(class="table-container", tableOutput("vgm_params_table")),
+                                hr(style="opacity: 0.3;")
+                              ),
+                              conditionalPanel(condition = "['IDW', 'TPS'].includes(input.method)",
+                                h5("Regional Parameters"), div(class="table-container", tableOutput("regional_params_table")),
+                                hr(style="opacity: 0.3;")
+                              ),
+                              h5("Model Performance"), div(class="table-container", tableOutput("metrics_table"))
+                            ),
+                            div(id = "prediction_performance_ui",
+                              style = "background-color: #f3e8ff; padding: 15px; border: 2px solid #9b59b6; border-radius: 8px; margin-bottom: 20px;",
+                              h4("Variable Prediction Statistics"),
+                              tags$p(style="font-size: 0.85em; opacity: 0.8; font-style: italic;", "Prediction accuracy and classification agreement metrics for uploaded data."),
+                              h5("Prediction Performance (Uploaded Data)"),
+                              div(class="table-container", tableOutput("uploaded_metrics_table")),
+                              hr(style="opacity: 0.3;"),
+                              h5("Classification Performance (Uploaded Predictions)"),
+                              selectInput("kappa_bin_method", "Binning Method:", choices = c("Agronomical Classes" = "agro", "Quartiles" = "quartile")),
+                              div(class="table-container", tableOutput("kappa_table"))
+                            ),
+                            div(style = "background-color: #e7f5ff; padding: 15px; border: 2px solid #339af0; border-radius: 8px;",
+                              h4("Data Summary Statistics"),
+                              tags$p(style="font-size: 0.85em; opacity: 0.8; font-style: italic;", "Aggregated descriptive statistics and area coverage for the data."),
+                              h5("Area Coverage"),
+                              conditionalPanel(condition = "input.locality && (typeof input.locality === 'string' ? input.locality === 'ALL' : (input.locality.length > 1 || input.locality.indexOf('ALL') > -1))",
+                                fluidRow(
+                                  column(6, h6("Total - Actual"), tableOutput("area_table_total_act")),
+                                  column(6, div(id = "area_total_pred_col", h6("Total - Predicted"), tableOutput("area_table_total_pre")))
+                                )
+                              ),
+                              fluidRow(
+                                column(6, h6("Locality - Actual"), tableOutput("area_table_loc_act")),
+                                column(6, div(id = "loc_pred_col", h6("Locality - Predicted"), tableOutput("area_table_loc_pre")))
+                              ),
+                              hr(style="border-top: 1px solid #339af0;"),
+                              h5("Descriptive Statistics"),
+                              conditionalPanel(condition = "input.locality && (typeof input.locality === 'string' ? input.locality === 'ALL' : (input.locality.length > 1 || input.locality.indexOf('ALL') > -1))",
+                                tableOutput("stats_table_total")
+                              ),
+                              tableOutput("stats_table_loc")
+                            )
+                     )
+                   )
+                 ),
+                 hr(),
+                 uiOutput("run_config_display"),
+                 verbatimTextOutput("log_output")),
         tabPanel("4. Export Panel",
                  div(style = "padding: 20px;",
                      h2("Unified Session Export Registry"),
@@ -795,17 +718,16 @@ ui <- fluidPage(
   )
 )
 
-# --- Server ---
 server <- function(input, output, session) {
 
-  # Generate a unique session ID and a session isolated progress folder in tempdir
   session_id <- paste0("session_", shiny:::createUniqueId(8))
   session_progress_dir <- file.path(tempdir(), "monolith_progress", session_id)
   
-  # Ensure isolated session folder is clean
   dir.create(session_progress_dir, recursive = TRUE, showWarnings = FALSE)
 
-  # --- Dynamic Residual Plot Factory ---
+  leaflet_proj_cache <- new.env(parent = emptyenv())
+  area_calc_cache <- new.env(parent = emptyenv())
+
   render_resid_plot <- function(cv_data_reactive, title_suffix = "") {
     renderPlot({
       req(input$sel_loc_stats, cv_data_reactive())
@@ -835,12 +757,10 @@ server <- function(input, output, session) {
          }
       }
       
-      if(!("residual" %in% colnames(cv_obj))) {
-         obs_col <- grep("^var1\\.observed$|^observed$|^target\\.observed$", colnames(cv_obj), value = TRUE)[1]
-         if (is.na(obs_col)) obs_col <- grep("\\.observed$", colnames(cv_obj), value = TRUE)[1]
-         
-         pre_col <- grep("^var1\\.pred$|^target\\.pred$|^pred$", colnames(cv_obj), value = TRUE)[1]
-         if (is.na(pre_col)) pre_col <- grep("\\.pred$", colnames(cv_obj), value = TRUE)[1]
+      if(!("residual" %in% names(cv_obj))) {
+         cols <- detect_cv_columns(names(cv_obj))
+         obs_col <- cols$observed
+         pre_col <- cols$pred
          
          req(obs_col, pre_col)
          cv_obj$residual <- cv_obj[[obs_col]] - cv_obj[[pre_col]]
@@ -849,17 +769,26 @@ server <- function(input, output, session) {
       tryCatch({
          lags <- calc_scientific_lags(cv_obj)
          v_res <- variogram(residual ~ 1, cv_obj, width = lags$width, cutoff = lags$cutoff)
-         plot(v_res, main = paste("Residual Variogram:", loc, title_suffix), sub = "Target: Pure Nugget (No structure)")
+         v_fit <- robust_vgm_fit(v_res, cv_obj$residual)
+         v_sub <- if (!is.null(v_fit)) {
+           model_name <- as.character(v_fit$model[2])
+           nugget <- round(v_fit$psill[1], 4)
+           psill <- if(nrow(v_fit) > 1) round(v_fit$psill[2], 4) else 0
+           v_range <- if(nrow(v_fit) > 1) round(v_fit$range[2], 2) else 0
+           paste0("Fitted: ", model_name, " (Nugget: ", nugget, ", Partial Sill: ", psill, ", Range: ", v_range, ")")
+         } else {
+           "Target: Pure Nugget (No structure)"
+         }
+         p_res <- plot(v_res, model = v_fit, main = paste("Residual Variogram:", loc, title_suffix), sub = v_sub)
+         print(p_res)
       }, error = function(e) {
          plot(1, 1, type="n", main=paste("Error:", e$message), axes=F)
       })
     })
   }
 
-  # --- Per-Locality Asset Export Registration Helper ---
   register_locality_assets <- function(l, meta, comp_mode, val_type) {
      if(!is.null(rv$sf)) {
-       # 1. Descriptive Stats (Actual)
        df_l_act <- rv$sf %>% st_drop_geometry() %>% filter(loc == !!l, !is.na(v))
        if(nrow(df_l_act) > 0) {
          s_l <- summary(df_l_act$v)
@@ -867,7 +796,6 @@ server <- function(input, output, session) {
          register_export_item(paste0("table_stats_loc_", l), paste(meta$label, "-", l, "- Descriptive Statistics (Actual)"), "table", stats_l, meta$category)
        }
        
-       # 1.5 Descriptive Stats (Predicted)
        if(comp_mode || val_type != "actual") {
          df_l_pre <- rv$sf %>% st_drop_geometry() %>% filter(loc == !!l, !is.na(pv))
          if(nrow(df_l_pre) > 0) {
@@ -877,7 +805,6 @@ server <- function(input, output, session) {
          }
        }
 
-       # 2. Prediction Performance
        if(comp_mode || val_type != "actual") {
          df_l_perf <- rv$sf %>% st_drop_geometry() %>% filter(loc == !!l, !is.na(v), !is.na(pv))
          if(nrow(df_l_perf) >= 3) {
@@ -897,28 +824,23 @@ server <- function(input, output, session) {
        }
      }
      
-     # 3. Interpolation CV Metrics (Actual)
      if(!is.null(rv$cv_metrics_act[[l]])) {
        cv_l <- rv$cv_metrics_act[[l]]
        cv_table <- data.frame(Metric = names(cv_l), Value = as.character(round(as.numeric(cv_l), 4)))
        register_export_item(paste0("table_cv_loc_", l), paste(meta$label, "-", l, "- Model CV Metrics (Actual)"), "table", cv_table, meta$category)
      }
      
-     # 3.5 Interpolation CV Metrics (Predicted)
      if((comp_mode || val_type != "actual") && !is.null(rv$cv_metrics_pre[[l]])) {
        cv_l_p <- rv$cv_metrics_pre[[l]]
        cv_table_p <- data.frame(Metric = names(cv_l_p), Value = as.character(round(as.numeric(cv_l_p), 4)))
        register_export_item(paste0("table_cv_pre_loc_", l), paste(meta$label, "-", l, "- Model CV Metrics (Predicted)"), "table", cv_table_p, meta$category)
      }
-
-     # 4. Area Coverage
-     if(isTruthy(input$color_style == "agro") && !is.null(rv$rast_list_act[[l]])) {
-        area_l <- calc_area_df(rv$rast_list_act[[l]])
-        if(is.data.frame(area_l)) register_export_item(paste0("table_area_loc_", l), paste(meta$label, "-", l, "- Area Coverage"), "table", area_l, meta$category)
+     
+     if(isTruthy(input$color_style %in% c("agro", "bin")) && !is.null(rv$rast_list_act[[l]])) {
+       area_l <- calc_area_df(rv$rast_list_act[[l]], paste0("export_act_", l))
+       if(is.data.frame(area_l)) register_export_item(paste0("table_area_loc_", l), paste(meta$label, "-", l, "- Area Coverage"), "table", area_l, meta$category)
      }
      
-     # B. Plots per locality
-     # 1. Variograms
      if(!is.null(rv$v_emp_list[[paste0(l, "_act")]])) {
        v_emp <- rv$v_emp_list[[paste0(l, "_act")]]
        v_fit <- rv$v_fit_list[[paste0(l, "_act")]]
@@ -936,7 +858,6 @@ server <- function(input, output, session) {
        register_export_item(paste0("table_vgm_pre_", l), paste(meta$label, "-", l, "- Variogram Data (Predicted)"), "table", df_vgm_p, meta$category)
      }
      
-     # 2. Obs vs Pred
      if(!is.null(rv$cv_data_act[[l]])) {
        df_cv <- as.data.frame(rv$cv_data_act[[l]])
        p_op <- tryCatch({
@@ -956,7 +877,6 @@ server <- function(input, output, session) {
        }
      }
      
-     # 3. TPS GCV Curves
      if(input$method == "TPS" && !is.null(rv$tps_gcv_data[[paste0(l, "_act")]])) {
        df_gcv <- rv$tps_gcv_data[[paste0(l, "_act")]]
        p_gcv <- ggplot(df_gcv, aes(x = lambda, y = gcv)) + 
@@ -972,7 +892,6 @@ server <- function(input, output, session) {
        register_export_item(paste0("plot_tps_gcv_pre_", l), paste(meta$label, "-", l, "- TPS GCV Curve (Predicted)"), "plot", p_gcv_p, meta$category)
      }
      
-     # 4. RF Importance Plots & Tables
      if(input$method == "RFK" && !is.null(rv$rf_models[[paste0(l, "_act")]])) {
        rf_mod <- rv$rf_models[[paste0(l, "_act")]]
        imp_mat <- randomForest::importance(rf_mod)
@@ -998,7 +917,6 @@ server <- function(input, output, session) {
        register_export_item(paste0("table_rf_imp_pre_", l), paste(meta$label, "-", l, "- RF Variable Importance Data (Predicted)"), "table", df_imp_p, meta$category)
      }
 
-     # 5. RK Coefficients Tables
      if(input$method == "RK" && !is.null(rv$model_summaries[[paste0(l, "_act")]])) {
        lm_sum <- rv$model_summaries[[paste0(l, "_act")]]
        coef_df <- as.data.frame(lm_sum$coefficients)
@@ -1014,7 +932,6 @@ server <- function(input, output, session) {
        register_export_item(paste0("table_rk_coef_pre_", l), paste(meta$label, "-", l, "- RK Regression Coefficients (Predicted)"), "table", coef_df_p, meta$category)
      }
 
-     # 6. CK Cross-Variogram Plots
      if(input$method == "CK" && !is.null(rv$gstat_objs[[paste0(l, "_act")]])) {
        g <- rv$gstat_objs[[paste0(l, "_act")]]
        vm <- variogram(g)
@@ -1025,10 +942,9 @@ server <- function(input, output, session) {
        g_p <- rv$gstat_objs[[paste0(l, "_pre")]]
        vm_p <- variogram(g_p)
        p_ck_p <- plot(vm_p, model = g_p$model, main = paste("Cross-Variogram (Predicted):", l))
-       register_export_item(paste0("plot_ck_vgm_pre_", l), paste(meta$label, "-", l, "- CK Cross-Variogram (Predicted)"), "plot", p_ck_p, meta$category)
+       register_export_item(paste0("plot_ck_vgm_pred_", l), paste(meta$label, "-", l, "- CK Cross-Variogram (Predicted)"), "plot", p_ck_p, meta$category)
      }
      
-     # 7. Model Parameters (IDW/TPS)
      if(input$method %in% c("IDW", "TPS")) {
        param_df <- data.frame(
          Param = if(input$method == "IDW") "Power (p)" else "Lambda",
@@ -1039,7 +955,6 @@ server <- function(input, output, session) {
      }
   }
 
-  # --- Force Comparison Mode for Residuals ---
   observeEvent(input$value_type, {
     if (isTruthy(input$value_type) && input$value_type == "resid") {
       updateCheckboxInput(session, "comp_mode", value = TRUE)
@@ -1049,9 +964,7 @@ server <- function(input, output, session) {
     }
   })
 
-  # --- UI Visibility based on Prediction State ---
   observe({
-    # 1. Elements requiring Interpolation
     prediction_active <- isTRUE(input$comp_mode) || (isTruthy(input$value_type) && input$value_type != "actual")
     has_interp <- prediction_active || rv$has_predictions
     shinyjs::toggle(id = "predicted_data_structure_ui", condition = has_interp)
@@ -1061,11 +974,11 @@ server <- function(input, output, session) {
     shinyjs::toggle(id = "rfk_internal_vgm_pre_ui", condition = has_interp)
     shinyjs::toggle(id = "ck_pred_ui", condition = has_interp)
     shinyjs::toggle(id = "tps_pred_ui", condition = has_interp)
+    shinyjs::toggle(id = "validation_diagnostics_act_ui", condition = length(rv$cv_data_act) > 0)
     shinyjs::toggle(id = "validation_diagnostics_pre_ui", condition = has_interp)
     shinyjs::toggle(id = "loc_pred_col", condition = has_interp)
     shinyjs::toggle(id = "area_total_pred_col", condition = has_interp)
     
-    # 2. Elements requiring Uploaded Predictions
     has_upl_pred <- FALSE
     if(!is.null(rv$mapping$vars) && !is.null(input$var_id)) {
        meta <- Filter(function(x) x$actual == input$var_id, rv$mapping$vars)
@@ -1076,7 +989,6 @@ server <- function(input, output, session) {
     shinyjs::toggle(id = "prediction_performance_ui", condition = has_upl_pred)
   })
 
-  # --- Descriptive & Exploratory Analytics Module ---
   desc_exploratory_server(
     id = "exploratory",
     data_reactive = reactive(rv$user_data),
@@ -1101,16 +1013,15 @@ server <- function(input, output, session) {
     theme_data <- app_themes[[active_theme_name()]]
     new_tiles <- theme_data$map_tiles
     
-    # Sync UI dropdown selection with active theme's map tiles
     if (!is.null(new_tiles) && new_tiles != "") {
       updateSelectInput(session, "base_map_layer", selected = new_tiles)
     }
   }, ignoreInit = FALSE)
 
-  # Local state variables for map rendering tracking (non-reactive to avoid feedback cycles)
-  main_map_rendered <- FALSE
-  comp_maps_rendered <- FALSE
-  minimap_rendered <- FALSE
+  session_state <- new.env(parent = emptyenv())
+  session_state$main_map_rendered <- FALSE
+  session_state$comp_maps_rendered <- FALSE
+  session_state$minimap_rendered <- FALSE
 
   rv <- reactiveValues(
     user_data = NULL, # Uploaded data
@@ -1147,17 +1058,14 @@ server <- function(input, output, session) {
     pt_style_colors = NULL, # F2: Named vector group_value -> hex_color
     pt_style_palette = "Set1", # F2: Current qualitative palette name
     auto_archive_choice = "none", # "none", "archive", or "discard"
-    model_running = FALSE # True when parallel model calculations are active
+    model_running = FALSE, # True when parallel model calculations are active
+    run_token = 0L # Incremental run token for async cancellation
   )
   
-  # --- Export Registry Core ---
   register_export_item <- function(id, label, type, obj, category = "General") {
     req(obj)
-    # Ensure ID is unique and clean
     clean_id <- gsub("[^a-zA-Z0-9_]", "_", id)
     
-    # Store item in registry
-    # We use a reactive list to trigger UI updates
     new_item <- list(
       id = clean_id,
       label = label,
@@ -1167,7 +1075,6 @@ server <- function(input, output, session) {
       timestamp = Sys.time()
     )
     
-    # Append or update
     current_reg <- isolate(rv$export_registry)
     current_reg[[clean_id]] <- new_item
     rv$export_registry <- current_reg
@@ -1175,13 +1082,11 @@ server <- function(input, output, session) {
     rv$log <- paste0(rv$log, "\n[Registry] Registered ", type, ": ", label)
   }
   
-  # --- Export Panel Server Logic ---
   output$export_registry_ui <- renderUI({
     req(rv$export_registry)
     reg <- rv$export_registry
     if (length(reg) == 0) return(tags$p("Registry is empty. Run models to populate."))
     
-    # Create choices for checkboxGroupInput
     choices <- setNames(names(reg), sapply(reg, function(x) {
       sprintf("%s [%s] - %s", x$label, x$type, format(x$timestamp, "%H:%M:%S"))
     }))
@@ -1189,7 +1094,6 @@ server <- function(input, output, session) {
     checkboxGroupInput("selected_assets", NULL, choices = choices, width = "100%")
   })
 
-  # --- B3: Run Configuration Summary Display ---
   output$run_config_display <- renderUI({
     cfg <- rv$run_config_summary
     if (is.null(cfg)) return(NULL)
@@ -1205,7 +1109,6 @@ server <- function(input, output, session) {
     )
   })
 
-  # B3: Compact config display for Map Viewer tab
   output$run_config_display_map <- renderUI({
     cfg <- rv$run_config_summary
     if (is.null(cfg)) return(NULL)
@@ -1215,7 +1118,6 @@ server <- function(input, output, session) {
     )
   })
 
-  # --- B4: Run History Archive UI ---
   output$run_history_ui <- renderUI({
     hist <- rv$run_history
     if (length(hist) == 0) return(tags$p(style="color: #888;", "No archived runs yet. Previous runs will appear here when a new model generation begins."))
@@ -1245,7 +1147,6 @@ server <- function(input, output, session) {
     tagList(run_panels)
   })
 
-  # B4: Dynamic observers for archive restore/delete buttons
   env_hist <- new.env(parent = emptyenv())
   env_hist$history_obs <- list()
   observe({
@@ -1259,7 +1160,6 @@ server <- function(input, output, session) {
       run <- hist[[i]]
       run_id <- run$config$run_id
       
-      # Restore observer
       obs_restore <- observeEvent(input[[paste0("restore_run_", run_id)]], {
         history_list <- isolate(rv$run_history)
         idx <- which(sapply(history_list, function(x) x$config$run_id) == run_id)[1]
@@ -1267,7 +1167,6 @@ server <- function(input, output, session) {
         
         run_to_restore <- history_list[[idx]]
         
-        # Archive current results first
         current_cfg <- isolate(rv$run_config_summary)
         current_reg <- isolate(rv$export_registry)
         if (!is.null(current_cfg) && length(current_reg) > 0) {
@@ -1279,14 +1178,12 @@ server <- function(input, output, session) {
           rv$run_history <- history_list[-idx]
         }
         
-        # Restore the selected run
         rv$export_registry <- run_to_restore$registry
         rv$run_config_summary <- run_to_restore$config
         
         showNotification(paste0("Restored Run #", run_to_restore$config$run_id, " to active session."), type = "message")
       }, ignoreInit = TRUE)
 
-      # Delete observer
       obs_delete <- observeEvent(input[[paste0("delete_run_", run_id)]], {
         history_list <- isolate(rv$run_history)
         idx <- which(sapply(history_list, function(x) x$config$run_id) == run_id)[1]
@@ -1301,7 +1198,6 @@ server <- function(input, output, session) {
     })
   })
 
-  # Track the most recently selected item for the Styler
   active_styler_item <- reactiveVal(NULL)
   
   observeEvent(input$selected_assets, {
@@ -1326,30 +1222,42 @@ server <- function(input, output, session) {
     }
   }, ignoreInit = TRUE)
   
-  # Reactive for the styled plot preview
+  base_preview_plot <- reactive({
+    req(active_styler_item(), rv$export_registry)
+    item <- rv$export_registry[[active_styler_item()]]
+    req(item)
+    
+    generate_base_plot(
+      item = item,
+      input = input,
+      agro_params = tryCatch(agro_params(), condition = function(c) NULL)
+    )
+  })
+  
   styled_preview_obj <- reactive({
     req(active_styler_item(), rv$export_registry)
     item <- rv$export_registry[[active_styler_item()]]
     req(item)
     
-    # Use the unified styling engine
-    generate_styled_plot(
-      item, input, 
-      calibration = 1, 
-      agro_params = tryCatch(agro_params(), error = function(e) NULL)
+    base_p <- base_preview_plot()
+    req(base_p)
+    
+    apply_styler_theme(
+      p = base_p,
+      input = input,
+      calibration = 1,
+      item_label = item$label,
+      item_type = item$type
     )
   })
   
-  # Debounce the preview to avoid flickering during slider movement
   styled_preview_obj_d <- styled_preview_obj %>% debounce(500)
   
-  # Dynamic UI for Styler Preview to show aspect ratio changes
   output$styler_preview_dynamic_ui <- renderUI({
     req(input$styler_width, input$styler_height)
     w_px <- (if(isTruthy(input$styler_width)) input$styler_width else 10) * 96
     h_px <- (if(isTruthy(input$styler_height)) input$styler_height else 8) * 96
     
-    # Scale to fit the 800x600 viewing area while maintaining aspect ratio
     scale <- min(1, 800 / w_px, 600 / h_px)
     w_disp <- w_px * scale
     h_disp <- h_px * scale
@@ -1378,7 +1286,6 @@ server <- function(input, output, session) {
     showNotification("Export registry cleared.", type = "message")
   })
   
-  # For now, just a notification for the other buttons until Phase 3/4
   observeEvent(input$quick_export_map, {
     meta <- get_current_meta(); req(meta)
     target <- if(input$value_type == "actual") rv$rast 
@@ -1392,11 +1299,9 @@ server <- function(input, output, session) {
     register_export_item(id, label, "map", target, meta$category)
     active_styler_item(id)
     
-    # Trigger the Open Styler logic (we can't just call it, but we can trigger the modal)
     shinyjs::click("open_styler")
   })
   
-  # Styler Configuration Persistence (Local Storage)
   observe({
     req(input$styler_title_size)
     cfg <- lapply(styler_fields, function(field) {
@@ -1406,7 +1311,6 @@ server <- function(input, output, session) {
   })
 
   observeEvent(input$open_styler, {
-    # Request config from localStorage
     shinyjs::runjs("
       var cfg = localStorage.getItem('monolith_styler_config');
       if(cfg) {
@@ -1509,7 +1413,6 @@ server <- function(input, output, session) {
     sync_styler_config(cfg, session)
   })
 
-  # Sync styler width, height and aspect ratio
   observeEvent(input$styler_width, {
     req(input$styler_width, input$styler_height)
     new_ratio <- round(input$styler_width / input$styler_height, 2)
@@ -1528,7 +1431,6 @@ server <- function(input, output, session) {
 
   observeEvent(input$styler_aspect_ratio, {
     req(input$styler_aspect_ratio, input$styler_width)
-    # Update height based on aspect ratio
     new_height <- round(input$styler_width / input$styler_aspect_ratio, 2)
     if (abs(new_height - (input$styler_height %||% 0)) > 0.01) {
       updateNumericInput(session, "styler_height", value = new_height)
@@ -1578,23 +1480,10 @@ server <- function(input, output, session) {
             p_obj <- generate_styled_plot(
               item, input, 
               calibration = 2.5, 
-              agro_params = tryCatch(agro_params(), error = function(e) NULL)
+              agro_params = tryCatch(agro_params(), condition = function(c) NULL)
             )
 
-            if (inherits(p_obj, "trellis")) {
-              if (ext == "png") png(file, width = input$styler_width %||% 10, height = (if(isTruthy(input$styler_height)) input$styler_height else 8), units = "in", res = input$styler_dpi %||% 300)
-              else if (ext == "tiff") tiff(file, width = input$styler_width %||% 10, height = (if(isTruthy(input$styler_height)) input$styler_height else 8), units = "in", res = input$styler_dpi %||% 300)
-              else if (ext == "pdf") pdf(file, width = input$styler_width %||% 10, height = (if(isTruthy(input$styler_height)) input$styler_height else 8))
-              else jpeg(file, width = input$styler_width %||% 10, height = (if(isTruthy(input$styler_height)) input$styler_height else 8), units = "in", res = input$styler_dpi %||% 300)
-
-              print(p_obj)
-              dev.off()
-            } else {
-              ggsave(file, plot = p_obj, 
-                     device = if(ext == "pdf") "pdf" else (if(ext == "tiff") "tiff" else NULL),
-                     dpi = input$styler_dpi %||% 300,
-                     width = input$styler_width %||% 10, height = (if(isTruthy(input$styler_height)) input$styler_height else 8), units = "in")
-            }
+            export_plot_to_file(p_obj, file, ext, input)
           } else if (item$type == "table") {
             if (ext == "xlsx") {
               wb <- createWorkbook()
@@ -1620,7 +1509,6 @@ server <- function(input, output, session) {
     content = function(file) {
       req(input$selected_assets, length(input$selected_assets) > 0)
       
-      # Create a temporary directory for zipping
       temp_dir <- file.path(tempdir(), paste0("export_", as.integer(Sys.time())))
       dir.create(temp_dir, showWarnings = FALSE)
       
@@ -1628,7 +1516,6 @@ server <- function(input, output, session) {
         selected_ids <- input$selected_assets
         items <- rv$export_registry[selected_ids]
         
-        # Group items by type
         table_items <- Filter(function(x) x$type == "table", items)
         plot_items <- Filter(function(x) x$type %in% c("plot", "map", "map_combined"), items)
         
@@ -1639,7 +1526,6 @@ server <- function(input, output, session) {
         
         files_to_zip <- c()
         
-        # 1. Handle Unified Excel Export for all selected tables
         if(has_tables) {
           current_step <- current_step + 1
           incProgress(1/total_steps, detail = "Compiling statistical tables into Excel...")
@@ -1651,13 +1537,10 @@ server <- function(input, output, session) {
           wb <- createWorkbook()
           used_sheet_names <- c()
           for(item in table_items) {
-            # Build a clean sheet name from the label, max 31 chars for Excel
             clean_label <- gsub("[^a-zA-Z0-9 ]", "_", item$label)
             sheet_name <- substr(clean_label, 1, 31)
             
-            # Deduplicate: when actual & predicted labels truncate identically
             if(sheet_name %in% used_sheet_names) {
-              # Determine a meaningful suffix from the registry ID
               suffix <- if(grepl("_pre_|_pre$", item$id)) "_Pre" else "_2"
               counter <- 2
               candidate <- paste0(substr(sheet_name, 1, 31 - nchar(suffix)), suffix)
@@ -1676,14 +1559,12 @@ server <- function(input, output, session) {
           files_to_zip <- c(files_to_zip, excel_name)
         }
         
-        # 2. Handle Individual Plot Exports
         for (i in seq_along(plot_items)) {
           current_step <- current_step + i
           item <- plot_items[[i]]
           incProgress(1/total_steps, detail = paste("Exporting Plot:", item$label))
           
           timestamp <- format(Sys.time(), "%Y%m%d_%H%M%S")
-          # FIX: Recognition of map_combined and plot types
           ext <- if(item$type %in% c("plot", "map", "map_combined")) (input$styler_format %||% "png") else "png"
           if(ext == "csv") ext <- "png" # Extra safety
           
@@ -1691,22 +1572,13 @@ server <- function(input, output, session) {
           filepath <- file.path(temp_dir, filename)
           
           tryCatch({
-            # Use the unified styling engine with batch calibration (2.5x)
             p <- generate_styled_plot(
               item, input, 
               calibration = 2.5, 
-              agro_params = tryCatch(agro_params(), error = function(e) NULL)
+              agro_params = tryCatch(agro_params(), condition = function(c) NULL)
             )
             
-            if (inherits(p, "trellis")) {
-              if (ext == "png") png(filepath, width = input$styler_width %||% 10, height = (if(isTruthy(input$styler_height)) input$styler_height else 8), units = "in", res = input$styler_dpi %||% 300)
-              else if (ext == "tiff") tiff(filepath, width = input$styler_width %||% 10, height = (if(isTruthy(input$styler_height)) input$styler_height else 8), units = "in", res = input$styler_dpi %||% 300)
-              else if (ext == "pdf") pdf(filepath, width = input$styler_width %||% 10, height = (if(isTruthy(input$styler_height)) input$styler_height else 8))
-              else jpeg(filepath, width = input$styler_width %||% 10, height = (if(isTruthy(input$styler_height)) input$styler_height else 8), units = "in", res = input$styler_dpi %||% 300)
-              print(p); dev.off()
-            } else {
-              ggsave(filepath, plot = p, dpi = input$styler_dpi %||% 300, width = input$styler_width %||% 10, height = (if(isTruthy(input$styler_height)) input$styler_height else 8), units = "in")
-            }
+            export_plot_to_file(p, filepath, ext, input)
             files_to_zip <- c(files_to_zip, filename)
           }, error = function(e) {
             rv$log <- paste0(rv$log, "\n[Batch] Failed to export ", item$label, ": ", e$message)
@@ -1714,20 +1586,15 @@ server <- function(input, output, session) {
         }
       })
       
-      # 3. Create ZIP archive
       zip_path <- file.path(temp_dir, "export.zip")
       zip::zip(zipfile = zip_path, files = files_to_zip, root = temp_dir)
       
-      # 4. Push to user via shiny download
       file.copy(zip_path, file)
       
-      # Cleanup
       unlink(temp_dir, recursive = TRUE)
     }
   )
   
-  # --- Map Selection & Grouping ---
-  # Remove the debug observer, add handlers for all maps
   
   handle_new_feature <- function(feature) {
     rv$drawn_feature <- feature
@@ -1759,7 +1626,6 @@ server <- function(input, output, session) {
     poly_sf <- sf::st_read(feat_json, quiet = TRUE)
     sf::st_crs(poly_sf) <- 4326
 
-    # Create sf object from all user_data
     df_map <- rv$user_data %>% 
       filter(!is.na(!!sym(rv$mapping$x)) & !is.na(!!sym(rv$mapping$y)))
     
@@ -1768,7 +1634,6 @@ server <- function(input, output, session) {
     
     intersect_idx <- sf::st_intersects(pts_sf, poly_sf_trans, sparse = FALSE)
     
-    # st_intersects returns a matrix (points x polygons). We want rowSums > 0
     in_poly <- rowSums(intersect_idx) > 0
     
     if (any(in_poly)) {
@@ -1783,11 +1648,9 @@ server <- function(input, output, session) {
       
       showNotification(paste("Assigned", length(intersecting_user_rows), "points to group:", group_name), type = "message")
       
-      # Update map_loc choices to include the new column
       current_loc <- input$map_loc
       updateSelectInput(session, "map_loc", choices = colnames(rv$user_data), selected = current_loc)
       
-      # Force trigger update on dropdowns if Assigned_Locality is the current loc mapping
       rv$user_data <- rv$user_data 
     } else {
       showNotification("No points found within the selected area.", type = "warning")
@@ -1797,7 +1660,6 @@ server <- function(input, output, session) {
     rv$drawn_feature <- NULL
   })
   
-  # --- Regional Parameter Helpers ---
   get_regional_param <- function(type, loc, target, default = 2.0) {
     field <- if(type == "IDW") "idw_factors" else "tps_lambdas"
     val <- rv[[field]][[loc]][[target]]
@@ -1815,12 +1677,10 @@ server <- function(input, output, session) {
     }
   }
 
-  # --- Pop-up Engine ---
   popup_metadata_cache <- reactive({
     req(rv$mapping$vars)
     meta_list <- rv$mapping$vars
     
-    # 1. Determine vars_to_show
     vars_to_show <- rv$pop_up_vars
     if(is.null(vars_to_show) || length(vars_to_show) == 0) {
       soil_vars <- Filter(function(x) grepl("Soil|Physicochem", x$category, ignore.case = TRUE), meta_list)
@@ -1831,13 +1691,11 @@ server <- function(input, output, session) {
       }
     }
     
-    # 2. Group vars by category
     all_cats <- unique(sapply(meta_list, function(x) x$category))
     priority_cats <- all_cats[grepl("Soil|Physicochem", all_cats, ignore.case = TRUE)]
     other_cats <- setdiff(all_cats, priority_cats)
     cats <- c(priority_cats, other_cats)
     
-    # Pre-filter and pre-group variables by category
     grouped_vars <- list()
     for(cat in cats) {
       cat_vars <- Filter(function(x) x$category == cat && x$actual %in% vars_to_show, meta_list)
@@ -1902,7 +1760,6 @@ server <- function(input, output, session) {
     return(html_content)
   }
 
-  # --- Pop-up Settings ---
   observeEvent(input$show_popup_settings, {
     req(rv$mapping$vars)
     vars_list <- rv$mapping$vars
@@ -1943,18 +1800,15 @@ server <- function(input, output, session) {
     showNotification("Pop-up settings updated.", type = "message")
   })
 
-  # --- F2: Point Styling Toolbar Logic ---
   observeEvent(input$toggle_pt_style, {
     shinyjs::toggle("pt_style_toolbar", anim = TRUE, animType = "slide", time = 0.3)
   })
 
-  # Populate color-by and label-field dropdowns when data loads or mapping changes
   observe({
     req(rv$user_data)
     df <- rv$user_data
     cols <- colnames(df)
 
-    # Establish reactive dependency on variable mappings
     vars_meta <- rv$mapping$vars
 
     cat_cols <- cols[sapply(df, function(x) {
@@ -1970,12 +1824,10 @@ server <- function(input, output, session) {
       color_choices <- c(color_choices, stats::setNames(other_cats, other_cats))
     }
     
-    # Preserve current selections if valid
     curr_color_by <- isolate(input$pt_color_by)
     selected_color_by <- if (!is.null(curr_color_by) && curr_color_by %in% color_choices) curr_color_by else "none"
     updateSelectInput(session, "pt_color_by", choices = color_choices, selected = selected_color_by)
 
-    # Translate column names to human-readable labels, falling back to raw names
     col_labels <- sapply(cols, function(c) {
       get_var_label(c, vars_meta)
     })
@@ -1986,7 +1838,6 @@ server <- function(input, output, session) {
     updateSelectInput(session, "pt_label_field", choices = label_choices, selected = selected_label_field)
   })
 
-  # Generate default palette when color-by or palette changes
   observeEvent(list(input$pt_color_by, input$pt_palette), {
     req(input$pt_color_by)
     if (input$pt_color_by == "none") {
@@ -2000,7 +1851,6 @@ server <- function(input, output, session) {
     rv$pt_style_palette <- pal_name
   }, ignoreInit = TRUE)
 
-  # Custom color assignment modal
   observeEvent(input$pt_custom_colors, {
     req(rv$pt_style_colors)
     groups <- names(rv$pt_style_colors)
@@ -2048,9 +1898,11 @@ server <- function(input, output, session) {
     showNotification("Custom colors applied.", type = "message", duration = 3)
   })
 
-  # --- Data Setup Logic ---
   output$file_uploaded <- reactive({ !is.null(input$user_file) })
   outputOptions(output, "file_uploaded", suspendWhenHidden = FALSE)
+  
+  output$model_ready <- reactive({ if(!is.null(rv$rast) || length(rv$v_emp_list) > 0) "yes" else "no" })
+  outputOptions(output, "model_ready", suspendWhenHidden = FALSE)
   
   output$export_updated_data <- downloadHandler(
     filename = function() {
@@ -2088,19 +1940,17 @@ server <- function(input, output, session) {
     
     req(df); rv$user_data <- df
     
-    # Update selectors with stricter regex
     cols <- colnames(df)
     updateSelectInput(session, "map_x", choices = cols, selected = grep("\\bx\\b|^lon|^longitude", cols, ignore.case=TRUE, value=TRUE)[1])
     updateSelectInput(session, "map_y", choices = cols, selected = grep("\\by\\b|^lat|^latitude", cols, ignore.case=TRUE, value=TRUE)[1])
     updateSelectInput(session, "map_loc", choices = cols, selected = grep("loc|site|farm|id|group", cols, ignore.case=TRUE, value=TRUE)[1])
     
-    # Populate Mapping Vars immediately with defaults
     new_vars <- list()
     num_cols <- cols[sapply(df, is.numeric)]
     for (col in num_cols) {
       if (!grepl("\\bx\\b|\\by\\b|lon|lat|latitude|longitude", col, ignore.case=TRUE)) {
-        p_cve <- grep(paste0("^", col, "_cve$"), num_cols, ignore.case=TRUE, value=TRUE)[1]
-        p_ss  <- grep(paste0("^", col, "_ss$"),  num_cols, ignore.case=TRUE, value=TRUE)[1]
+        p_cve <- detect_pred_column(col, num_cols, "cve")
+        p_ss  <- detect_pred_column(col, num_cols, "ss")
         new_vars[[length(new_vars) + 1]] <- list(
           actual = col, pred = p_cve, pred_ss = p_ss, label = col, category = "Uploaded Data",
           palette = get_default_palette(col, "Uploaded Data", col)
@@ -2109,18 +1959,16 @@ server <- function(input, output, session) {
     }
     rv$mapping$vars <- new_vars
     
-    # Set default pop-up variables to all numeric columns (excluding coordinates)
     rv$pop_up_vars <- num_cols[!grepl("\\bx\\b|\\by\\b|lon|lat|latitude|longitude", num_cols, ignore.case=TRUE)]
     
-    # Populate Sidebar Locality
     curr_locs <- isolate(input$locality)
     new_choices <- c("ALL", unique(df[[input$map_loc %||% cols[1]]]))
     selected_locs <- intersect(curr_locs, new_choices)
-    if (length(selected_locs) == 0) selected_locs <- new_choices[1]
     updateSelectInput(session, "locality", choices = new_choices, selected = selected_locs)
+    
+    shinyjs::runjs("setTimeout(function() { $('html, body').animate({ scrollTop: $('#map_x').offset().top - 20 }, 1000); }, 500);")
   })
 
-  # --- Shapefile Integration ---
   observeEvent(input$user_shp, {
     req(input$user_shp)
     temp_dir <- file.path(tempdir(), paste0("shp_upload_", as.integer(Sys.time())))
@@ -2142,7 +1990,6 @@ server <- function(input, output, session) {
     }
     rv$shp_bound <- s
     
-    # Check if shapefile contains polygon geometries
     geom_types <- unique(sf::st_geometry_type(s))
     if (!any(geom_types %in% c("POLYGON", "MULTIPOLYGON"))) {
       showNotification("Uploaded shapefile contains point/line geometry. Monolith will automatically generate boundary polygons (convex hulls) around these points/lines for interpolation.", type = "warning", duration = 12)
@@ -2164,7 +2011,6 @@ server <- function(input, output, session) {
     }
   })
 
-  # --- Intelligent CRS Suggestion ---
   observeEvent(list(rv$user_data, input$map_x, input$map_y), {
     req(rv$user_data, input$map_x, input$map_y)
     if (!(input$map_x %in% colnames(rv$user_data) && input$map_y %in% colnames(rv$user_data))) return()
@@ -2177,11 +2023,9 @@ server <- function(input, output, session) {
     
     suggested_crs <- "EPSG:4326" # Default WGS84
     
-    # Heuristic for detection
     if (all(x_range >= -180 & x_range <= 180) && all(y_range >= -90 & y_range <= 90)) {
        suggested_crs <- "EPSG:4326"
     } else if (all(x_range > 100000 | x_range < -100000)) {
-       # Likely projected (UTM or S-JTSK)
        if (any(x_range < 0)) suggested_crs <- "EPSG:5514" 
        else suggested_crs <- "EPSG:32635" 
     }
@@ -2190,15 +2034,12 @@ server <- function(input, output, session) {
     updateSelectizeInput(session, "crs_selection", selected = suggested_crs)
   })
 
-  # --- Dynamic Resolution Sync ---
   observeEvent(input$crs_selection, {
     req(input$crs_selection)
 
-    # We now enforce metric resolution reporting regardless of target CRS
     updateSliderInput(session, "grid_res", label = "Resolution (m)",
                       min = 1, max = 500, value = 50, step = 1)
   })
-  # --- Smart Resolution Recommendation ---
   observeEvent(list(rv$user_data, input$map_x, input$map_y, input$crs_selection, input$locality, input$res_mode), {
     req(rv$user_data, input$map_x, input$map_y, input$crs_selection, input$locality, input$res_mode)
     if (!(input$map_x %in% colnames(rv$user_data) && input$map_y %in% colnames(rv$user_data))) return()
@@ -2208,7 +2049,6 @@ server <- function(input, output, session) {
        return()
     }
 
-    # Adaptive: Filter data based on selected locality for specific density analysis
     df_raw <- rv$user_data %>% select(x = !!sym(input$map_x), y = !!sym(input$map_y), loc = !!sym(input$map_loc)) %>% na.omit()
     
     if (input$res_mode == "global" || "ALL" %in% input$locality || length(input$locality) == 0) {
@@ -2221,39 +2061,21 @@ server <- function(input, output, session) {
     
     if (nrow(df) < 2) return()
     
-    # Check current CRS units
-    crs_obj <- tryCatch({
-      c_obj <- sf::st_crs(input$crs_selection)
-      if (is.na(c_obj)) stop("Invalid CRS format.")
-      
-      # Test terra conversion
-      t_obj <- terra::crs(input$crs_selection)
-      if (t_obj == "") stop("Invalid CRS for terra.")
-      
-      c_obj
-    }, error = function(e) {
-      showNotification(paste("Invalid CRS provided:", e$message), type = "error")
-      NULL
-    })
+    crs_obj <- validate_crs(input$crs_selection, "Invalid CRS provided:")
     req(crs_obj)
     is_degree <- grepl("degree", crs_obj$units_gdal %||% "meters", ignore.case = TRUE)
     
-    # Project data to target CRS for accurate distance measurement
     pts <- tryCatch({
       st_as_sf(df, coords = c("x", "y"), crs = input$map_crs) %>% st_transform(input$crs_selection)
     }, error = function(e) NULL)
     req(pts)
     coords <- st_coordinates(pts)
     
-    # Average Nearest Neighbor Distance
-    # Optimized with FNN
     knn_res <- FNN::get.knn(coords, k = 1)
     avg_nn_dist <- mean(knn_res$nn.dist)
     
-    # Hybrid Recommendation: 50% of avg NN dist
     rec_res <- avg_nn_dist * 0.5 
     
-    # Performance limit: Max 300 cells on longest axis (increased for better detail)
     bbox <- st_bbox(pts)
     width <- bbox["xmax"] - bbox["xmin"]
     height <- bbox["ymax"] - bbox["ymin"]
@@ -2273,7 +2095,6 @@ server <- function(input, output, session) {
     if (input$res_mode != "fixed") updateSliderInput(session, "grid_res", value = final_rec)
     output$res_reasoning <- renderText({ reasoning })
     
-    # Pre-calculate per-locality resolutions for the UI if in 'local' mode
     if (input$res_mode == "local") {
         locs_to_calc <- if("ALL" %in% input$locality || length(input$locality) == 0) unique(df_raw$loc) else input$locality
         temp_res <- list()
@@ -2285,13 +2106,11 @@ server <- function(input, output, session) {
             if(is.null(sub_pts)) next
             
             if (nrow(sub_pts) > 1) {
-                 # Strictly enforce metric distances for resolution estimation
                  sub_pts_m <- tryCatch(sf::st_transform(sub_pts, 3857), error = function(e) sub_pts)
                  sub_coords_m <- sf::st_coordinates(sub_pts_m)
                  sub_knn <- FNN::get.knn(sub_coords_m, k = 1)
                  l_res <- mean(sub_knn$nn.dist) * 0.5
 
-                 # If transformation failed and we are in degrees, apply heuristic to convert to meters
                  if (is_degree && identical(sub_pts, sub_pts_m)) {
                     lat_c <- mean(sf::st_coordinates(sf::st_transform(sub_pts, 4326))[,2])
                     m_per_deg <- 111319 * cos(lat_c * pi / 180)
@@ -2304,7 +2123,6 @@ server <- function(input, output, session) {
             temp_res[[l]] <- l_res        }
         rv$loc_resolutions <- temp_res
     } else {
-        # If not local mode, apply global/fixed resolution to all selected localities
         locs_to_calc <- if("ALL" %in% input$locality || length(input$locality) == 0) unique(df_raw$loc) else input$locality
         temp_res <- list()
         for (l in locs_to_calc) temp_res[[l]] <- final_rec
@@ -2347,12 +2165,10 @@ server <- function(input, output, session) {
     cols <- colnames(rv$user_data)
     num_cols <- cols[sapply(rv$user_data, is.numeric)]
     
-    # Use existing mapping if available to populate targets, otherwise fallback to first 20 numeric columns
     if (!is.null(rv$mapping$vars) && length(rv$mapping$vars) > 0) {
       targets <- sapply(rv$mapping$vars, function(x) x$actual)
     } else {
       targets <- num_cols[!grepl("\\bx\\b|\\by\\b|lon|lat|latitude|longitude", num_cols, ignore.case=TRUE)]
-      # Limit to 30 to prevent UI freezing if no metadata is provided
       if (length(targets) > 30) {
         targets <- head(targets, 30)
         showNotification("Too many columns. Showing first 30 for mapping. Please use an Excel metadata file for bulk mapping.", type = "warning")
@@ -2374,8 +2190,8 @@ server <- function(input, output, session) {
       tagList(
         lapply(seq_along(targets), function(i) {
           t <- targets[i]
-          def_p_cve <- get_map_val(t, "pred")    %||% grep(paste0("^", t, "_cve$"), num_cols, ignore.case=TRUE, value=TRUE)[1] %||% "None"
-          def_p_ss  <- get_map_val(t, "pred_ss") %||% grep(paste0("^", t, "_ss$"),  num_cols, ignore.case=TRUE, value=TRUE)[1] %||% "None"
+          def_p_cve <- get_map_val(t, "pred")    %||% detect_pred_column(t, num_cols, "cve") %||% "None"
+          def_p_ss  <- get_map_val(t, "pred_ss") %||% detect_pred_column(t, num_cols, "ss")  %||% "None"
           def_l     <- get_map_val(t, "label")    %||% t
           def_c     <- get_map_val(t, "category") %||% "Uploaded Data"
           
@@ -2445,7 +2261,6 @@ server <- function(input, output, session) {
     rv$mapping$loc <- input$map_loc
     rv$mapping$crs <- input$map_crs
     
-    # Update sidebar locality choices whenever the mapping column changes
     if (!is.null(rv$user_data) && input$map_loc %in% colnames(rv$user_data)) {
       loc_choices <- unique(rv$user_data[[input$map_loc]])
       curr_locs <- isolate(input$locality)
@@ -2459,7 +2274,6 @@ server <- function(input, output, session) {
   output$setup_minimap <- renderLeaflet({
     req(rv$user_data, rv$mapping$x, rv$mapping$y, rv$mapping$crs)
 
-    # F2: Determine which extra columns are needed for styling
     color_by <- input$pt_color_by %||% "none"
     apply_mini <- isTRUE(input$pt_apply_minimap)
 
@@ -2492,21 +2306,18 @@ server <- function(input, output, session) {
     } else {
       m <- m %>% addCircleMarkers(radius = input$pt_marker_size %||% 3, color = "cyan", opacity = 1)
     }
-    minimap_rendered <<- TRUE
+    session_state$minimap_rendered <- TRUE
     m
   })
 
-  # --- Metadata Helper ---
   get_current_meta <- function() {
     var <- input$var_id
     if (is.null(var) || var == "" || is.null(rv$mapping$vars)) return(NULL)
     
-    # Find variable in dynamic mapping
     idx <- which(sapply(rv$mapping$vars, function(x) x$actual == var))
     if (length(idx) == 0) return(NULL)
     m <- rv$mapping$vars[[idx]]
     
-    # Use selected palette from pickerInput if available, otherwise default
     pal <- "YlOrRd"
     if (!is.null(input$palette_select) && input$palette_select != "") {
       pal <- input$palette_select
@@ -2514,7 +2325,6 @@ server <- function(input, output, session) {
       pal <- m$palette
     }
     
-    # Determine the column being viewed
     view_col <- switch(input$value_type,
       "actual" = as.character(m$actual),
       "pred"   = if(!is.null(m$pred)) as.character(m$pred) else NULL,
@@ -2533,19 +2343,15 @@ server <- function(input, output, session) {
     )
   }
   
-  # --- Dynamic Sidebar Sync ---
-  # Centralized observer to keep sidebar in sync with mapping state
   observe({
     req(rv$mapping$vars)
     vars <- rv$mapping$vars
     cats <- unique(sapply(vars, function(x) x$category))
     
-    # Update Category choices
     current_cat <- input$var_category
     sel_cat <- if(!is.null(current_cat) && current_cat %in% cats) current_cat else cats[1]
     updateSelectInput(session, "var_category", choices = cats, selected = sel_cat)
     
-    # Update Variable choices based on selected/predicted category
     filtered <- Filter(function(x) x$category == sel_cat, vars)
     choices <- setNames(sapply(filtered, function(x) x$actual), sapply(filtered, function(x) x$label))
     updateSelectInput(session, "var_id", choices = choices)
@@ -2568,93 +2374,158 @@ server <- function(input, output, session) {
       div(style = "text-align: center; padding: 20px;",
           img(src = "assets/banner.png", style = "max-width: 100%; height: auto; margin-bottom: 20px;"),
           h4("Workbench for statistics and optimized mapping in life sciences."),
-          p("Version: 0.9.7c"),
+          p("Version: 0.9.8c"),
           p("Integrated geostatistical modeling, classification and statistical interpretation."),
           hr(),
           p("Designed for high-performance parallel processing and spatial diagnostics, multi-scale interpolation via kriging, inverse distance weighting, and thin plate splines with practical multi-criteria optimization."),
           p("Supported with the Descriptive and Exploratory Suite with dynamic visualizations and statistics."),
           hr(),
-          p(strong("A product of `that` couple of months following the loose of institutional e-mail address.")),
+          p(strong("A vibe-coded product of `that` couple of months following the loose of institutional e-mail address.")),
           p(style = "color: #666; font-size: 0.9em;", "  by Recep Serdar Kara in cooperation with Gemini CLI - 2026")
       )
     ))
   })
   
-  output$render_ui_ux_guide <- renderUI({
-    withMathJax(HTML(commonmark::markdown_html(paste(readLines("docs/ui_ux_guide.md", warn = FALSE), collapse = "\n"))))
+  output$render_user_guide <- renderUI({
+    withMathJax(HTML(commonmark::markdown_html(paste(readLines("docs/user_guide.md", warn = FALSE), collapse = "\n"))))
+  })
+  
+  output$render_desc_exploratory_guide <- renderUI({
+    withMathJax(HTML(commonmark::markdown_html(paste(readLines("docs/desc_exploratory_guide.md", warn = FALSE), collapse = "\n"))))
   })
   
   output$render_scientific_guide <- renderUI({
     withMathJax(HTML(commonmark::markdown_html(paste(readLines("docs/scientific_guide.md", warn = FALSE), collapse = "\n"))))
   })
   
-  # --- Global Scale Synchronization ---
   joint_vv <- reactive({
     is_uncertainty <- input$value_type %in% c("pred_ss", "uncert")
     get_joint_scale_values(rv$rast, rv$rast_pred, input$match_scales, is_uncertainty)
   })
 
-  # --- Unified Agro Engine ---
-  agro_params <- reactive({
-    req(input$color_style == "agro")
+  classification_params <- reactive({
+    req(input$color_style %in% c("agro", "bin"))
     req(input$var_id)
     meta <- get_current_meta()
     req(meta)
-    n_c <- input$agro_n_classes
     
-    if(input$agro_method == "limits") {
-      brks_inner <- sapply(1:(n_c-1), function(i) {
-        val <- input[[paste0("agro_limit_", i)]]
-        if(is.null(val)) i * 10 else val
-      })
+    if (input$color_style == "agro") {
+      n_c <- input$agro_n_classes
+      
+      if(input$agro_method == "limits") {
+        brks_inner <- sapply(1:(n_c-1), function(i) {
+          val <- input[[paste0("agro_limit_", i)]]
+          if(is.null(val)) i * 10 else val
+        })
+      } else {
+        vv_joint <- joint_vv()
+        if(!is.null(vv_joint)) {
+          vv <- vv_joint
+        } else {
+          target <- if(input$value_type == "actual") rv$rast else rv$rast_pred
+          if(is.null(target)) {
+            df <- rv$user_data
+            v_data <- df[[meta$actual]]
+            if(is.null(v_data) || length(v_data) < n_c) return(NULL)
+            vv <- v_data
+          } else {
+            target_layer <- if("var1.pred" %in% names(target)) target[["var1.pred"]] else target[[1]]
+            vv <- as.vector(values(target_layer, na.rm=TRUE))
+          }
+        }
+        
+        if(length(vv) < n_c) return(NULL)
+        brks_inner <- tryCatch({
+          classIntervals(vv, n=n_c, style=input$agro_method)$brks[2:n_c]
+        }, error = function(e) {
+          seq(min(vv, na.rm=TRUE), max(vv, na.rm=TRUE), length.out = n_c + 1)[2:n_c]
+        })
+      }
+      
+      brks <- sort(unique(c(-Inf, brks_inner, Inf)))
+      n_c_actual <- length(brks) - 1
+      
+      rcl_mat <- matrix(NA, nrow = n_c_actual, ncol = 3)
+      for(i in 1:n_c_actual) {
+        rcl_mat[i, ] <- c(brks[i], brks[i+1], i)
+      }
+      
+      colors <- get_agro_colors(n_c_actual)
+      labels <- if(n_c_actual==3) c("Low", "Med", "High") else paste("Class", 1:n_c_actual)
+      
+      leg_labels <- character(n_c_actual)
+      for(i in 1:n_c_actual) {
+        if(i==1) leg_labels[i] <- paste("<", round(brks[2], 3))
+        else if(i==n_c_actual) leg_labels[i] <- paste(">", round(brks[n_c_actual], 3))
+        else leg_labels[i] <- paste(round(brks[i],3), "-", round(brks[i+1],3))
+      }
+      if(n_c_actual == 3) leg_labels <- paste(labels, ":", leg_labels)
+      
+      list(brks = brks, rcl_mat = rcl_mat, colors = colors, labels = labels, leg_labels = leg_labels, n_c = n_c_actual)
+      
     } else {
+      n_c <- 5
       vv_joint <- joint_vv()
       if(!is.null(vv_joint)) {
         vv <- vv_joint
       } else {
-        # Use the current raster's values for data-driven breaks
         target <- if(input$value_type == "actual") rv$rast else rv$rast_pred
         if(is.null(target)) {
-          # Fallback to quantiles of raw data if raster isn't ready
           df <- rv$user_data
           v_data <- df[[meta$actual]]
           if(is.null(v_data) || length(v_data) < n_c) return(NULL)
           vv <- v_data
         } else {
-          vv <- as.vector(values(target, na.rm=TRUE))
+          target_layer <- if("var1.pred" %in% names(target)) target[["var1.pred"]] else target[[1]]
+          vv <- as.vector(values(target_layer, na.rm=TRUE))
         }
       }
       
       if(length(vv) < n_c) return(NULL)
-      brks_inner <- classIntervals(vv, n=n_c, style=input$agro_method)$brks[2:n_c]
+      
+      rng <- range(vv, na.rm = TRUE)
+      if(is.infinite(rng[1]) || is.infinite(rng[2]) || rng[1] == rng[2]) {
+        brks_inner <- seq(rng[1], rng[1] + 1, length.out = n_c + 1)[2:n_c]
+      } else {
+        brks_inner <- seq(rng[1], rng[2], length.out = n_c + 1)[2:n_c]
+      }
+      
+      brks <- sort(unique(c(-Inf, brks_inner, Inf)))
+      n_c_actual <- length(brks) - 1
+      
+      rcl_mat <- matrix(NA, nrow = n_c_actual, ncol = 3)
+      for(i in 1:n_c_actual) {
+        rcl_mat[i, ] <- c(brks[i], brks[i+1], i)
+      }
+      
+      is_viridis <- meta$palette == "viridis" || meta$palette == "inferno"
+      colors <- if(is_viridis) {
+        viridis::viridis(n_c_actual, option = meta$palette)
+      } else {
+        colorRampPalette(RColorBrewer::brewer.pal(min(8, max(3, n_c_actual)), meta$palette))(n_c_actual)
+      }
+      
+      labels <- paste("Bin", 1:n_c_actual)
+      
+      leg_labels <- character(n_c_actual)
+      for(i in 1:n_c_actual) {
+        if(i==1) leg_labels[i] <- paste("<", round(brks[2], 3))
+        else if(i==n_c_actual) leg_labels[i] <- paste(">", round(brks[n_c_actual], 3))
+        else leg_labels[i] <- paste(round(brks[i],3), "-", round(brks[i+1],3))
+      }
+      
+      list(brks = brks, rcl_mat = rcl_mat, colors = colors, labels = labels, leg_labels = leg_labels, n_c = n_c_actual)
     }
-    brks <- sort(unique(c(-Inf, brks_inner, Inf)))
-    
-    # Create classification matrix for terra::classify
-    rcl_mat <- matrix(NA, nrow = n_c, ncol = 3)
-    for(i in 1:n_c) {
-      rcl_mat[i, ] <- c(brks[i], brks[i+1], i)
-    }
-    
-    colors <- get_agro_colors(n_c)
-    labels <- if(n_c==3) c("Low", "Med", "High") else paste("Class", 1:n_c)
-    
-    leg_labels <- character(n_c)
-    for(i in 1:n_c) {
-      if(i==1) leg_labels[i] <- paste("<", round(brks[2], 3))
-      else if(i==n_c) leg_labels[i] <- paste(">", round(brks[n_c], 3))
-      else leg_labels[i] <- paste(round(brks[i],3), "-", round(brks[i+1],3))
-    }
-    if(n_c == 3) leg_labels <- paste(labels, ":", leg_labels)
-    
-    list(brks = brks, rcl_mat = rcl_mat, colors = colors, labels = labels, leg_labels = leg_labels, n_c = n_c)
   })
 
-  # Pickers
+  agro_params <- reactive({
+    req(input$color_style == "agro")
+    classification_params()
+  })
+
   volumes <- c(Home = fs::path_home(), Project = getwd())
   shinyFileChoose(input, "load_config", roots = volumes, session = session, filetypes = c("json"))
 
-  # --- Sidebar Configuration Management: Save & Load Backend ---
   
   observeEvent(input$save_config, {
     showModal(modalDialog(
@@ -2679,17 +2550,14 @@ server <- function(input, output, session) {
     },
     content = function(file) {
       config_list <- list(
-        # Coordinate selection
         map_x = input$map_x,
         map_y = input$map_y,
         map_loc = input$map_loc,
         map_crs = input$map_crs,
         crs_selection = input$crs_selection,
-        # Variable category / Variable selector
         var_category = input$var_category,
         var_id = input$var_id,
         value_type = input$value_type,
-        # Interpolation configurations
         method = input$method,
         boundary_type = input$boundary_type,
         buff_mode = input$buff_mode,
@@ -2697,7 +2565,6 @@ server <- function(input, output, session) {
         res_mode = input$res_mode,
         grid_res = input$grid_res,
         color_style = input$color_style,
-        # Active variable mappings
         vars_mapping = rv$mapping$vars
       )
       writeLines(jsonlite::toJSON(config_list, auto_unbox = TRUE, pretty = TRUE), file)
@@ -2713,13 +2580,10 @@ server <- function(input, output, session) {
     tryCatch({
       cfg <- jsonlite::fromJSON(config_path, simplifyVector = FALSE)
       
-      # Restore reactive values
       if (!is.null(cfg$vars_mapping)) {
-        # Ensure mapping$vars gets formatted as list of elements matching our internal structure
         rv$mapping$vars <- cfg$vars_mapping
       }
       
-      # Restore UI inputs
       if (!is.null(cfg$map_x)) updateSelectInput(session, "map_x", selected = cfg$map_x)
       if (!is.null(cfg$map_y)) updateSelectInput(session, "map_y", selected = cfg$map_y)
       if (!is.null(cfg$map_loc)) updateSelectInput(session, "map_loc", selected = cfg$map_loc)
@@ -2757,13 +2621,11 @@ server <- function(input, output, session) {
                 choicesOpt = list(content = names(choices)))
   })
 
-  # Automatic Export Title Sync
   observeEvent(input$var_id, {
     req(input$var_id); meta <- get_current_meta(); req(meta)
     updateTextInput(session, "exp_title", value = paste(meta$label, "- Soil Mapping"))
   })
 
-  # Dynamic Manual Variogram Sliders Auto-Scaling
   observe({
     req(rv$user_data, input$var_id, rv$mapping$vars)
     meta <- get_current_meta()
@@ -2816,7 +2678,6 @@ server <- function(input, output, session) {
       req(rv$loc_names); selectInput("sel_loc_stats", "Filter Analysis View:", choices = c("Total (Combined)", rv$loc_names))
     })
   
-  # --- Advanced Kriging & Covariates ---
   output$covariate_selector_ui <- renderUI({
     req(rv$user_data, input$var_id)
     cols <- colnames(rv$user_data)
@@ -2874,7 +2735,6 @@ server <- function(input, output, session) {
         res_df <- rv$full_cor_matrix
         target <- input$var_id
         
-        # Apply p-value filter
         thresh <- as.numeric(input$corr_pval_thresh %||% 1)
         if(thresh < 1) {
            res_df <- res_df[!is.na(res_df$Pval) & res_df$Pval <= thresh, ]
@@ -2882,7 +2742,6 @@ server <- function(input, output, session) {
         
         if(nrow(res_df) == 0) return(tags$p("No variables meet the significance threshold."))
         
-        # Map variables to categories and labels from metadata
         vars_metadata <- rv$mapping$vars
         var_to_cat <- sapply(res_df$Variable, function(v) {
           match <- Filter(function(x) x$actual == v, vars_metadata)
@@ -2902,13 +2761,10 @@ server <- function(input, output, session) {
         res_df$Label <- var_to_label
         res_df$AbsCorr <- abs(res_df$Corr)
 
-        # Filter for valid categories only
         cats <- unique(res_df$Category)
 
-        # Build list of tabs
         tabs <- list()
 
-        # 1. "All" Tab
         results_all <- res_df[order(res_df$AbsCorr, decreasing = TRUE), ]
         res_all <- head(results_all, 8)
 
@@ -2920,7 +2776,6 @@ server <- function(input, output, session) {
           )
         )
 
-        # 2. Category Tabs using lapply
         cat_dfs <- split(res_df, res_df$Category)
         cat_tabs <- lapply(names(cat_dfs), function(cat) {
           results_cat <- cat_dfs[[cat]]
@@ -2946,7 +2801,6 @@ server <- function(input, output, session) {
         )
       })
     
-      # Deprecated UI but keeping it as NULL or redirecting
       output$cor_ranks_modal_ui <- renderUI({ NULL })  # --- TPS Optimization ---
   tps_opt_vals <- reactiveVal(NULL)
   observeEvent(input$opt_tps, {
@@ -2954,7 +2808,6 @@ server <- function(input, output, session) {
     locs <- if("ALL" %in% input$locality) unique(rv$user_data[[rv$mapping$loc]]) else input$locality
     meta <- get_current_meta(); req(meta)
     
-    # Expanded Lambda Search Space for better resolution
     lambdas <- c(0, 10^seq(-8, 1, length.out = 30))
     rv$tps_gcv_data <- list()
     
@@ -2995,11 +2848,12 @@ server <- function(input, output, session) {
               lambda = mod$gcv.grid[,1],
               gcv = mod$gcv.grid[,3]
             )
+            gcv_res <- gcv_res[gcv_res$lambda > 0, , drop=FALSE]
 
             list(l = item$l, best_lam = best_lam, gcv_data = gcv_res, err = NULL)          }, error = function(e) {
             list(l = item$l, best_lam = 0, gcv_data = NULL, err = e$message)
           })
-        }, .options = furrr::furrr_options(seed = TRUE, packages = c("sf", "fields")))
+        }, .options = furrr::furrr_options(seed = 12345, packages = c("sf", "fields")))
         
         for(res in res_list) {
           l <- res$l
@@ -3044,13 +2898,10 @@ server <- function(input, output, session) {
     )
   })
 
-  # --- IDW Optimization ---
   idw_opt_vals <- reactiveVal(NULL)
   observeEvent(input$opt_idw, {
     req(rv$user_data, input$var_id, input$method == "IDW", input$locality)
     
-    # Respect user selection: If specific localities are selected, only optimize those.
-    # We shouldn't blindly optimize all unless "ALL" is explicitly in the selection.
     locs <- if("ALL" %in% input$locality || length(input$locality) == 0) {
       unique(rv$user_data[[rv$mapping$loc]])
     } else {
@@ -3061,7 +2912,6 @@ server <- function(input, output, session) {
     factors <- seq(0.5, 5.0, by = 0.5)
     
     withProgress(message = "Calculating optimal IDW factors per region...", {
-      # Iterate over targets: Actual and Predicted (if in comparison/prediction mode)
       targets <- "act"
       if(input$comp_mode || input$value_type != "actual") targets <- c("act", "pre")
       
@@ -3079,18 +2929,19 @@ server <- function(input, output, session) {
         })
 
         res_list <- furrr::future_map(df_list, function(item) {
+          force_globals <- list(optimize_idw_p)
+          
           if(nrow(item$df) < 5) return(list(l = item$l, best_f = 2.0))
           pts <- sf::st_as_sf(item$df, coords=c("x","y"), crs=current_crs)
           best_f <- optimize_idw_p(pts, "v", nmax = idw_nmax_val)
           return(list(l = item$l, best_f = best_f))
-        }, .options = furrr::furrr_options(seed = TRUE, packages = c("sf", "gstat")))
+        }, .options = furrr::furrr_options(seed = 12345, packages = c("sf", "gstat")))
 
         for(res in res_list) {
           set_regional_param("IDW", res$l, target, res$best_f)
         }
       }    })
     
-    # Update main slider with average of best factors for current selection to provide feedback
     all_best <- sapply(locs, function(l) get_regional_param("IDW", l, "act"))
     updateSliderInput(session, "idw_p", value = mean(all_best))
     
@@ -3125,7 +2976,6 @@ server <- function(input, output, session) {
       m_act <- rv$cv_metrics_act
       if(length(m_act) == 0) return(NULL)
       
-      # Correct weighted pooling
       ns <- sapply(m_act, function(x) x$n %||% 0)
       rmses <- sapply(m_act, function(x) x$rmse %||% NA)
       mes <- sapply(m_act, function(x) x$me %||% NA)
@@ -3138,13 +2988,11 @@ server <- function(input, output, session) {
       
       data.frame(Metric = c("Mean CV RMSE (Pooled)", "Mean Bias (ME)"), Value = c(round(avg_rmse, 4), round(avg_me, 4)))
     })
-  # --- Slider & UI Sync ---
   observeEvent(list(input$locality, rv$user_data, rv$mapping$loc), {
     req(input$locality, rv$user_data, rv$mapping$loc)
     loc_col <- rv$mapping$loc
     locs <- if("ALL" %in% input$locality) unique(rv$user_data[[loc_col]]) else input$locality
     
-    # Update selectors for all methods
     update_selector <- function(id, current_locs) {
       current_sel <- isolate(input[[id]])
       if (!identical(sort(as.character(current_locs)), sort(as.character(current_sel)))) {
@@ -3188,7 +3036,6 @@ server <- function(input, output, session) {
     showNotification(paste("Manual model applied to", loc, "(", target, ")"), type = "message")
   })
 
-  # --- IDW Manual Sync & Apply ---
   observeEvent(list(input$idw_mode, input$idw_m_loc, input$comp_mode, input$idw_m_target), {
     req(input$idw_mode == "manual", input$idw_m_loc)
     loc <- input$idw_m_loc
@@ -3205,7 +3052,6 @@ server <- function(input, output, session) {
     showNotification(paste("Manual IDW Power applied to", loc, "(", target, ")"), type = "message")
   })
 
-  # --- TPS Manual Sync & Apply ---
   observeEvent(list(input$tps_mode, input$tps_m_loc, input$comp_mode, input$tps_m_target), {
     req(input$tps_mode == "manual", input$tps_m_loc)
     loc <- input$tps_m_loc
@@ -3222,7 +3068,6 @@ server <- function(input, output, session) {
     showNotification(paste("Manual TPS Lambda applied to", loc, "(", target, ")"), type = "message")
   })
 
-  # --- Auto-Fit ---
   observeEvent(input$auto_fit, {
     req(rv$user_data, input$locality, rv$mapping$x, rv$mapping$y)
     locs <- if("ALL" %in% input$locality) unique(rv$user_data[[rv$mapping$loc]]) else input$locality
@@ -3251,14 +3096,11 @@ server <- function(input, output, session) {
       })
       
       res_list <- furrr::future_map(df_list, function(item) {
+        force_globals <- list(calc_scientific_lags, robust_vgm_fit)
+        
         res_a <- list(emp = NULL, fit = NULL, mod = "FAIL", sse = "N/A")
         sub_a_raw <- sf::st_as_sf(item$act, coords=c("x","y"), crs=current_crs)
-        
-        if(sf::st_is_longlat(sub_a_raw)) {
-            c_geo <- sf::st_coordinates(sf::st_transform(sub_a_raw, 4326))
-            utm_crs <- paste0("+proj=utm +zone=", floor((mean(c_geo[,1]) + 180) / 6) + 1, " +datum=WGS84 +units=m +no_defs", if(mean(c_geo[,2]) < 0) " +south" else "")
-            sub_a <- sf::st_transform(sub_a_raw, utm_crs)
-        } else { sub_a <- sub_a_raw }
+        sub_a <- validate_and_project_sf(sub_a_raw, current_crs)
         sub_a <- sub_a[!duplicated(round(sf::st_coordinates(sub_a), 2)),]
         
         if(nrow(sub_a) >= 3) {
@@ -3274,11 +3116,7 @@ server <- function(input, output, session) {
         res_p <- list(emp = NULL, fit = NULL, mod = "FAIL", sse = "N/A")
         if(!is.null(item$pre)) {
           sub_p_raw <- sf::st_as_sf(item$pre, coords=c("x","y"), crs=current_crs)
-          if(sf::st_is_longlat(sub_p_raw)) {
-              c_geo <- sf::st_coordinates(sf::st_transform(sub_p_raw, 4326))
-              utm_crs <- paste0("+proj=utm +zone=", floor((mean(c_geo[,1]) + 180) / 6) + 1, " +datum=WGS84 +units=m +no_defs", if(mean(c_geo[,2]) < 0) " +south" else "")
-              sub_p <- sf::st_transform(sub_p_raw, utm_crs)
-          } else { sub_p <- sub_p_raw }
+          sub_p <- validate_and_project_sf(sub_p_raw, current_crs)
           sub_p <- sub_p[!duplicated(round(sf::st_coordinates(sub_p), 2)),]
           
           if(nrow(sub_p) >= 3) {
@@ -3293,7 +3131,7 @@ server <- function(input, output, session) {
         }
         
         list(l = item$l, act = res_a, pre = res_p)
-      }, .options = furrr::furrr_options(seed = TRUE, packages = c("sf", "gstat")))
+      }, .options = furrr::furrr_options(seed = 12345, packages = c("sf", "gstat")))
       
       for(res in res_list) {
         l <- res$l
@@ -3324,13 +3162,48 @@ server <- function(input, output, session) {
     showModal(modalDialog(title = "Expert Auto-Fit: Variogram Diagnostics", tags$ul(res_tags), easyClose = TRUE))
   })
 
-  # --- Engine ---
 
-  # B4: Modal dialog for archive choice when previous results exist
+  archive_and_proceed <- function(action, meta, n_locs, estimate_text, is_long_run) {
+    if (action == "archive") {
+      current_cfg <- rv$run_config_summary
+      current_reg <- rv$export_registry
+      if (!is.null(current_cfg) && length(current_reg) > 0) {
+        rv$run_history <- c(list(list(config = current_cfg, registry = current_reg)), rv$run_history)
+      }
+    } else if (action == "discard") {
+      rv$v_fit_list <- list()
+    }
+    
+    if (is_long_run) {
+      showModal(modalDialog(
+        title = "Ready to Run Interpolation",
+        tags$p("You are about to start the spatial interpolation pipeline with the following parameters:"),
+        div(style = "background-color: #f8f9fa; padding: 12px; border-radius: 5px; margin: 10px 0;",
+          tags$strong("Method: "), tags$span(input$method), tags$br(),
+          tags$strong("Localities: "), tags$span(n_locs), tags$br(),
+          tags$strong("Variables: "), tags$span(meta$label)
+        ),
+        div(style = "background-color: #e8f4fd; color: #1d6fa5; padding: 10px; border-radius: 5px; margin: 10px 0;",
+          icon("hourglass-half"), tags$strong(" Run Estimate: "), tags$span(estimate_text)
+        ),
+        footer = tagList(
+          actionButton("confirm_start_run", "Start Interpolation", class = "btn-primary", icon = icon("play")),
+          modalButton("Cancel")
+        ),
+        size = "m", easyClose = FALSE
+      ))
+    } else {
+      rv$proceed_run <- runif(1)
+    }
+  }
+
   observeEvent(input$run, {
+    if (isTRUE(rv$model_running)) {
+      showNotification("A model run is already in progress.", type = "warning")
+      return()
+    }
     req(rv$user_data, input$locality, rv$mapping$x, rv$mapping$y)
     
-    # UI Guard: check if auxiliary variables are missing for RK/RFK/CK
     if (input$method %in% c("RK", "RFK", "CK") && (is.null(input$aux_vars) || length(input$aux_vars) == 0)) {
       showNotification("Please select at least one auxiliary variable for RK/RFK/CK model generation.", type = "error")
       return()
@@ -3339,18 +3212,71 @@ server <- function(input, output, session) {
     meta <- get_current_meta()
     req(meta)
     
-    # If there are previous results, check remember settings or ask user
+    loc_col <- rv$mapping$loc
+    selected_locs <- if ("ALL" %in% input$locality || length(input$locality) == 0) {
+      if (!is.null(rv$user_data) && !is.null(loc_col) && loc_col %in% colnames(rv$user_data)) {
+        unique(na.omit(rv$user_data[[loc_col]]))
+      } else NULL
+    } else {
+      input$locality
+    }
+    n_locs <- length(selected_locs)
+    if (n_locs == 0) n_locs <- 1
+    
+    comp_mode <- isTruthy(input$comp_mode) || isTruthy(input$value_type != "actual")
+    n_models <- n_locs * (if(comp_mode) 2 else 1)
+    
+    method_mult <- switch(input$method,
+      "RFK" = 1.0,
+      "RK"  = 1.0,
+      "CK"  = 1.5,
+      "OK"  = 0.5,
+      "IDW" = 0.5,
+      "TPS" = 0.3,
+      1.0 # default fallback
+    )
+    
+    loc_times_sec <- numeric(n_locs)
+    if (!is.null(rv$user_data) && !is.null(loc_col) && loc_col %in% colnames(rv$user_data) && length(selected_locs) > 0) {
+      for (idx in seq_along(selected_locs)) {
+        l <- selected_locs[idx]
+        n_samples <- nrow(rv$user_data[rv$user_data[[loc_col]] == l, ])
+        if (is.null(n_samples) || is.na(n_samples) || n_samples == 0) n_samples <- 50
+        
+        if (n_samples > 50) {
+          base_sec <- max(10, 15 + (n_samples / 100) * 2.0)
+        } else {
+          base_sec <- max(10, 120 + (n_samples - 50) * 0.84)
+        }
+        model_time <- base_sec * method_mult
+        
+        loc_times_sec[idx] <- model_time * (if (comp_mode) 2 else 1)
+      }
+    } else {
+      loc_times_sec <- rep(120 * method_mult * (if (comp_mode) 2 else 1), n_locs)
+    }
+    
+    cores <- tryCatch(future::nbrOfWorkers(), error = function(e) 1)
+    if (is.null(cores) || cores < 1) cores <- 1
+    
+    max_single_loc_time <- max(loc_times_sec)
+    distributed_time <- sum(loc_times_sec) / cores
+    
+    est_time_sec <- max(max_single_loc_time, distributed_time) * 1.1
+    
+    est_time_str <- if (est_time_sec < 60) {
+      paste(round(est_time_sec), "seconds")
+    } else {
+      paste(round(est_time_sec / 60, 1), "minutes")
+    }
+    estimate_text <- paste0("~", n_models, " locality model(s), ~", est_time_str, " estimated")
+    is_long_run <- est_time_sec >= 120 || input$method %in% c("RK", "RFK", "CK")
+    
     if (!is.null(rv$run_config_summary) && length(rv$export_registry) > 0) {
       if (rv$auto_archive_choice == "archive") {
-        current_cfg <- rv$run_config_summary
-        current_reg <- rv$export_registry
-        if (!is.null(current_cfg) && length(current_reg) > 0) {
-          rv$run_history <- c(list(list(config = current_cfg, registry = current_reg)), rv$run_history)
-        }
-        rv$proceed_run <- runif(1)
+        archive_and_proceed("archive", meta, n_locs, estimate_text, is_long_run)
       } else if (rv$auto_archive_choice == "discard") {
-        rv$v_fit_list <- list()
-        rv$proceed_run <- runif(1)
+        archive_and_proceed("discard", meta, n_locs, estimate_text, is_long_run)
       } else {
         showModal(modalDialog(
           title = "Previous Results Detected",
@@ -3362,6 +3288,9 @@ server <- function(input, output, session) {
             tags$small(paste0(rv$run_config_summary$localities, " | ",
               format(rv$run_config_summary$timestamp, "%H:%M:%S")))
           ),
+          div(style = "background-color: #e8f4fd; color: #1d6fa5; padding: 10px; border-radius: 5px; margin: 10px 0;",
+            icon("hourglass-half"), tags$strong(" Run Estimate: "), tags$span(estimate_text)
+          ),
           checkboxInput("auto_archive_remember", "Remember my choice (apply automatically for future runs)", FALSE),
           footer = tagList(
             actionButton("archive_prev_run", "Archive & Continue", class = "btn-warning", icon = icon("archive")),
@@ -3372,32 +3301,64 @@ server <- function(input, output, session) {
         ))
       }
     } else {
-      # No previous results, proceed directly
-      rv$proceed_run <- runif(1)
+      archive_and_proceed("none", meta, n_locs, estimate_text, is_long_run)
     }
   })
 
-  # B4: Archive previous results then proceed
   observeEvent(input$archive_prev_run, {
     removeModal()
     if (isTRUE(input$auto_archive_remember)) {
       rv$auto_archive_choice <- "archive"
     }
-    current_cfg <- rv$run_config_summary
-    current_reg <- rv$export_registry
-    if (!is.null(current_cfg) && length(current_reg) > 0) {
-      rv$run_history <- c(list(list(config = current_cfg, registry = current_reg)), rv$run_history)
+    
+    meta <- get_current_meta()
+    loc_col <- rv$mapping$loc
+    n_locs <- if ("ALL" %in% input$locality || length(input$locality) == 0) {
+      if (!is.null(rv$user_data) && !is.null(loc_col) && loc_col %in% colnames(rv$user_data)) {
+        length(unique(na.omit(rv$user_data[[loc_col]])))
+      } else 1
+    } else {
+      length(input$locality)
     }
-    rv$proceed_run <- runif(1)
+    comp_mode <- isTruthy(input$comp_mode) || isTruthy(input$value_type != "actual")
+    n_models <- n_locs * (if(comp_mode) 2 else 1)
+    sec_per_model <- 1.5
+    est_time_sec <- n_models * sec_per_model
+    est_time_str <- if (est_time_sec < 60) paste(round(est_time_sec), "seconds") else paste(round(est_time_sec / 60, 1), "minutes")
+    estimate_text <- paste0("~", n_models, " locality model(s), ~", est_time_str, " estimated")
+    is_long_run <- n_models >= 3 || input$method %in% c("RK", "RFK", "CK")
+    
+    archive_and_proceed("archive", meta, n_locs, estimate_text, is_long_run)
   })
 
-  # B4: Discard previous results then proceed
   observeEvent(input$discard_prev_run, {
     removeModal()
     if (isTRUE(input$auto_archive_remember)) {
       rv$auto_archive_choice <- "discard"
     }
-    rv$v_fit_list <- list() # Clear variogram fits on discard
+    
+    meta <- get_current_meta()
+    loc_col <- rv$mapping$loc
+    n_locs <- if ("ALL" %in% input$locality || length(input$locality) == 0) {
+      if (!is.null(rv$user_data) && !is.null(loc_col) && loc_col %in% colnames(rv$user_data)) {
+        length(unique(na.omit(rv$user_data[[loc_col]])))
+      } else 1
+    } else {
+      length(input$locality)
+    }
+    comp_mode <- isTruthy(input$comp_mode) || isTruthy(input$value_type != "actual")
+    n_models <- n_locs * (if(comp_mode) 2 else 1)
+    sec_per_model <- 1.5
+    est_time_sec <- n_models * sec_per_model
+    est_time_str <- if (est_time_sec < 60) paste(round(est_time_sec), "seconds") else paste(round(est_time_sec / 60, 1), "minutes")
+    estimate_text <- paste0("~", n_models, " locality model(s), ~", est_time_str, " estimated")
+    is_long_run <- n_models >= 3 || input$method %in% c("RK", "RFK", "CK")
+    
+    archive_and_proceed("discard", meta, n_locs, estimate_text, is_long_run)
+  })
+
+  observeEvent(input$confirm_start_run, {
+    removeModal()
     rv$proceed_run <- runif(1)
   })
 
@@ -3414,13 +3375,15 @@ server <- function(input, output, session) {
     showNotification("Auto-archive/discard setting has been reset. You will be prompted for future runs.", type = "message")
   })
 
-  # Main model generation logic (triggered after archive decision)
   observeEvent(rv$proceed_run, {
+    if (isTRUE(rv$model_running)) {
+      showNotification("A model run is already in progress.", type = "warning")
+      return()
+    }
     req(rv$user_data, input$locality, rv$mapping$x, rv$mapping$y);
     meta <- get_current_meta()
     req(meta)
 
-    # Validate coordinate mapping and numeric type correctness
     x_col_name <- rv$mapping$x
     y_col_name <- rv$mapping$y
     
@@ -3453,7 +3416,6 @@ server <- function(input, output, session) {
       return()
     }
     
-    # Validate covariates if using Regression Kriging (RK), RFK, or CK
     current_method <- input$method
     aux_vars <- input$aux_vars
     if (current_method %in% c("RK", "RFK", "CK") && length(aux_vars) > 0) {
@@ -3491,29 +3453,29 @@ server <- function(input, output, session) {
 
     locs <- if("ALL" %in% input$locality) unique(rv$user_data[[rv$mapping$loc]]) else input$locality
 
-    # If the method has changed since the last run, clear the variogram fits
     if (!is.null(rv$run_config_summary) && rv$run_config_summary$method != input$method) {
       rv$v_fit_list <- list()
     }
 
-    # Automatically switch to Map Viewer tab to show progress
     updateTabsetPanel(session, "main_tabs", selected = "tab_map")
 
-    # Show progress overlay, hide reveal button
+    shinyjs::disable("run")
+    updateActionButton(session, "run", label = "Interpolating...", icon = icon("spinner", class = "fa-spin"))
+
     shinyjs::show("map_processing_overlay")
     shinyjs::show("map_spinner")
+    shinyjs::show("map_progress_bar_container")
+    shinyjs::show("cancel_model_btn")
     shinyjs::hide("reveal_maps_btn")
     shinyjs::html("map_processing_title", "Processing...")
     update_premium_progress(5, "Initializing Spatial Analysis Engine...")
 
-    # Wipe any old progress files and start the timer
     cancel_file <- file.path(session_progress_dir, "cancel_flag.txt")
     if (file.exists(cancel_file)) tryCatch(file.remove(cancel_file), error = function(e) NULL)
     old_files <- list.files(path = session_progress_dir, pattern = paste0("^progress_", session_id, "_.*_.*\\.txt$"), full.names = TRUE)
     if (length(old_files) > 0) tryCatch(file.remove(old_files), error = function(e) NULL)
     rv$model_running <- TRUE
 
-    # B3: Capture run configuration before clearing
     rv$run_counter <- rv$run_counter + 1L
     method_params_list <- list(
       "IDW" = paste0("IDW Power: ", input$idw_p, " | Nmax: ", input$idw_nmax),
@@ -3544,7 +3506,6 @@ server <- function(input, output, session) {
     )
 
     tryCatch({
-      # Clear current results for fresh run
       rv$export_registry <- list()
       rv$rast_list_act <- list(); rv$rast_list_pre <- list(); sf_list <- list(); b_list <- list()
       rv$rast <- NULL; rv$rast_pred <- NULL; rv$rast_res <- NULL; rv$has_predictions <- FALSE
@@ -3561,7 +3522,6 @@ server <- function(input, output, session) {
     
     update_premium_progress(25, "Preparing Neighborhood Search Grids...")
     
-    # Pre-extract reactive states
     current_method <- input$method
     current_crs <- rv$mapping$crs
     current_loc_col <- rv$mapping$loc
@@ -3578,20 +3538,7 @@ server <- function(input, output, session) {
     grid_res <- input$grid_res
     crs_sel <- input$crs_selection
     
-    # Strict CRS Sanitization and Validation
-    safe_crs <- tryCatch({
-      c_obj <- sf::st_crs(crs_sel)
-      if (is.na(c_obj)) stop("Invalid CRS format.")
-      
-      # Test terra conversion
-      t_obj <- terra::crs(crs_sel)
-      if (t_obj == "") stop("Invalid CRS for terra.")
-      
-      c_obj
-    }, error = function(e) {
-      showNotification(paste("CRS Validation Error:", e$message), type = "error", duration = 15)
-      NULL
-    })
+    safe_crs <- validate_crs(crs_sel, "CRS Validation Error:", duration = 15)
     req(safe_crs)
     
     comp_mode <- input$comp_mode
@@ -3629,7 +3576,6 @@ server <- function(input, output, session) {
 
     update_premium_progress(50, "Executing Parallel Interpolation Algorithms...")
 
-    # C1: Clear rast lists before starting new run to prevent spatial interference
     rv$rast_list_act <- list(); rv$rast_list_pre <- list(); rv$rast_list_res <- list(); rv$rast_list_point_res <- list()
 
     main_wd <- getwd()
@@ -3637,324 +3583,68 @@ server <- function(input, output, session) {
     session_id_val <- session_id
     cancel_file_val <- file.path(session_progress_dir, "cancel_flag.txt")
 
+    rv$run_token <- rv$run_token + 1L
+    this_token <- rv$run_token
+
     promises::future_promise({
-      res_all <- furrr::future_map(df_list, function(item) {
-        options(monolith_progress_dir = progress_dir_val)
-        options(monolith_session_id = session_id_val)
-        
-        if (file.exists(cancel_file_val)) {
-          stop("Model generation cancelled by user.")
-        }
-        l <- item$l
-      pts_data <- item$pts_data
-      m_params <- item$m_params        
-        res_out <- list(l = l, r_a = NULL, r_p = NULL, r_res = NULL, bound = NULL, pts = NULL, 
-                        v_emp_act = NULL, v_fit_act = NULL, cv_act = NULL, cv_obj_act = NULL, summ_act = NULL, rf_act = NULL, gstat_act = NULL,
-                        v_emp_pre = NULL, v_fit_pre = NULL, cv_pre = NULL, cv_obj_pre = NULL, summ_pre = NULL, rf_pre = NULL, gstat_pre = NULL, log_msg = "", actual_res = NULL)
-        
-        res_out <- tryCatch({
-          # Ensure x and y coordinates are numeric
-          if (!is.numeric(pts_data$x)) pts_data$x <- as.numeric(as.character(pts_data$x))
-          if (!is.numeric(pts_data$y)) pts_data$y <- as.numeric(as.character(pts_data$y))
-          
-          pts_raw <- pts_data %>% filter(!is.na(x), !is.na(y))
-          if (nrow(pts_raw) < 3) {
-            res_out$log_msg <- paste0("Warning in ", l, ": Insufficient data points after cleaning (needed >= 3, got ", nrow(pts_raw), ").")
-            return(res_out)
-          }
-          
-          pts_raw <- pts_raw %>% sf::st_as_sf(coords=c("x","y"), crs=current_crs)
-          if (current_method %in% c("RK", "RFK", "CK") && length(aux_vars) > 0) {
-             pts_raw <- pts_raw %>% filter(dplyr::if_all(dplyr::all_of(aux_vars), ~!is.na(.)))
-          }
-          
-          if (nrow(pts_raw) < 3) {
-            res_out$log_msg <- paste0("Warning in ", l, ": Insufficient data points after covariate filtering (needed >= 3, got ", nrow(pts_raw), ").")
-            return(res_out)
-          }
-          
-          coords_4326_geo <- sf::st_coordinates(sf::st_transform(pts_raw, 4326))
-          lon_c <- mean(coords_4326_geo[,1])
-          lat_c <- mean(coords_4326_geo[,2])
-          if (is.na(lon_c) || is.na(lat_c)) {
-            stop("Calculated geographic center contains NA.")
-          }
-          
-          utm_zone <- floor((lon_c + 180) / 6) + 1
-          utm_crs <- paste0("+proj=utm +zone=", utm_zone, " +datum=WGS84 +units=m +no_defs")
-          if (lat_c < 0) utm_crs <- paste0(utm_crs, " +south")
-          
-          pts <- sf::st_transform(pts_raw, utm_crs)
-          if(nrow(pts) < 3) {
-            res_out$log_msg <- paste0("Warning in ", l, ": Insufficient data points after UTM conversion (needed >= 3, got ", nrow(pts), ").")
-            return(res_out)
-          }
-          
-          c_round <- round(sf::st_coordinates(pts), 2)
-          pts <- pts[!duplicated(cbind(c_round[,1], c_round[,2])),]
-          if(nrow(pts) < 3) {
-            res_out$log_msg <- paste0("Warning in ", l, ": Insufficient unique points after duplicate coordinate removal (needed >= 3, got ", nrow(pts), ").")
-            return(res_out)
-          }
-          
-          # Calculate local spatial density and dynamic buffer distance with robust safety fallbacks
-          b_mode_safe <- if (!is.null(buff_mode) && length(buff_mode) > 0) buff_mode else "dynamic"
-          b_dist_safe <- if (!is.null(b_dist) && length(b_dist) > 0) b_dist else 250
-          grid_res_safe <- if (!is.null(grid_res) && length(grid_res) > 0) grid_res else 50
-          current_method_safe <- if (!is.null(current_method) && length(current_method) > 0) current_method else "OK"
-  
-          coords_local <- sf::st_coordinates(pts)
-          if (!is.null(res_mode) && res_mode == "fixed") {
-            # Use manual grid resolution for scaling dynamic buffers in fixed resolution mode
-            local_res <- grid_res_safe
-          } else if (nrow(coords_local) > 1) {
-            knn_res <- FNN::get.knn(coords_local, k = 1)
-            local_res <- mean(knn_res$nn.dist) * 0.5
-          } else {
-            local_res <- grid_res_safe
-          }
-          
-          b_dist_local <- if (b_mode_safe == "dynamic" && b_type == "wrapped") {
-            buffer_multipliers <- list(
-              "TPS" = 1.0 * local_res,
-              "IDW" = 2.0 * local_res,
-              "OK"  = 3.0 * local_res,
-              "CK"  = 3.0 * local_res,
-              "RK"  = 3.0 * local_res,
-              "RFK" = 3.0 * local_res
-            )
-            val <- buffer_multipliers[[current_method_safe]] %||% (2.0 * local_res)
-            val <- if(is.numeric(val)) val else 2.0 * local_res
-            max(5, min(2000, val))
-          } else {
-            b_dist_safe
-          }
-          
-          local_shp <- NULL
-          if (!is.null(shp_bound)) {
-            # 1. Try Attribute Matching first
-            match_col <- NULL
-            for(col_name in colnames(shp_bound)) {
-              if (any(as.character(shp_bound[[col_name]]) == l)) {
-                match_col <- col_name
-                break
-              }
-            }
-            
-            if (!is.null(match_col)) {
-              local_shp <- shp_bound[as.character(shp_bound[[match_col]]) == l, ]
-              if (nrow(local_shp) == 0) local_shp <- NULL
-            }
-            
-            # 2. If no attribute match, try Geographic Intersection
-            if (is.null(local_shp)) {
-              shp_trans <- tryCatch(sf::st_transform(shp_bound, sf::st_crs(pts)), error = function(e) NULL)
-              if (!is.null(shp_trans)) {
-                intersect_matrix <- sf::st_intersects(shp_trans, sf::st_union(pts), sparse = FALSE)
-                intersecting_indices <- which(rowSums(intersect_matrix) > 0)
-                
-                if (length(intersecting_indices) > 0) {
-                  local_shp <- shp_bound[intersecting_indices, ]
-                }
-              }
-            }
-          }
-  
-          bound <- NULL
-          if (!is.null(local_shp)) {
-            bound <- tryCatch({
-              if (is.na(sf::st_crs(local_shp))) {
-                stop("Missing shapefile CRS")
-              }
-              
-              # Check geometry type of local_shp
-              geom_types <- unique(sf::st_geometry_type(local_shp))
-              if (!any(geom_types %in% c("POLYGON", "MULTIPOLYGON"))) {
-                # Convert points/lines to polygon boundary (convex hull of unioned features)
-                geom_union <- sf::st_union(local_shp)
-                poly <- sf::st_convex_hull(geom_union)
-                if (any(unique(sf::st_geometry_type(poly)) %in% c("POLYGON", "MULTIPOLYGON"))) {
-                  local_shp <- sf::st_as_sf(poly)
-                } else {
-                  # Buffer it by 50 meters to get a polygon area if convex hull didn't form an area
-                  local_shp <- sf::st_as_sf(sf::st_buffer(geom_union, dist = 50))
-                }
-              }
-              
-              sf::st_transform(local_shp, sf::st_crs(pts)) %>% 
-                sf::st_union() %>% 
-                sf::st_as_sf()
-            }, error = function(e) {
-              NULL
-            })
-          }
-          
-          if (is.null(bound)) {
-            bound <- tryCatch({
-              b <- switch(b_type,
-                     "convex"  = sf::st_convex_hull(sf::st_union(pts)),
-                     "concave" = safe_concaveman(pts),
-                     "wrapped" = sf::st_buffer(safe_concaveman(pts), dist = b_dist_local),
-                     "strict"  = sf::st_union(sf::st_buffer(pts, dist = b_dist_local)))
-              sf::st_as_sf(sf::st_sfc(sf::st_geometry(b), crs = sf::st_crs(pts)))
-            }, error = function(e) {
-              sf::st_as_sf(sf::st_sfc(sf::st_convex_hull(sf::st_union(pts)), crs = sf::st_crs(pts)))
-            })
-          }
-          
-          bbox <- sf::st_bbox(bound)
-          width <- as.numeric(bbox["xmax"] - bbox["xmin"])
-          height <- as.numeric(bbox["ymax"] - bbox["ymin"])
-          
-          if (res_mode == "local") {
-             coords_local <- sf::st_coordinates(pts)
-             if (nrow(coords_local) > 1) {
-               knn_res <- FNN::get.knn(coords_local, k = 1)
-               actual_res <- mean(knn_res$nn.dist) * 0.5
-             } else {
-               actual_res <- grid_res
-             }
-          } else {
-             actual_res <- grid_res
-             crs_obj_target <- tryCatch(sf::st_crs(crs_sel), error = function(e) { NULL })
-             if (!is.null(crs_obj_target) && grepl("degree", crs_obj_target$units_gdal %||% "meters", ignore.case = TRUE)) {
-                coords_4326 <- sf::st_coordinates(sf::st_transform(pts_raw, 4326))
-                lat_c <- mean(coords_4326[,2])
-                m_per_deg <- 111319 * cos(lat_c * pi / 180) 
-                actual_res <- grid_res / m_per_deg
-             }
-          }
-          
-          max_dim <- max(width, height)
-          min_res_safe <- max_dim / 300
-          if (actual_res > min_res_safe) actual_res <- max(0.1, min_res_safe)
-  
-          grid_r <- terra::rast(terra::ext(bbox), res=actual_res, crs=sf::st_crs(pts)$wkt)
-          grid_p <- terra::as.points(grid_r, values=FALSE) %>% sf::st_as_sf() %>%
-            dplyr::mutate(x = sf::st_coordinates(.)[,1], y = sf::st_coordinates(.)[,2])
-          
-          r_a <- NULL; r_p <- NULL
-          
-          pts_a <- pts %>% dplyr::filter(!is.na(v)) %>% dplyr::mutate(x = sf::st_coordinates(.)[,1], y = sf::st_coordinates(.)[,2])
-          if(nrow(pts_a) >= 3) {
-              lags_a <- calc_scientific_lags(pts_a)
-              mp_a <- list(idw_p = m_params$idw_p_act, idw_nmax = m_params$idw_nmax, tps_lambda = m_params$tps_lambda_act, pre_fit = m_params$pre_fit_act)
-              if (file.exists(cancel_file_val)) stop("Model generation cancelled by user.")
-              res_a_list <- apply_interpolation(pts_a, "v", current_method, grid_p, aux_vars, lags_a, mp_a, l, "act")
-              res_out$v_emp_act <- res_a_list$v_emp; res_out$v_fit_act <- res_a_list$fit; res_out$cv_act <- res_a_list$cv_metrics; res_out$cv_obj_act <- res_a_list$cv_obj
-              res_out$summ_act <- res_a_list$model_summary; res_out$rf_act <- res_a_list$rf_model; res_out$gstat_act <- res_a_list$gstat_obj
-              res_out$log_msg <- paste0(res_out$log_msg, "\n", res_a_list$log_msg)
-              
-              if(!is.null(res_a_list$res_sf)) {
-                  fields_a <- if("var1.var" %in% colnames(res_a_list$res_sf)) c("var1.pred", "var1.var") else "var1.pred"
-                  r_a <- terra::rasterize(res_a_list$res_sf, grid_r, field=fields_a) %>% terra::mask(terra::vect(bound)) %>% terra::project(crs_sel)
-                  res_out$r_a <- terra::wrap(r_a)
-              }
-          }
-          
-          if(comp_mode || val_type != "actual") {
-              pts_p <- pts %>% dplyr::filter(!is.na(pv)) %>% dplyr::mutate(x = sf::st_coordinates(.)[,1], y = sf::st_coordinates(.)[,2])
-              if(nrow(pts_p) >= 3) {
-                  lags_p <- calc_scientific_lags(pts_p)
-                  mp_p <- list(idw_p = m_params$idw_p_pre, idw_nmax = m_params$idw_nmax, tps_lambda = m_params$tps_lambda_pre, pre_fit = m_params$pre_fit_pre)
-                  if (file.exists(cancel_file_val)) stop("Model generation cancelled by user.")
-                  res_p_list <- apply_interpolation(pts_p, "pv", current_method, grid_p, aux_vars, lags_p, mp_p, l, "pre")
-                  res_out$v_emp_pre <- res_p_list$v_emp; res_out$v_fit_pre <- res_p_list$fit; res_out$cv_pre <- res_p_list$cv_metrics; res_out$cv_obj_pre <- res_p_list$cv_obj
-                  res_out$summ_pre <- res_p_list$model_summary; res_out$rf_pre <- res_p_list$rf_model; res_out$gstat_pre <- res_p_list$gstat_obj
-                  res_out$log_msg <- paste0(res_out$log_msg, "\n", res_p_list$log_msg)
-                  
-                  if(!is.null(res_p_list$res_sf)) {
-                      fields_p <- if("var1.var" %in% colnames(res_p_list$res_sf)) c("var1.pred", "var1.var") else "var1.pred"
-                      r_p <- terra::rasterize(res_p_list$res_sf, grid_r, field=fields_p) %>% terra::mask(terra::vect(bound)) %>% terra::project(crs_sel)
-                      res_out$r_p <- terra::wrap(r_p)
-                  }
-              }
-          }
-          
-          if(!is.null(r_a) && !is.null(r_p)) res_out$r_res <- terra::wrap(r_a - r_p)
-          
-          # --- Extended Residuals: Kriged Point Errors ---
-          pts_err_raw <- pts_data %>% filter(!is.na(v), !is.na(pv))
-          if(nrow(pts_err_raw) >= 3) {
-              pts_err <- sf::st_as_sf(pts_err_raw, coords=c("x","y"), crs=utm_crs) %>%
-                         dplyr::mutate(err = v - pv)
-              err_mod <- gstat::idw(err ~ 1, pts_err, grid_p, nmax = m_params$idw_nmax, idp = 2, debug.level = 0)
-              r_err <- terra::rasterize(err_mod, grid_r, field="var1.pred") %>% terra::mask(terra::vect(bound)) %>% terra::project(crs_sel)
-              res_out$r_point_err <- terra::wrap(r_err)
-          }
-          
-          pts$model_resid_act <- NA_real_
-          if (nrow(pts_a) >= 3 && exists("res_a_list") && !is.null(res_a_list$residuals)) {
-            pts$model_resid_act[!is.na(pts$v)] <- res_a_list$residuals
-          }
-          
-          pts$model_resid_pre <- NA_real_
-          if ((comp_mode || val_type != "actual") && nrow(pts_p) >= 3 && exists("res_p_list") && !is.null(res_p_list$residuals)) {
-            pts$model_resid_pre[!is.na(pts$pv)] <- res_p_list$residuals
-          }
-  
-          res_out$bound <- sf::st_transform(bound, crs_sel)
-          res_out$pts <- sf::st_transform(pts, crs_sel) %>% dplyr::mutate(loc = l, resid = v - pv)
-          res_out$actual_res <- actual_res
-          
-          res_out
-        }, error = function(e) {
-          res_out$log_msg <- paste0(res_out$log_msg, "\nError in ", l, ": ", e$message)
-          res_out
-        })
-        
-        return(res_out)
-      }, .options = furrr::furrr_options(seed = TRUE))
-      return(res_all)
-    }, seed = TRUE, packages = c("sf", "terra", "dplyr", "gstat", "randomForest", "fields", "concaveman", "FNN", "spdep", "furrr"),
-      globals = list(
-        df_list = df_list,
-        current_method = current_method,
-        current_crs = current_crs,
-        aux_vars = aux_vars,
-        shp_bound = shp_bound,
-        b_type = b_type,
-        buff_mode = buff_mode,
-        b_dist = b_dist,
-        res_mode = res_mode,
-        grid_res = grid_res,
-        crs_sel = crs_sel,
-        comp_mode = comp_mode,
-        val_type = val_type,
-        apply_interpolation = apply_interpolation,
-        calc_scientific_lags = calc_scientific_lags,
-        robust_vgm_fit = robust_vgm_fit,
-        perform_cv = perform_cv,
-        perform_rk_cv = perform_rk_cv,
-        perform_rfk_cv = perform_rfk_cv,
-        calc_ccc = calc_ccc,
-        augment_metrics = augment_metrics,
-        calc_moran = calc_moran,
-        check_vif = check_vif,
-        suggest_lmc_model = suggest_lmc_model,
-        `%||%` = `%||%`,
-        apply_OK = apply_OK,
-        apply_RK = apply_RK,
-        apply_RFK = apply_RFK,
-        apply_CK = apply_CK,
-        apply_IDW = apply_IDW,
-        apply_TPS = apply_TPS,
-        krige_covariates = krige_covariates,
-        get_cv_residuals = get_cv_residuals,
-        init_interpolation_res = init_interpolation_res,
-        safe_run_cv = safe_run_cv,
-        sanitize_spatial_predictions = sanitize_spatial_predictions,
-        update_progress_file = update_progress_file,
-        detect_multicollinearity_engine = detect_multicollinearity_engine,
-        optimize_idw_p = optimize_idw_p,
-        main_wd = main_wd,
-        progress_dir_val = progress_dir_val,
-        session_id_val = session_id_val,
-        cancel_file_val = cancel_file_val
-      )
-    ) %...>% (function(res_all) {
+      setwd(main_wd)
+      source("spatial_helpers_0.9.8c.R", local = FALSE)
       
-      # Aggregate results back to rv
+      force_globals <- list(
+        run_regional_interpolation, calc_scientific_lags, robust_vgm_fit, 
+        apply_interpolation, apply_OK, apply_RK, apply_RFK, apply_CK, 
+        apply_IDW, apply_TPS, perform_kriging_loocv, safe_run_cv, 
+        optimize_idw_p, clean_gstat_env,
+        apply_kriging_pipeline, check_vif, krige_covariates, get_buffer_multiplier,
+        sanitize_spatial_predictions, validate_and_project_sf, suggest_lmc_model,
+        .cv_to_df, detect_cv_columns
+      )
+      
+      res_all <- furrr::future_map(df_list, function(item) {
+        force_globals_nested <- list(
+          run_regional_interpolation, calc_scientific_lags, robust_vgm_fit, 
+          apply_interpolation, apply_OK, apply_RK, apply_RFK, apply_CK, 
+          apply_IDW, apply_TPS, perform_kriging_loocv, safe_run_cv, 
+          optimize_idw_p, clean_gstat_env,
+          apply_kriging_pipeline, check_vif, krige_covariates, get_buffer_multiplier,
+          sanitize_spatial_predictions, validate_and_project_sf, suggest_lmc_model,
+          .cv_to_df, detect_cv_columns
+        )
+        
+        run_regional_interpolation(
+          item = item,
+          current_method = current_method,
+          current_crs = current_crs,
+          aux_vars = aux_vars,
+          shp_bound = shp_bound,
+          b_type = b_type,
+          buff_mode = buff_mode,
+          b_dist = b_dist,
+          res_mode = res_mode,
+          grid_res = grid_res,
+          crs_sel = crs_sel,
+          comp_mode = comp_mode,
+          val_type = val_type,
+          progress_dir_val = progress_dir_val,
+          session_id_val = session_id_val,
+          cancel_file_val = cancel_file_val
+        )
+      }, .options = furrr::furrr_options(
+        seed = 12345,
+        globals = c(
+          "run_regional_interpolation", "calc_scientific_lags", "robust_vgm_fit",
+          "apply_interpolation", "apply_OK", "apply_RK", "apply_RFK", "apply_CK",
+          "apply_IDW", "apply_TPS", "perform_kriging_loocv", "safe_run_cv",
+          "optimize_idw_p", "clean_gstat_env",
+          "apply_kriging_pipeline", "check_vif", "krige_covariates", "get_buffer_multiplier",
+          "sanitize_spatial_predictions", "validate_and_project_sf", "suggest_lmc_model",
+          ".cv_to_df", "detect_cv_columns"
+        )
+      ))
+      return(res_all)
+    }, seed = 12345) %...>% (function(res_all) {
+      if (this_token != rv$run_token) return()
+      
       for(res in res_all) {
           l <- res$l
           if(res$log_msg != "") {
@@ -3970,10 +3660,10 @@ server <- function(input, output, session) {
                 ))
               }
           }
-          if(!is.null(res$r_a)) rv$rast_list_act[[l]] <- terra::unwrap(res$r_a)
-          if(!is.null(res$r_p)) rv$rast_list_pre[[l]] <- terra::unwrap(res$r_p)
-          if(!is.null(res$r_res)) rv$rast_list_res[[l]] <- terra::unwrap(res$r_res)
-          if(!is.null(res$r_point_err)) rv$rast_list_point_res[[l]] <- terra::unwrap(res$r_point_err)
+          if(!is.null(res$r_a)) rv$rast_list_act[[l]] <- res$r_a
+          if(!is.null(res$r_p)) rv$rast_list_pre[[l]] <- res$r_p
+          if(!is.null(res$r_res)) rv$rast_list_res[[l]] <- res$r_res
+          if(!is.null(res$r_point_err)) rv$rast_list_point_res[[l]] <- res$r_point_err
           if(!is.null(res$bound)) b_list[[length(b_list)+1]] <- res$bound
           if(!is.null(res$pts)) sf_list[[length(sf_list)+1]] <- res$pts
           
@@ -4017,7 +3707,6 @@ server <- function(input, output, session) {
       register_export_item("map_point_residuals", paste(meta$label, "- Point Error Map"), "map", rv$rast_point_res, meta$category)
     }
     
-    # NEW: Register Combined Comparison Map
     if(!is.null(rv$rast) && !is.null(rv$rast_pred)) {
        register_export_item("map_comparison", paste(meta$label, "- Actual vs Predicted Comparison"), "map_combined", list(act = rv$rast, pre = rv$rast_pred), meta$category)
     }
@@ -4033,10 +3722,20 @@ server <- function(input, output, session) {
       })
       rv$sf <- do.call(rbind, sf_list_aligned)
     }
-    if(length(b_list) > 0) rv$bound <- do.call(rbind, unname(b_list)) %>% st_union()
+    valid_bounds <- Filter(function(x) !is.null(x) && inherits(x, "sf"), b_list)
+    if(length(valid_bounds) > 0) {
+      target_crs_b <- sf::st_crs(valid_bounds[[1]])
+      b_list_aligned <- lapply(valid_bounds, function(x) {
+        if (sf::st_crs(x) != target_crs_b) {
+          sf::st_transform(x, target_crs_b)
+        } else {
+          x
+        }
+      })
+      rv$bound <- do.call(rbind, unname(b_list_aligned)) %>% sf::st_union()
+    }
     rv$loc_names <- names(valid_a)
     
-    # Automatically zoom/pan maps to the active boundary bounding box when the run completes
     if (!is.null(rv$bound)) {
       tryCatch({
         bbox <- sf::st_bbox(sf::st_transform(sf::st_as_sf(rv$bound), 4326))
@@ -4048,7 +3747,6 @@ server <- function(input, output, session) {
       }, error = function(e) NULL)
     }
     
-    # Global Metrics (Standard RMSE/R2)
     if(!is.null(rv$sf)) {
       df_met <- rv$sf %>% st_drop_geometry() %>% filter(!is.na(v), !is.na(pv))
       if(nrow(df_met) > 0) {
@@ -4067,10 +3765,8 @@ server <- function(input, output, session) {
         rv$metrics <- data.frame(Metric = c("RMSE (Avg Error)", "R2 (Correlation)", "R2 (Traditional)", "MBE (Bias)"), Value = c(NA, NA, NA, NA))
       }
     }
-    # --- REGISTRY: Register Total Statistics ---
     meta <- get_current_meta()
     
-    # 1. Total Performance Metrics (Uploaded Data)
     if(!is.null(rv$sf)) {
       df_perf <- rv$sf %>% st_drop_geometry() %>% filter(!is.na(v), !is.na(pv))
       if(nrow(df_perf) >= 3) {
@@ -4088,7 +3784,6 @@ server <- function(input, output, session) {
         register_export_item("table_perf_uploaded_total", paste(meta$label, "- Total Prediction Performance"), "table", perf_total, meta$category)
       }
       
-      # 2. Total Descriptive Statistics (Actual)
       v_all <- rv$sf$v[!is.na(rv$sf$v)]
       if(length(v_all) > 0) {
         s_a <- summary(v_all)
@@ -4096,7 +3791,6 @@ server <- function(input, output, session) {
         register_export_item("table_stats_total", paste(meta$label, "- Total Descriptive Statistics (Actual)"), "table", stats_total, meta$category)
       }
       
-      # 2.5 Total Descriptive Statistics (Predicted)
       if(comp_mode || val_type != "actual") {
         pv_all <- rv$sf$pv[!is.na(rv$sf$pv)]
         if(length(pv_all) > 0) {
@@ -4106,9 +3800,7 @@ server <- function(input, output, session) {
         }
       }
       
-      # 3. Total Classification Performance (Kappa)
-      # Using default 'agro' binning for registration
-      params_k <- tryCatch(agro_params(), error = function(e) NULL)
+      params_k <- tryCatch(agro_params(), condition = function(c) NULL)
       if(!is.null(params_k) && (comp_mode || val_type != "actual")) {
         df_k <- df_perf
         brks_k <- c(-Inf, params_k$rcl_mat[-1, 1], Inf)
@@ -4130,14 +3822,11 @@ server <- function(input, output, session) {
       }
     }
 
-    # 4. Total Area Coverage (if Agro)
-    if(isTruthy(input$color_style == "agro") && !is.null(rv$rast)) {
+    if(isTruthy(input$color_style %in% c("agro", "bin")) && !is.null(rv$rast)) {
        area_total <- area_df_total_act()
        if(is.data.frame(area_total)) register_export_item("table_area_total", paste(meta$label, "- Total Area Coverage"), "table", area_total, meta$category)
     }
 
-    # --- REGISTRY: Per-Locality Assets ---
-    # Per-Locality Assets Registration
     for(l in locs) {
        register_locality_assets(l, meta, comp_mode, val_type)
     }
@@ -4152,13 +3841,29 @@ server <- function(input, output, session) {
     update_premium_progress(100, "Click below to reveal the updated geostatistical surfaces.")
     shinyjs::show("reveal_maps_btn")
     
-    # Wipe the polling state and remove temporary files
+    shinyjs::enable("run")
+    updateActionButton(session, "run", label = "Interpolated", icon = icon("check"))
+    
     rv$model_running <- FALSE
-    old_files <- list.files(path = session_progress_dir, pattern = paste0("^progress_", session_id, "_.*_.*\\.txt$"), full.names = TRUE)
+    old_files <- list.files(path = session_progress_dir, pattern = paste0("^(progress|warn)_", session_id, "_.*_.*\\.txt$"), full.names = TRUE)
     if(length(old_files) > 0) tryCatch(file.remove(old_files), error = function(e) NULL)
     }) %...!% (function(err) {
-      shinyjs::hide("map_processing_overlay")
-      if (!grepl("cancelled", tolower(err$message))) {
+      if (this_token != rv$run_token) return()
+      shinyjs::hide("map_spinner")
+      shinyjs::hide("map_progress_bar_container")
+      shinyjs::hide("cancel_model_btn")
+      shinyjs::hide("reveal_maps_btn")
+      
+      shinyjs::enable("run")
+      updateActionButton(session, "run", label = "Run Interpolation", icon = NULL)
+      shinyjs::runjs("$('#run i').remove();")
+      
+      if (grepl("cancelled", tolower(err$message))) {
+        shinyjs::html("map_processing_title", "Interpolation Cancelled")
+        shinyjs::html("map_progress_text", HTML("Please configure parameters in the left panel and click <b>'Run Interpolation'</b> to generate geostatistical maps and review diagnostic results."))
+      } else {
+        shinyjs::html("map_processing_title", "Interpolation Failed")
+        shinyjs::html("map_progress_text", "An error occurred during parallel modeling. Please check the error message and click 'Run Interpolation' to try again.")
         showModal(modalDialog(
           title = tags$div(style = "color: #d9534f; font-weight: bold;", icon("exclamation-triangle"), "Parallel Interpolation Failed"),
           tags$p("An error occurred while executing the parallel interpolation algorithms:"),
@@ -4174,27 +3879,51 @@ server <- function(input, output, session) {
         ))
       }
       
-      # Wipe the polling state and remove temporary files on failure
       rv$model_running <- FALSE
-      old_files <- list.files(path = session_progress_dir, pattern = paste0("^progress_", session_id, "_.*_.*\\.txt$"), full.names = TRUE)
+      old_files <- list.files(path = session_progress_dir, pattern = paste0("^(progress|warn)_", session_id, "_.*_.*\\.txt$"), full.names = TRUE)
       if(length(old_files) > 0) tryCatch(file.remove(old_files), error = function(e) NULL)
     })
     
     }, error = function(e) {
-      shinyjs::hide("map_processing_overlay")
+      shinyjs::hide("map_spinner")
+      shinyjs::hide("map_progress_bar_container")
+      shinyjs::hide("cancel_model_btn")
+      shinyjs::html("map_processing_title", "Interpolation Failed")
+      shinyjs::html("map_progress_text", paste("Model preparation failed:", e$message))
       showNotification(paste("Model preparation failed:", e$message), type = "error")
       rv$model_running <- FALSE
+      
+      shinyjs::enable("run")
+      updateActionButton(session, "run", label = "Run Interpolation", icon = NULL)
+      shinyjs::runjs("$('#run i').remove();")
     })
     
-    # CRITICAL: Return NULL so Shiny does NOT lock the session waiting for the promise.
-    # If the promise is the last expression, Shiny treats it as "wait for this before allowing interaction".
     NULL
   })
 
-  # Step 2: Implement the dynamic reactiveTimer polling observer
   observe({
     req(rv$model_running)
-    invalidateLater(500)
+    n_locs <- 1
+    if (!is.null(rv$sf) && "loc" %in% colnames(rv$sf)) {
+      n_locs <- length(unique(rv$sf$loc))
+    } else if (!is.null(input$locality) && !("ALL" %in% input$locality) && length(input$locality) > 0) {
+      n_locs <- length(input$locality)
+    }
+    poll_interval <- if (n_locs < 5) 250 else if (n_locs <= 20) 1000 else 2000
+    invalidateLater(poll_interval)
+    
+    loc_col <- rv$mapping$loc
+    selected_locs <- if ("ALL" %in% input$locality || length(input$locality) == 0) {
+      if (!is.null(rv$user_data) && !is.null(loc_col) && loc_col %in% colnames(rv$user_data)) {
+        unique(na.omit(rv$user_data[[loc_col]]))
+      } else NULL
+    } else {
+      input$locality
+    }
+    n_locs_calc <- length(selected_locs)
+    if (n_locs_calc == 0) n_locs_calc <- 1
+    comp_mode <- isTruthy(input$comp_mode) || isTruthy(input$value_type != "actual")
+    expected_models <- n_locs_calc * (if(comp_mode) 2 else 1)
     
     files <- list.files(path = session_progress_dir, pattern = paste0("^progress_", session_id, "_.*_.*\\.txt$"), full.names = TRUE)
     if(length(files) > 0) {
@@ -4203,45 +3932,98 @@ server <- function(input, output, session) {
         if(length(val) == 0 || is.na(val)) 0 else val
       }, numeric(1))
       
-      avg_pct <- mean(vals, na.rm = TRUE)
-      # Scale progress between 50% (start of math loops) and 100% (done)
+      avg_pct <- sum(vals, na.rm = TRUE) / expected_models
+      
       bar_width <- 50 + (avg_pct * 0.5)
       bar_width <- max(50, min(99, bar_width)) # Cap at 99% until complete handler resolves
       
       update_premium_progress(bar_width)
       
-      # Build premium individual region status
       progress_msgs <- c()
       for (f in files) {
-        loc_name <- gsub(paste0("^progress_", session_id, "_(.*)_(act|pre)\\.txt$"), "\\1", basename(f))
+        f_base <- basename(f)
+        if (grepl("_act\\.txt$", f_base)) {
+          loc_name <- gsub(paste0("^progress_", session_id, "_(.*)_act\\.txt$"), "\\1", f_base)
+          type_suffix <- " (Actual)"
+        } else if (grepl("_pre\\.txt$", f_base)) {
+          loc_name <- gsub(paste0("^progress_", session_id, "_(.*)_pre\\.txt$"), "\\1", f_base)
+          type_suffix <- " (Predicted)"
+        } else {
+          loc_name <- gsub(paste0("^progress_", session_id, "_(.*)_(act|pre)\\.txt$"), "\\1", f_base)
+          type_suffix <- ""
+        }
+        
+        loc_display <- gsub("_", " ", loc_name)
         val <- tryCatch(as.numeric(readLines(f, warn = FALSE)), error = function(e) NA_real_)
         if(length(val) > 0 && !is.na(val)) {
-          progress_msgs <- c(progress_msgs, paste0("<b>", loc_name, "</b>: ", val, "%"))
+          progress_msgs <- c(progress_msgs, paste0("<b>", loc_display, type_suffix, "</b>: ", val, "%"))
         }
       }
+      
+      warn_files <- list.files(path = session_progress_dir, pattern = paste0("^warn_", session_id, "_.*_.*\\.txt$"), full.names = TRUE)
+      warn_msgs <- c()
+      if(length(warn_files) > 0) {
+        for (wf in warn_files) {
+          wf_base <- basename(wf)
+          if (grepl("_act\\.txt$", wf_base)) {
+            loc_name <- gsub(paste0("^warn_", session_id, "_(.*)_act\\.txt$"), "\\1", wf_base)
+            type_suffix <- " (Actual)"
+          } else if (grepl("_pre\\.txt$", wf_base)) {
+            loc_name <- gsub(paste0("^warn_", session_id, "_(.*)_pre\\.txt$"), "\\1", wf_base)
+            type_suffix <- " (Predicted)"
+          } else {
+            loc_name <- gsub(paste0("^warn_", session_id, "_(.*)_(act|pre)\\.txt$"), "\\1", wf_base)
+            type_suffix <- ""
+          }
+          loc_display <- gsub("_", " ", loc_name)
+          msg <- tryCatch(readLines(wf, warn = FALSE), error = function(e) "")
+          if (length(msg) > 0 && msg != "") {
+            warn_msgs <- c(warn_msgs, paste0("⚠️ <b>", loc_display, type_suffix, "</b>: ", msg))
+          }
+        }
+      }
+      
+      warn_block <- ""
+      if (length(warn_msgs) > 0) {
+        warn_block <- paste0("<br/><span style='font-size: 0.85em; color: #e74c3c; margin-top: 5px; display: inline-block;'>", paste(warn_msgs, collapse = "<br/>"), "</span>")
+      }
+      
       if (length(progress_msgs) > 0) {
-        shinyjs::html("map_progress_text", paste0("Executing Parallel Interpolation Algorithms...<br/><span style='font-size: 0.85em; opacity: 0.8;'>", paste(progress_msgs, collapse = " &nbsp;|&nbsp; "), "</span>"))
+        shinyjs::html("map_progress_text", paste0("Executing Parallel Interpolation Algorithms...<br/><span style='font-size: 0.85em; opacity: 0.8;'>", paste(progress_msgs, collapse = " &nbsp;|&nbsp; "), "</span>", warn_block))
       }
     }
   })
 
-  # Event to cancel model generation
   observeEvent(input$cancel_model_btn, {
     cancel_file <- file.path(session_progress_dir, "cancel_flag.txt")
     file.create(cancel_file)
     rv$model_running <- FALSE
-    shinyjs::hide("map_processing_overlay")
+    rv$run_token <- rv$run_token + 1L
+    
+    shinyjs::hide("map_spinner")
+    shinyjs::hide("map_progress_bar_container")
+    shinyjs::hide("cancel_model_btn")
+    shinyjs::hide("reveal_maps_btn")
+    
+    shinyjs::html("map_processing_title", "Interpolation Cancelled")
+    shinyjs::html("map_progress_text", HTML("Please configure parameters in the left panel and click <b>'Run Interpolation'</b> to generate geostatistical maps and review diagnostic results."))
+    
     showNotification("Model generation cancelled by user.", type = "warning")
     
-    # Wipe the temporary progress files
-    old_files <- list.files(path = session_progress_dir, pattern = paste0("^progress_", session_id, "_.*_.*\\.txt$"), full.names = TRUE)
+    old_files <- list.files(path = session_progress_dir, pattern = paste0("^(progress|warn)_", session_id, "_.*_.*\\.txt$"), full.names = TRUE)
     if(length(old_files) > 0) tryCatch(file.remove(old_files), error = function(e) NULL)
+    
+    shinyjs::enable("run")
+    updateActionButton(session, "run", label = "Run Interpolation", icon = NULL)
+    shinyjs::runjs("$('#run i').remove();")
   })
 
-  # Event to reveal maps and unlock analysis
   observeEvent(input$reveal_maps_btn, {
     shinyjs::hide("map_processing_overlay")
     showNotification("Maps and scientific analysis metrics are now available.", type = "message")
+    
+    updateActionButton(session, "run", label = "Run Interpolation", icon = NULL)
+    shinyjs::runjs("$('#run i').remove();")
   })
 
   observeEvent(input$resid_info_btn, {
@@ -4302,7 +4084,6 @@ server <- function(input, output, session) {
       fixed_dist <- input$buff_dist %||% 250
       
       df$`Buffer (m)` <- sapply(res_list, function(x) {
-        # Determine the base resolution for calculations
         if (res_mode_val == "fixed") {
           base_res <- manual_res_val
         } else {
@@ -4330,12 +4111,10 @@ server <- function(input, output, session) {
     df
   }, striped = TRUE, hover = TRUE, bordered = TRUE, width = "100%")
 
-  # --- Map Helper ---
   draw_map <- function(r_obj, lab) {
     current_tiles <- input$base_map_layer %||% "Esri.WorldImagery"
     
-    # Check if we are drawing a raster or just points (resid_points mode)
-    if(is.null(r_obj) && lab != "resid_points") return(leaflet(options = leafletOptions(zoomControl = FALSE)) %>% addProviderTiles(current_tiles, layerId="base_tiles"))
+    if((is.null(r_obj) || (is.list(r_obj) && length(r_obj) == 0)) && lab != "resid_points") return(leaflet(options = leafletOptions(zoomControl = FALSE)) %>% addProviderTiles(current_tiles, layerId="base_tiles"))
     
     m <- leaflet(options = leafletOptions(zoomControl = FALSE)) %>% addProviderTiles(current_tiles, layerId="base_tiles") %>%
       leaflet.extras::addDrawToolbar(
@@ -4351,73 +4130,164 @@ server <- function(input, output, session) {
     meta <- get_current_meta()
     req(meta)
     
-    # 1. Draw Raster if provided
-    if(!is.null(r_obj)) {
-      if(inherits(r_obj, "PackedSpatRaster")) r_obj <- terra::unwrap(r_obj)
-      r_w <- terra::project(r_obj, "EPSG:4326")
+    if(!is.null(r_obj) && !(is.list(r_obj) && length(r_obj) == 0)) {
+      r_list <- if(inherits(r_obj, "SpatRaster") || inherits(r_obj, "PackedSpatRaster")) list(r_obj) else r_obj
+      r_list <- Filter(Negate(is.null), r_list)
       
-      # Select the active layer based on uncertainty toggle
-      is_uncertainty <- isTruthy(input$show_uncertainty) && input$method %in% c("OK", "RK", "RFK", "CK") && "var1.var" %in% names(r_w)
-      if (is_uncertainty) {
-        active_layer <- r_w[["var1.var"]]
-        if (input$uncertainty_type == "se") {
-          active_layer <- sqrt(active_layer)
-          meta$label <- paste(meta$label, "(Std Error)")
-        } else {
-          meta$label <- paste(meta$label, "(Variance)")
-        }
-        meta$palette <- "inferno"
-      } else {
-        active_layer <- if("var1.pred" %in% names(r_w)) r_w[["var1.pred"]] else r_w[[1]]
-      }
-      
-      vv <- as.vector(values(active_layer, na.rm=TRUE))
-      vv_scale <- joint_vv() %||% vv
-
-      is_viridis <- meta$palette == "viridis"
-      if(input$value_type == "resid" || lab == "resid_raster") {
-        # Use divergent palette for residuals: Red (Neg) -> White (Zero) -> Blue (Pos)
-        abs_max <- max(abs(vv), na.rm = TRUE)
-        if(is.infinite(abs_max) || is.na(abs_max)) abs_max <- 1
-        # Removing reverse=TRUE makes Red negative and Blue positive in brewer RdBu
-        pal <- colorNumeric("RdBu", domain = c(-abs_max, abs_max), na.color = "transparent")
-        m <- m %>% addRasterImage(active_layer, colors = pal, opacity = 0.8)
-        m <- m %>% leaflet::addLegend(pal = pal, values = c(-abs_max, abs_max), title = paste("Resid:", meta$label))
-      } else if(input$color_style == "agro") {
-        params <- agro_params()
-        if(!is.null(params)) {
-          pal <- colorBin(params$colors, bins = params$brks, na.color = "transparent", right = FALSE)
-          m <- m %>% addRasterImage(active_layer, colors = pal, opacity = 0.8)
-          m <- m %>% leaflet::addLegend(colors = params$colors, labels = params$leg_labels, opacity = 0.8, title = paste(meta$label, meta$unit))
-        }
-      } else if(input$color_style == "bin") {
-        pal <- if(is_viridis) colorBin(viridis::viridis(256, option = meta$palette), vv_scale, bins = 5, na.color = "transparent") 
-               else colorBin(meta$palette, vv_scale, bins = 5, na.color = "transparent")
-        m <- m %>% addRasterImage(active_layer, colors = pal, opacity = 0.8)
-        m <- m %>% leaflet::addLegend(pal = pal, values = vv_scale, opacity = 0.8, title = paste(meta$label, meta$unit))
-      } else {
-        pal <- if(is_viridis) colorNumeric(viridis::viridis(256, option = meta$palette), vv_scale, na.color = "transparent") 
-               else colorNumeric(meta$palette, vv_scale, na.color = "transparent")
-        m <- m %>% addRasterImage(active_layer, colors = pal, opacity = 0.8)
+      if (length(r_list) > 0) {
+        r_names <- names(r_list)
+        vv_list <- lapply(seq_along(r_list), function(i) {
+          r <- r_list[[i]]
+          r_name <- if (!is.null(r_names) && length(r_names) >= i && !is.na(r_names[i]) && r_names[i] != "") r_names[i] else as.character(i)
+          cache_key <- paste0(rv$run_counter, "_", lab, "_", r_name)
+          
+          if (exists(cache_key, envir = leaflet_proj_cache)) {
+            r_proj <- get(cache_key, envir = leaflet_proj_cache)
+          } else {
+            if (inherits(r, "PackedSpatRaster")) r <- terra::unwrap(r)
+            r_proj <- tryCatch(terra::project(r, "EPSG:4326"), error = function(e) NULL)
+            assign(cache_key, r_proj, envir = leaflet_proj_cache)
+          }
+          if (is.null(r_proj)) return(NULL)
+          
+          is_uncertainty <- isTruthy(input$show_uncertainty) && input$method %in% c("OK", "RK", "RFK", "CK") && "var1.var" %in% names(r_proj)
+          active_layer <- if (is_uncertainty) {
+            al <- r_proj[["var1.var"]]
+            if (input$uncertainty_type == "se") sqrt(al) else al
+          } else {
+            if("var1.pred" %in% names(r_proj)) r_proj[["var1.pred"]] else r_proj[[1]]
+          }
+          as.vector(values(active_layer, na.rm=TRUE))
+        })
+        vv <- unlist(vv_list)
+        vv_scale <- joint_vv() %||% vv
         
-        # Dynamic precision based on range
-        v_range <- diff(range(vv_scale, na.rm=TRUE))
-        d_format <- if(is.na(v_range)) 2 else if(v_range < 0.01) 6 else if(v_range < 0.1) 4 else 2
-        m <- m %>% leaflet::addLegend(pal = pal, values = vv_scale, title = paste(meta$label, meta$unit), labFormat = labelFormat(digits = d_format))
+        is_viridis <- meta$palette == "viridis"
+        if(input$value_type == "resid" || lab == "resid_raster") {
+          abs_max <- max(abs(vv), na.rm = TRUE)
+          if(is.infinite(abs_max) || is.na(abs_max)) abs_max <- 1
+          pal <- colorNumeric("RdBu", domain = c(-abs_max, abs_max), na.color = "transparent")
+          
+          for (i in seq_along(r_list)) {
+            r <- r_list[[i]]
+            r_name <- if (!is.null(r_names) && length(r_names) >= i && !is.na(r_names[i]) && r_names[i] != "") r_names[i] else as.character(i)
+            cache_key <- paste0(rv$run_counter, "_", lab, "_", r_name)
+            
+            if (exists(cache_key, envir = leaflet_proj_cache)) {
+              r_w <- get(cache_key, envir = leaflet_proj_cache)
+            } else {
+              if (inherits(r, "PackedSpatRaster")) r <- terra::unwrap(r)
+              r_w <- tryCatch(terra::project(r, "EPSG:4326"), error = function(e) NULL)
+              assign(cache_key, r_w, envir = leaflet_proj_cache)
+            }
+            if (is.null(r_w)) next
+            active_layer <- if("var1.pred" %in% names(r_w)) r_w[["var1.pred"]] else r_w[[1]]
+            m <- m %>% addRasterImage(active_layer, colors = pal, opacity = 0.8)
+          }
+          m <- m %>% leaflet::addLegend(pal = pal, values = c(-abs_max, abs_max), title = paste("Resid:", meta$label))
+        } else if(input$color_style == "agro") {
+          params <- agro_params()
+          if(!is.null(params)) {
+            pal <- colorBin(params$colors, bins = params$brks, na.color = "transparent", right = FALSE)
+            
+            for (i in seq_along(r_list)) {
+              r <- r_list[[i]]
+              r_name <- if (!is.null(r_names) && length(r_names) >= i && !is.na(r_names[i]) && r_names[i] != "") r_names[i] else as.character(i)
+              cache_key <- paste0(rv$run_counter, "_", lab, "_", r_name)
+              
+              if (exists(cache_key, envir = leaflet_proj_cache)) {
+                r_w <- get(cache_key, envir = leaflet_proj_cache)
+              } else {
+                if (inherits(r, "PackedSpatRaster")) r <- terra::unwrap(r)
+                r_w <- tryCatch(terra::project(r, "EPSG:4326"), error = function(e) NULL)
+                assign(cache_key, r_w, envir = leaflet_proj_cache)
+              }
+              if (is.null(r_w)) next
+              
+              is_uncertainty <- isTruthy(input$show_uncertainty) && input$method %in% c("OK", "RK", "RFK", "CK") && "var1.var" %in% names(r_w)
+              active_layer <- if (is_uncertainty) {
+                al <- r_w[["var1.var"]]
+                if (input$uncertainty_type == "se") sqrt(al) else al
+              } else {
+                if("var1.pred" %in% names(r_w)) r_w[["var1.pred"]] else r_w[[1]]
+              }
+              m <- m %>% addRasterImage(active_layer, colors = pal, opacity = 0.8)
+            }
+            m <- m %>% leaflet::addLegend(colors = params$colors, labels = params$leg_labels, opacity = 0.8, title = paste(meta$label, meta$unit))
+          }
+        } else if(input$color_style == "bin") {
+          params <- classification_params()
+          if(!is.null(params)) {
+            pal <- colorBin(params$colors, bins = params$brks, na.color = "transparent", right = FALSE)
+            
+            for (i in seq_along(r_list)) {
+              r <- r_list[[i]]
+              r_name <- if (!is.null(r_names) && length(r_names) >= i && !is.na(r_names[i]) && r_names[i] != "") r_names[i] else as.character(i)
+              cache_key <- paste0(rv$run_counter, "_", lab, "_", r_name)
+              
+              if (exists(cache_key, envir = leaflet_proj_cache)) {
+                r_w <- get(cache_key, envir = leaflet_proj_cache)
+              } else {
+                if (inherits(r, "PackedSpatRaster")) r <- terra::unwrap(r)
+                r_w <- tryCatch(terra::project(r, "EPSG:4326"), error = function(e) NULL)
+                assign(cache_key, r_w, envir = leaflet_proj_cache)
+              }
+              if (is.null(r_w)) next
+              
+              is_uncertainty <- isTruthy(input$show_uncertainty) && input$method %in% c("OK", "RK", "RFK", "CK") && "var1.var" %in% names(r_w)
+              active_layer <- if (is_uncertainty) {
+                al <- r_w[["var1.var"]]
+                if (input$uncertainty_type == "se") sqrt(al) else al
+              } else {
+                if("var1.pred" %in% names(r_w)) r_w[["var1.pred"]] else r_w[[1]]
+              }
+              m <- m %>% addRasterImage(active_layer, colors = pal, opacity = 0.8)
+            }
+            m <- m %>% leaflet::addLegend(colors = params$colors, labels = params$leg_labels, opacity = 0.8, title = paste(meta$label, meta$unit))
+          }
+        } else {
+          pal <- if(is_viridis) colorNumeric(viridis::viridis(256, option = meta$palette), vv_scale, na.color = "transparent") 
+                 else colorNumeric(meta$palette, vv_scale, na.color = "transparent")
+                 
+          for (i in seq_along(r_list)) {
+            r <- r_list[[i]]
+            r_name <- if (!is.null(r_names) && length(r_names) >= i && !is.na(r_names[i]) && r_names[i] != "") r_names[i] else as.character(i)
+            cache_key <- paste0(rv$run_counter, "_", lab, "_", r_name)
+            
+            if (exists(cache_key, envir = leaflet_proj_cache)) {
+              r_w <- get(cache_key, envir = leaflet_proj_cache)
+            } else {
+              if (inherits(r, "PackedSpatRaster")) r <- terra::unwrap(r)
+              r_w <- tryCatch(terra::project(r, "EPSG:4326"), error = function(e) NULL)
+              assign(cache_key, r_w, envir = leaflet_proj_cache)
+            }
+            if (is.null(r_w)) next
+            
+            is_uncertainty <- isTruthy(input$show_uncertainty) && input$method %in% c("OK", "RK", "RFK", "CK") && "var1.var" %in% names(r_w)
+            active_layer <- if (is_uncertainty) {
+              al <- r_w[["var1.var"]]
+              if (input$uncertainty_type == "se") sqrt(al) else al
+            } else {
+              if("var1.pred" %in% names(r_w)) r_w[["var1.pred"]] else r_w[[1]]
+            }
+            m <- m %>% addRasterImage(active_layer, colors = pal, opacity = 0.8)
+          }
+          
+          v_range <- diff(range(vv_scale, na.rm=TRUE))
+          d_format <- if(is.na(v_range)) 2 else if(v_range < 0.01) 6 else if(v_range < 0.1) 4 else 2
+          m <- m %>% leaflet::addLegend(pal = pal, values = vv_scale, title = paste(meta$label, meta$unit), labFormat = labelFormat(digits = d_format))
+        }
       }
     }
 
-    # 2. Draw Points
-    # Separation: Regular Points (cyan, toggled) vs Colored Residual Points (RdBu, context-dependent)
     
-    # RIGHT MAP in comparison mode: ALWAYS show colored residual points
     if(lab == "resid_points") {
        pts_view <- st_transform(rv$sf, 4326)
        abs_max_p <- max(abs(pts_view$resid), na.rm=T)
        if(is.infinite(abs_max_p) || is.na(abs_max_p)) abs_max_p <- 1
        pal_pts <- colorNumeric("RdBu", domain = c(-abs_max_p, abs_max_p), na.color = "black")
        df_clean <- st_drop_geometry(pts_view)
-       popups <- lapply(1:nrow(df_clean), function(i) generate_popup(df_clean[i, ])) %>% unlist()
+       popups <- vapply(1:nrow(df_clean), function(i) generate_popup(df_clean[i, ]), character(1))
        
        m <- m %>% addCircleMarkers(data = pts_view, radius = 5, color = "black", weight = 1,
                                   fillColor = ~pal_pts(resid), fillOpacity = 0.9,
@@ -4425,12 +4295,9 @@ server <- function(input, output, session) {
        m <- m %>% leaflet::addLegend(pal = pal_pts, values = c(-abs_max_p, abs_max_p), title = paste("Point Resid:", meta$label))
     }
     
-    # OTHER MAPS (Single view or Comparison Left): Use the Toggle for REGULAR points
-    # (unless it's the left map in resid comp mode, where we want only interpolated)
     if(input$show_points_viewer && lab != "resid_raster" && lab != "resid_points") {
       pts_view <- st_transform(rv$sf, 4326)
       if(nrow(pts_view) > 0) {
-        # F2: Use styled points with group coloring, labels, and custom sizes
         color_by <- input$pt_color_by %||% "none"
         label_field <- input$pt_label_field %||% "none"
 
@@ -4481,7 +4348,6 @@ server <- function(input, output, session) {
 
   output$main_map_title <- renderText({
     req(input$value_type); meta <- get_current_meta(); req(meta)
-    # Reactive dependency on results to ensure it updates when model finishes
     model_done <- !is.null(rv$rast_list_act) && length(rv$rast_list_act) > 0
     
     type_lab <- switch(input$value_type,
@@ -4492,14 +4358,7 @@ server <- function(input, output, session) {
     
     current_method <- rv$run_method[[input$var_id]]
     method_lab <- if(!is.null(current_method)) {
-      m_name <- switch(current_method,
-        "OK"  = "Ordinary Kriging",
-        "RK"  = "Regression Kriging",
-        "RFK" = "Random Forest Kriging",
-        "CK"  = "Co-Kriging",
-        "IDW" = "IDW",
-        "TPS" = "Thin Plate Spline",
-        current_method)
+      m_name <- get_method_label(current_method)
       paste0(" (", m_name, ")")
     } else ""
     
@@ -4512,7 +4371,7 @@ server <- function(input, output, session) {
     
     current_method <- rv$run_method[[input$var_id]]
     method_lab <- if(!is.null(current_method)) {
-      m_name <- switch(current_method, "OK"="Ordinary Kriging","UK"="Universal Kriging","RK"="Regression Kriging","RFK"="Random Forest Kriging","CK"="Co-Kriging","IDW"="IDW","TPS"="Thin Plate Spline", current_method)
+      m_name <- get_method_label(current_method)
       paste0(" (", m_name, ")")
     } else ""
     
@@ -4526,7 +4385,7 @@ server <- function(input, output, session) {
     
     current_method <- rv$run_method[[input$var_id]]
     method_lab <- if(!is.null(current_method)) {
-      m_name <- switch(current_method, "OK"="Ordinary Kriging","UK"="Universal Kriging","RK"="Regression Kriging","RFK"="Random Forest Kriging","CK"="Co-Kriging","IDW"="IDW","TPS"="Thin Plate Spline", current_method)
+      m_name <- get_method_label(current_method)
       paste0(" (", m_name, ")")
     } else ""
     
@@ -4548,7 +4407,6 @@ server <- function(input, output, session) {
 
   observeEvent(input$refresh_map_area, {
     req(input$base_map_layer)
-    # Re-apply the base tile layer to trigger a redraw/refresh of the map canvas
     leafletProxy("main_map") %>%
       clearTiles() %>%
       addProviderTiles(input$base_map_layer, layerId="base_tiles", options = providerTileOptions(zIndex = -10))
@@ -4561,7 +4419,6 @@ server <- function(input, output, session) {
       clearTiles() %>%
       addProviderTiles(input$base_map_layer, layerId="base_tiles", options = providerTileOptions(zIndex = -10))
       
-    # Reset to the initial reveal position (zoom/pan to bounding box)
     if (!is.null(rv$bound)) {
       tryCatch({
         bbox <- sf::st_bbox(sf::st_transform(sf::st_as_sf(rv$bound), 4326))
@@ -4586,28 +4443,27 @@ server <- function(input, output, session) {
       }, error = function(e) NULL)
     }
       
-    # Trigger window resize to force Leaflet invalidateSize which fixes gray tiles
     shinyjs::runjs("setTimeout(function() { window.dispatchEvent(new Event('resize')); }, 100);")
   })
 
   output$main_map <- renderLeaflet({
     req(input$value_type); req(rv$run_method[[input$var_id]])
-    target <- if(input$value_type == "actual") rv$rast
-              else if(input$value_type == "resid") rv$rast_res
-              else rv$rast_pred
+    target <- if(input$value_type == "actual") rv$rast_list_act
+              else if(input$value_type == "resid") rv$rast_list_res
+              else rv$rast_list_pre
     m <- draw_map(target, input$value_type)
-    main_map_rendered <<- TRUE
+    session_state$main_map_rendered <- TRUE
     m
   })
 
   output$comp_map_left <- renderLeaflet({
     req(rv$run_method[[input$var_id]])
     m <- if(input$value_type == "resid") {
-      draw_map(rv$rast_res, "resid_raster")
+      draw_map(rv$rast_list_res, "resid_raster")
     } else {
-      draw_map(rv$rast, "Actual")
+      draw_map(rv$rast_list_act, "Actual")
     }
-    comp_maps_rendered <<- TRUE
+    session_state$comp_maps_rendered <- TRUE
     m
   })
 
@@ -4616,12 +4472,11 @@ server <- function(input, output, session) {
     m <- if(input$value_type == "resid") {
       draw_map(NULL, "resid_points")
     } else {
-      draw_map(rv$rast_pred, "Predicted")
+      draw_map(rv$rast_list_pre, "Predicted")
     }
-    comp_maps_rendered <<- TRUE
+    session_state$comp_maps_rendered <- TRUE
     m
   })
-      # --- Map Panning Logic ---
       output$locality_pan_ui <- renderUI({
       req(rv$loc_names)
       render_locality_pan_input(rv$loc_names)
@@ -4630,9 +4485,7 @@ server <- function(input, output, session) {
       observeEvent(input$locality_pan, {
       req(input$locality_pan, rv$user_data, rv$mapping$x, rv$mapping$y, rv$mapping$crs)
 
-      # 1. Get bounding box
       bbox <- if (input$locality_pan == "global") {
-        # Use only localities that were actually processed (rv$loc_names)
         df_map <- rv$user_data %>% 
           dplyr::filter(!!sym(rv$mapping$loc) %in% rv$loc_names) %>%
           dplyr::select(x = !!sym(rv$mapping$x), y = !!sym(rv$mapping$y)) %>% 
@@ -4648,7 +4501,6 @@ server <- function(input, output, session) {
         st_bbox(pts)
       }
 
-      # 2. Pan maps
       leafletProxy("main_map") %>% fitBounds(as.numeric(bbox$xmin), as.numeric(bbox$ymin), as.numeric(bbox$xmax), as.numeric(bbox$ymax))
 
       if (isTRUE(input$comp_mode)) {
@@ -4657,66 +4509,97 @@ server <- function(input, output, session) {
       }
    })
 
-   # --- Scientific Outputs ---
    output$vgm_plot_main <- renderPlot({
-    loc <- input$sel_loc_stats; meta <- get_current_meta()
-    req(loc, meta)
-    if(loc == "Total (Combined)") {
-      req(rv$sf)
-      plot(variogram(v ~ 1, rv$sf), main = paste("Global Variogram (Actual):", meta$label))
-    }
-    else { 
-      req(rv$v_emp_list[[paste0(loc, "_act")]]); 
-      v_emp <- rv$v_emp_list[[paste0(loc, "_act")]]
-      v_fit <- rv$v_fit_list[[paste0(loc, "_act")]]
-      p <- plot(v_emp, v_fit, main = paste("Fitted (Actual):", loc))
-      
-      # Manual Overlay logic
-      if(input$vgm_mode == "manual" && loc == input$m_loc && (is.null(input$m_target) || input$m_target == "act")) {
-        v_mod_m <- vgm(psill = input$m_psill, model = input$k_mod, range = input$m_range, nugget = input$m_nugget)
-        v_line_m <- variogramLine(v_mod_m, maxdist = max(v_emp$dist))
-        v_line_at_emp <- variogramLine(v_mod_m, dist_vector = v_emp$dist)
-        sse_m <- sum((v_emp$gamma - v_line_at_emp$gamma)^2)
-        
-        p <- p + latticeExtra::layer({
-          panel.lines(v_line_m$dist, v_line_m$gamma, col = "red", lwd = 2, lty = 2)
-          panel.text(max_dist * 0.8, max_gamma * 0.9, paste("Manual SSE:", round(sse_m, 4)), col="red", font=2)
-        }, data = list(v_line_m = v_line_m, sse_m = sse_m, max_dist = max(v_emp$dist), max_gamma = max(v_emp$gamma)))
-      }
-      p
-    }
-  })
-  output$vgm_plot_pred <- renderPlot({
-    loc <- input$sel_loc_stats; meta <- get_current_meta()
-    req(loc, meta)
-    if(loc == "Total (Combined)") {
-      req(rv$sf)
-      plot(variogram(pv ~ 1, rv$sf %>% filter(!is.na(pv))), main = paste("Global Variogram (Predicted):", meta$label))
-    }
-    else { 
-      req(rv$v_emp_list[[paste0(loc, "_pre")]]); 
-      v_emp <- rv$v_emp_list[[paste0(loc, "_pre")]]
-      v_fit <- rv$v_fit_list[[paste0(loc, "_pre")]]
-      p <- plot(v_emp, v_fit, main = paste("Fitted (Predicted):", loc))
-      
-      # Manual Overlay logic
-      if(input$vgm_mode == "manual" && loc == input$m_loc && !is.null(input$m_target) && input$m_target == "pre") {
-        v_mod_m <- vgm(psill = input$m_psill, model = input$k_mod, range = input$m_range, nugget = input$m_nugget)
-        v_line_m <- variogramLine(v_mod_m, maxdist = max(v_emp$dist))
-        v_line_at_emp <- variogramLine(v_mod_m, dist_vector = v_emp$dist)
-        sse_m <- sum((v_emp$gamma - v_line_at_emp$gamma)^2)
-        
-        p <- p + latticeExtra::layer({
-          panel.lines(v_line_m$dist, v_line_m$gamma, col = "red", lwd = 2, lty = 2)
-          panel.text(max_dist * 0.8, max_gamma * 0.9, paste("Manual SSE:", round(sse_m, 4)), col="red", font=2)
-        }, data = list(v_line_m = v_line_m, sse_m = sse_m, max_dist = max(v_emp$dist), max_gamma = max(v_emp$gamma)))
-      }
-      p
-    }
-  })
+     loc <- input$sel_loc_stats; meta <- get_current_meta()
+     req(loc, meta)
+     if(loc == "Total (Combined)") {
+       pts_sf <- if(!is.null(rv$sf)) {
+         rv$sf
+       } else {
+         req(rv$user_data, rv$mapping$x, rv$mapping$y, rv$mapping$crs)
+         act_col <- meta$actual
+         req(act_col %in% colnames(rv$user_data))
+         df_clean <- rv$user_data %>% 
+           dplyr::select(x = !!sym(rv$mapping$x), y = !!sym(rv$mapping$y), v = !!sym(act_col)) %>% 
+           na.omit()
+         req(nrow(df_clean) >= 3)
+         
+         sf_obj <- sf::st_as_sf(df_clean, coords = c("x", "y"), crs = rv$mapping$crs)
+         sf_obj <- validate_and_project_sf(sf_obj, rv$mapping$crs)
+         sf_obj
+       }
+       req(pts_sf)
+       plot(gstat::variogram(v ~ 1, pts_sf), main = paste("Global Variogram (Actual):", meta$label))
+     }
+     else { 
+       req(rv$v_emp_list[[paste0(loc, "_act")]]); 
+       v_emp <- rv$v_emp_list[[paste0(loc, "_act")]]
+       v_fit <- rv$v_fit_list[[paste0(loc, "_act")]]
+       p <- plot(v_emp, v_fit, main = paste("Fitted (Actual):", loc))
+       
+       if(input$vgm_mode == "manual" && loc == input$m_loc && (is.null(input$m_target) || input$m_target == "act")) {
+         v_mod_m <- vgm(psill = input$m_psill, model = input$k_mod, range = input$m_range, nugget = input$m_nugget)
+         v_line_m <- variogramLine(v_mod_m, maxdist = max(v_emp$dist))
+         v_line_at_emp <- variogramLine(v_mod_m, dist_vector = v_emp$dist)
+         sse_m <- sum((v_emp$gamma - v_line_at_emp$gamma)^2)
+         
+         p <- p + latticeExtra::layer({
+           panel.lines(v_line_m$dist, v_line_m$gamma, col = "red", lwd = 2, lty = 2)
+           panel.text(max_dist * 0.8, max_gamma * 0.9, paste("Manual SSE:", round(sse_m, 4)), col="red", font=2)
+         }, data = list(v_line_m = v_line_m, sse_m = sse_m, max_dist = max(v_emp$dist), max_gamma = max(v_emp$gamma)))
+       }
+       p
+     }
+   })
+   output$vgm_plot_pred <- renderPlot({
+     loc <- input$sel_loc_stats; meta <- get_current_meta()
+     req(loc, meta)
+     if(loc == "Total (Combined)") {
+       pred_col <- if(input$value_type == "pred_ss") meta$pred_ss else meta$pred
+       
+       pts_sf <- if(!is.null(rv$sf) && "pv" %in% colnames(rv$sf)) {
+         rv$sf
+       } else if(!is.null(pred_col) && pred_col %in% colnames(rv$user_data)) {
+         req(rv$user_data, rv$mapping$x, rv$mapping$y, rv$mapping$crs)
+         df_clean <- rv$user_data %>% 
+           dplyr::select(x = !!sym(rv$mapping$x), y = !!sym(rv$mapping$y), pv = !!sym(pred_col)) %>% 
+           na.omit()
+         if(nrow(df_clean) < 3) NULL else {
+           sf_obj <- sf::st_as_sf(df_clean, coords = c("x", "y"), crs = rv$mapping$crs)
+           sf_obj <- validate_and_project_sf(sf_obj, rv$mapping$crs)
+           sf_obj
+         }
+       } else {
+         NULL
+       }
+       
+       if (is.null(pts_sf) || !("pv" %in% colnames(pts_sf))) {
+         return(ggplot() + annotate("text", x = 4, y = 4, label = "Predicted data structure is not available.\nPlease run spatial interpolation first.", size = 5, color = "grey40") + theme_void())
+       }
+       
+       plot(gstat::variogram(pv ~ 1, pts_sf %>% filter(!is.na(pv))), main = paste("Global Variogram (Predicted):", meta$label))
+     }
+     else { 
+       req(rv$v_emp_list[[paste0(loc, "_pre")]]); 
+       v_emp <- rv$v_emp_list[[paste0(loc, "_pre")]]
+       v_fit <- rv$v_fit_list[[paste0(loc, "_pre")]]
+       p <- plot(v_emp, v_fit, main = paste("Fitted (Predicted):", loc))
+       
+       if(input$vgm_mode == "manual" && loc == input$m_loc && !is.null(input$m_target) && input$m_target == "pre") {
+         v_mod_m <- vgm(psill = input$m_psill, model = input$k_mod, range = input$m_range, nugget = input$m_nugget)
+         v_line_m <- variogramLine(v_mod_m, maxdist = max(v_emp$dist))
+         v_line_at_emp <- variogramLine(v_mod_m, dist_vector = v_emp$dist)
+         sse_m <- sum((v_emp$gamma - v_line_at_emp$gamma)^2)
+         
+         p <- p + latticeExtra::layer({
+           panel.lines(v_line_m$dist, v_line_m$gamma, col = "red", lwd = 2, lty = 2)
+           panel.text(max_dist * 0.8, max_gamma * 0.9, paste("Manual SSE:", round(sse_m, 4)), col="red", font=2)
+         }, data = list(v_line_m = v_line_m, sse_m = sse_m, max_dist = max(v_emp$dist), max_gamma = max(v_emp$gamma)))
+       }
+       p
+     }
+   })
 
-    # --- Method-Specific Diagnostics ---
-    # RK Summaries
     output$model_summary_ui_act <- renderUI({
     loc <- input$sel_loc_stats; req(loc)
     if (loc == "Total (Combined)") {
@@ -4752,7 +4635,6 @@ server <- function(input, output, session) {
     summary_obj
   })
 
-  # RFK Importance
   output$rf_importance_plot_act <- renderPlot({
     loc <- input$sel_loc_stats; req(loc)
     if (loc == "Total (Combined)") {
@@ -4770,7 +4652,6 @@ server <- function(input, output, session) {
     randomForest::varImpPlot(rv$rf_models[[paste0(loc, "_pre")]], main = paste("Variable Importance (Predicted):", loc))
   })
   
-  # --- Residual & Cross-Variogram Rendering Engine ---
   render_internal_vgm_plot <- function(type) {
     renderPlot({
       loc <- input$sel_loc_stats; req(loc)
@@ -4781,11 +4662,13 @@ server <- function(input, output, session) {
         req(rv$sf, col_resid %in% colnames(rv$sf))
         formula_obj <- as.formula(paste(col_resid, "~ 1"))
         df_filtered <- rv$sf[!is.na(rv$sf[[col_resid]]), ]
-        plot(variogram(formula_obj, df_filtered), main = paste("Global Internal Residual Variogram", title_suffix))
+        p_res <- plot(variogram(formula_obj, df_filtered), main = paste("Global Internal Residual Variogram", title_suffix))
+        print(p_res)
       } else {
         req(rv$v_emp_list[[paste0(loc, "_", type)]], rv$v_fit_list[[paste0(loc, "_", type)]])
-        plot(rv$v_emp_list[[paste0(loc, "_", type)]], rv$v_fit_list[[paste0(loc, "_", type)]], 
+        p_res <- plot(rv$v_emp_list[[paste0(loc, "_", type)]], rv$v_fit_list[[paste0(loc, "_", type)]], 
              main = paste("Internal Residual Variogram", paste0(title_suffix, ":"), loc))
+        print(p_res)
       }
     })
   }
@@ -4802,16 +4685,19 @@ server <- function(input, output, session) {
         return(ggplot() + annotate("text", x = 4, y = 4, label = "Cross-variograms are generated per locality.\nPlease select a specific locality from the dropdown.", size = 5, color = "grey40") + theme_void())
       }
       key <- paste0(loc, "_", type)
-      req(rv$gstat_objs[[key]])
       g <- rv$gstat_objs[[key]]
+      if (is.null(g)) {
+        return(ggplot() + annotate("text", x = 4, y = 4, label = "Cross-variogram is not available\n(LMC model fit failed, using Ordinary Kriging fallback.)", size = 5, color = "grey40") + theme_void())
+      }
       vm <- variogram(g)
       title_suffix <- if (type == "act") "(Actual)" else "(Predicted)"
-      plot(vm, model = g$model, main = paste("Cross-Variogram", paste0(title_suffix, ":"), loc))
+      p_ck <- plot(vm, model = g$model, main = paste("Cross-Variogram", paste0(title_suffix, ":"), loc))
+      print(p_ck)
     })
   }
 
   output$ck_variogram_plot_act <- render_ck_variogram_plot("act")
-  output$ck_variogram_plot_pre <- render_ck_variogram_plot("pre")
+  output$ck_variogram_plot_pred <- render_ck_variogram_plot("pre")
 
   output$vgm_params_table <- renderTable({
     loc <- input$sel_loc_stats; req(loc); if(loc == "Total (Combined)") return(NULL)
@@ -4852,8 +4738,19 @@ server <- function(input, output, session) {
 
   build_obs_pred_plot <- function(df, title, x_lab = "Observed", y_lab = "Predicted") {
     req(df, nrow(df) > 0)
-    obs_col <- grep("\\.observed$|^observed$|^target$", colnames(df), value = TRUE)[1]
-    pre_col <- grep("\\.pred$|^var1\\.pred$", colnames(df), value = TRUE)[1]
+    
+    if (inherits(df, "Spatial")) {
+      df <- as.data.frame(df)
+    } else if (inherits(df, "sf")) {
+      df <- sf::st_drop_geometry(df)
+    }
+    df <- as.data.frame(df)
+    
+    cnames <- names(df)
+    cols <- detect_cv_columns(cnames)
+    obs_col <- cols$observed
+    pre_col <- cols$pred
+    
     req(obs_col, pre_col)
     
     obs <- df[[obs_col]]; pre <- df[[pre_col]]
@@ -4875,6 +4772,7 @@ server <- function(input, output, session) {
     } else {
        df <- rv$cv_data_act[[loc]]
        if(inherits(df, "sf")) df <- st_drop_geometry(df)
+       if(inherits(df, "Spatial")) df <- as.data.frame(df)
     }
     build_obs_pred_plot(df, title = paste("Observed vs Predicted:", loc))
   })
@@ -4890,6 +4788,7 @@ server <- function(input, output, session) {
     } else {
        df <- rv$cv_data_pre[[loc]]
        if(inherits(df, "sf")) df <- st_drop_geometry(df)
+       if(inherits(df, "Spatial")) df <- as.data.frame(df)
     }
     build_obs_pred_plot(df, title = paste("Observed vs Predicted (Predicted Map):", loc))
   })
@@ -4930,10 +4829,11 @@ server <- function(input, output, session) {
     meta <- get_current_meta()
     req(meta)
     
-    # Get actual and predicted data from raw frame
     df <- rv$user_data
-    v_act <- df[[meta$actual]]
-    v_pre <- if(!is.null(meta$pred)) df[[meta$pred]] else if(!is.null(meta$pred_ss)) df[[meta$pred_ss]] else NULL
+    v_act <- if(!is.null(meta$actual) && !is.na(meta$actual) && meta$actual %in% colnames(df)) df[[meta$actual]] else NULL
+    if (is.null(v_act)) return(NULL)
+    
+    v_pre <- if(!is.null(meta$pred) && !is.na(meta$pred) && meta$pred %in% colnames(df)) df[[meta$pred]] else if(!is.null(meta$pred_ss) && !is.na(meta$pred_ss) && meta$pred_ss %in% colnames(df)) df[[meta$pred_ss]] else NULL
     
     s_a <- summary(v_act)
     res <- data.frame(Metric = names(s_a), Total_Actual = as.character(round(as.numeric(s_a), 3)))
@@ -4951,10 +4851,11 @@ server <- function(input, output, session) {
     meta <- get_current_meta()
     req(meta)
     
-    # Filter raw data by mapped locality column
     df <- rv$user_data %>% filter(!!sym(rv$mapping$loc) == input$sel_loc_stats)
-    v_act <- df[[meta$actual]]
-    v_pre <- if(!is.null(meta$pred)) df[[meta$pred]] else if(!is.null(meta$pred_ss)) df[[meta$pred_ss]] else NULL
+    v_act <- if(!is.null(meta$actual) && !is.na(meta$actual) && meta$actual %in% colnames(df)) df[[meta$actual]] else NULL
+    if (is.null(v_act)) return(NULL)
+    
+    v_pre <- if(!is.null(meta$pred) && !is.na(meta$pred) && meta$pred %in% colnames(df)) df[[meta$pred]] else if(!is.null(meta$pred_ss) && !is.na(meta$pred_ss) && meta$pred_ss %in% colnames(df)) df[[meta$pred_ss]] else NULL
     
     s_a <- summary(v_act)
     res <- data.frame(Metric = names(s_a), Selected_Actual = as.character(round(as.numeric(s_a), 3)))
@@ -4966,39 +4867,57 @@ server <- function(input, output, session) {
     res
   })
 
-  calc_area_df <- function(r_obj) {
+  calc_area_df <- function(r_obj, r_id = NULL) {
     if(is.null(r_obj)) return(NULL)
-    params <- tryCatch(agro_params(), error = function(e) NULL)
-    if(is.null(params)) return(data.frame(Status = "Awaiting Agro Params"))
+    if(inherits(r_obj, "PackedSpatRaster")) r_obj <- terra::unwrap(r_obj)
+    params <- tryCatch(classification_params(), condition = function(c) NULL)
+    if(is.null(params)) return(data.frame(Status = "Awaiting Classification Params"))
+    
+    if (!is.null(r_id)) {
+      brk_str <- if (!is.null(params) && !is.null(params$brks)) paste(params$brks, collapse = "_") else "nobrks"
+      cache_key <- paste0(rv$run_counter, "_", r_id, "_", brk_str)
+      if (exists(cache_key, envir = area_calc_cache)) {
+        return(get(cache_key, envir = area_calc_cache))
+      }
+    }
     
     tryCatch({
-      # Use matrix classification for 100% predictability
-      # Fix Area Coverage Bug: Subset r_obj to the first layer (prediction) to prevent double-counting multi-layer rasters (like Kriging variance)
       r_class <- classify(r_obj[[1]], params$rcl_mat, right = FALSE)
-      freq_df <- as.data.frame(freq(r_class))
       
-      full_res <- data.frame(value = as.numeric(1:params$n_c), Class = params$labels)
+      area_df <- as.data.frame(expanse(r_class, unit = "ha", byValue = TRUE))
       
-      if(!"value" %in% names(freq_df)) {
-        return(data.frame(Class = params$labels, Ha = 0))
+      class_names <- if(isTruthy(input$color_style == "bin")) params$leg_labels else params$labels
+      full_res <- data.frame(value = as.numeric(1:params$n_c), Class = class_names)
+      
+      if(!"value" %in% names(area_df)) {
+        res_df <- data.frame(Class = class_names, Ha = 0)
+        if (!is.null(r_id)) {
+          assign(cache_key, res_df, envir = area_calc_cache)
+        }
+        return(res_df)
       }
       
-      # Clean freq_df: ensure numeric value and remove NAs (background)
-      freq_df$value <- as.numeric(as.character(freq_df$value))
-      freq_df <- freq_df[!is.na(freq_df$value), ]
+      is_label <- any(as.character(area_df$value) %in% class_names)
+      if (is_label) {
+         area_df$value <- match(as.character(area_df$value), class_names)
+      } else {
+         area_df$value <- as.numeric(as.character(area_df$value))
+      }
       
-      # Aggregate count by value to avoid duplicates if freq() returns multiple layers
-      freq_df <- freq_df %>%
+      area_df <- area_df[!is.na(area_df$value), ]
+      
+      area_df <- area_df %>%
         group_by(value) %>%
-        summarise(count = sum(count, na.rm = TRUE), .groups = "drop")
+        summarise(Ha = round(sum(area, na.rm = TRUE), 2), .groups = "drop")
 
-      # Use left_join to strictly keep only defined classes
       res_df <- full_res %>%
-        left_join(freq_df, by = "value") %>%
-        mutate(count = ifelse(is.na(count), 0, count)) %>%
-        mutate(Ha = round((count * prod(res(r_obj))) / 10000, 2)) %>%
+        left_join(area_df, by = "value") %>%
+        mutate(Ha = ifelse(is.na(Ha), 0, Ha)) %>%
         select(Class, Ha)
       
+      if (!is.null(r_id)) {
+        assign(cache_key, res_df, envir = area_calc_cache)
+      }
       return(res_df)
     }, error = function(e) {
       return(data.frame(Error = as.character(e$message)))
@@ -5006,34 +4925,32 @@ server <- function(input, output, session) {
   }
   area_df_total_act <- reactive({
     req(rv$rast)
-    calc_area_df(rv$rast)
+    calc_area_df(rv$rast, "total_act")
   })
   
   area_df_total_pre <- reactive({
     req(rv$rast_pred)
-    calc_area_df(rv$rast_pred)
+    calc_area_df(rv$rast_pred, "total_pre")
   })
 
-  output$area_table_total_act <- renderTable({ req(input$color_style == "agro"); area_df_total_act() })
-  output$area_table_total_pre <- renderTable({ req(input$color_style == "agro"); area_df_total_pre() })
+  output$area_table_total_act <- renderTable({ req(input$color_style %in% c("agro", "bin")); area_df_total_act() })
+  output$area_table_total_pre <- renderTable({ req(input$color_style %in% c("agro", "bin")); area_df_total_pre() })
   
   output$area_table_loc_act <- renderTable({
-    req(rv$rast_list_act, input$color_style == "agro"); loc <- input$sel_loc_stats
-    if(loc == "Total (Combined)") return(NULL) else calc_area_df(rv$rast_list_act[[loc]])
+    req(rv$rast_list_act, input$color_style %in% c("agro", "bin")); loc <- input$sel_loc_stats
+    if(loc == "Total (Combined)") return(NULL) else calc_area_df(rv$rast_list_act[[loc]], paste0("loc_act_", loc))
   })
   output$area_table_loc_pre <- renderTable({
-    req(rv$rast_list_pre, input$color_style == "agro"); loc <- input$sel_loc_stats
-    if(loc == "Total (Combined)") return(NULL) else calc_area_df(rv$rast_list_pre[[loc]])
+    req(rv$rast_list_pre, input$color_style %in% c("agro", "bin")); loc <- input$sel_loc_stats
+    if(loc == "Total (Combined)") return(NULL) else calc_area_df(rv$rast_list_pre[[loc]], paste0("loc_pre_", loc))
   })
 
   output$metrics_table <- renderTable({
     req(input$sel_loc_stats)
     loc <- input$sel_loc_stats
     
-    # helper to build df row
     get_metrics_df <- function(cv_list, data_list, label) {
       if(loc == "Total (Combined)") {
-        # Mathematically correct pooling, preserving coordinates if available
         all_cv <- do.call(rbind, lapply(data_list, function(x) {
           if(inherits(x, "sf")) {
             coords <- sf::st_coordinates(x)
@@ -5053,7 +4970,6 @@ server <- function(input, output, session) {
           return(empty_df)
         }
         
-        # Use centralized perform_cv for pooled metrics
         res <- perform_cv(all_cv)
         rmse <- res$rmse
         r2 <- res$r2
@@ -5127,7 +5043,6 @@ server <- function(input, output, session) {
     
     loc <- input$sel_loc_stats
     
-    # Filter points
     df <- rv$sf %>% st_drop_geometry() %>% filter(!is.na(v), !is.na(pv))
     if(loc != "Total (Combined)") {
       df <- df %>% filter(loc == !!loc)
@@ -5135,12 +5050,10 @@ server <- function(input, output, session) {
     
     if(nrow(df) < 3) return(data.frame(Status = "Not enough data points for Kappa."))
     
-    # Binning Logic
     if (input$kappa_bin_method == "agro") {
-      params <- tryCatch(agro_params(), error = function(e) NULL)
+      params <- tryCatch(agro_params(), condition = function(c) NULL)
       if(is.null(params) || input$color_style != "agro") return(data.frame(Status = "Please select Agronomical Classes style for this method."))
       
-      # Use cut() with extended range to avoid NA for out-of-bounds predictions
       breaks <- c(-Inf, params$rcl_mat[-1, 1], Inf)
       labels <- params$labels
       
@@ -5152,12 +5065,9 @@ server <- function(input, output, session) {
       df$pred_bin <- factor(df$pred_bin, levels = labels)
       
     } else {
-      # Quartile Binning
-      # Always base quartiles on the actual target values distribution
       brks <- unique(quantile(df$v, probs = seq(0, 1, 0.25), na.rm = TRUE))
       if(length(brks) < 2) return(data.frame(Status = "Not enough variance for quartiles."))
       
-      # Extend boundaries to handle out-of-range predictions
       brks_ext <- brks
       brks_ext[1] <- -Inf
       brks_ext[length(brks_ext)] <- Inf
@@ -5179,15 +5089,16 @@ server <- function(input, output, session) {
     b_acc <- tryCatch(yardstick::bal_accuracy_vec(df$act_bin, df$pred_bin), error = function(e) NA)
     mcc   <- tryCatch(yardstick::mcc_vec(df$act_bin, df$pred_bin), error = function(e) NA)
     
+    off_by_one_acc <- tryCatch(sum(abs(as.integer(df$act_bin) - as.integer(df$pred_bin)) <= 1, na.rm = TRUE) / sum(!is.na(df$act_bin) & !is.na(df$pred_bin)), error = function(e) NA)
+    
     data.frame(
-      Metric = c("Overall Accuracy", "Balanced Accuracy", "Matthews Corr. Coef. (MCC)", "Kappa (Unweighted)", "Weighted Kappa (Linear)"),
-      Value = c(round(acc, 4), round(b_acc, 4), round(mcc, 4), round(k_unw, 4), round(k_lin, 4))
+      Metric = c("Overall Accuracy", "Balanced Accuracy", "Off-by-one Accuracy", "Matthews Corr. Coef. (MCC)", "Kappa (Unweighted)", "Weighted Kappa (Linear)"),
+      Value = c(round(acc, 4), round(b_acc, 4), round(off_by_one_acc, 4), round(mcc, 4), round(k_unw, 4), round(k_lin, 4))
     )
   })
 
   output$log_output <- renderText({ rv$log })
 
-  # Scan rv$log for new warnings and display UI notifications
   last_notified_warnings <- reactiveVal(character(0))
   observe({
     req(rv$log)
@@ -5202,7 +5113,6 @@ server <- function(input, output, session) {
     }
   })
 
-  # --- Export ---
   build_export_plot <- function(target, title, vv_scale = NULL, subtitle = NULL) {
     if(is.null(target)) return(ggplot() + annotate("text", x=0.5, y=0.5, label="Awaiting model results...") + theme_void())
     meta <- get_current_meta()
@@ -5219,26 +5129,21 @@ server <- function(input, output, session) {
     is_viridis <- meta$palette == "viridis" || meta$palette == "inferno"
     
     p <- tryCatch({
-      if(input$color_style == "agro" && !is_uncertainty && input$value_type != "resid" && input$exp_layer != "resid") {
-        params <- agro_params()
-        if(is.null(params)) return(ggplot() + annotate("text", x=0.5, y=0.5, label="Awaiting agronomical parameters...") + theme_void())
-        # 100% Robust approach: convert to dataframe for geom_tile
-        # Fix Area Coverage Bug: Subset target to first layer
+      if(input$color_style %in% c("agro", "bin") && !is_uncertainty && input$value_type != "resid" && input$exp_layer != "resid") {
+        params <- classification_params()
+        if(is.null(params)) return(ggplot() + annotate("text", x=0.5, y=0.5, label="Awaiting classification parameters...") + theme_void())
         target_c <- classify(target[[1]], params$rcl_mat, right = FALSE)
         df_plot <- as.data.frame(target_c, xy = TRUE)
         if(nrow(df_plot) == 0) return(ggplot() + annotate("text", x=0.5, y=0.5, label="No data in classified raster.") + theme_void())
         colnames(df_plot) <- c("x", "y", "val")
         
-        # Calculate Ha coverage for legend zero indicators
-        cell_area_ha <- prod(res(target)) / 10000
-        ha_counts <- as.numeric(table(factor(df_plot$val, levels = 1:params$n_c))) * cell_area_ha
+        pixel_counts <- as.numeric(table(factor(df_plot$val, levels = 1:params$n_c)))
         new_labels <- sapply(1:params$n_c, function(i) {
-          if (ha_counts[i] == 0) paste0(params$leg_labels[i], " (0 ha)")
+          if (pixel_counts[i] == 0) paste0(params$leg_labels[i], " (0 ha)")
           else paste0(params$leg_labels[i], "       ")
         })
         
-        # Add dummy rows for any missing level to force it into the legend
-        missing_levels <- which(ha_counts == 0)
+        missing_levels <- which(pixel_counts == 0)
         if(length(missing_levels) > 0) {
           dummy_df <- data.frame(x = NA, y = NA, val = missing_levels)
           df_plot <- rbind(df_plot, dummy_df)
@@ -5251,17 +5156,12 @@ server <- function(input, output, session) {
           scale_fill_manual(values = setNames(params$colors, new_labels), limits = new_labels, na.value = "transparent", name = meta$label, drop = FALSE) +
           coord_equal()
       } else if(input$value_type == "resid" || (input$exp_layer == "resid")) {
-        # Handle Residuals in Export
         vv <- as.vector(values(target, na.rm=TRUE))
         abs_max <- max(abs(vv), na.rm = TRUE)
         if(is.infinite(abs_max) || is.na(abs_max)) abs_max <- 1
         ggplot() + geom_spatraster(data = target) + 
           scale_fill_distiller(palette = "RdBu", direction = 1, limits = c(-abs_max, abs_max), 
                                na.value = "transparent", name = "Residual")
-      } else if(input$color_style == "bin") {
-        bp <- ggplot() + geom_spatraster(data = target)
-        if(is_viridis) bp + scale_fill_viridis_b(option = meta$palette, name = meta$unit, na.value = "transparent", n.breaks = 5, limits = if(!is.null(vv_scale)) range(vv_scale, na.rm=T) else NULL)
-        else bp + scale_fill_fermenter(palette = meta$palette, direction = 1, name = meta$unit, na.value = "transparent", n.breaks = 5, limits = if(!is.null(vv_scale)) range(vv_scale, na.rm=T) else NULL)
       } else {
         bp <- ggplot() + geom_spatraster(data = target)
         if(is_viridis) bp + scale_fill_viridis_c(option = meta$palette, name = meta$unit, na.value = "transparent", limits = if(!is.null(vv_scale)) range(vv_scale, na.rm=T) else NULL)
@@ -5271,17 +5171,21 @@ server <- function(input, output, session) {
       ggplot() + annotate("text", x=0.5, y=0.5, label=paste("Plot Error:", e$message)) + theme_void()
     })
     
-        p <- p + theme_minimal(base_size = input$exp_font_base) +
-            theme(plot.title = element_text(size = input$exp_title_size, face = "bold"),
-                  plot.subtitle = element_text(size = input$exp_font_base, face = "italic"),
-                  axis.text.x = element_text(angle = 90, vjust = 0.5, hjust = 1),
-                  legend.text = element_text(angle = 90, hjust = 0.5),
-                  legend.title = element_text(angle = 90, hjust = 0.5),
-                  plot.margin = ggplot2::margin(40, 10, 10, 10)) +
-            labs(title = title, subtitle = subtitle)
-    
-        if(input$exp_scale) p <- p + coord_sf(clip = "off") + annotation_scale(location = "bl", width_hint = 0.4, pad_y = unit(-2.5, "cm")) + theme(plot.margin = ggplot2::margin(10, 10, 70, 10))
-        p  }
+    font_base <- if (is.null(input$exp_font_base)) 11 else input$exp_font_base
+    title_size <- if (is.null(input$exp_title_size)) 14 else input$exp_title_size
+    exp_scale <- isTruthy(input$exp_scale)
+
+    p <- p + theme_minimal(base_size = font_base) +
+        theme(plot.title = element_text(size = title_size, face = "bold"),
+              plot.subtitle = element_text(size = font_base, face = "italic"),
+              axis.text.x = element_text(angle = 90, vjust = 0.5, hjust = 1),
+              legend.text = element_text(angle = 90, hjust = 0.5),
+              legend.title = element_text(angle = 90, hjust = 0.5),
+              plot.margin = ggplot2::margin(40, 10, 10, 10)) +
+        labs(title = title, subtitle = subtitle)
+
+    if(exp_scale) p <- p + coord_sf(clip = "off") + annotation_scale(location = "bl", width_hint = 0.4, pad_y = unit(-2.5, "cm")) + theme(plot.margin = ggplot2::margin(10, 10, 70, 10))
+    p  }
 
   get_export_plot <- function() {
     meta <- get_current_meta()
@@ -5289,14 +5193,7 @@ server <- function(input, output, session) {
     
         current_method <- rv$run_method[[input$var_id]]
         method_lab <- if(!is.null(current_method)) {
-          m_name <- switch(current_method,
-            "OK"  = "Ordinary Kriging",
-            "RK"  = "Regression Kriging",
-            "RFK" = "Random Forest Kriging",
-            "CK"  = "Co-Kriging",
-            "IDW" = "IDW",
-            "TPS" = "Thin Plate Spline",
-            current_method)
+          m_name <- get_method_label(current_method)
           paste0("Method: ", m_name)
         } else NULL
     
@@ -5334,13 +5231,11 @@ server <- function(input, output, session) {
             )
             target <- get_active_layer(target_raw)
             
-            # Derive title for single view
             single_title <- if(input$exp_title == "Soil Mapping") {
                paste0("[", meta$category, "] ", meta$label, " - ", input$exp_layer)
             } else input$exp_title
             
             build_export_plot(target, single_title, subtitle = method_lab)  }
-  # --- Polygon Drawing & Export Logic ---
   observeEvent(input$main_map_draw_new_feature, {
     feat <- input$main_map_draw_new_feature
     if(feat$geometry$type %in% c("Polygon", "MultiPolygon")) {
@@ -5368,7 +5263,6 @@ server <- function(input, output, session) {
     polys <- rv$drawn_polygons
     if(length(polys) == 0) return(NULL)
     
-    # Convert list of GeoJSON features to an sf object
     sf_list <- lapply(polys, function(p) {
       json_str <- jsonlite::toJSON(p, auto_unbox = TRUE)
       sf::st_read(json_str, quiet = TRUE)
@@ -5402,7 +5296,6 @@ server <- function(input, output, session) {
           
           sf::st_write(sf_obj, shp_path, driver = "ESRI Shapefile", quiet = TRUE, delete_layer = TRUE)
           
-          # Zip the files
           files_to_zip <- list.files(temp_dir, full.names = FALSE)
           zip::zip(zipfile = file, files = files_to_zip, root = temp_dir)
           

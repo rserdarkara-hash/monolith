@@ -1,5 +1,54 @@
-# desc_exploratory_module_0.9.8a.R - Descriptive Exploratory Suite Server Module
-# Handles Tab 5 analytics: grouping, descriptive stats, correlation, and PCA
+
+compute_normality <- function(x) {
+  default_res <- list(
+    status = "insufficient",
+    method = "None",
+    statistic = NA,
+    p_value = NA,
+    n = 0
+  )
+  
+  if (is.null(x) || !is.numeric(x)) {
+    return(default_res)
+  }
+  
+  clean_x <- x[!is.na(x)]
+  n <- length(clean_x)
+  default_res$n <- n
+  
+  if (n < 3) {
+    return(default_res)
+  }
+  
+  if (var(clean_x) == 0) {
+    return(default_res)
+  }
+  
+  tryCatch({
+    if (n < 50) {
+      test_res <- shapiro.test(clean_x)
+      method_name <- "Shapiro-Wilk Normality Test"
+      stat_val <- unname(test_res$statistic)
+    } else {
+      test_res <- nortest::lillie.test(clean_x)
+      method_name <- "Lilliefors (Kolmogorov-Smirnov) Normality Test"
+      stat_val <- unname(test_res$statistic)
+    }
+    
+    p_val <- test_res$p.value
+    status_val <- if (p_val >= 0.05) "normal" else "not_normal"
+    
+    list(
+      status = status_val,
+      method = method_name,
+      statistic = stat_val,
+      p_value = p_val,
+      n = n
+    )
+  }, error = function(e) {
+    default_res
+  })
+}
 
 desc_exploratory_ui <- function(id) {
   ns <- shiny::NS(id)
@@ -124,7 +173,6 @@ desc_exploratory_ui <- function(id) {
             gov_factors_ui(ns("gov"))
           )
         ),
-        # Hidden reactive input for conditionalPanel
         shiny::conditionalPanel("false", shiny::textInput(ns("pca_ready_flag"), "", value = "no"))
     )
   )
@@ -134,7 +182,6 @@ desc_exploratory_server <- function(id, data_reactive, vars_metadata_reactive) {
   shiny::moduleServer(id, function(input, output, session) {
     ns <- session$ns
     
-    # --- Grouping & Discretization Server Logic ---
     shiny::observe({
       req(data_reactive())
       df <- data_reactive()
@@ -148,7 +195,6 @@ desc_exploratory_server <- function(id, data_reactive, vars_metadata_reactive) {
         choices_named <- valid_cols
       }
       
-      # Retain selection
       curr_sel <- intersect(input$analytics_group_vars, choices_named)
       shiny::updateSelectInput(session, "analytics_group_vars", choices = choices_named, selected = curr_sel)
     })
@@ -173,7 +219,6 @@ desc_exploratory_server <- function(id, data_reactive, vars_metadata_reactive) {
       })
     })
     
-    # Reactive dataset with grouping applied
     rv_analytics_data <- shiny::reactive({
       req(data_reactive())
       df <- data_reactive()
@@ -196,7 +241,6 @@ desc_exploratory_server <- function(id, data_reactive, vars_metadata_reactive) {
       })
     })
     
-    # Filtered dataset based on active groups (Cached)
     rv_filtered_analytics_data <- shiny::reactive({
       req(rv_analytics_data())
       df_local <- rv_analytics_data()
@@ -214,7 +258,6 @@ desc_exploratory_server <- function(id, data_reactive, vars_metadata_reactive) {
       }
     })
     
-    # --- Descriptive Suite Logic ---
     desc_vars_state <- shiny::reactiveValues(x = "", y = "", z = "", multi = NULL)
     
     output$desc_plot_vars_ui <- shiny::renderUI({
@@ -250,7 +293,10 @@ desc_exploratory_server <- function(id, data_reactive, vars_metadata_reactive) {
         },
         if (p_type %in% c("boxplot", "violin", "sinaplot")) {
           shiny::div(style="background-color: #f0f8ff; padding: 10px; border-radius: 5px; border: 1px solid #b8daff; margin-bottom: 10px;",
-              shiny::h5("Statistical Significance Tests", style="margin-top:0; color: #0056b3;"),
+              shiny::h5(style="margin-top:0; color: #0056b3;",
+                  "Statistical Significance Tests",
+                  shiny::uiOutput(ns("desc_normality_indicator"), inline = TRUE)
+              ),
               shiny::checkboxGroupInput(ns("desc_stat_tests"), "Select Test (Choose One):", 
                                  choices = c("ANOVA" = "anova", "Duncan's" = "duncan", "Tukey's HSD" = "tukey"), inline = TRUE),
               shiny::radioButtons(ns("desc_stat_letter_pos"), "Letter Placement:", choices = c("Above Data" = "above", "Top of Plot" = "top"), inline = TRUE)
@@ -279,6 +325,88 @@ desc_exploratory_server <- function(id, data_reactive, vars_metadata_reactive) {
     shiny::observeEvent(input$desc_var_y, { desc_vars_state$y <- input$desc_var_y })
     shiny::observeEvent(input$desc_var_z, { desc_vars_state$z <- input$desc_var_z })
     shiny::observeEvent(input$desc_vars_multi, { desc_vars_state$multi <- input$desc_vars_multi })
+    output$desc_normality_indicator <- shiny::renderUI({
+      req(rv_filtered_analytics_data())
+      req(input$desc_var_x)
+      
+      p_type <- input$desc_plot_type %||% "histogram"
+      if (!(p_type %in% c("boxplot", "violin", "sinaplot"))) {
+        return(NULL)
+      }
+      
+      df <- rv_filtered_analytics_data()
+      var_name <- input$desc_var_x
+      
+      if (!(var_name %in% colnames(df)) || !is.numeric(df[[var_name]])) {
+        return(NULL)
+      }
+      
+      val <- df[[var_name]]
+      
+      group_breakdown <- ""
+      if ("group_id" %in% colnames(df) && length(unique(df$group_id)) > 1) {
+        group_results <- c()
+        groups <- split(df[[var_name]], df$group_id)
+        for (g_name in names(groups)) {
+          g_val <- groups[[g_name]]
+          g_res <- compute_normality(g_val)
+          if (g_res$status == "insufficient") {
+            group_results <- c(group_results, sprintf("- %s (n=%d): Insufficient data", g_name, g_res$n))
+          } else {
+            status_text <- if (g_res$status == "normal") "Normal" else "Not Normal"
+            group_results <- c(group_results, sprintf("- %s (n=%d): p = %.4f (%s)", g_name, g_res$n, g_res$p_value, status_text))
+          }
+        }
+        group_breakdown <- paste("\nGroup Breakdown:\n", paste(group_results, collapse = "\n"), sep = "")
+      }
+      
+      if ("group_id" %in% colnames(df) && length(unique(df$group_id)) > 1) {
+        tryCatch({
+          val <- residuals(lm(val ~ group_id, data = df, na.action = na.exclude))
+        }, error = function(e) {
+        })
+      }
+      
+      res <- compute_normality(val)
+      
+      if (res$status == "insufficient") {
+        icon_element <- shiny::icon("question-circle", style = "color: #6c757d; font-size: 14px; cursor: help;")
+        tooltip_title <- sprintf(
+          "Normality Test: Insufficient data (n = %d). Typically n >= 3 is required.%s",
+          res$n,
+          group_breakdown
+        )
+      } else if (res$status == "normal") {
+        icon_element <- shiny::icon("check-circle", style = "color: #28a745; font-size: 14px; cursor: help;")
+        tooltip_title <- sprintf(
+          "Normality Passed: %s (on residuals)\nStatistic: %s = %.4f\np-value = %.4f\nSample Size: n = %d\nWithin-group residuals appear to be normally distributed (p >= 0.05).%s",
+          res$method,
+          ifelse(grepl("Shapiro-Wilk", res$method), "W", "D"),
+          res$statistic,
+          res$p_value,
+          res$n,
+          group_breakdown
+        )
+      } else {
+        icon_element <- shiny::icon("exclamation-triangle", style = "color: #dc3545; font-size: 14px; cursor: help;")
+        p_str <- if (res$p_value < 0.0001) "< 0.0001" else sprintf("= %.4f", res$p_value)
+        tooltip_title <- sprintf(
+          "Normality Failed: %s (on residuals)\nStatistic: %s = %.4f\np-value %s\nSample Size: n = %d\nWithin-group residuals deviate significantly from normality (p < 0.05).%s",
+          res$method,
+          ifelse(grepl("Shapiro-Wilk", res$method), "W", "D"),
+          res$statistic,
+          p_str,
+          res$n,
+          group_breakdown
+        )
+      }
+      
+      shiny::tags$span(
+        style = "margin-left: 5px; display: inline-block; vertical-align: middle;",
+        title = tooltip_title,
+        icon_element
+      )
+    })
     
     desc_plot_obj <- shiny::reactive({
       req(rv_analytics_data())
@@ -468,7 +596,6 @@ desc_exploratory_server <- function(id, data_reactive, vars_metadata_reactive) {
       DT::datatable(res, options = list(pageLength = 10, dom = 'tip', scrollX = TRUE))
     })
     
-    # --- Phase 4: Correlation Rendering ---
     output$corr_vars_ui <- shiny::renderUI({
       req(data_reactive())
       df <- data_reactive()
@@ -658,7 +785,6 @@ desc_exploratory_server <- function(id, data_reactive, vars_metadata_reactive) {
       }
     })
     
-    # --- PCA Logic ---
     output$pca_vars_ui <- shiny::renderUI({
       req(data_reactive())
       df <- data_reactive()
@@ -839,7 +965,6 @@ desc_exploratory_server <- function(id, data_reactive, vars_metadata_reactive) {
        DT::datatable(df_res, options = list(pageLength = 10, dom = 't', scrollX = TRUE), rownames = FALSE)
     })
     
-    # --- Expandable Modal Dialogs Server Logic ---
     register_expanded_modal(
       input, output, session,
       btn_id = "desc_expand_plot_btn",
@@ -875,10 +1000,8 @@ desc_exploratory_server <- function(id, data_reactive, vars_metadata_reactive) {
       pca_3d_special = shiny::reactive({ input$pca_plot_type == "3d_biplot" })
     )
     
-    # Governing Factors Module integration
     gov_factors_server("gov", data_reactive = shiny::reactive(rv_analytics_data()), vars_metadata_reactive = vars_metadata_reactive)
     
-    # Return processed reactive dataset to caller
     return(list(
       analytics_data = rv_analytics_data
     ))

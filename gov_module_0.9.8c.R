@@ -1,5 +1,3 @@
-# gov_module_0.9.8.R - Agronomical Evaluation Suite Module
-# --- UI Module ---
 gov_factors_ui <- function(id) {
   ns <- shiny::NS(id)
   
@@ -17,7 +15,6 @@ gov_factors_ui <- function(id) {
           shiny::radioButtons(ns("gov_effect_type"), "Functional Effect Plot:", choices = c("ALE" = "ale", "PDP" = "pdp"), inline = TRUE)
         ),
         shiny::column(9,
-          # In-progress calculation message
           shiny::conditionalPanel(
             condition = sprintf("output['%s'] == 'running'", ns("gov_ready")),
             shiny::div(style = "text-align: center; padding: 100px 50px; background-color: rgba(255,255,255,0.02); border-radius: 8px; border: 2px dashed #007bff; margin-bottom: 20px; transition: all 0.3s ease;",
@@ -28,7 +25,6 @@ gov_factors_ui <- function(id) {
             )
           ),
           
-          # Awaiting configuration message
           shiny::conditionalPanel(
             condition = sprintf("output['%s'] == 'no'", ns("gov_ready")),
             shiny::div(style = "text-align: center; padding: 120px 50px; color: #888;",
@@ -38,7 +34,6 @@ gov_factors_ui <- function(id) {
             )
           ),
           
-          # Namespace-aware conditional panel
           shiny::conditionalPanel(
             condition = sprintf("output['%s'] == 'yes'", ns("gov_ready")),
             shiny::fluidRow(
@@ -84,15 +79,12 @@ gov_factors_ui <- function(id) {
   )
 }
 
-# --- Server Module ---
 gov_factors_server <- function(id, data_reactive, vars_metadata_reactive) {
   shiny::moduleServer(id, function(input, output, session) {
     ns <- session$ns
     
-    # Internal state: decoupled from main server environment
     gov_rv <- shiny::reactiveValues(res = NULL, ready = "no")
     
-    # Generate Target Parameter dropdown
     output$gov_target_ui <- shiny::renderUI({
       df <- data_reactive()
       shiny::req(df)
@@ -105,7 +97,6 @@ gov_factors_server <- function(id, data_reactive, vars_metadata_reactive) {
       shiny::selectInput(ns("gov_target"), "Target Parameter", choices = num_cols)
     })
     
-    # Generate Predictors picker
     output$gov_predictors_ui <- shiny::renderUI({
       df <- data_reactive()
       shiny::req(df)
@@ -122,7 +113,6 @@ gov_factors_server <- function(id, data_reactive, vars_metadata_reactive) {
       )
     })
     
-    # Run random forest analysis asynchronously
     shiny::observeEvent(input$gov_run_btn, {
       if (identical(gov_rv$ready, "running")) {
         return(NULL)
@@ -131,7 +121,6 @@ gov_factors_server <- function(id, data_reactive, vars_metadata_reactive) {
       df <- data_reactive()
       shiny::req(df, input$gov_target, input$gov_predictors)
       
-      # Exclude target from predictors if mistakenly selected
       preds <- setdiff(input$gov_predictors, input$gov_target)
       
       if (length(preds) < 1 || nrow(df) < 10) {
@@ -139,17 +128,14 @@ gov_factors_server <- function(id, data_reactive, vars_metadata_reactive) {
         return()
       }
       
-      # Disable button to prevent double-clicks and show running state with spinner
       shinyjs::disable("gov_run_btn")
       shiny::updateActionButton(session, "gov_run_btn", label = "Running...", icon = shiny::icon("spinner", class = "fa-spin"))
       
-      # Set status to running (displays beautiful in-tab progress view)
       gov_rv$ready <- "running"
       
       target_col <- input$gov_target
       n_perms <- input$gov_permutations
       
-      # Execute Random Forest & Dalex calculations in a future promise
       promises::future_promise({
         compute_governing_factors(
           df = df, 
@@ -178,13 +164,11 @@ gov_factors_server <- function(id, data_reactive, vars_metadata_reactive) {
       NULL
     })
     
-    # Ready status exposed to UI conditionalPanel
     output$gov_ready <- shiny::reactive({
       gov_rv$ready
     })
     shiny::outputOptions(output, "gov_ready", suspendWhenHidden = FALSE)
     
-    # --- Unified Reusable Plot Builder (Issue A) ---
     gov_create_plot <- function(plot_type = c("importance", "interaction_a", "effect", "interaction_b"), expanded = FALSE) {
       plot_type <- match.arg(plot_type)
       base_size <- if (expanded) 16 else 11
@@ -255,31 +239,26 @@ gov_factors_server <- function(id, data_reactive, vars_metadata_reactive) {
       }
     }
     
-    # Global Importance Plot
     output$gov_plot_importance <- shiny::renderPlot({
       shiny::req(gov_rv$res)
       gov_create_plot("importance", expanded = FALSE)
     })
     
-    # Causality / Interaction (A)
     output$gov_plot_interaction_a <- shiny::renderPlot({
       shiny::req(gov_rv$res)
       gov_create_plot("interaction_a", expanded = FALSE)
     })
     
-    # Functional Effect Plot
     output$gov_plot_effect <- shiny::renderPlot({
       shiny::req(gov_rv$res)
       gov_create_plot("effect", expanded = FALSE)
     })
     
-    # Causality / Interaction (B)
     output$gov_plot_interaction_b <- shiny::renderPlot({
       shiny::req(gov_rv$res, input$gov_target)
       gov_create_plot("interaction_b", expanded = FALSE)
     })
     
-    # Tabular Data Metrics
     output$gov_summary_table <- DT::renderDataTable({
       shiny::req(gov_rv$res)
       vip_df <- gov_rv$res$importance
@@ -291,13 +270,11 @@ gov_factors_server <- function(id, data_reactive, vars_metadata_reactive) {
       DT::datatable(vip_df, options = list(pageLength = 5, dom = 't', scrollX = TRUE), rownames = FALSE)
     })
     
-    # --- Expanded View Reusable Plot Builders calling the unified function ---
     gov_build_imp_plot <- function() { shiny::req(gov_rv$res); gov_create_plot("importance", expanded = TRUE) }
     gov_build_inta_plot <- function() { shiny::req(gov_rv$res); gov_create_plot("interaction_a", expanded = TRUE) }
     gov_build_eff_plot <- function() { shiny::req(gov_rv$res); gov_create_plot("effect", expanded = TRUE) }
     gov_build_intb_plot <- function() { shiny::req(gov_rv$res, input$gov_target); gov_create_plot("interaction_b", expanded = TRUE) }
     
-    # --- Expanded Modal View Handlers via Centralized Factory ---
     register_expanded_modal(
       input, output, session,
       btn_id = "gov_expand_imp_btn",
