@@ -353,6 +353,24 @@ desc_exploratory_server <- function(id, data_reactive, vars_metadata_reactive) {
       
       val <- df[[var_name]]
       
+      # Group breakdown calculation
+      group_breakdown <- ""
+      if ("group_id" %in% colnames(df) && length(unique(df$group_id)) > 1) {
+        group_results <- c()
+        groups <- split(df[[var_name]], df$group_id)
+        for (g_name in names(groups)) {
+          g_val <- groups[[g_name]]
+          g_res <- compute_normality(g_val)
+          if (g_res$status == "insufficient") {
+            group_results <- c(group_results, sprintf("- %s (n=%d): Insufficient data", g_name, g_res$n))
+          } else {
+            status_text <- if (g_res$status == "normal") "Normal" else "Not Normal"
+            group_results <- c(group_results, sprintf("- %s (n=%d): p = %.4f (%s)", g_name, g_res$n, g_res$p_value, status_text))
+          }
+        }
+        group_breakdown <- paste("\nGroup Breakdown:\n", paste(group_results, collapse = "\n"), sep = "")
+      }
+      
       # Correct statistical approach: Test the residuals of the group model (ANOVA assumption)
       # to prevent different group means from artificially failing the normality test.
       if ("group_id" %in% colnames(df) && length(unique(df$group_id)) > 1) {
@@ -369,29 +387,32 @@ desc_exploratory_server <- function(id, data_reactive, vars_metadata_reactive) {
       if (res$status == "insufficient") {
         icon_element <- shiny::icon("question-circle", style = "color: #6c757d; font-size: 14px; cursor: help;")
         tooltip_title <- sprintf(
-          "Normality Test: Insufficient data (n = %d). Typically n >= 3 is required.",
-          res$n
+          "Normality Test: Insufficient data (n = %d). Typically n >= 3 is required.%s",
+          res$n,
+          group_breakdown
         )
       } else if (res$status == "normal") {
         icon_element <- shiny::icon("check-circle", style = "color: #28a745; font-size: 14px; cursor: help;")
         tooltip_title <- sprintf(
-          "Normality Passed: %s (on residuals)\nStatistic: %s = %.4f\np-value = %.4f\nSample Size: n = %d\nWithin-group residuals appear to be normally distributed (p >= 0.05).",
+          "Normality Passed: %s (on residuals)\nStatistic: %s = %.4f\np-value = %.4f\nSample Size: n = %d\nWithin-group residuals appear to be normally distributed (p >= 0.05).%s",
           res$method,
           ifelse(grepl("Shapiro-Wilk", res$method), "W", "D"),
           res$statistic,
           res$p_value,
-          res$n
+          res$n,
+          group_breakdown
         )
       } else {
         icon_element <- shiny::icon("exclamation-triangle", style = "color: #dc3545; font-size: 14px; cursor: help;")
         p_str <- if (res$p_value < 0.0001) "< 0.0001" else sprintf("= %.4f", res$p_value)
         tooltip_title <- sprintf(
-          "Normality Failed: %s (on residuals)\nStatistic: %s = %.4f\np-value %s\nSample Size: n = %d\nWithin-group residuals deviate significantly from normality (p < 0.05).",
+          "Normality Failed: %s (on residuals)\nStatistic: %s = %.4f\np-value %s\nSample Size: n = %d\nWithin-group residuals deviate significantly from normality (p < 0.05).%s",
           res$method,
           ifelse(grepl("Shapiro-Wilk", res$method), "W", "D"),
           res$statistic,
           p_str,
-          res$n
+          res$n,
+          group_breakdown
         )
       }
       
