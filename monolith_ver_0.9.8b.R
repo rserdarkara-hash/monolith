@@ -2560,8 +2560,12 @@ server <- function(input, output, session) {
     ))
   })
   
-  output$render_ui_ux_guide <- renderUI({
-    withMathJax(HTML(commonmark::markdown_html(paste(readLines("docs/ui_ux_guide.md", warn = FALSE), collapse = "\n"))))
+  output$render_user_guide <- renderUI({
+    withMathJax(HTML(commonmark::markdown_html(paste(readLines("docs/user_guide.md", warn = FALSE), collapse = "\n"))))
+  })
+  
+  output$render_desc_exploratory_guide <- renderUI({
+    withMathJax(HTML(commonmark::markdown_html(paste(readLines("docs/desc_exploratory_guide.md", warn = FALSE), collapse = "\n"))))
   })
   
   output$render_scientific_guide <- renderUI({
