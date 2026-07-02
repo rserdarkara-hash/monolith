@@ -216,7 +216,7 @@ write_warning_file <- function(l, prefix, message) {
   }, error = function(e) NULL)
 }
 
-perform_kriging_loocv <- function(pts, target_var, aux_vars, lags_func, vgm_fit_func, model_type = c("lm", "rf"), l = "region", prefix = "act") {
+perform_kriging_loocv <- function(pts, target_var, aux_vars, lags_func, vgm_fit_func, model_type = c("lm", "rf"), l = "region", prefix = "act", rf_ntree = 200) {
   model_type <- match.arg(model_type)
   pts <- pts[complete.cases(sf::st_drop_geometry(pts)[, c(target_var, aux_vars), drop=FALSE]), ]
   n <- nrow(pts)
@@ -239,7 +239,7 @@ perform_kriging_loocv <- function(pts, target_var, aux_vars, lags_func, vgm_fit_
         train$residuals <- residuals(lm_mod)
         pred_trend <- predict(lm_mod, newdata = test)
       } else {
-        rf_mod <- randomForest::randomForest(form_reg, data = train, ntree = 50)
+        rf_mod <- randomForest::randomForest(form_reg, data = train, ntree = rf_ntree)
         train$residuals <- train[[target_var]] - rf_mod$predicted
         pred_trend <- predict(rf_mod, test)
       }
@@ -264,7 +264,7 @@ perform_kriging_loocv <- function(pts, target_var, aux_vars, lags_func, vgm_fit_
         train$residuals <- residuals(lm_mod)
         pred_trend <- predict(lm_mod, newdata = test)
       } else {
-        rf_mod <- randomForest::randomForest(form_reg, data = train, ntree = 100)
+        rf_mod <- randomForest::randomForest(form_reg, data = train, ntree = rf_ntree)
         train$residuals <- train[[target_var]] - rf_mod$predicted
         pred_trend <- predict(rf_mod, test)
       }
@@ -544,7 +544,8 @@ apply_kriging_pipeline <- function(engine = c("OK", "RK", "RFK"), data, target_v
         )
         res <- safe_run_cv(res, perform_kriging_loocv(data, target_var, aux_vars, calc_scientific_lags, robust_vgm_fit, model_type = "lm", l, prefix), "RK", nrow(data))
       } else if (engine == "RFK") {
-        rf_mod <- randomForest::randomForest(form_reg, data = data, ntree = 200, importance = TRUE)
+        rf_ntree <- if (!is.null(method_params$rf_ntree)) method_params$rf_ntree else 200
+        rf_mod <- randomForest::randomForest(form_reg, data = data, ntree = rf_ntree, importance = TRUE)
         res$rf_model <- rf_mod
         
         residuals_val <- data[[target_var]] - rf_mod$predicted
@@ -563,7 +564,7 @@ apply_kriging_pipeline <- function(engine = c("OK", "RK", "RFK"), data, target_v
           var1.pred = as.vector(pred_trend_all$aggregate + res_krig$var1.pred), 
           var1.var = as.vector(trend_var + res_krig$var1.var)
         )
-        res <- safe_run_cv(res, perform_kriging_loocv(data, target_var, aux_vars, calc_scientific_lags, robust_vgm_fit, model_type = "rf", l, prefix), "RFK", nrow(data))
+        res <- safe_run_cv(res, perform_kriging_loocv(data, target_var, aux_vars, calc_scientific_lags, robust_vgm_fit, model_type = "rf", l, prefix, rf_ntree = rf_ntree), "RFK", nrow(data))
       }
       res
     }, error = function(e) {

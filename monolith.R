@@ -1,5 +1,93 @@
 
-source("global_0.9.8c.R")
+source("global.R")
+
+estimate_run_duration <- function(loc_sample_counts, method, comp_mode, cores) {
+  # History aware run duration estimator
+  history_dir <- "run_history"
+  history_file <- file.path(history_dir, "run_history.csv")
+  
+  # Base multipliers for different methods. Note: Only RFK/RK base formula is currently 
+  # calibrated. OK/IDW/TPS/CK multipliers are unverified guesses and should be updated 
+  # when enough history is logged.
+  method_mult <- switch(method,
+    "RFK" = 1.0,
+    "RK"  = 1.0,
+    "CK"  = 1.5,
+    "OK"  = 0.5,
+    "IDW" = 0.5,
+    "TPS" = 0.3,
+    1.0
+  )
+  
+  # Ensure valid sample counts
+  loc_sample_counts[is.na(loc_sample_counts) | loc_sample_counts == 0] <- 50
+  
+  n_locs <- length(loc_sample_counts)
+  n_models <- n_locs * (if(comp_mode) 2 else 1)
+  
+  loc_times_sec <- numeric(n_locs)
+  history_data <- NULL
+  
+  if (file.exists(history_file)) {
+    tryCatch({
+      history_data <- read.csv(history_file)
+      history_data <- history_data[history_data$method == method, ]
+      
+      # Try filtering by comp_mode if enough data
+      comp_history <- history_data[history_data$comp_mode == comp_mode, ]
+      if (nrow(comp_history) >= 5) {
+        history_data <- comp_history
+      }
+    }, error = function(e) { history_data <- NULL })
+  }
+  
+  is_history_based <- !is.null(history_data) && nrow(history_data) >= 5
+  
+  if (is_history_based) {
+    fit <- tryCatch(lm(per_locality_share_sec ~ n_samples, data = history_data), error = function(e) NULL)
+    if (!is.null(fit)) {
+      preds <- predict(fit, newdata = data.frame(n_samples = loc_sample_counts))
+      loc_times_sec <- pmax(5, preds)
+    } else {
+      is_history_based <- FALSE
+    }
+  }
+  
+  if (!is_history_based) {
+    # Cold-start formula based on real data points (79->150s, 355->510s for 2 models)
+    # Scaled down to 70% per user request
+    base_sec <- pmax(5.25, 16.45 + 0.455 * loc_sample_counts)
+    model_time <- base_sec * method_mult
+    loc_times_sec <- model_time * (if (comp_mode) 2 else 1)
+  }
+  
+  max_single_loc_time <- max(loc_times_sec)
+  
+  # Distributed efficiency fix (0.75 effective cores)
+  eff_factor <- 0.75
+  distributed_time <- sum(loc_times_sec) / max(1, (cores * eff_factor))
+  
+  # Apply fudge factor (more uncertainty for cold start)
+  fudge_mult <- if (is_history_based) 1.25 else 1.4
+  est_time_sec <- max(max_single_loc_time, distributed_time) * fudge_mult
+  
+  est_time_str <- if (est_time_sec < 60) {
+    paste(round(est_time_sec), "seconds")
+  } else {
+    paste(round(est_time_sec / 60, 1), "minutes")
+  }
+  
+  estimate_text <- paste0("~", n_models, " locality model(s), ~", est_time_str, " estimated")
+  is_long_run <- est_time_sec >= 120 || method %in% c("RK", "RFK", "CK")
+  
+  return(list(
+    est_time_sec = est_time_sec,
+    est_time_str = est_time_str,
+    estimate_text = estimate_text,
+    is_long_run = is_long_run,
+    n_models = n_models
+  ))
+}
 
 
 validate_crs <- function(crs_selection, error_prefix = "Invalid CRS provided", duration = NULL) {
@@ -2374,7 +2462,6 @@ server <- function(input, output, session) {
       div(style = "text-align: center; padding: 20px;",
           img(src = "assets/banner.png", style = "max-width: 100%; height: auto; margin-bottom: 20px;"),
           h4("Workbench for statistics and optimized mapping in life sciences."),
-          p("Version: 0.9.8c"),
           p("Integrated geostatistical modeling, classification and statistical interpretation."),
           hr(),
           p("Designed for high-performance parallel processing and spatial diagnostics, multi-scale interpolation via kriging, inverse distance weighting, and thin plate splines with practical multi-criteria optimization."),
@@ -3224,53 +3311,24 @@ server <- function(input, output, session) {
     if (n_locs == 0) n_locs <- 1
     
     comp_mode <- isTruthy(input$comp_mode) || isTruthy(input$value_type != "actual")
-    n_models <- n_locs * (if(comp_mode) 2 else 1)
+    cores <- tryCatch(future::nbrOfWorkers(), error = function(e) 1)
+    if (is.null(cores) || cores < 1) cores <- 1
     
-    method_mult <- switch(input$method,
-      "RFK" = 1.0,
-      "RK"  = 1.0,
-      "CK"  = 1.5,
-      "OK"  = 0.5,
-      "IDW" = 0.5,
-      "TPS" = 0.3,
-      1.0 # default fallback
-    )
-    
-    loc_times_sec <- numeric(n_locs)
+    loc_sample_counts <- numeric(n_locs)
     if (!is.null(rv$user_data) && !is.null(loc_col) && loc_col %in% colnames(rv$user_data) && length(selected_locs) > 0) {
       for (idx in seq_along(selected_locs)) {
         l <- selected_locs[idx]
         n_samples <- nrow(rv$user_data[rv$user_data[[loc_col]] == l, ])
-        if (is.null(n_samples) || is.na(n_samples) || n_samples == 0) n_samples <- 50
-        
-        if (n_samples > 50) {
-          base_sec <- max(10, 15 + (n_samples / 100) * 2.0)
-        } else {
-          base_sec <- max(10, 120 + (n_samples - 50) * 0.84)
-        }
-        model_time <- base_sec * method_mult
-        
-        loc_times_sec[idx] <- model_time * (if (comp_mode) 2 else 1)
+        loc_sample_counts[idx] <- if (is.null(n_samples) || is.na(n_samples) || n_samples == 0) 50 else n_samples
       }
     } else {
-      loc_times_sec <- rep(120 * method_mult * (if (comp_mode) 2 else 1), n_locs)
+      loc_sample_counts <- rep(50, n_locs)
     }
     
-    cores <- tryCatch(future::nbrOfWorkers(), error = function(e) 1)
-    if (is.null(cores) || cores < 1) cores <- 1
-    
-    max_single_loc_time <- max(loc_times_sec)
-    distributed_time <- sum(loc_times_sec) / cores
-    
-    est_time_sec <- max(max_single_loc_time, distributed_time) * 1.1
-    
-    est_time_str <- if (est_time_sec < 60) {
-      paste(round(est_time_sec), "seconds")
-    } else {
-      paste(round(est_time_sec / 60, 1), "minutes")
-    }
-    estimate_text <- paste0("~", n_models, " locality model(s), ~", est_time_str, " estimated")
-    is_long_run <- est_time_sec >= 120 || input$method %in% c("RK", "RFK", "CK")
+    est_res <- estimate_run_duration(loc_sample_counts, input$method, comp_mode, cores)
+    estimate_text <- est_res$estimate_text
+    is_long_run <- est_res$is_long_run
+    n_models <- est_res$n_models
     
     if (!is.null(rv$run_config_summary) && length(rv$export_registry) > 0) {
       if (rv$auto_archive_choice == "archive") {
@@ -3313,20 +3371,34 @@ server <- function(input, output, session) {
     
     meta <- get_current_meta()
     loc_col <- rv$mapping$loc
-    n_locs <- if ("ALL" %in% input$locality || length(input$locality) == 0) {
+    selected_locs <- if ("ALL" %in% input$locality || length(input$locality) == 0) {
       if (!is.null(rv$user_data) && !is.null(loc_col) && loc_col %in% colnames(rv$user_data)) {
-        length(unique(na.omit(rv$user_data[[loc_col]])))
-      } else 1
+        unique(na.omit(rv$user_data[[loc_col]]))
+      } else "Unknown"
     } else {
-      length(input$locality)
+      input$locality
     }
+    n_locs <- length(selected_locs)
     comp_mode <- isTruthy(input$comp_mode) || isTruthy(input$value_type != "actual")
-    n_models <- n_locs * (if(comp_mode) 2 else 1)
-    sec_per_model <- 1.5
-    est_time_sec <- n_models * sec_per_model
-    est_time_str <- if (est_time_sec < 60) paste(round(est_time_sec), "seconds") else paste(round(est_time_sec / 60, 1), "minutes")
-    estimate_text <- paste0("~", n_models, " locality model(s), ~", est_time_str, " estimated")
-    is_long_run <- n_models >= 3 || input$method %in% c("RK", "RFK", "CK")
+    
+    cores <- tryCatch(future::nbrOfWorkers(), error = function(e) 1)
+    if (is.null(cores) || cores < 1) cores <- 1
+    
+    loc_sample_counts <- numeric(n_locs)
+    if (!is.null(rv$user_data) && !is.null(loc_col) && loc_col %in% colnames(rv$user_data) && !("Unknown" %in% selected_locs)) {
+      for (idx in seq_along(selected_locs)) {
+        l <- selected_locs[idx]
+        n_samples <- nrow(rv$user_data[rv$user_data[[loc_col]] == l, ])
+        loc_sample_counts[idx] <- if (is.null(n_samples) || is.na(n_samples) || n_samples == 0) 50 else n_samples
+      }
+    } else {
+      loc_sample_counts <- rep(50, n_locs)
+    }
+    
+    est_res <- estimate_run_duration(loc_sample_counts, input$method, comp_mode, cores)
+    estimate_text <- est_res$estimate_text
+    is_long_run <- est_res$is_long_run
+    n_models <- est_res$n_models
     
     archive_and_proceed("archive", meta, n_locs, estimate_text, is_long_run)
   })
@@ -3339,20 +3411,34 @@ server <- function(input, output, session) {
     
     meta <- get_current_meta()
     loc_col <- rv$mapping$loc
-    n_locs <- if ("ALL" %in% input$locality || length(input$locality) == 0) {
+    selected_locs <- if ("ALL" %in% input$locality || length(input$locality) == 0) {
       if (!is.null(rv$user_data) && !is.null(loc_col) && loc_col %in% colnames(rv$user_data)) {
-        length(unique(na.omit(rv$user_data[[loc_col]])))
-      } else 1
+        unique(na.omit(rv$user_data[[loc_col]]))
+      } else "Unknown"
     } else {
-      length(input$locality)
+      input$locality
     }
+    n_locs <- length(selected_locs)
     comp_mode <- isTruthy(input$comp_mode) || isTruthy(input$value_type != "actual")
-    n_models <- n_locs * (if(comp_mode) 2 else 1)
-    sec_per_model <- 1.5
-    est_time_sec <- n_models * sec_per_model
-    est_time_str <- if (est_time_sec < 60) paste(round(est_time_sec), "seconds") else paste(round(est_time_sec / 60, 1), "minutes")
-    estimate_text <- paste0("~", n_models, " locality model(s), ~", est_time_str, " estimated")
-    is_long_run <- n_models >= 3 || input$method %in% c("RK", "RFK", "CK")
+    
+    cores <- tryCatch(future::nbrOfWorkers(), error = function(e) 1)
+    if (is.null(cores) || cores < 1) cores <- 1
+    
+    loc_sample_counts <- numeric(n_locs)
+    if (!is.null(rv$user_data) && !is.null(loc_col) && loc_col %in% colnames(rv$user_data) && !("Unknown" %in% selected_locs)) {
+      for (idx in seq_along(selected_locs)) {
+        l <- selected_locs[idx]
+        n_samples <- nrow(rv$user_data[rv$user_data[[loc_col]] == l, ])
+        loc_sample_counts[idx] <- if (is.null(n_samples) || is.na(n_samples) || n_samples == 0) 50 else n_samples
+      }
+    } else {
+      loc_sample_counts <- rep(50, n_locs)
+    }
+    
+    est_res <- estimate_run_duration(loc_sample_counts, input$method, comp_mode, cores)
+    estimate_text <- est_res$estimate_text
+    is_long_run <- est_res$is_long_run
+    n_models <- est_res$n_models
     
     archive_and_proceed("discard", meta, n_locs, estimate_text, is_long_run)
   })
@@ -3586,9 +3672,16 @@ server <- function(input, output, session) {
     rv$run_token <- rv$run_token + 1L
     this_token <- rv$run_token
 
+    log_start_time <- Sys.time()
+    log_cores <- tryCatch(future::nbrOfWorkers(), error = function(e) 1)
+    log_method <- current_method
+    log_comp_mode <- comp_mode
+    log_n_locs <- length(df_list)
+    log_sample_counts <- sapply(df_list, function(x) nrow(x$pts_data))
+
     promises::future_promise({
       setwd(main_wd)
-      source("spatial_helpers_0.9.8c.R", local = FALSE)
+      source("spatial_helpers.R", local = FALSE)
       
       force_globals <- list(
         run_regional_interpolation, calc_scientific_lags, robust_vgm_fit, 
@@ -3644,6 +3737,38 @@ server <- function(input, output, session) {
       return(res_all)
     }, seed = 12345) %...>% (function(res_all) {
       if (this_token != rv$run_token) return()
+      
+      tryCatch({
+        batch_elapsed_sec <- as.numeric(difftime(Sys.time(), log_start_time, units = "secs"))
+        history_dir <- "run_history"
+        if (!dir.exists(history_dir)) dir.create(history_dir, recursive = TRUE, showWarnings = FALSE)
+        history_file <- file.path(history_dir, "run_history.csv")
+        
+        total_samples <- sum(log_sample_counts)
+        per_locality_share <- if (total_samples > 0) {
+          batch_elapsed_sec * (log_sample_counts / total_samples)
+        } else {
+          rep(batch_elapsed_sec / log_n_locs, log_n_locs)
+        }
+        
+        new_rows <- data.frame(
+          timestamp = format(Sys.time(), "%Y-%m-%d %H:%M:%S"),
+          method = log_method,
+          comp_mode = log_comp_mode,
+          n_locs_in_batch = log_n_locs,
+          n_samples = log_sample_counts,
+          cores_used = log_cores,
+          batch_elapsed_sec = batch_elapsed_sec,
+          per_locality_share_sec = per_locality_share,
+          stringsAsFactors = FALSE
+        )
+        
+        if (file.exists(history_file)) {
+          write.table(new_rows, history_file, append = TRUE, sep = ",", row.names = FALSE, col.names = FALSE)
+        } else {
+          write.table(new_rows, history_file, append = FALSE, sep = ",", row.names = FALSE, col.names = TRUE)
+        }
+      }, error = function(e) {})
       
       for(res in res_all) {
           l <- res$l

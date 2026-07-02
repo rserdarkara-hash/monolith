@@ -76,9 +76,9 @@ if (!inherits(future::plan(), "multisession")) {
   future::plan(future::multisession)
 }
 
-source("ui_helpers_0.9.8c.R")
-source("spatial_helpers_0.9.8c.R")
-source("theme_helpers_0.9.8c.R")
-source("gov_module_0.9.8c.R")
-source("desc_exploratory_module_0.9.8c.R")
+source("ui_helpers.R")
+source("spatial_helpers.R")
+source("theme_helpers.R")
+source("gov_module.R")
+source("desc_exploratory_module.R")
 

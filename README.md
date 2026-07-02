@@ -90,9 +90,9 @@ Before installing the application, ensure you have the following software instal
 The Monolith dashboard relies on a comprehensive suite of R packages for its spatial engine, statistical analytics, and user interface. 
 
 > [!IMPORTANT]
-> **Automated Package Setup in v0.9.8c:**
+> **Automated Package Setup:**
 > You **do not need** to execute any manual `install.packages(...)` console commands.
-> Sourcing the dashboard or launching `monolith_ver_0.9.8c.R` automatically triggers a smart **Auto-Installation Hook** inside `global_0.9.8c.R`. This hook scans your environment, identifies any missing packages from the required suite, and downloads them non-interactively from the cloud CRAN repository.
+> Sourcing the dashboard or launching `monolith.R` automatically triggers a smart **Auto-Installation Hook** inside `global.R`. This hook scans your environment, identifies any missing packages from the required suite, and downloads them non-interactively from the cloud CRAN repository.
 > 
 > *The dependencies managed automatically by the loader include: shiny, leaflet, sf, terra, tidyterra, gstat, fields, randomForest, DALEX, ggplot2, ggpubr, plotly, fresh, future, furrr, and DT.*
 
@@ -103,16 +103,15 @@ Ensure your project directory maintains the following structure. The application
 ```
 monolith/
 │
-├── global_0.9.8c.R                          # Centralized package loader & environment configuration
-├── monolith_ver_0.9.8c.R            # Main Application Runner (Sources global.R)
-├── spatial_helpers_0.9.8c.R         # Spatial math, interpolation methods & CV logic
-├── ui_helpers_0.9.8c.R              # Analytics, descriptive plots & fuzzy matching helpers
-├── theme_helpers_0.9.8c.R           # Theming & export configurations
-├── gov_module_0.9.8c.R              # Governing Factors UI & Server Modules
-├── desc_exploratory_module_0.9.8c.R # Descriptive & Exploratory Suite (Tab 5 Module)
+├── global.R                          # Centralized package loader & environment configuration
+├── monolith.R                        # Main Application Runner (Sources global.R)
+├── spatial_helpers.R                 # Spatial math, interpolation methods & CV logic
+├── ui_helpers.R                      # Analytics, descriptive plots & fuzzy matching helpers
+├── theme_helpers.R                   # Theming & export configurations
+├── gov_module.R                      # Governing Factors UI & Server Modules
+├── desc_exploratory_module.R         # Descriptive & Exploratory Suite (Tab 5 Module)
 │
 ├── assets/                          # Screenshots & static assets
-├── backup/                          # Backup copies of prior versions
 ├── docs/                            # Guides & documentation
 ├── sample_data/                     # Demo datasets (restricted license)
 │
@@ -123,7 +122,7 @@ monolith/
 ## 4. Running the Application
 
 ### Option A: Using RStudio (Recommended)
-1. Open the `monolith_ver_0.9.8c.R` file in RStudio.
+1. Open the `monolith.R` file in RStudio.
 2. Ensure all required packages are installed and loaded without errors.
 3. Click the **"Run App"** button located at the top right of the source editor.
 
@@ -135,7 +134,7 @@ monolith/
    ```
 3. Launch the Shiny app:
    ```R
-   shiny::runApp("monolith_ver_0.9.8c.R")
+   shiny::runApp("monolith.R")
    ```
 
 ## License
