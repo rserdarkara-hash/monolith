@@ -5432,9 +5432,11 @@ server <- function(input, output, session) {
     b_acc <- tryCatch(yardstick::bal_accuracy_vec(df$act_bin, df$pred_bin), error = function(e) NA)
     mcc   <- tryCatch(yardstick::mcc_vec(df$act_bin, df$pred_bin), error = function(e) NA)
     
+    off_by_one_acc <- tryCatch(sum(abs(as.integer(df$act_bin) - as.integer(df$pred_bin)) <= 1, na.rm = TRUE) / sum(!is.na(df$act_bin) & !is.na(df$pred_bin)), error = function(e) NA)
+    
     data.frame(
-      Metric = c("Overall Accuracy", "Balanced Accuracy", "Matthews Corr. Coef. (MCC)", "Kappa (Unweighted)", "Weighted Kappa (Linear)"),
-      Value = c(round(acc, 4), round(b_acc, 4), round(mcc, 4), round(k_unw, 4), round(k_lin, 4))
+      Metric = c("Overall Accuracy", "Balanced Accuracy", "Off-by-one Accuracy", "Matthews Corr. Coef. (MCC)", "Kappa (Unweighted)", "Weighted Kappa (Linear)"),
+      Value = c(round(acc, 4), round(b_acc, 4), round(off_by_one_acc, 4), round(mcc, 4), round(k_unw, 4), round(k_lin, 4))
     )
   })
 
