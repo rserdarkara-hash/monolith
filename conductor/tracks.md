@@ -5,5 +5,5 @@ This file tracks all major tracks for the project. Each track has its own detail
 
 ---
 
-- [~] **Track: Add normality testing option before the Statistical Significance Tests in the descriptive and exploratory suite**
+- [x] **Track: Add normality testing option before the Statistical Significance Tests in the descriptive and exploratory suite**
 *Link: [./tracks/normality_testing_20260702/](./tracks/normality_testing_20260702/)*
