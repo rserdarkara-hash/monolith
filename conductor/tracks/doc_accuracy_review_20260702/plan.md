@@ -1,10 +1,10 @@
 # Implementation Plan: Monolith Documentation Accuracy Review
 
 ## Phase 1: Setup and Documentation Drawer Restructuring
-- [ ] Task: Create drawer UI test and write failing tests
-    - [ ] Create test file `tests/test_docs_drawer.R`
-    - [ ] Write tests to verify `render_docs_drawer()` outputs three tabs: 'Scientific Guide', 'User Guide', and 'Descriptive & Exploratory Suite'
-    - [ ] Run test suite to verify tests fail as expected (Red Phase)
+- [x] Task: Create drawer UI test and write failing tests f46af2e
+    - [x] Create test file `tests/test_docs_drawer.R`
+    - [x] Write tests to verify `render_docs_drawer()` outputs three tabs: 'Scientific Guide', 'User Guide', and 'Descriptive & Exploratory Suite'
+    - [x] Run test suite to verify tests fail as expected (Red Phase)
 - [ ] Task: Implement drawer restructuring and rename files
     - [ ] Rename `docs/ui_ux_guide.md` to `docs/user_guide.md`
     - [ ] Create `docs/desc_exploratory_guide.md` as a new markdown file
