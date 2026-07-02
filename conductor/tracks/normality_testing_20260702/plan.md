@@ -7,7 +7,7 @@
     - [x] Run the tests and confirm they fail/warn as expected (Red Phase)
 - [x] Task: Conductor - User Manual Verification 'Phase 1: Setup and Test Suite (TDD)' (Protocol in workflow.md)
 
-## Phase 2: Core Normality Test Implementation
+## Phase 2: Core Normality Test Implementation [checkpoint: 4ad2371]
 - [x] Task: Implement Normality Testing Function [0e547a4]
     - [x] Write helper function `compute_normality` in `desc_exploratory_module_0.9.8b.R` or a helper utility
     - [x] Handle sample size $n < 3$ edge case (neutral status, no test run)
@@ -16,7 +16,7 @@
     - [x] Add `tryCatch` to handle errors (e.g. zero variance in data) gracefully
 - [x] Task: Verify Core Logic and Green Phase
     - [x] Run the tests in `tests/test_normality_testing.R` and confirm they pass (Green Phase)
-- [~] Task: Conductor - User Manual Verification 'Phase 2: Core Normality Test Implementation' (Protocol in workflow.md)
+- [x] Task: Conductor - User Manual Verification 'Phase 2: Core Normality Test Implementation' (Protocol in workflow.md)
 
 ## Phase 3: UI Integration and Tooltip Render
 - [ ] Task: Add Normality Indicator to descriptive module UI
