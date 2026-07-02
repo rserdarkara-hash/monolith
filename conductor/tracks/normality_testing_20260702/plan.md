@@ -1,10 +1,10 @@
 # Implementation Plan: Normality Testing Option for Descriptive Suite
 
 ## Phase 1: Setup and Test Suite (TDD)
-- [ ] Task: Update Dependencies and Setup Test
-    - [ ] Add "nortest" to `required_packages` in `global_0.9.8b.R`
-    - [ ] Create test file `tests/test_normality_testing.R` defining the normality test selection logic (sample sizes, test methods, p-values, edge cases)
-    - [ ] Run the tests and confirm they fail/warn as expected (Red Phase)
+- [x] Task: Update Dependencies and Setup Test [7182cee]
+    - [x] Add "nortest" to `required_packages` in `global_0.9.8b.R`
+    - [x] Create test file `tests/test_normality_testing.R` defining the normality test selection logic (sample sizes, test methods, p-values, edge cases)
+    - [x] Run the tests and confirm they fail/warn as expected (Red Phase)
 - [ ] Task: Conductor - User Manual Verification 'Phase 1: Setup and Test Suite (TDD)' (Protocol in workflow.md)
 
 ## Phase 2: Core Normality Test Implementation
