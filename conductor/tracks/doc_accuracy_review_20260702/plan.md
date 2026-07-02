@@ -14,10 +14,10 @@
 - [x] Task: Conductor - User Manual Verification 'Phase 1: Setup and Documentation Drawer Restructuring' (Protocol in workflow.md)
 
 ## Phase 2: Documentation Migration and Accuracy Review
-- [ ] Task: Content migration and validation tests
-    - [ ] Create test `tests/test_docs_existence.R` verifying that all three markdown files are present in the `docs/` folder and contain content
-    - [ ] Migrate the Descriptive & Exploratory Suite sections from `docs/user_guide.md` into `docs/desc_exploratory_guide.md`
-    - [ ] Run test suite to verify all checks pass
+- [x] Task: Content migration and validation tests 751d0b8
+    - [x] Create test `tests/test_docs_existence.R` verifying that all three markdown files are present in the `docs/` folder and contain content
+    - [x] Migrate the Descriptive & Exploratory Suite sections from `docs/user_guide.md` into `docs/desc_exploratory_guide.md`
+    - [x] Run test suite to verify all checks pass
 - [ ] Task: Conduct codebase-to-docs accuracy review and update documentation
     - [ ] Verify geostatistical models, equations, and defaults in `docs/scientific_guide.md` (e.g. OK epsilon-nugget, CK/RK/RFK IDW fallback, etc.) match R code implementation
     - [ ] Verify UI menus, buttons, labels, and text inputs in `docs/user_guide.md` match `monolith_ver_0.9.8b.R` and `ui_helpers_0.9.8b.R` exactly
