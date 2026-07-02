@@ -472,11 +472,11 @@ render_docs_drawer <- function() {
     ),
     tabsetPanel(
       id = "docs_tabs",
-      tabPanel("Scientific Guide", 
-               uiOutput("render_scientific_guide")
-      ),
       tabPanel("User Guide", 
                uiOutput("render_user_guide")
+      ),
+      tabPanel("Scientific Guide", 
+               uiOutput("render_scientific_guide")
       ),
       tabPanel("Descriptive & Exploratory Suite", 
                uiOutput("render_desc_exploratory_guide")
