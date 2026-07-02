@@ -302,7 +302,10 @@ desc_exploratory_server <- function(id, data_reactive, vars_metadata_reactive) {
         },
         if (p_type %in% c("boxplot", "violin", "sinaplot")) {
           shiny::div(style="background-color: #f0f8ff; padding: 10px; border-radius: 5px; border: 1px solid #b8daff; margin-bottom: 10px;",
-              shiny::h5("Statistical Significance Tests", style="margin-top:0; color: #0056b3;"),
+              shiny::h5(style="margin-top:0; color: #0056b3;",
+                  "Statistical Significance Tests",
+                  shiny::uiOutput(ns("desc_normality_indicator"), inline = TRUE)
+              ),
               shiny::checkboxGroupInput(ns("desc_stat_tests"), "Select Test (Choose One):", 
                                  choices = c("ANOVA" = "anova", "Duncan's" = "duncan", "Tukey's HSD" = "tukey"), inline = TRUE),
               shiny::radioButtons(ns("desc_stat_letter_pos"), "Letter Placement:", choices = c("Above Data" = "above", "Top of Plot" = "top"), inline = TRUE)
@@ -331,6 +334,62 @@ desc_exploratory_server <- function(id, data_reactive, vars_metadata_reactive) {
     shiny::observeEvent(input$desc_var_y, { desc_vars_state$y <- input$desc_var_y })
     shiny::observeEvent(input$desc_var_z, { desc_vars_state$z <- input$desc_var_z })
     shiny::observeEvent(input$desc_vars_multi, { desc_vars_state$multi <- input$desc_vars_multi })
+    output$desc_normality_indicator <- shiny::renderUI({
+      req(rv_filtered_analytics_data())
+      req(input$desc_var_x)
+      
+      # Make sure Boxplot, Violin, or Sina-style is selected
+      p_type <- input$desc_plot_type %||% "histogram"
+      if (!(p_type %in% c("boxplot", "violin", "sinaplot"))) {
+        return(NULL)
+      }
+      
+      df <- rv_filtered_analytics_data()
+      var_name <- input$desc_var_x
+      
+      if (!(var_name %in% colnames(df)) || !is.numeric(df[[var_name]])) {
+        return(NULL)
+      }
+      
+      val <- df[[var_name]]
+      res <- compute_normality(val)
+      
+      # Determine icon and styling
+      if (res$status == "insufficient") {
+        icon_element <- shiny::icon("question-circle", style = "color: #6c757d; font-size: 14px; cursor: help;")
+        tooltip_title <- sprintf(
+          "Normality Test: Insufficient data (n = %d). Typically n >= 3 is required.",
+          res$n
+        )
+      } else if (res$status == "normal") {
+        icon_element <- shiny::icon("check-circle", style = "color: #28a745; font-size: 14px; cursor: help;")
+        tooltip_title <- sprintf(
+          "Normality Passed: %s\nStatistic: %s = %.4f\np-value = %.4f\nSample Size: n = %d\nData appears to be normally distributed (p >= 0.05).",
+          res$method,
+          ifelse(grepl("Shapiro-Wilk", res$method), "W", "D"),
+          res$statistic,
+          res$p_value,
+          res$n
+        )
+      } else {
+        icon_element <- shiny::icon("exclamation-triangle", style = "color: #dc3545; font-size: 14px; cursor: help;")
+        p_str <- if (res$p_value < 0.0001) "< 0.0001" else sprintf("= %.4f", res$p_value)
+        tooltip_title <- sprintf(
+          "Normality Failed: %s\nStatistic: %s = %.4f\np-value %s\nSample Size: n = %d\nData deviates significantly from normality (p < 0.05).",
+          res$method,
+          ifelse(grepl("Shapiro-Wilk", res$method), "W", "D"),
+          res$statistic,
+          p_str,
+          res$n
+        )
+      }
+      
+      shiny::tags$span(
+        style = "margin-left: 5px; display: inline-block; vertical-align: middle;",
+        title = tooltip_title,
+        icon_element
+      )
+    })
     
     desc_plot_obj <- shiny::reactive({
       req(rv_analytics_data())
