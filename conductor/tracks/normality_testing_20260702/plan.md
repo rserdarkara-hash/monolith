@@ -26,4 +26,4 @@
 - [x] Task: Verification and Styling Polish [6089e00]
     - [x] Verify reactive responsiveness (changing variables or plot types dynamically updates the normality icon and tooltip)
     - [x] Add CSS style tweaks to align the icon nicely next to the heading
-- [ ] Task: Conductor - User Manual Verification 'Phase 3: UI Integration and Tooltip Render' (Protocol in workflow.md)
+- [~] Task: Conductor - User Manual Verification 'Phase 3: UI Integration and Tooltip Render' (Protocol in workflow.md)
