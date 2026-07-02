@@ -899,7 +899,7 @@ server <- function(input, output, session) {
      }
      
      # 4. Area Coverage
-     if(isTruthy(input$color_style == "agro") && !is.null(rv$rast_list_act[[l]])) {
+     if(isTruthy(input$color_style %in% c("agro", "bin")) && !is.null(rv$rast_list_act[[l]])) {
        area_l <- calc_area_df(rv$rast_list_act[[l]], paste0("export_act_", l))
        if(is.data.frame(area_l)) register_export_item(paste0("table_area_loc_", l), paste(meta$label, "-", l, "- Area Coverage"), "table", area_l, meta$category)
      }
@@ -2560,8 +2560,12 @@ server <- function(input, output, session) {
     ))
   })
   
-  output$render_ui_ux_guide <- renderUI({
-    withMathJax(HTML(commonmark::markdown_html(paste(readLines("docs/ui_ux_guide.md", warn = FALSE), collapse = "\n"))))
+  output$render_user_guide <- renderUI({
+    withMathJax(HTML(commonmark::markdown_html(paste(readLines("docs/user_guide.md", warn = FALSE), collapse = "\n"))))
+  })
+  
+  output$render_desc_exploratory_guide <- renderUI({
+    withMathJax(HTML(commonmark::markdown_html(paste(readLines("docs/desc_exploratory_guide.md", warn = FALSE), collapse = "\n"))))
   })
   
   output$render_scientific_guide <- renderUI({
@@ -2574,60 +2578,131 @@ server <- function(input, output, session) {
     get_joint_scale_values(rv$rast, rv$rast_pred, input$match_scales, is_uncertainty)
   })
 
-  # --- Unified Agro Engine ---
-  agro_params <- reactive({
-    req(input$color_style == "agro")
+  # --- Unified Classification Engine ---
+  classification_params <- reactive({
+    req(input$color_style %in% c("agro", "bin"))
     req(input$var_id)
     meta <- get_current_meta()
     req(meta)
-    n_c <- input$agro_n_classes
     
-    if(input$agro_method == "limits") {
-      brks_inner <- sapply(1:(n_c-1), function(i) {
-        val <- input[[paste0("agro_limit_", i)]]
-        if(is.null(val)) i * 10 else val
-      })
+    if (input$color_style == "agro") {
+      n_c <- input$agro_n_classes
+      
+      if(input$agro_method == "limits") {
+        brks_inner <- sapply(1:(n_c-1), function(i) {
+          val <- input[[paste0("agro_limit_", i)]]
+          if(is.null(val)) i * 10 else val
+        })
+      } else {
+        vv_joint <- joint_vv()
+        if(!is.null(vv_joint)) {
+          vv <- vv_joint
+        } else {
+          # Use the current raster's values for data-driven breaks
+          target <- if(input$value_type == "actual") rv$rast else rv$rast_pred
+          if(is.null(target)) {
+            # Fallback to quantiles of raw data if raster isn't ready
+            df <- rv$user_data
+            v_data <- df[[meta$actual]]
+            if(is.null(v_data) || length(v_data) < n_c) return(NULL)
+            vv <- v_data
+          } else {
+            # Extract prediction layer to avoid standard error / variance contamination
+            target_layer <- if("var1.pred" %in% names(target)) target[["var1.pred"]] else target[[1]]
+            vv <- as.vector(values(target_layer, na.rm=TRUE))
+          }
+        }
+        
+        if(length(vv) < n_c) return(NULL)
+        brks_inner <- tryCatch({
+          classIntervals(vv, n=n_c, style=input$agro_method)$brks[2:n_c]
+        }, error = function(e) {
+          seq(min(vv, na.rm=TRUE), max(vv, na.rm=TRUE), length.out = n_c + 1)[2:n_c]
+        })
+      }
+      
+      brks <- sort(unique(c(-Inf, brks_inner, Inf)))
+      n_c_actual <- length(brks) - 1
+      
+      # Create classification matrix for terra::classify
+      rcl_mat <- matrix(NA, nrow = n_c_actual, ncol = 3)
+      for(i in 1:n_c_actual) {
+        rcl_mat[i, ] <- c(brks[i], brks[i+1], i)
+      }
+      
+      colors <- get_agro_colors(n_c_actual)
+      labels <- if(n_c_actual==3) c("Low", "Med", "High") else paste("Class", 1:n_c_actual)
+      
+      leg_labels <- character(n_c_actual)
+      for(i in 1:n_c_actual) {
+        if(i==1) leg_labels[i] <- paste("<", round(brks[2], 3))
+        else if(i==n_c_actual) leg_labels[i] <- paste(">", round(brks[n_c_actual], 3))
+        else leg_labels[i] <- paste(round(brks[i],3), "-", round(brks[i+1],3))
+      }
+      if(n_c_actual == 3) leg_labels <- paste(labels, ":", leg_labels)
+      
+      list(brks = brks, rcl_mat = rcl_mat, colors = colors, labels = labels, leg_labels = leg_labels, n_c = n_c_actual)
+      
     } else {
+      # Binned (5) styling
+      n_c <- 5
       vv_joint <- joint_vv()
       if(!is.null(vv_joint)) {
         vv <- vv_joint
       } else {
-        # Use the current raster's values for data-driven breaks
         target <- if(input$value_type == "actual") rv$rast else rv$rast_pred
         if(is.null(target)) {
-          # Fallback to quantiles of raw data if raster isn't ready
           df <- rv$user_data
           v_data <- df[[meta$actual]]
           if(is.null(v_data) || length(v_data) < n_c) return(NULL)
           vv <- v_data
         } else {
-          vv <- as.vector(values(target, na.rm=TRUE))
+          # Extract prediction layer to avoid standard error / variance contamination
+          target_layer <- if("var1.pred" %in% names(target)) target[["var1.pred"]] else target[[1]]
+          vv <- as.vector(values(target_layer, na.rm=TRUE))
         }
       }
       
       if(length(vv) < n_c) return(NULL)
-      brks_inner <- classIntervals(vv, n=n_c, style=input$agro_method)$brks[2:n_c]
+      
+      rng <- range(vv, na.rm = TRUE)
+      if(is.infinite(rng[1]) || is.infinite(rng[2]) || rng[1] == rng[2]) {
+        brks_inner <- seq(rng[1], rng[1] + 1, length.out = n_c + 1)[2:n_c]
+      } else {
+        brks_inner <- seq(rng[1], rng[2], length.out = n_c + 1)[2:n_c]
+      }
+      
+      brks <- sort(unique(c(-Inf, brks_inner, Inf)))
+      n_c_actual <- length(brks) - 1
+      
+      rcl_mat <- matrix(NA, nrow = n_c_actual, ncol = 3)
+      for(i in 1:n_c_actual) {
+        rcl_mat[i, ] <- c(brks[i], brks[i+1], i)
+      }
+      
+      is_viridis <- meta$palette == "viridis" || meta$palette == "inferno"
+      colors <- if(is_viridis) {
+        viridis::viridis(n_c_actual, option = meta$palette)
+      } else {
+        colorRampPalette(RColorBrewer::brewer.pal(min(8, max(3, n_c_actual)), meta$palette))(n_c_actual)
+      }
+      
+      labels <- paste("Bin", 1:n_c_actual)
+      
+      leg_labels <- character(n_c_actual)
+      for(i in 1:n_c_actual) {
+        if(i==1) leg_labels[i] <- paste("<", round(brks[2], 3))
+        else if(i==n_c_actual) leg_labels[i] <- paste(">", round(brks[n_c_actual], 3))
+        else leg_labels[i] <- paste(round(brks[i],3), "-", round(brks[i+1],3))
+      }
+      
+      list(brks = brks, rcl_mat = rcl_mat, colors = colors, labels = labels, leg_labels = leg_labels, n_c = n_c_actual)
     }
-    brks <- sort(unique(c(-Inf, brks_inner, Inf)))
-    
-    # Create classification matrix for terra::classify
-    rcl_mat <- matrix(NA, nrow = n_c, ncol = 3)
-    for(i in 1:n_c) {
-      rcl_mat[i, ] <- c(brks[i], brks[i+1], i)
-    }
-    
-    colors <- get_agro_colors(n_c)
-    labels <- if(n_c==3) c("Low", "Med", "High") else paste("Class", 1:n_c)
-    
-    leg_labels <- character(n_c)
-    for(i in 1:n_c) {
-      if(i==1) leg_labels[i] <- paste("<", round(brks[2], 3))
-      else if(i==n_c) leg_labels[i] <- paste(">", round(brks[n_c], 3))
-      else leg_labels[i] <- paste(round(brks[i],3), "-", round(brks[i+1],3))
-    }
-    if(n_c == 3) leg_labels <- paste(labels, ":", leg_labels)
-    
-    list(brks = brks, rcl_mat = rcl_mat, colors = colors, labels = labels, leg_labels = leg_labels, n_c = n_c)
+  })
+
+  agro_params <- reactive({
+    req(input$color_style == "agro")
+    classification_params()
   })
 
   # Pickers
@@ -4012,8 +4087,8 @@ server <- function(input, output, session) {
       }
     }
 
-    # 4. Total Area Coverage (if Agro)
-    if(isTruthy(input$color_style == "agro") && !is.null(rv$rast)) {
+    # 4. Total Area Coverage (if Agro or Bin)
+    if(isTruthy(input$color_style %in% c("agro", "bin")) && !is.null(rv$rast)) {
        area_total <- area_df_total_act()
        if(is.data.frame(area_total)) register_export_item("table_area_total", paste(meta$label, "- Total Area Coverage"), "table", area_total, meta$category)
     }
@@ -4437,34 +4512,36 @@ server <- function(input, output, session) {
             m <- m %>% leaflet::addLegend(colors = params$colors, labels = params$leg_labels, opacity = 0.8, title = paste(meta$label, meta$unit))
           }
         } else if(input$color_style == "bin") {
-          pal <- if(is_viridis) colorBin(viridis::viridis(256, option = meta$palette), vv_scale, bins = 5, na.color = "transparent") 
-                 else colorBin(meta$palette, vv_scale, bins = 5, na.color = "transparent")
-                 
-          # Render each regional sub-grid at native crisp resolution
-          for (i in seq_along(r_list)) {
-            r <- r_list[[i]]
-            r_name <- if (!is.null(r_names) && length(r_names) >= i && !is.na(r_names[i]) && r_names[i] != "") r_names[i] else as.character(i)
-            cache_key <- paste0(rv$run_counter, "_", lab, "_", r_name)
+          params <- classification_params()
+          if(!is.null(params)) {
+            pal <- colorBin(params$colors, bins = params$brks, na.color = "transparent", right = FALSE)
             
-            if (exists(cache_key, envir = leaflet_proj_cache)) {
-              r_w <- get(cache_key, envir = leaflet_proj_cache)
-            } else {
-              if (inherits(r, "PackedSpatRaster")) r <- terra::unwrap(r)
-              r_w <- tryCatch(terra::project(r, "EPSG:4326"), error = function(e) NULL)
-              assign(cache_key, r_w, envir = leaflet_proj_cache)
+            # Render each regional sub-grid at native crisp resolution
+            for (i in seq_along(r_list)) {
+              r <- r_list[[i]]
+              r_name <- if (!is.null(r_names) && length(r_names) >= i && !is.na(r_names[i]) && r_names[i] != "") r_names[i] else as.character(i)
+              cache_key <- paste0(rv$run_counter, "_", lab, "_", r_name)
+              
+              if (exists(cache_key, envir = leaflet_proj_cache)) {
+                r_w <- get(cache_key, envir = leaflet_proj_cache)
+              } else {
+                if (inherits(r, "PackedSpatRaster")) r <- terra::unwrap(r)
+                r_w <- tryCatch(terra::project(r, "EPSG:4326"), error = function(e) NULL)
+                assign(cache_key, r_w, envir = leaflet_proj_cache)
+              }
+              if (is.null(r_w)) next
+              
+              is_uncertainty <- isTruthy(input$show_uncertainty) && input$method %in% c("OK", "RK", "RFK", "CK") && "var1.var" %in% names(r_w)
+              active_layer <- if (is_uncertainty) {
+                al <- r_w[["var1.var"]]
+                if (input$uncertainty_type == "se") sqrt(al) else al
+              } else {
+                if("var1.pred" %in% names(r_w)) r_w[["var1.pred"]] else r_w[[1]]
+              }
+              m <- m %>% addRasterImage(active_layer, colors = pal, opacity = 0.8)
             }
-            if (is.null(r_w)) next
-            
-            is_uncertainty <- isTruthy(input$show_uncertainty) && input$method %in% c("OK", "RK", "RFK", "CK") && "var1.var" %in% names(r_w)
-            active_layer <- if (is_uncertainty) {
-              al <- r_w[["var1.var"]]
-              if (input$uncertainty_type == "se") sqrt(al) else al
-            } else {
-              if("var1.pred" %in% names(r_w)) r_w[["var1.pred"]] else r_w[[1]]
-            }
-            m <- m %>% addRasterImage(active_layer, colors = pal, opacity = 0.8)
+            m <- m %>% leaflet::addLegend(colors = params$colors, labels = params$leg_labels, opacity = 0.8, title = paste(meta$label, meta$unit))
           }
-          m <- m %>% leaflet::addLegend(pal = pal, values = vv_scale, opacity = 0.8, title = paste(meta$label, meta$unit))
         } else {
           pal <- if(is_viridis) colorNumeric(viridis::viridis(256, option = meta$palette), vv_scale, na.color = "transparent") 
                  else colorNumeric(meta$palette, vv_scale, na.color = "transparent")
@@ -5120,8 +5197,8 @@ server <- function(input, output, session) {
   calc_area_df <- function(r_obj, r_id = NULL) {
     if(is.null(r_obj)) return(NULL)
     if(inherits(r_obj, "PackedSpatRaster")) r_obj <- terra::unwrap(r_obj)
-    params <- tryCatch(agro_params(), condition = function(c) NULL)
-    if(is.null(params)) return(data.frame(Status = "Awaiting Agro Params"))
+    params <- tryCatch(classification_params(), condition = function(c) NULL)
+    if(is.null(params)) return(data.frame(Status = "Awaiting Classification Params"))
     
     # Construct cache key if r_id is provided
     if (!is.null(r_id)) {
@@ -5140,10 +5217,11 @@ server <- function(input, output, session) {
       # This handles both decimal degree grids and planar metric grids correctly and seamlessly!
       area_df <- as.data.frame(expanse(r_class, unit = "ha", byValue = TRUE))
       
-      full_res <- data.frame(value = as.numeric(1:params$n_c), Class = params$labels)
+      class_names <- if(isTruthy(input$color_style == "bin")) params$leg_labels else params$labels
+      full_res <- data.frame(value = as.numeric(1:params$n_c), Class = class_names)
       
       if(!"value" %in% names(area_df)) {
-        res_df <- data.frame(Class = params$labels, Ha = 0)
+        res_df <- data.frame(Class = class_names, Ha = 0)
         if (!is.null(r_id)) {
           assign(cache_key, res_df, envir = area_calc_cache)
         }
@@ -5151,9 +5229,9 @@ server <- function(input, output, session) {
       }
       
       # Clean area_df: handle factors/character vs numeric values
-      is_label <- any(as.character(area_df$value) %in% params$labels)
+      is_label <- any(as.character(area_df$value) %in% class_names)
       if (is_label) {
-         area_df$value <- match(as.character(area_df$value), params$labels)
+         area_df$value <- match(as.character(area_df$value), class_names)
       } else {
          area_df$value <- as.numeric(as.character(area_df$value))
       }
@@ -5189,15 +5267,15 @@ server <- function(input, output, session) {
     calc_area_df(rv$rast_pred, "total_pre")
   })
 
-  output$area_table_total_act <- renderTable({ req(input$color_style == "agro"); area_df_total_act() })
-  output$area_table_total_pre <- renderTable({ req(input$color_style == "agro"); area_df_total_pre() })
+  output$area_table_total_act <- renderTable({ req(input$color_style %in% c("agro", "bin")); area_df_total_act() })
+  output$area_table_total_pre <- renderTable({ req(input$color_style %in% c("agro", "bin")); area_df_total_pre() })
   
   output$area_table_loc_act <- renderTable({
-    req(rv$rast_list_act, input$color_style == "agro"); loc <- input$sel_loc_stats
+    req(rv$rast_list_act, input$color_style %in% c("agro", "bin")); loc <- input$sel_loc_stats
     if(loc == "Total (Combined)") return(NULL) else calc_area_df(rv$rast_list_act[[loc]], paste0("loc_act_", loc))
   })
   output$area_table_loc_pre <- renderTable({
-    req(rv$rast_list_pre, input$color_style == "agro"); loc <- input$sel_loc_stats
+    req(rv$rast_list_pre, input$color_style %in% c("agro", "bin")); loc <- input$sel_loc_stats
     if(loc == "Total (Combined)") return(NULL) else calc_area_df(rv$rast_list_pre[[loc]], paste0("loc_pre_", loc))
   })
 
@@ -5354,9 +5432,11 @@ server <- function(input, output, session) {
     b_acc <- tryCatch(yardstick::bal_accuracy_vec(df$act_bin, df$pred_bin), error = function(e) NA)
     mcc   <- tryCatch(yardstick::mcc_vec(df$act_bin, df$pred_bin), error = function(e) NA)
     
+    off_by_one_acc <- tryCatch(sum(abs(as.integer(df$act_bin) - as.integer(df$pred_bin)) <= 1, na.rm = TRUE) / sum(!is.na(df$act_bin) & !is.na(df$pred_bin)), error = function(e) NA)
+    
     data.frame(
-      Metric = c("Overall Accuracy", "Balanced Accuracy", "Matthews Corr. Coef. (MCC)", "Kappa (Unweighted)", "Weighted Kappa (Linear)"),
-      Value = c(round(acc, 4), round(b_acc, 4), round(mcc, 4), round(k_unw, 4), round(k_lin, 4))
+      Metric = c("Overall Accuracy", "Balanced Accuracy", "Off-by-one Accuracy", "Matthews Corr. Coef. (MCC)", "Kappa (Unweighted)", "Weighted Kappa (Linear)"),
+      Value = c(round(acc, 4), round(b_acc, 4), round(off_by_one_acc, 4), round(mcc, 4), round(k_unw, 4), round(k_lin, 4))
     )
   })
 
@@ -5394,9 +5474,9 @@ server <- function(input, output, session) {
     is_viridis <- meta$palette == "viridis" || meta$palette == "inferno"
     
     p <- tryCatch({
-      if(input$color_style == "agro" && !is_uncertainty && input$value_type != "resid" && input$exp_layer != "resid") {
-        params <- agro_params()
-        if(is.null(params)) return(ggplot() + annotate("text", x=0.5, y=0.5, label="Awaiting agronomical parameters...") + theme_void())
+      if(input$color_style %in% c("agro", "bin") && !is_uncertainty && input$value_type != "resid" && input$exp_layer != "resid") {
+        params <- classification_params()
+        if(is.null(params)) return(ggplot() + annotate("text", x=0.5, y=0.5, label="Awaiting classification parameters...") + theme_void())
         # 100% Robust approach: convert to dataframe for geom_tile
         # Fix Area Coverage Bug: Subset target to first layer
         target_c <- classify(target[[1]], params$rcl_mat, right = FALSE)
@@ -5404,16 +5484,15 @@ server <- function(input, output, session) {
         if(nrow(df_plot) == 0) return(ggplot() + annotate("text", x=0.5, y=0.5, label="No data in classified raster.") + theme_void())
         colnames(df_plot) <- c("x", "y", "val")
         
-        # Calculate Ha coverage for legend zero indicators
-        cell_area_ha <- prod(res(target)) / 10000
-        ha_counts <- as.numeric(table(factor(df_plot$val, levels = 1:params$n_c))) * cell_area_ha
+        # Calculate pixel counts for legend zero indicators
+        pixel_counts <- as.numeric(table(factor(df_plot$val, levels = 1:params$n_c)))
         new_labels <- sapply(1:params$n_c, function(i) {
-          if (ha_counts[i] == 0) paste0(params$leg_labels[i], " (0 ha)")
+          if (pixel_counts[i] == 0) paste0(params$leg_labels[i], " (0 ha)")
           else paste0(params$leg_labels[i], "       ")
         })
         
         # Add dummy rows for any missing level to force it into the legend
-        missing_levels <- which(ha_counts == 0)
+        missing_levels <- which(pixel_counts == 0)
         if(length(missing_levels) > 0) {
           dummy_df <- data.frame(x = NA, y = NA, val = missing_levels)
           df_plot <- rbind(df_plot, dummy_df)
@@ -5433,10 +5512,6 @@ server <- function(input, output, session) {
         ggplot() + geom_spatraster(data = target) + 
           scale_fill_distiller(palette = "RdBu", direction = 1, limits = c(-abs_max, abs_max), 
                                na.value = "transparent", name = "Residual")
-      } else if(input$color_style == "bin") {
-        bp <- ggplot() + geom_spatraster(data = target)
-        if(is_viridis) bp + scale_fill_viridis_b(option = meta$palette, name = meta$unit, na.value = "transparent", n.breaks = 5, limits = if(!is.null(vv_scale)) range(vv_scale, na.rm=T) else NULL)
-        else bp + scale_fill_fermenter(palette = meta$palette, direction = 1, name = meta$unit, na.value = "transparent", n.breaks = 5, limits = if(!is.null(vv_scale)) range(vv_scale, na.rm=T) else NULL)
       } else {
         bp <- ggplot() + geom_spatraster(data = target)
         if(is_viridis) bp + scale_fill_viridis_c(option = meta$palette, name = meta$unit, na.value = "transparent", limits = if(!is.null(vv_scale)) range(vv_scale, na.rm=T) else NULL)

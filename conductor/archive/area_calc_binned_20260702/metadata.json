@@ -1,8 +1,0 @@
-{
-  "track_id": "area_calc_binned_20260702",
-  "type": "bug",
-  "status": "new",
-  "created_at": "2026-07-02T10:43:00Z",
-  "updated_at": "2026-07-02T10:43:00Z",
-  "description": "1. we need to investigate and confirm if the ha sizes calculations are correct when styling options were switched to agronomical or binned. 2. if not, they need to be corrected."
-}

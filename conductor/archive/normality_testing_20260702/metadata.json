@@ -1,8 +1,0 @@
-{
-  "track_id": "normality_testing_20260702",
-  "type": "feature",
-  "status": "new",
-  "created_at": "2026-07-02T09:26:00Z",
-  "updated_at": "2026-07-02T09:26:00Z",
-  "description": "Add normality testing option before the Statistical Significance Tests in the descriptive and exploratory suite"
-}

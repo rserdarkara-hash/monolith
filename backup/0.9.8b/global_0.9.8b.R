@@ -10,8 +10,14 @@ required_packages <- c(
   "ggplot2", "ggpubr", "plotly", "RColorBrewer", "viridis", "latticeExtra",
   "patchwork", "fresh", "showtext", "scales", "commonmark", "glue",
   "randomForest", "DALEX", "yardstick", "agricolae", "mgcv",
-  "future", "furrr", "promises"
+  "future", "furrr", "promises", "nortest"
 )
+
+# --- Auto-resolve Missing Dependencies ---
+missing_packages <- required_packages[!(required_packages %in% installed.packages()[, "Package"])]
+if (length(missing_packages) > 0) {
+  install.packages(missing_packages, repos = "https://cloud.r-project.org")
+}
 
 # --- Core R/Shiny Dependencies ---
 library(shiny)
@@ -65,6 +71,7 @@ library(DALEX)
 library(yardstick)
 library(agricolae)
 library(mgcv)
+library(nortest)
 
 # --- Async & Parallel Core Dependencies ---
 library(future)

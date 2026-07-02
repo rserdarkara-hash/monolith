@@ -30,7 +30,7 @@ tab_titles <- sapply(li_tags, function(li) {
 tab_titles <- unlist(tab_titles)
 cat("Detected tab titles: ", paste(tab_titles, collapse = ", "), "\n")
 
-expected_tabs <- c("Scientific Guide", "User Guide", "Descriptive & Exploratory Suite")
+expected_tabs <- c("User Guide", "Scientific Guide", "Descriptive & Exploratory Suite")
 
 # Check if the tabs match exactly
 match_all <- length(tab_titles) == length(expected_tabs) && all(tab_titles == expected_tabs)
