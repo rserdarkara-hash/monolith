@@ -110,7 +110,7 @@ Once selections are made, the main interface transitions to the analytical modul
 * **Buffer Distance (m):** Defines how far the map extends beyond the outermost sample points.
 
 **5. Execution:**
-   - Click **GENERATE MODELS**. The system will perform LOOCV, generate the surface, and populate the Validation Diagnostics table with RMSE, R², and Moran's I metrics.
+   - Click **RUN ANALYSIS**. The system will perform cross-validation (Leave-One-Out CV for 50 or fewer observations, or 10-fold CV for larger datasets), generate the surface, and populate the Validation Diagnostics table with RMSE, R², and Moran's I metrics.
    - **Responsive Diagnostic Views:** The UI employs `shinyjs` to dynamically toggle the visibility of complex validation diagnostics (like the RF Variable Importance Plot, Internal Residual Variogram, or TPS GCV Diagnostic Plot) based on the active Spatial Engine and whether the user is viewing `Actual` or `Predicted` data. This prevents empty plots from rendering and provides visual cleanliness.
 
 ---

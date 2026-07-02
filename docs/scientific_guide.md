@@ -141,8 +141,8 @@ The dashboard employs an automated least-squares fitting algorithm to establish 
 
 ### 4.2 IDW Optimization
 * **Logic**: The application performs an automated search to find the optimal **Distance Power** that minimizes the spatial interpolation error for each specific locality.
-* **Optimization Engine**: The system executes a Leave-One-Out Cross-Validation (LOOCV) loop, testing power factors ranging from **0.5 to 5.0**.
-* **High-Precision Mode**: For larger datasets (typically > 50 points), the engine automatically switches to **5-fold Cross-Validation** to maintain computational efficiency without sacrificing statistical reliability.
+* **Optimization Engine**: The system executes a cross-validation loop to find the optimal power factor, testing values from **0.5 to 5.0**. If the dataset has 50 or fewer observations, it uses **Leave-One-Out Cross-Validation (LOOCV)**.
+* **Large Dataset Handling**: For larger datasets (typically > 50 points), the engine automatically switches to **5-Fold Cross-Validation** to maintain computational efficiency without sacrificing statistical reliability.
 * **Local Adaptation**: As the soil variability is site-specific, the "Optimize" button calculates a unique power factor for every selected locality. 
 
 ### 4.3 TPS Optimization
@@ -155,7 +155,10 @@ The dashboard employs an automated least-squares fitting algorithm to establish 
 
 ## 5. Validation Diagnostics
 
-The dashboard automatically runs Leave-One-Out Cross-Validation (LOOCV) for the selected spatial model. By dropping one data point at a time and predicting its value using the remaining points, we generate a dataset of predicted vs. actual values (<i>P<sub>i</sub></i> vs <i>O<sub>i</sub></i>). The cross-validation engine utilizes a centralized metric abstraction (`perform_cv`) to process an expanded suite of metrics natively.
+The dashboard automatically runs cross-validation for the selected spatial model. Depending on the sample size:
+- If the dataset has 50 or fewer observations, the engine executes a full **Leave-One-Out Cross-Validation (LOOCV)**.
+- If the dataset has more than 50 observations, the engine automatically switches to a **10-Fold Cross-Validation (CV)** to ensure computational efficiency.
+By dropping points according to this partition, we generate a dataset of predicted vs. actual values (<i>P<sub>i</sub></i> vs <i>O<sub>i</sub></i>). The cross-validation engine utilizes a centralized metric abstraction (`perform_cv`) to process an expanded suite of metrics natively.
 
 - **RMSE (Root Mean Square Error):**
   <div style="text-align:center;"><i>RMSE = &radic;( &sum; (P<sub>i</sub> - O<sub>i</sub>)<sup>2</sup> / n )</i></div>
