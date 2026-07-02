@@ -873,8 +873,16 @@ apply_interpolation <- function(data, target_var, method, grid_p, aux_vars, lags
 # --- Global Scale Synchronization ---
 get_joint_scale_values <- function(r1_packed, r2_packed, match_scales, is_uncertainty) {
   if(match_scales && !is_uncertainty) {
-    v1 <- if(!is.null(r1_packed)) as.vector(terra::values(terra::unwrap(r1_packed), na.rm=TRUE)) else NULL
-    v2 <- if(!is.null(r2_packed)) as.vector(terra::values(terra::unwrap(r2_packed), na.rm=TRUE)) else NULL
+    v1 <- if(!is.null(r1_packed)) {
+      r1 <- terra::unwrap(r1_packed)
+      layer <- if("var1.pred" %in% names(r1)) r1[["var1.pred"]] else r1[[1]]
+      as.vector(terra::values(layer, na.rm=TRUE))
+    } else NULL
+    v2 <- if(!is.null(r2_packed)) {
+      r2 <- terra::unwrap(r2_packed)
+      layer <- if("var1.pred" %in% names(r2)) r2[["var1.pred"]] else r2[[1]]
+      as.vector(terra::values(layer, na.rm=TRUE))
+    } else NULL
     res <- c(v1, v2)
     if(length(res) == 0) return(NULL)
     return(res)

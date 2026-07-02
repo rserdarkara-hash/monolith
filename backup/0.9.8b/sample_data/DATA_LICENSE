@@ -1,0 +1,14 @@
+# DATA LICENSE & RESTRICTIONS
+
+Copyright (c) 2026 Recep Serdar Kara. All rights reserved.
+
+The files and datasets contained within this `sample_data/` directory (including but not limited to `samp_data_1.xlsx`, `samp_data_2.xlsx`, `samp_var_list.xlsx`, and `samp_var_list_2.xlsx`) are provided strictly for demonstration, evaluation, and testing purposes of the Monolith application.
+
+By using, cloning, or downloading this repository, you agree to the following terms regarding the sample datasets:
+
+1. **Restricted Use**: The sample data is provided solely to demonstrate the functionality and interface of the Monolith application. Any other use, including but not limited to spatial analyses for external projects, commercial use, or academic/scientific research and publication, is strictly prohibited.
+2. **No Publication**: You may not publish, reprint, upload, or present any research, maps, figures, reports, or analytical results generated using this sample data in any journal article, conference proceeding, website, thesis, presentation, or other public or private forum.
+3. **No Redistribution**: You may not copy, share, redistribute, sublicense, or sell the sample datasets, either in their original form or in any modified or derived format, without the prior written consent of the copyright owner, Recep Serdar Kara.
+4. **No Ownership Transfer**: No ownership rights, intellectual property rights, or research exploitation rights to this data are transferred to any user of this repository.
+
+For inquiries regarding the authorized use, licensing, or collaborations involving these datasets, please contact the author: Recep Serdar Kara.

@@ -184,10 +184,10 @@ generate_base_plot <- function(item, input, agro_params = NULL) {
       if (inherits(obj, "PackedSpatRaster")) obj <- terra::unwrap(obj)
       pal_name <- input$palette_select %||% "YlOrRd"
       is_resid <- grepl("Residual", label)
-      is_agro <- input$color_style == "agro" && !is_resid
+      is_class <- input$color_style %in% c("agro", "bin") && !is_resid
       
       if (isTruthy(input$styler_high_contrast)) {
-          if (!is_agro && !is_resid) pal_name <- "viridis"
+          if (!is_class && !is_resid) pal_name <- "viridis"
       }
       
       # Strip redundant legend titles to maximize layout space
@@ -202,13 +202,14 @@ generate_base_plot <- function(item, input, agro_params = NULL) {
         resid_pal <- if (isTruthy(input$styler_high_contrast)) "PuOr" else "RdBu"
         bp <- bp + scale_fill_distiller(palette = resid_pal, direction = 1, limits = c(-abs_max, abs_max), na.value = "transparent", name = leg_name) +
           coord_sf()
-      } else if (is_agro && !is.null(agro_params)) {
-        # Classification for agronomical maps
+      } else if (is_class && !is.null(agro_params)) {
+        # Classification for agronomical/binned maps
         obj_c <- terra::classify(obj[[1]], agro_params$rcl_mat, right = FALSE)
         names(obj_c) <- "category"
         
         # Add levels to help tidyterra/ggplot2 recognize it as categorical
-        lvls <- data.frame(value = 1:agro_params$n_c, category = agro_params$labels)
+        labels_to_use <- if(input$color_style == "bin") agro_params$leg_labels else agro_params$labels
+        lvls <- data.frame(value = 1:agro_params$n_c, category = labels_to_use)
         levels(obj_c) <- lvls
         
         a_cols <- agro_params$colors
