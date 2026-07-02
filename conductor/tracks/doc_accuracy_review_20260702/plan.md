@@ -5,12 +5,12 @@
     - [x] Create test file `tests/test_docs_drawer.R`
     - [x] Write tests to verify `render_docs_drawer()` outputs three tabs: 'Scientific Guide', 'User Guide', and 'Descriptive & Exploratory Suite'
     - [x] Run test suite to verify tests fail as expected (Red Phase)
-- [ ] Task: Implement drawer restructuring and rename files
-    - [ ] Rename `docs/ui_ux_guide.md` to `docs/user_guide.md`
-    - [ ] Create `docs/desc_exploratory_guide.md` as a new markdown file
-    - [ ] Update `render_docs_drawer()` in `ui_helpers_0.9.8b.R` to define three tabs
-    - [ ] Update server-side renderUI hooks in `monolith_ver_0.9.8b.R` to load and compile `docs/desc_exploratory_guide.md` as `output$render_desc_exploratory_guide`
-    - [ ] Run test suite to confirm tests pass (Green Phase)
+- [x] Task: Implement drawer restructuring and rename files d06e29d
+    - [x] Rename `docs/ui_ux_guide.md` to `docs/user_guide.md`
+    - [x] Create `docs/desc_exploratory_guide.md` as a new markdown file
+    - [x] Update `render_docs_drawer()` in `ui_helpers_0.9.8b.R` to define three tabs
+    - [x] Update server-side renderUI hooks in `monolith_ver_0.9.8b.R` to load and compile `docs/desc_exploratory_guide.md` as `output$render_desc_exploratory_guide`
+    - [x] Run test suite to confirm tests pass (Green Phase)
 - [ ] Task: Conductor - User Manual Verification 'Phase 1: Setup and Documentation Drawer Restructuring' (Protocol in workflow.md)
 
 ## Phase 2: Documentation Migration and Accuracy Review
