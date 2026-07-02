@@ -5482,16 +5482,15 @@ server <- function(input, output, session) {
         if(nrow(df_plot) == 0) return(ggplot() + annotate("text", x=0.5, y=0.5, label="No data in classified raster.") + theme_void())
         colnames(df_plot) <- c("x", "y", "val")
         
-        # Calculate Ha coverage for legend zero indicators
-        cell_area_ha <- prod(res(target)) / 10000
-        ha_counts <- as.numeric(table(factor(df_plot$val, levels = 1:params$n_c))) * cell_area_ha
+        # Calculate pixel counts for legend zero indicators
+        pixel_counts <- as.numeric(table(factor(df_plot$val, levels = 1:params$n_c)))
         new_labels <- sapply(1:params$n_c, function(i) {
-          if (ha_counts[i] == 0) paste0(params$leg_labels[i], " (0 ha)")
+          if (pixel_counts[i] == 0) paste0(params$leg_labels[i], " (0 ha)")
           else paste0(params$leg_labels[i], "       ")
         })
         
         # Add dummy rows for any missing level to force it into the legend
-        missing_levels <- which(ha_counts == 0)
+        missing_levels <- which(pixel_counts == 0)
         if(length(missing_levels) > 0) {
           dummy_df <- data.frame(x = NA, y = NA, val = missing_levels)
           df_plot <- rbind(df_plot, dummy_df)
