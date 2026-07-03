@@ -2,6 +2,8 @@
 
 The **Descriptive and Exploratory Suite**  provides a comprehensive set of statistical and visual tools to investigate your data either before interpolation or after generating parameter predictions.
 
+> *Note: The statistical and geostatistical methods described in this document (e.g., kriging variants, IDW, TPS, cross-validation metrics, PCA, statistical tests) are established methods previously published in the literature; they are not original scientific contributions of this software or its author. This document explains how these methods are implemented within Monolith for practical and operational clarity, and is not designed to serve as a citable source for their theoretical origins. Users who wish to cite the original literature source for a given method should locate and review the relevant sources themselves, as this document does not aim to provide academic citations for each method.*
+
 ## 1. Global Data Grouping & Discretization
 
 At the top of the Analytics Engine, a master control panel dictates the data subset fed into all subsequent analysis tabs (Descriptive, Correlation, PCA, Governing Factors). Any filter or grouping applied persists across your entire analytical session through this tabs, the results will instantly updated if grouping modified.
@@ -20,7 +22,7 @@ This tab focuses on univariate and bivariate distributions, how data varies acro
 A central dropdown allows you to switch between over a dozen high-fidelity visualization modes:
 *   **Distribution:** Histogram, Density, ECDF, QQ Plot, Ridge/Joyplot.
 *   **Categorical Variance:** Boxplot, Violin, Sina-style Plot.
-*   **Multivariate/Spatial:** Scatterplot, 2D Density Heatmap, Parallel Coordinates, Radar/Spider Chart, Multi-fit XYZ Surface.
+*   **Multivariate/Spatial:** Scatterplot, 2D Density Heatmap, Parallel Coordinates, Radar Chart, XYZ Surface.
 
 **2.2 Significance Testing (ANOVA & Post-Hoc)**
 *   When utilizing categorical variance plots (Boxplot, Violin, Sina), the UI natively integrates ANOVA testing.
@@ -29,6 +31,12 @@ A central dropdown allows you to switch between over a dozen high-fidelity visua
 
 **2.3 Ghosting Overlay**
 *   **Functionality:** A toggleable feature that overlays the currently selected local sub-population (filtered group) over a faded, "ghosted" background representing the entire global dataset.
+
+**2.4 Normality Testing**
+*   The UI features an integrated normality test to assess distribution assumptions.
+*   **Dynamic Methodology:** If the sample size is $n < 50$, the system automatically utilizes the Shapiro-Wilk test. For $n \ge 50$, it switches to the Lilliefors test (`nortest::lillie.test`).
+*   **Group-Aware:** If a grouping variable is active (i.e. >1 group), the normality test is run on the group residuals to account for inter-group differences. Otherwise, it runs directly on the raw values.
+
 ---
 
 ## 3. Tab 2: Correlation Analysis
@@ -42,7 +50,7 @@ This module evaluates the linear and monotonic relationships between all numeric
 *   **Hierarchical Heatmap:** Automatically clusters highly correlated variables together.
 *   **Correlation Network:** Visualizes relationships as a node-edge graph, where edge thickness dictates correlation strength.
 *   **Partial Correlation:** Allows users to calculate correlations while mathematically controlling for the effect of a third variable (via regression residual extraction).
-*   **Correlogram & Lagged CCF:** For spatial or sequential lag analysis.
+*   **Correlogram, Lagged CCF:** For spatial or sequential lag analysis.
 
 **3.3 Data Table**
 *   A reactive data table (`DT::dataTableOutput`) below the plot provides the exact numerical correlation matrix for rigorous inspection and export.
@@ -58,7 +66,7 @@ A dedicated high-dimensional dimensionality reduction module.
 *   It lists the exact conflicting pairs and prevents execution, offering an "Ignore Warning & Force PCA" red button for advanced users. This prevents the generation of heavily distorted loading vectors.
 
 **4.2 Plot Settings**
-*   **Types:** Scree Plot, Biplot (2D), Loadings, Contribution, Cumulative Variance, and Mahalanobis Distance.
+*   **Types:** Scree Plot, Biplot (2D), Biplot (3D), Loadings, Contribution, Cumulative Variance, and Mahalanobis Distance.
 *   **Controls:** Dynamic numeric inputs appear based on the plot type to select specific Principal Components (e.g., X-Axis PC 1, Y-Axis PC 2) or assess specific loading contributions.
 
 ---
@@ -74,8 +82,8 @@ This module leverages machine learning explainability to discover non-linear rel
 
 **5.2 Functional Effect Plots**
 Users can toggle between two advanced explainability frameworks:
-*   **SHAP (SHapley Additive exPlanations):** Shows the marginal contribution of each feature across the dataset.
 *   **ALE (Accumulated Local Effects):** A faster, unbiased alternative to Partial Dependence Plots that maps the main effect of a predictor on the target variable.
+*   **PDP (Partial Dependence Plot):** Shows the marginal effect of a feature on the predicted outcome.
 
 ---
 

@@ -114,3 +114,54 @@ test_that("statistic is a single numeric value", {
   expect_type(res$statistic, "double")
   expect_length(res$statistic, 1)
 })
+
+# ── Normality tooltip on residuals vs raw values ───────────────────────────
+
+test_that("normality tooltip shows (on residuals) only when groups are present", {
+  skip_if_not_installed("shiny")
+  
+  df_single <- data.frame(
+    x_val = rnorm(30),
+    group_id = factor(rep("All", 30))
+  )
+  df_multi <- data.frame(
+    x_val = rnorm(30),
+    group_id = factor(rep(c("A", "B"), each = 15))
+  )
+  
+  # Test with single group (should contain "(on raw values)", should NOT contain "(on residuals)")
+  shiny::testServer(desc_exploratory_server, args = list(
+    data_reactive = reactive(df_single),
+    vars_metadata_reactive = reactive(NULL)
+  ), {
+    session$setInputs(
+      desc_plot_type = "boxplot",
+      desc_var_x = "x_val",
+      analytics_group_vars = NULL
+    )
+    
+    indicator_html <- output$desc_normality_indicator
+    html_str <- indicator_html$html
+    expect_false(grepl("(on residuals)", html_str, fixed = TRUE))
+    expect_true(grepl("(on raw values)", html_str, fixed = TRUE))
+  })
+  
+  # Test with multi group (should contain "(on residuals)", should NOT contain "(on raw values)")
+  shiny::testServer(desc_exploratory_server, args = list(
+    data_reactive = reactive(df_multi),
+    vars_metadata_reactive = reactive(NULL)
+  ), {
+    session$setInputs(
+      desc_plot_type = "boxplot",
+      desc_var_x = "x_val",
+      analytics_group_vars = "group_id",
+      grp_type_1 = "categorical",
+      analytics_active_group = c("A", "B")
+    )
+    
+    indicator_html <- output$desc_normality_indicator
+    html_str <- indicator_html$html
+    expect_true(grepl("(on residuals)", html_str, fixed = TRUE))
+    expect_false(grepl("(on raw values)", html_str, fixed = TRUE))
+  })
+})

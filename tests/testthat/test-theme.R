@@ -60,7 +60,7 @@ test_that("all pre-defined themes produce valid theme objects", {
   expect_true("Terra Cotta" %in% names(app_themes))
   expect_true("Arctic Mineral" %in% names(app_themes))
   expect_true("Midnight Neon" %in% names(app_themes))
-  expect_true("Muted Sage" %in% names(app_themes))
+  expect_true("Muted Sage (modified)" %in% names(app_themes))
   expect_true("Slate & Gold" %in% names(app_themes))
   expect_true("Oceanic Deep" %in% names(app_themes))
   expect_true("Sandstone" %in% names(app_themes))

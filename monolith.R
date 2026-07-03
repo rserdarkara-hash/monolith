@@ -6,13 +6,12 @@ estimate_run_duration <- function(loc_sample_counts, method, comp_mode, cores) {
   history_dir <- "run_history"
   history_file <- file.path(history_dir, "run_history.csv")
   
-  # Base multipliers for different methods. Note: Only RFK/RK base formula is currently 
-  # calibrated. OK/IDW/TPS/CK multipliers are unverified guesses and should be updated 
-  # when enough history is logged.
+  # Base multipliers for different methods. Note: RFK, RK, and CK are calibrated 
+  # from real measurements; OK/IDW/TPS multipliers are still unverified guesses.
   method_mult <- switch(method,
     "RFK" = 1.0,
     "RK"  = 1.0,
-    "CK"  = 1.5,
+    "CK"  = 1.3,
     "OK"  = 0.5,
     "IDW" = 0.5,
     "TPS" = 0.3,
@@ -37,6 +36,12 @@ estimate_run_duration <- function(loc_sample_counts, method, comp_mode, cores) {
       comp_history <- history_data[history_data$comp_mode == comp_mode, ]
       if (nrow(comp_history) >= 5) {
         history_data <- comp_history
+      }
+      
+      # Try filtering by cores if enough data
+      cores_history <- history_data[history_data$cores_used == cores, ]
+      if (nrow(cores_history) >= 5) {
+        history_data <- cores_history
       }
     }, error = function(e) { history_data <- NULL })
   }
@@ -77,7 +82,7 @@ estimate_run_duration <- function(loc_sample_counts, method, comp_mode, cores) {
     paste(round(est_time_sec / 60, 1), "minutes")
   }
   
-  estimate_text <- paste0("~", n_models, " locality model(s), ~", est_time_str, " estimated")
+  estimate_text <- paste0("~", n_models, " locality model(s), ~", est_time_str, " estimated.\n\n* Note: This time estimate is calibrated based on a below-average hardware benchmark. Actual execution time on modern or cloud hardware will likely be significantly faster.")
   is_long_run <- est_time_sec >= 120 || method %in% c("RK", "RFK", "CK")
   
   return(list(
@@ -184,6 +189,7 @@ safe_concaveman <- function(pts) {
   b <- tryCatch({
     concaveman::concaveman(pts)
   }, error = function(e) {
+    warning(paste("Concave hull failed:", e$message, "- extrapolations may occur at the edges via convex hull."))
     NULL
   })
   
@@ -211,16 +217,21 @@ robust_vgm_fit <- function(v_emp, v_data) {
   initial_sill <- var(v_data, na.rm=TRUE)
   if (is.na(initial_sill) || initial_sill == 0) initial_sill <- 1
   
+  max_dist <- if (!is.null(v_emp) && nrow(v_emp) > 0) max(v_emp$dist, na.rm = TRUE) else 1.0
+  if (is.na(max_dist) || is.infinite(max_dist) || max_dist <= 0) {
+    max_dist <- 1.0 # Safe default positive distance fallback
+  }
+  
+  if (is.null(v_emp) || nrow(v_emp) < 5) {
+    # Skip fitting to prevent gstat::fit.variogram from crashing R on very small empirical variograms
+    return(gstat::vgm(psill = initial_sill * 0.8, "Sph", range = max_dist/2, nugget = initial_sill * 0.2))
+  }
+  
   initial_nugget <- min(v_emp$gamma)
   if (initial_nugget == 0) initial_nugget <- max(initial_sill * 1e-6, 1e-6)
   
   if (initial_nugget > initial_sill) initial_nugget <- initial_sill * 0.9
   initial_psill <- max(initial_sill - initial_nugget, initial_sill * 0.1)
-  
-  max_dist <- max(v_emp$dist, na.rm = TRUE)
-  if (is.na(max_dist) || is.infinite(max_dist) || max_dist <= 0) {
-    max_dist <- 1.0 # Safe default positive distance fallback
-  }
   
   initial_range <- max_dist / 4
   models <- c("Sph", "Exp", "Gau", "Mat") # Added Matern
@@ -250,9 +261,7 @@ robust_vgm_fit <- function(v_emp, v_data) {
     } else {
       best_fit <- gstat::vgm(psill = initial_sill * 0.8, "Sph", range = max_dist/2, nugget = initial_sill * 0.2)
     }
-    if (!is.null(shiny::getDefaultReactiveDomain())) {
-      tryCatch({ showNotification("Variogram auto-fit failed. Using fallback.", type = "warning", duration = 5) }, error=function(e) NULL)
-    }
+    attr(best_fit, "is_fallback") <- TRUE
   }
   return(best_fit)
 }
@@ -262,9 +271,9 @@ ui <- fluidPage(
   useShinyjs(),
   render_docs_drawer(),
   
-  fresh::use_theme(app_themes[["Muted Sage"]]$theme),
+  fresh::use_theme(app_themes[["Muted Sage (modified)"]]$theme),
   tags$head(
-    tags$style(HTML(app_themes[["Muted Sage"]]$manual_style))
+    tags$style(HTML(app_themes[["Muted Sage (modified)"]]$manual_style))
   ),
   
   uiOutput("dynamic_theme"),
@@ -298,8 +307,9 @@ ui <- fluidPage(
           tags$style(HTML("
             .header-controls .shiny-input-container { width: auto !important; margin: 0 !important; }
             .header-controls .form-group { margin-bottom: 0 !important; margin-right: 0 !important; }
-            .header-controls .checkbox { margin: 0 !important; padding: 0 !important; }
-            .header-controls .checkbox label { margin: 0 !important; padding-left: 20px !important; color: white !important; font-size: 11px !important; }
+            .header-controls .checkbox { margin: 0 !important; padding: 0 !important; display: flex !important; align-items: center !important; }
+            .header-controls .checkbox label { margin: 0 !important; padding-left: 0 !important; color: white !important; font-size: 11px !important; display: flex !important; align-items: center !important; gap: 5px !important; line-height: 1 !important; }
+            .header-controls .checkbox input[type=\"checkbox\"] { position: static !important; margin: 0 !important; }
             
             .header-controls .btn-header-circle,
             .header-controls .dropdown-toggle {
@@ -380,7 +390,7 @@ ui <- fluidPage(
         br(),
         div(style="background-color: #e7f5ff; padding: 10px; border: 1px solid #a5d8ff;",
             h4("2. Spatial Engine"),
-            selectInput("method", "Interpolation", 
+            selectInput("method", HTML(paste0("Interpolation", info_tooltip("method_info", "Cross-validation folds use a fixed random seed (12345) for reproducibility. See Scientific Guide to change this."))), 
                         choices = c("Ordinary Kriging" = "OK", 
                                     "Regression Kriging" = "RK",
                                     "Random Forest Kriging" = "RFK",
@@ -2937,8 +2947,9 @@ server <- function(input, output, session) {
             )
             gcv_res <- gcv_res[gcv_res$lambda > 0, , drop=FALSE]
 
-            list(l = item$l, best_lam = best_lam, gcv_data = gcv_res, err = NULL)          }, error = function(e) {
-            list(l = item$l, best_lam = 0, gcv_data = NULL, err = e$message)
+            list(l = item$l, best_lam = best_lam, gcv_data = gcv_res, err = NULL)
+          }, error = function(e) {
+            list(l = item$l, best_lam = NULL, gcv_data = NULL, err = e$message)
           })
         }, .options = furrr::furrr_options(seed = 12345, packages = c("sf", "fields")))
         
@@ -2946,6 +2957,7 @@ server <- function(input, output, session) {
           l <- res$l
           if(!is.null(res$err)) {
             rv$log <- paste0(rv$log, "\nTPS Opt Error (", l, "): ", res$err)
+            tryCatch({ showNotification(paste("TPS Optimization failed for", l, "- using fallback lambda."), type = "warning") }, error=function(e) NULL)
           } else {
             set_regional_param("TPS", l, target, res$best_lam)
             if(!is.null(res$gcv_data)) {
@@ -4260,6 +4272,13 @@ server <- function(input, output, session) {
       r_list <- Filter(Negate(is.null), r_list)
       
       if (length(r_list) > 0) {
+        fallback_locs <- c()
+        for(n in names(rv$v_fit_list)) {
+          if(isTRUE(attr(rv$v_fit_list[[n]], "is_fallback"))) fallback_locs <- c(fallback_locs, n)
+        }
+        if(length(fallback_locs) > 0) {
+          m <- m %>% addControl(html = paste0("<div id='vgm_fallback_warn' style='color:red; font-weight:bold; background:white; padding:5px 25px 5px 5px; border-radius:4px; position:relative;'><button onclick='document.getElementById(\"vgm_fallback_warn\").style.display=\"none\";' style='position:absolute; top:2px; right:2px; background:none; border:none; color:red; font-size:16px; font-weight:bold; cursor:pointer;'>&times;</button>Note: Variogram fit failed for some localities (", paste(fallback_locs, collapse=", "), ").<br>A fallback spherical model was applied to prevent application failure. Interpret interpolations with caution.</div>"), position = "bottomleft")
+        }
         r_names <- names(r_list)
         vv_list <- lapply(seq_along(r_list), function(i) {
           r <- r_list[[i]]

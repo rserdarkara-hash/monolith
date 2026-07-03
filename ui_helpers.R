@@ -860,9 +860,9 @@ generate_core_plot <- function(df, var_name, y_var = NULL, group_col = NULL, plo
          )
          fit_params <- fit_methods[[scatter_fit]]
          if (!is.null(fit_params)) {
-           x_aes <- if (!is.null(y_var) && y_var != "") .data[[var_name]] else .data[["index_seq"]]
-           y_aes <- if (!is.null(y_var) && y_var != "") .data[[y_var]] else .data[[var_name]]
-           fit_params$mapping <- aes(x = x_aes, y = y_aes, color = .data[[group_col]])
+           x_col <- if (!is.null(y_var) && y_var != "") var_name else "index_seq"
+           y_col <- if (!is.null(y_var) && y_var != "") y_var else var_name
+           fit_params$mapping <- aes(x = .data[[x_col]], y = .data[[y_col]], color = .data[[group_col]])
            p <- p + do.call(geom_smooth, fit_params)
          }
       }

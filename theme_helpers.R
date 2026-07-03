@@ -298,8 +298,8 @@ themes_params <- list(
     body_text_color = "#2b0052",
     header_text_color = "#ffffff"
   ),
-  "Muted Sage" = list(
-    light_blue = "#7c9885",
+  "Muted Sage (modified)" = list(
+    light_blue = "#2d5a27",
     dark_bg = "#4b534d",
     content_bg = "#f4f6f4",
     font_family = "Lato",
@@ -365,10 +365,11 @@ theme_switcher_ui <- function(id) {
         inputId = ns("theme_selector"),
         label = "Select App Theme",
         choices = names(app_themes),
-        selected = "Muted Sage" # Default fallback
+        selected = "Muted Sage (modified)" # Default fallback
       ),
       circle = TRUE, status = "primary", icon = shiny::icon("paint-brush"), width = "300px",
-      tooltip = shinyWidgets::tooltipOptions(title = "Click to change theme")
+      tooltip = shinyWidgets::tooltipOptions(title = "Click to change theme"),
+      right = TRUE
     ),
     shinyjs::useShinyjs(),
     shiny::tags$script(shiny::HTML(sprintf(
@@ -378,7 +379,7 @@ theme_switcher_ui <- function(id) {
         if (saved_theme) {
           Shiny.setInputValue('%s', saved_theme);
         } else {
-          Shiny.setInputValue('%s', 'Muted Sage');
+          Shiny.setInputValue('%s', 'Muted Sage (modified)');
         }
       });
       ",
@@ -390,7 +391,7 @@ theme_switcher_ui <- function(id) {
 theme_switcher_server <- function(id) {
   shiny::moduleServer(id, function(input, output, session) {
     
-    active_theme <- shiny::reactiveVal("Muted Sage")
+    active_theme <- shiny::reactiveVal("Muted Sage (modified)")
     
     shiny::observeEvent(input$saved_theme_js, {
       req(input$saved_theme_js)

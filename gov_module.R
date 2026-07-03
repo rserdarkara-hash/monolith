@@ -5,7 +5,10 @@ gov_factors_ui <- function(id) {
     shiny::div(style = "padding: 10px;",
       shiny::fluidRow(
         shiny::column(3,
-          shiny::h4("Analysis Configuration"),
+          shiny::div(style = "display: flex; align-items: center; margin-bottom: 10px;",
+            shiny::h4("Analysis Configuration", style = "margin: 0; margin-right: 8px;"),
+            shiny::tags$i(class = "fa fa-info-circle", style = "color: #007bff; cursor: help;", title = "A minimum of 50 samples is required to reliably execute Machine Learning models.")
+          ),
           shiny::uiOutput(ns("gov_target_ui")),
           shiny::uiOutput(ns("gov_predictors_ui")),
           shiny::sliderInput(ns("gov_permutations"), "Permutations (for RF importance)", min = 10, max = 100, value = 50, step = 10),
@@ -45,7 +48,7 @@ gov_factors_ui <- function(id) {
                 )
               ),
               shiny::column(6, 
-                shiny::h4("Causality / Interaction (A)"),
+                shiny::h4("SHAP Dependence (Marginal)"),
                 shiny::div(style = "position: relative;",
                   shiny::tags$button(id = ns("gov_expand_inta_btn"), type = "button", class = "btn btn-default action-button expand-icon-btn", shiny::icon("expand")),
                   shiny::plotOutput(ns("gov_plot_interaction_a"), height = "300px")
@@ -62,7 +65,7 @@ gov_factors_ui <- function(id) {
                 )
               ),
               shiny::column(6, 
-                shiny::h4("Causality / Interaction (B)"),
+                shiny::h4("Feature vs Target Scatterplot"),
                 shiny::div(style = "position: relative;",
                   shiny::tags$button(id = ns("gov_expand_intb_btn"), type = "button", class = "btn btn-default action-button expand-icon-btn", shiny::icon("expand")),
                   shiny::plotOutput(ns("gov_plot_interaction_b"), height = "300px")
@@ -123,8 +126,8 @@ gov_factors_server <- function(id, data_reactive, vars_metadata_reactive) {
       
       preds <- setdiff(input$gov_predictors, input$gov_target)
       
-      if (length(preds) < 1 || nrow(df) < 10) {
-        shiny::showNotification("Insufficient data or predictors for analysis.", type = "error")
+      if (length(preds) < 1 || nrow(df) < 50) {
+        shiny::showNotification("Insufficient data or predictors for analysis. At least 50 observations are required.", type = "error")
         return()
       }
       
@@ -175,6 +178,7 @@ gov_factors_server <- function(id, data_reactive, vars_metadata_reactive) {
       
       if (plot_type == "importance") {
         vip_df <- gov_rv$res$importance
+        vip_df <- vip_df[!vip_df$variable %in% c("_baseline_", "_full_model_", "(Intercept)"), ]
         vip_df <- vip_df[order(vip_df$dropout_loss, decreasing = FALSE), ]
         vip_df$variable_label <- sapply(as.character(vip_df$variable), function(v) get_var_label(v, vars_metadata_reactive()))
         vip_df$variable_label <- factor(vip_df$variable_label, levels = vip_df$variable_label)
@@ -293,7 +297,7 @@ gov_factors_server <- function(id, data_reactive, vars_metadata_reactive) {
       ui_id = "gov_inta_expanded_ui",
       plot_static_id = "gov_plot_inta_exp",
       plot_plotly_id = "gov_plot_inta_exp_plotly",
-      title_text = "Interaction (A)",
+      title_text = "SHAP Dependence (Marginal)",
       build_fn = gov_build_inta_plot
     )
     
@@ -315,7 +319,7 @@ gov_factors_server <- function(id, data_reactive, vars_metadata_reactive) {
       ui_id = "gov_intb_expanded_ui",
       plot_static_id = "gov_plot_intb_exp",
       plot_plotly_id = "gov_plot_intb_exp_plotly",
-      title_text = "Interaction (B)",
+      title_text = "Feature vs Target Scatterplot",
       build_fn = gov_build_intb_plot
     )
     

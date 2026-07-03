@@ -34,7 +34,7 @@ Whether you are mapping soil physicochemistry, analyzing topographical interacti
   ![Alternative Text](assets/4.png) 
 
 
-* **Descriptive & Exploratory Suite**: Understand your dataset with simultaneous descriptive, correlation, and principal component analyses with results that can be instantly generated and observed by simultaneous categorization and data popularization of choice. An additional Governing Factors module computes variable importance and effects via Random Forest models with ALE, PDP, and SHAP analyses, decoupled as of v0.9.6 for advanced performance and modularity.
+* **Descriptive & Exploratory Suite**: Understand your dataset with simultaneous descriptive, correlation, and principal component analyses with results that can be instantly generated and observed by simultaneous categorization and data popularization of choice. An additional Governing Factors module computes variable importance and effects via Random Forest models with ALE and PDP analyses, decoupled as of v0.9.6 for advanced performance and modularity.
 
   ![Alternative Text](assets/5.png) 
 

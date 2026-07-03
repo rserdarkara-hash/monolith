@@ -25,15 +25,14 @@ compute_normality <- function(x) {
   }
   
   tryCatch({
-    if (n < 50) {
+    if (n < 5000) {
       test_res <- shapiro.test(clean_x)
       method_name <- "Shapiro-Wilk Normality Test"
-      stat_val <- unname(test_res$statistic)
     } else {
       test_res <- nortest::lillie.test(clean_x)
       method_name <- "Lilliefors (Kolmogorov-Smirnov) Normality Test"
-      stat_val <- unname(test_res$statistic)
     }
+    stat_val <- unname(test_res$statistic)
     
     p_val <- test_res$p.value
     status_val <- if (p_val >= 0.05) "normal" else "not_normal"
@@ -46,6 +45,7 @@ compute_normality <- function(x) {
       n = n
     )
   }, error = function(e) {
+    warning("Normality computation failed: ", e$message)
     default_res
   })
 }
@@ -360,14 +360,20 @@ desc_exploratory_server <- function(id, data_reactive, vars_metadata_reactive) {
         group_breakdown <- paste("\nGroup Breakdown:\n", paste(group_results, collapse = "\n"), sep = "")
       }
       
+      used_residuals <- FALSE
+      residual_err <- NULL
       if ("group_id" %in% colnames(df) && length(unique(df$group_id)) > 1) {
         tryCatch({
           val <- residuals(lm(val ~ group_id, data = df, na.action = na.exclude))
+          used_residuals <- TRUE
         }, error = function(e) {
+          residual_err <<- e$message
+          warning("Residual extraction failed: ", e$message)
         })
       }
       
       res <- compute_normality(val)
+      res_suffix <- if (used_residuals) " (on residuals)" else if (!is.null(residual_err)) paste0(" (on raw values - Residual extraction failed: ", residual_err, ")") else " (on raw values)"
       
       if (res$status == "insufficient") {
         icon_element <- shiny::icon("question-circle", style = "color: #6c757d; font-size: 14px; cursor: help;")
@@ -379,8 +385,9 @@ desc_exploratory_server <- function(id, data_reactive, vars_metadata_reactive) {
       } else if (res$status == "normal") {
         icon_element <- shiny::icon("check-circle", style = "color: #28a745; font-size: 14px; cursor: help;")
         tooltip_title <- sprintf(
-          "Normality Passed: %s (on residuals)\nStatistic: %s = %.4f\np-value = %.4f\nSample Size: n = %d\nWithin-group residuals appear to be normally distributed (p >= 0.05).%s",
+          "Normality Passed: %s%s\nStatistic: %s = %.4f\np-value = %.4f\nSample Size: n = %d\nWithin-group residuals appear to be normally distributed (p >= 0.05).%s",
           res$method,
+          res_suffix,
           ifelse(grepl("Shapiro-Wilk", res$method), "W", "D"),
           res$statistic,
           res$p_value,
@@ -391,8 +398,9 @@ desc_exploratory_server <- function(id, data_reactive, vars_metadata_reactive) {
         icon_element <- shiny::icon("exclamation-triangle", style = "color: #dc3545; font-size: 14px; cursor: help;")
         p_str <- if (res$p_value < 0.0001) "< 0.0001" else sprintf("= %.4f", res$p_value)
         tooltip_title <- sprintf(
-          "Normality Failed: %s (on residuals)\nStatistic: %s = %.4f\np-value %s\nSample Size: n = %d\nWithin-group residuals deviate significantly from normality (p < 0.05).%s",
+          "Normality Failed: %s%s\nStatistic: %s = %.4f\np-value %s\nSample Size: n = %d\nWithin-group residuals deviate significantly from normality (p < 0.05).%s",
           res$method,
+          res_suffix,
           ifelse(grepl("Shapiro-Wilk", res$method), "W", "D"),
           res$statistic,
           p_str,
@@ -561,10 +569,14 @@ desc_exploratory_server <- function(id, data_reactive, vars_metadata_reactive) {
               if (nrow(sub_df) < 5) return(NA)
               f <- input$desc_scatter_fit
               tryCatch({
-                 if (f == "linear") summary(lm(sub_df[[y_var]] ~ sub_df[[var]]))$r.squared
-                 else if (f == "polynomial") { if(length(unique(sub_df[[var]])) > 2) summary(lm(sub_df[[y_var]] ~ poly(sub_df[[var]], 2)))$r.squared else NA }
-                 else if (f == "loess") { mod <- loess(sub_df[[y_var]] ~ sub_df[[var]], span=0.7); cor(sub_df[[y_var]], fitted(mod))^2 }
-                 else if (f == "gam") { if(requireNamespace("mgcv", quietly=TRUE)) summary(mgcv::gam(sub_df[[y_var]] ~ s(sub_df[[var]], bs = "cs")))$r.sq else NA }
+                 form_lin <- as.formula(paste0("`", y_var, "` ~ `", var, "`"))
+                 form_poly <- as.formula(paste0("`", y_var, "` ~ poly(`", var, "`, 2)"))
+                 form_gam <- as.formula(paste0("`", y_var, "` ~ s(`", var, "`, bs = 'cs')"))
+                 
+                 if (f == "linear") summary(lm(form_lin, data = sub_df))$r.squared
+                 else if (f == "polynomial") { if(length(unique(sub_df[[var]])) > 2) summary(lm(form_poly, data = sub_df))$r.squared else NA }
+                 else if (f == "loess") { mod <- loess(form_lin, data = sub_df, span=0.7); cor(sub_df[[y_var]], fitted(mod))^2 }
+                 else if (f == "gam") { if(requireNamespace("mgcv", quietly=TRUE)) summary(mgcv::gam(form_gam, data = sub_df))$r.sq else NA }
                  else NA
               }, error = function(e) NA)
            })
@@ -574,21 +586,29 @@ desc_exploratory_server <- function(id, data_reactive, vars_metadata_reactive) {
               if (nrow(sub_df) < 5) return(NA)
               f <- input$desc_scatter_fit
               tryCatch({
+                 form_lin <- as.formula(paste0("`", y_var, "` ~ `", var, "`"))
+                 form_poly <- as.formula(paste0("`", y_var, "` ~ poly(`", var, "`, 2)"))
+                 form_gam <- as.formula(paste0("`", y_var, "` ~ s(`", var, "`, bs = 'cs')"))
+                 
                  if (f == "linear") {
-                     mod <- summary(lm(sub_df[[y_var]] ~ sub_df[[var]]))
+                     mod <- summary(lm(form_lin, data = sub_df))
                      if(!is.null(mod$fstatistic)) pf(mod$fstatistic[1], mod$fstatistic[2], mod$fstatistic[3], lower.tail=FALSE) else NA
                  } else if (f == "polynomial") { 
                      if(length(unique(sub_df[[var]])) > 2) {
-                         mod <- summary(lm(sub_df[[y_var]] ~ poly(sub_df[[var]], 2)))
+                         mod <- summary(lm(form_poly, data = sub_df))
                          if(!is.null(mod$fstatistic)) pf(mod$fstatistic[1], mod$fstatistic[2], mod$fstatistic[3], lower.tail=FALSE) else NA
                      } else NA 
                  }
-                 else if (f == "gam") { if(requireNamespace("mgcv", quietly=TRUE)) summary(mgcv::gam(sub_df[[y_var]] ~ s(sub_df[[var]], bs = "cs")))$s.table[1, "p-value"] else NA }
+                 else if (f == "gam") { if(requireNamespace("mgcv", quietly=TRUE)) summary(mgcv::gam(form_gam, data = sub_df))$s.table[1, "p-value"] else NA }
                  else NA
               }, error = function(e) NA)
            })
            
-           res$Trend_R2 <- round(as.numeric(r2_vals), 3)
+           if (input$desc_scatter_fit == "loess") {
+               res$`Squared Correlation (Not true R²)` <- round(as.numeric(r2_vals), 3)
+           } else {
+               res$Trend_R2 <- round(as.numeric(r2_vals), 3)
+           }
            res$Trend_PVal <- format.pval(as.numeric(p_vals), digits = 3, eps = 0.001)
         }
       }
@@ -829,7 +849,7 @@ desc_exploratory_server <- function(id, data_reactive, vars_metadata_reactive) {
         colnames(df_clean) <- vars_lab
         
         tryCatch({
-          pca_rv$res <- prcomp(df_clean, scale. = input$pca_scale, center = input$pca_scale)
+          pca_rv$res <- prcomp(df_clean, scale. = input$pca_scale, center = TRUE)
           pca_rv$data <- df_clean
           pca_rv$cols <- vars_lab
           shiny::updateTextInput(session, "pca_ready_flag", value = "yes")
@@ -864,7 +884,7 @@ desc_exploratory_server <- function(id, data_reactive, vars_metadata_reactive) {
       colnames(df_clean) <- vars_lab
       
       tryCatch({
-        pca_rv$res <- prcomp(df_clean, scale. = input$pca_scale, center = input$pca_scale)
+        pca_rv$res <- prcomp(df_clean, scale. = input$pca_scale, center = TRUE)
         pca_rv$data <- df_clean
         pca_rv$cols <- vars_lab
         pca_rv$collinearity_warn <- FALSE

@@ -76,7 +76,10 @@ calc_moran <- function(residuals, coords) {
     }
     
     knn_res <- if(nrow(coords) > 1) {
-      tryCatch({ FNN::get.knn(coords, k = 1) }, error = function(e) list(nn.dist = mean(dist(coords), na.rm = TRUE)))
+      tryCatch({ FNN::get.knn(coords, k = 1) }, error = function(e) {
+        if (nrow(coords) > 2000) return(list(nn.dist = 1))
+        list(nn.dist = mean(dist(coords), na.rm = TRUE))
+      })
     } else {
       list(nn.dist = 1)
     }
@@ -227,6 +230,14 @@ perform_kriging_loocv <- function(pts, target_var, aux_vars, lags_func, vgm_fit_
   
   if (n > 50) {
     k <- 10
+    
+    # Sandbox the seed to prevent global pollution
+    old_seed <- if (exists(".Random.seed", envir = .GlobalEnv, inherits = FALSE)) get(".Random.seed", envir = .GlobalEnv, inherits = FALSE) else NULL
+    on.exit({
+      if (!is.null(old_seed)) assign(".Random.seed", old_seed, envir = .GlobalEnv)
+      else if (exists(".Random.seed", envir = .GlobalEnv, inherits = FALSE)) rm(".Random.seed", envir = .GlobalEnv)
+    }, add = TRUE)
+    
     set.seed(12345) # for scientific reproducibility
     folds <- sample(cut(seq_len(n), breaks = k, labels = FALSE))
     
@@ -247,13 +258,21 @@ perform_kriging_loocv <- function(pts, target_var, aux_vars, lags_func, vgm_fit_
       lags <- lags_func(train)
       v_emp <- variogram(residuals ~ 1, train, width = lags$width, cutoff = lags$cutoff)
       v_fit <- vgm_fit_func(v_emp, train$residuals)
-      res_krig <- krige(residuals ~ 1, train, test, model = v_fit, debug.level = 0)
-      
-      fold_sf <- test[, c("orig_idx", target_var), drop = FALSE]
-      names(fold_sf)[names(fold_sf) == target_var] <- "observed"
-      fold_sf$var1.pred <- as.numeric(pred_trend) + res_krig$var1.pred
-      fold_sf$residual <- fold_sf$observed - fold_sf$var1.pred
-      fold_sf
+      tryCatch({
+        res_krig <- krige(residuals ~ 1, train, test, model = v_fit, debug.level = 0)
+        fold_sf <- test[, c("orig_idx", target_var), drop = FALSE]
+        names(fold_sf)[names(fold_sf) == target_var] <- "observed"
+        fold_sf$var1.pred <- as.numeric(pred_trend) + res_krig$var1.pred
+        fold_sf$residual <- fold_sf$observed - fold_sf$var1.pred
+        fold_sf
+      }, error = function(e) {
+        warning(paste("Kriging CV fold failed:", e$message))
+        fold_sf <- test[, c("orig_idx", target_var), drop = FALSE]
+        names(fold_sf)[names(fold_sf) == target_var] <- "observed"
+        fold_sf$var1.pred <- NA
+        fold_sf$residual <- NA
+        fold_sf
+      })
     })
   } else {
     results_list <- lapply(1:n, function(i) {
@@ -272,13 +291,21 @@ perform_kriging_loocv <- function(pts, target_var, aux_vars, lags_func, vgm_fit_
       lags <- lags_func(train)
       v_emp <- variogram(residuals ~ 1, train, width = lags$width, cutoff = lags$cutoff)
       v_fit <- vgm_fit_func(v_emp, train$residuals)
-      res_krig <- krige(residuals ~ 1, train, test, model = v_fit, debug.level = 0)
-      
-      fold_sf <- test[, c("orig_idx", target_var), drop = FALSE]
-      names(fold_sf)[names(fold_sf) == target_var] <- "observed"
-      fold_sf$var1.pred <- as.numeric(pred_trend) + res_krig$var1.pred
-      fold_sf$residual <- fold_sf$observed - fold_sf$var1.pred
-      fold_sf
+      tryCatch({
+        res_krig <- krige(residuals ~ 1, train, test, model = v_fit, debug.level = 0)
+        fold_sf <- test[, c("orig_idx", target_var), drop = FALSE]
+        names(fold_sf)[names(fold_sf) == target_var] <- "observed"
+        fold_sf$var1.pred <- as.numeric(pred_trend) + res_krig$var1.pred
+        fold_sf$residual <- fold_sf$observed - fold_sf$var1.pred
+        fold_sf
+      }, error = function(e) {
+        warning(paste("Kriging CV fold failed:", e$message))
+        fold_sf <- test[, c("orig_idx", target_var), drop = FALSE]
+        names(fold_sf)[names(fold_sf) == target_var] <- "observed"
+        fold_sf$var1.pred <- NA
+        fold_sf$residual <- NA
+        fold_sf
+      })
     })
   }
   
@@ -337,10 +364,10 @@ detect_multicollinearity_engine <- function(df, vars = NULL, vif_threshold = 10,
   has_collinearity <- FALSE
   
   if (length(kept) >= 2) {
-    df_clean <- na.omit(df[, kept, drop = FALSE])
+    df_clean <- df[, kept, drop = FALSE]
     if (nrow(df_clean) >= 3) {
-      vars_var <- sapply(df_clean, var)
-      valid_vars <- kept[vars_var > 1e-6]
+      vars_var <- sapply(df_clean, var, na.rm = TRUE)
+      valid_vars <- kept[!is.na(vars_var) & vars_var > 1e-6]
       
       if (length(valid_vars) >= 2) {
         cormat <- cor(df_clean[, valid_vars], use = "pairwise.complete.obs")
@@ -626,7 +653,9 @@ apply_CK <- function(data, target_var, grid_p, lags, method_params, aux_vars, l 
     m_type <- suggest_lmc_model(fit_ok_init)
     
     g_or_err <- tryCatch({
-      fit.lmc(vm, g, vgm(var(data_scaled[[target_var]]), m_type, lags$cutoff / 2, 0), correct.diagonal = 1.01)
+      fit_obj <- fit.lmc(vm, g, vgm(var(data_scaled[[target_var]]), m_type, lags$cutoff / 2, 0), correct.diagonal = 1.01)
+      res$log_msg <- paste0(res$log_msg, "\n[Warning] LMC applied correct.diagonal=1.01 to force positive definiteness.")
+      fit_obj
     }, error = function(e) {
       list(error_msg = paste0("LMC Fit Failed: ", e$message, ". Falling back to OK."))
     })
@@ -683,6 +712,9 @@ apply_CK <- function(data, target_var, grid_p, lags, method_params, aux_vars, l 
   })
   
   res <- ck_res
+  if(!is.null(res$res_sf) && !("model_type" %in% names(res$res_sf))) {
+    res$res_sf$model_type <- "Co-Kriging"
+  }
   
   if(is.null(res$res_sf)) {
     write_warning_file(l, prefix, "CK failed, using Ordinary Kriging fallback.")
@@ -692,6 +724,7 @@ apply_CK <- function(data, target_var, grid_p, lags, method_params, aux_vars, l 
     res$v_emp <- v_emp_ok
     res$fit <- fit_ok
     res$res_sf <- krige(form_ok, data, grid_p, model = fit_ok, debug.level = 0)
+    res$res_sf$model_type <- "Ordinary Kriging (Fallback)"
     folds_count <- if (nrow(data) > 50) 10 else nrow(data)
     res <- safe_run_cv(res, krige.cv(form_ok, data, model = fit_ok, nfold = folds_count, debug.level = 0), "OK Fallback", nrow(data))
   }

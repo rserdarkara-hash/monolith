@@ -2,6 +2,8 @@
 
 The Monolith Spatial Analysis Dashboard provides agronomists, soil scientists, and geostatisticians with a toolkit for exploring spatial variability. This guide briefly elaborates on the mathematical intuition, structural assumptions, and practical applications of the underlying spatial methods and evaluation metrics.
 
+> *Note: The statistical and geostatistical methods described in this document (e.g., kriging variants, IDW, TPS, cross-validation metrics, PCA, statistical tests) are established methods previously published in the literature; they are not original scientific contributions of this software or its author. This document explains how these methods are implemented within Monolith for practical and operational clarity, and is not designed to serve as a citable source for their theoretical origins. Users who wish to cite the original literature source for a given method should locate and review the relevant sources themselves, as this document does not aim to provide academic citations for each method.*
+
 ---
 
 ## 1. Spatial Interpolation Engines
@@ -147,7 +149,7 @@ The dashboard employs an automated least-squares fitting algorithm to establish 
 
 ### 4.3 TPS Optimization
 * **Logic**: The software optimizes the **Smoothing Parameter** to achieve the ideal mathematical balance between honoring every individual data point and creating a generalized regional trend.
-* **GCV Diagnostics**: The engine utilizes **Generalized Cross-Validation (GCV)** to score a grid of 30 different lambda values distributed on a logarithmic scale from 0.00000001 to 10.
+* **GCV Diagnostics**: The engine utilizes **Generalized Cross-Validation (GCV)** within the `fields::Tps` algorithm to automatically find the optimal lambda.
 * **Interpretation**: The "Best Lambda" is defined as the value achieving the lowest GCV score. A lambda of 0 indicates an "Exact Interpolator" (zero error at sample points), while higher values indicate a "Smoothing Spline," which is often better for handling noisy sensor data.
 * **Visualization**: The resulting **GCV Curve** is plotted in the Scientific Analysis tab, allowing the user to verify if the optimization process reached a clear mathematical minimum.
 
@@ -185,7 +187,7 @@ By dropping points according to this partition, we generate a dataset of predict
 - **SMAPE (Symmetric Mean Absolute Percentage Error):** Standardizes absolute errors as percentages, preventing extreme inflation when actual values are near zero.
 
 - **Moran's I (Spatial Autocorrelation of Residuals):**
-  Evaluates whether the LOOCV errors are randomly distributed across the field. If Moran's I is significantly positive, errors are clustered (e.g., the model consistently underestimates in the north and overestimates in the south). This indicates the model failed to capture a macroscopic spatial trend, and an RK or RFK approach might be required. The system uses FNN (k=1) and `spdep` for rapid spatial weights matrix construction when calculating the spatial autocorrelation of residuals.
+  Evaluates whether the LOOCV errors are randomly distributed across the field. If Moran's I is significantly positive, errors are clustered (e.g., the model consistently underestimates in the north and overestimates in the south). This indicates the model failed to capture a macroscopic spatial trend, and an RK or RFK approach might be required. The system uses FNN (k=1) and `spdep` for rapid spatial weights matrix construction when calculating the spatial autocorrelation of residuals. **Note:** The spatial distance threshold for defining neighbors uses a hardcoded multiplier. See Section 9 for details on adjusting this.
 
 ---
 
@@ -235,3 +237,19 @@ For advanced models (Regression Kriging and Random Forest Kriging), the uncertai
 ### 8.1 Multicollinearity Filter
 
 The PCA module implements an automated strict collinearity check. Before executing standard PCA, it scans the numerical matrix for pairwise correlations > 0.95. If detected, it actively halts the execution and alerts the user, requiring a manual override or parameter drop. This is a critical statistical guardrail that prevents severe distortion of the loading vectors.
+
+---
+
+## 9. Advanced Parameter Customization (Hardcoded Values)
+
+Certain statistical parameters are hardcoded to ensure smooth automated execution but can be modified directly in the source code by advanced users:
+
+### 9.1 Cross-Validation Random Seed
+To ensure "scientific reproducibility" across identical runs, the cross-validation fold generation uses a fixed seed (`12345`). 
+* **Where to change:** `perform_kriging_loocv` and `apply_TPS` functions inside `spatial_helpers.R`.
+* **How to change:** Locate `set.seed(12345)` and either change the integer or comment out the line to allow fully randomized folds on every execution.
+
+### 9.2 Moran's I Distance Threshold Multiplier
+The spatial distance threshold for defining neighbors in the Moran's I test is calculated dynamically, but relies on a hardcoded multiplier of `5` (`mean(knn_res$nn.dist, na.rm = TRUE) * 5`).
+* **Where to change:** `calc_moran` function inside `spatial_helpers.R`.
+* **How to change:** Locate the `d_thresh` variable and adjust the multiplier (e.g., from `* 5` to `* 3`) if you are working with data where the range of spatial autocorrelation is expected to be much narrower or broader.

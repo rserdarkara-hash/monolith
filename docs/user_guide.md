@@ -106,11 +106,14 @@ Once selections are made, the main interface transitions to the analytical modul
 * **Concave Hull:** Shrink-wraps the boundary to follow the outer perimeter of your points. Ideal for irregularly shaped fields.
 * **Convex Hull:** Creates a "rubber band" boundary around the points. Best for simple, rectangular fields.
 * **Wrapped (Buffered):** Creates a smoothed buffer around the concave hull to ensure the map covers the field edges.
-* **Strict Measured:** Creates individual buffers around every point.
+* **Strict Measured (Point Buffer):** Creates individual buffers around every point.
 * **Buffer Distance (m):** Defines how far the map extends beyond the outermost sample points.
 
-**5. Execution:**
-   - Click **RUN ANALYSIS** and proceed to **Map Viewer** tab. The system will perform cross-validation (Leave-One-Out CV for 50 or fewer observations, or 10-fold CV for larger datasets), generate the surface, and populate the Validation Diagnostics table with RMSE, R², and Moran's I metrics.
+**5. Execution & Run Estimation:**
+   - **Run Estimate:** Before execution, the UI displays a dynamic "Run Estimate" indicator (e.g., "~1 locality model(s), ~1.5 minutes estimated").
+     - **History-Aware Logic:** If sufficient prior runs exist in the `.csv` log for the chosen method, the engine uses a linear model to predict runtime based on sample counts.
+     - **Cold-Start Method Multipliers:** If no history exists, it uses base multipliers: RFK (1.0x), RK (1.0x), and CK (1.3x) which are calibrated from real measurements. OK (0.5x), IDW (0.5x), and TPS (0.3x) are currently unverified estimates based on theoretical complexity.
+   - Click **Run Interpolation** and proceed to **Map Viewer** tab. The system will perform cross-validation (Leave-One-Out CV for 50 or fewer observations, or 10-fold CV for larger datasets) *(Note: cross-validation utilizes a fixed random seed by default; see the Scientific Guide Section 9 for customization)*, generate the surface, and populate the Validation Diagnostics table with RMSE, R², and Moran's I metrics *(Note: Moran's I uses a hardcoded distance threshold multiplier; see the Scientific Guide Section 9 for customization)*.
    - **Responsive Diagnostic Views:** The UI employs `shinyjs` to dynamically toggle the visibility of complex validation diagnostics (like the RF Variable Importance Plot, Internal Residual Variogram, or TPS GCV Diagnostic Plot) based on the active Spatial Engine and whether the user is viewing `Actual` or `Predicted` data. This prevents empty plots from rendering and provides visual cleanliness.
 
 ---
@@ -119,7 +122,7 @@ Once selections are made, the main interface transitions to the analytical modul
 
 **Color Palette Configuration:**
 - Locate the **Styling** drop down menu.
-- Styling can be changed both before and after generating the interpolation models.
+- Styling can be changed both before and after generating the interpolation models. ***If you modify the styling after a model has already been generated**, please allow approximately one minute for the application to re-render the map and recalculate area coverage and classification statistics. During this processing time, the map area and statistics table will fade to a pale gray to indicate that the update is in progress.
 - Choose a classification method:
     * **Continuous:** Best for visualizing raw gradients.
     * **Binned (Statistical):** Select Jenks Natural Breaks or K-Means clustering and choose the number of classes (e.g., 5). This forces the continuous data into easily readable color bands based on data distribution.
