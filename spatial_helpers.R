@@ -802,20 +802,11 @@ apply_TPS <- function(data, target_var, grid_p, method_params, l = "region", pre
     
     grid_p %>% mutate(var1.pred = as.vector(p_v))
   }, error = function(e) {
-    idw_p <- if(!is.null(method_params$idw_p)) method_params$idw_p else 2
-    idw_nmax <- if(!is.null(method_params$idw_nmax)) method_params$idw_nmax else 12
-    form_ok <- reformulate("1", response = target_var)
-    idw_res <- idw(form_ok, data, grid_p, nmax = idw_nmax, idp = idw_p, debug.level = 0)
-    
-    folds_count <- if (nrow(data) > 50) 10 else nrow(data)
-    cv_obj_fallback <- tryCatch({
-      krige.cv(form_ok, data, nmax = idw_nmax, set = list(idp = idw_p), nfold = folds_count, debug.level = 0)
-    }, error = function(e) NULL)
-    res$cv_obj <- cv_obj_fallback
-    res$cv_metrics <- perform_cv(cv_obj_fallback)
-    res$residuals <- get_cv_residuals(cv_obj_fallback, nrow(data))
-    
-    idw_res
+    idw_fallback <- apply_IDW(data, target_var, grid_p, method_params, l, prefix)
+    res$cv_obj <<- idw_fallback$cv_obj
+    res$cv_metrics <<- idw_fallback$cv_metrics
+    res$residuals <<- idw_fallback$residuals
+    idw_fallback$res_sf
   })
   
   res$res_sf <- sanitize_spatial_predictions(res$res_sf)

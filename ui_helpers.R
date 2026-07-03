@@ -1311,61 +1311,48 @@ generate_pca_biplot <- function(pca_res, original_df, pc_x = 1, pc_y = 2, group_
   return(p)
 }
 
-generate_pca_loadings <- function(pca_res, pc = 1) {
-
-  loadings <- pca_res$rotation[, pc]
-  df_load <- data.frame(Variable = names(loadings), Loading = loadings)
-  df_load <- df_load[order(abs(df_load$Loading), decreasing = TRUE), ]
-  df_load$Variable <- factor(df_load$Variable, levels = rev(df_load$Variable))
+generate_pca_bar_plot <- function(values_named, val_name, title_text, y_label, fill_color = NULL, exp_cont = NULL) {
+  df <- data.frame(Variable = names(values_named), Value = values_named)
   
-  p <- ggplot(df_load, aes(x = Variable, y = Loading, fill = Loading > 0)) +
-    geom_bar(stat = "identity") +
-    coord_flip() +
-    theme_minimal() +
-    scale_fill_manual(values = c("TRUE" = "steelblue", "FALSE" = "indianred"), guide="none") +
-    labs(title = paste("Loadings for PC", pc), x = "Variable", y = "Loading Weight")
+  if (val_name == "Loading") {
+    df <- df[order(abs(df$Value), decreasing = TRUE), ]
+  } else {
+    df <- df[order(df$Value, decreasing = TRUE), ]
+  }
+  df$Variable <- factor(df$Variable, levels = rev(df$Variable))
+  
+  p <- ggplot(df, aes(x = Variable, y = Value))
+  if (val_name == "Loading") {
+    p <- p + geom_bar(stat = "identity", aes(fill = Value > 0)) +
+      scale_fill_manual(values = c("TRUE" = "steelblue", "FALSE" = "indianred"), guide = "none")
+  } else {
+    p <- p + geom_bar(stat = "identity", fill = fill_color, alpha = 0.8)
+  }
+  
+  if (!is.null(exp_cont)) {
+    p <- p + geom_hline(yintercept = exp_cont, linetype = "dashed", color = "red")
+  }
+  
+  p <- p + coord_flip() + theme_minimal() + labs(title = title_text, x = "Variable", y = y_label)
+  if (!is.null(exp_cont)) p <- p + labs(caption = "Dashed line indicates expected average contribution")
+  
   return(p)
+}
+
+generate_pca_loadings <- function(pca_res, pc = 1) {
+  generate_pca_bar_plot(pca_res$rotation[, pc], "Loading", paste("Loadings for PC", pc), "Loading Weight")
 }
 
 generate_pca_contribution <- function(pca_res, pc = 1) {
-
   loadings <- pca_res$rotation[, pc]
   contrib <- (loadings^2) * 100
-  
-  df_cont <- data.frame(Variable = names(contrib), Contribution = contrib)
-  df_cont <- df_cont[order(df_cont$Contribution, decreasing = TRUE), ]
-  df_cont$Variable <- factor(df_cont$Variable, levels = rev(df_cont$Variable))
-  
-  exp_cont <- 100 / length(contrib)
-  
-  p <- ggplot(df_cont, aes(x = Variable, y = Contribution)) +
-    geom_bar(stat = "identity", fill = "coral", alpha=0.8) +
-    geom_hline(yintercept = exp_cont, linetype = "dashed", color = "red") +
-    coord_flip() +
-    theme_minimal() +
-    labs(title = paste("Variable Contribution to PC", pc), 
-         x = "Variable", 
-         y = "Contribution (%)",
-         caption = "Dashed line indicates expected average contribution")
-  return(p)
+  generate_pca_bar_plot(contrib, "Contribution", paste("Variable Contribution to PC", pc), "Contribution (%)", "coral", 100 / length(contrib))
 }
 
 generate_pca_cos2 <- function(pca_res, axes = 1:2) {
-
   coord <- sweep(pca_res$rotation[, axes, drop=FALSE], 2, pca_res$sdev[axes], "*")
   cos2 <- rowSums(coord^2)
-  
-  df_cos2 <- data.frame(Variable = names(cos2), Cos2 = cos2)
-  df_cos2 <- df_cos2[order(df_cos2$Cos2, decreasing = TRUE), ]
-  df_cos2$Variable <- factor(df_cos2$Variable, levels = rev(df_cos2$Variable))
-  
-  p <- ggplot(df_cos2, aes(x = Variable, y = Cos2)) +
-    geom_bar(stat = "identity", fill = "mediumseagreen", alpha=0.8) +
-    coord_flip() +
-    theme_minimal() +
-    labs(title = paste("Quality of Representation (cos2) on PC", paste(axes, collapse=" & ")), 
-         x = "Variable", y = "cos2")
-  return(p)
+  generate_pca_bar_plot(cos2, "Cos2", paste("Quality of Representation (cos2) on PC", paste(axes, collapse=" & ")), "cos2", "mediumseagreen")
 }
 
 generate_pca_cumvar <- function(pca_res) {

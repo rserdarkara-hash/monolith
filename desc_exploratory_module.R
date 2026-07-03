@@ -148,6 +148,7 @@ desc_exploratory_ui <- function(id) {
                                   "Biplot (3D)" = "3d_biplot",
                                   "Loadings" = "loadings",
                                   "Contribution" = "contrib",
+                                  "Quality of Rep. (Cos2)" = "cos2",
                                   "Cumulative Variance" = "cumvar",
                                   "Mahalanobis Distance" = "mahalanobis")),
                     shiny::uiOutput(ns("pca_plot_controls"))

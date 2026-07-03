@@ -182,23 +182,6 @@ sync_styler_config <- function(cfg, session) {
   }
 }
 
-safe_concaveman <- function(pts) {
-  if (nrow(pts) < 3) {
-    return(sf::st_convex_hull(sf::st_union(pts)))
-  }
-  b <- tryCatch({
-    concaveman::concaveman(pts)
-  }, error = function(e) {
-    warning(paste("Concave hull failed:", e$message, "- extrapolations may occur at the edges via convex hull."))
-    NULL
-  })
-  
-  if (is.null(b) || sf::st_is_empty(b) || sf::st_geometry_type(b) == "GEOMETRYCOLLECTION") {
-    return(sf::st_convex_hull(sf::st_union(pts)))
-  }
-  return(b)
-}
-
 clean_gstat_env <- function(vgm_obj) {
   if (is.null(vgm_obj)) return(NULL)
   if (is.list(vgm_obj)) {
@@ -884,7 +867,10 @@ server <- function(input, output, session) {
          } else {
            "Target: Pure Nugget (No structure)"
          }
-         p_res <- plot(v_res, model = v_fit, main = paste("Residual Variogram:", loc, title_suffix), sub = v_sub)
+         p_res <- plot(v_res, model = v_fit, 
+                       main = list(label = paste("Residual Variogram:", loc, title_suffix), cex = 0.85), 
+                       sub = list(label = v_sub, cex = 0.75), 
+                       scales = list(cex = 0.75))
          print(p_res)
       }, error = function(e) {
          plot(1, 1, type="n", main=paste("Error:", e$message), axes=F)
@@ -4862,12 +4848,12 @@ server <- function(input, output, session) {
         req(rv$sf, col_resid %in% colnames(rv$sf))
         formula_obj <- as.formula(paste(col_resid, "~ 1"))
         df_filtered <- rv$sf[!is.na(rv$sf[[col_resid]]), ]
-        p_res <- plot(variogram(formula_obj, df_filtered), main = paste("Global Internal Residual Variogram", title_suffix))
+        p_res <- plot(variogram(formula_obj, df_filtered), main = list(label = paste("Global Internal Residual Variogram", title_suffix), cex = 0.85), scales = list(cex = 0.75))
         print(p_res)
       } else {
         req(rv$v_emp_list[[paste0(loc, "_", type)]], rv$v_fit_list[[paste0(loc, "_", type)]])
         p_res <- plot(rv$v_emp_list[[paste0(loc, "_", type)]], rv$v_fit_list[[paste0(loc, "_", type)]], 
-             main = paste("Internal Residual Variogram", paste0(title_suffix, ":"), loc))
+             main = list(label = paste("Internal Residual Variogram", paste0(title_suffix, ":"), loc), cex = 0.85), scales = list(cex = 0.75))
         print(p_res)
       }
     })
