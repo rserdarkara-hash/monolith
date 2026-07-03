@@ -105,8 +105,6 @@ The full dependency suite, grouped by function:
 | **Statistics & Machine Learning** | `randomForest`, `DALEX`, `yardstick`, `agricolae`, `mgcv`, `nortest` |
 | **Parallelization / Async** | `future`, `furrr`, `promises` |
 
-> This list mirrors `required_packages` in `global.R` verbatim. If a dependency is added or removed there, update this table in the same commit to prevent drift.
-
 ## 3. Application Structure
 
 Ensure your project directory maintains the following structure. The application consists of a centralized package loader, a main runner file, and several helper scripts:
