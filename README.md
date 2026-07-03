@@ -87,14 +87,25 @@ Before installing the application, ensure you have the following software instal
 
 ## 2. Package Dependencies
 
-The Monolith dashboard relies on a comprehensive suite of R packages for its spatial engine, statistical analytics, and user interface. 
+The Monolith dashboard relies on a comprehensive suite of R packages for its spatial engine, statistical analytics, and user interface.
 
 > [!IMPORTANT]
 > **Automated Package Setup:**
 > You **do not need** to execute any manual `install.packages(...)` console commands.
-> Sourcing the dashboard or launching `monolith.R` automatically triggers a smart **Auto-Installation Hook** inside `global.R`. This hook scans your environment, identifies any missing packages from the required suite, and downloads them non-interactively from the cloud CRAN repository.
-> 
-> *The dependencies managed automatically by the loader include: shiny, leaflet, sf, terra, tidyterra, gstat, fields, randomForest, DALEX, ggplot2, ggpubr, plotly, fresh, future, furrr, and DT.*
+> Sourcing the dashboard or launching `monolith.R` automatically triggers a smart **Auto-Installation Hook** inside `global.R`. This hook scans your environment, identifies any missing packages from the required suite (47 packages total), and downloads them non-interactively from the cloud CRAN repository.
+
+The full dependency suite, grouped by function:
+
+| Category | Packages |
+|---|---|
+| **Core App / UI** | `shiny`, `shinyjs`, `shinyWidgets`, `shinyFiles`, `shinycssloaders`, `DT` |
+| **Spatial / GIS** | `sf`, `terra`, `tidyterra`, `leaflet`, `leaflet.extras`, `ggspatial`, `fields`, `classInt`, `gstat`, `automap`, `concaveman`, `spdep`, `FNN` |
+| **Data Wrangling & I/O** | `dplyr`, `tidyr`, `jsonlite`, `readxl`, `openxlsx`, `officer`, `zip` |
+| **Visualization & Theming** | `ggplot2`, `ggpubr`, `plotly`, `RColorBrewer`, `viridis`, `latticeExtra`, `patchwork`, `fresh`, `showtext`, `scales`, `commonmark`, `glue` |
+| **Statistics & Machine Learning** | `randomForest`, `DALEX`, `yardstick`, `agricolae`, `mgcv`, `nortest` |
+| **Parallelization / Async** | `future`, `furrr`, `promises` |
+
+> This list mirrors `required_packages` in `global.R` verbatim. If a dependency is added or removed there, update this table in the same commit to prevent drift.
 
 ## 3. Application Structure
 
@@ -143,6 +154,4 @@ monolith/
 This project features a dual-licensing structure to protect both open-source contributions and private research datasets:
 
 *   **Software & Source Code**: The core codebase of **Monolith** is licensed under the **GNU General Public License v3.0 (GPL-3.0)**. You are free to run, study, share, and modify the software, provided all derivative works remain open-source under the same terms. See the [LICENSE](LICENSE) file for the full legal text.
-*   **Sample Datasets**: The files within the [sample_data/](file:///C:/Users/serda/Desktop/Data%20analysis%20tool%20creation/monolith/sample_data) directory are **not** open-source. They are provided solely for demonstrating and testing the application. You are strictly prohibited from publishing, redistributing, or using these datasets in any scientific publications or external projects. See the [sample_data/DATA_LICENSE](file:///C:/Users/serda/Desktop/Data%20analysis%20tool%20creation/monolith/sample_data/DATA_LICENSE) file for the full terms and restrictions.
-
-[def]: assets/2.png
+*   **Sample Datasets**: The files within the [sample_data/] directory are **not** open-source. They are provided solely for demonstrating and testing the application. You are strictly prohibited from publishing, redistributing, or using these datasets in any scientific publications or external projects. See the [sample_data/DATA_LICENSE] file for the full terms and restrictions.
