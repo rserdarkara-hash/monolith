@@ -24,8 +24,9 @@ A central dropdown allows you to switch between over a dozen high-fidelity visua
 *   **Categorical Variance:** Boxplot, Violin, Sina-style Plot.
 *   **Multivariate/Spatial:** Scatterplot, 2D Density Heatmap, Parallel Coordinates, Radar Chart, XYZ Surface.
 
-**2.2 Significance Testing (ANOVA & Post-Hoc)**
-*   When utilizing categorical variance plots (Boxplot, Violin, Sina), the UI natively integrates ANOVA testing.
+**2.2 Significance Testing (ANOVA, Kruskal-Wallis & Post-Hoc)**
+*   When utilizing categorical variance plots (Boxplot, Violin, Sina), the UI natively integrates ANOVA testing for normally distributed data.
+*   **Non-Parametric Testing:** For data that violates normality assumptions, the UI includes a Kruskal-Wallis test option, complete with a contextual tooltip recommendation.
 *   Users can select post-hoc methods (Duncan's or Tukey's HSD).
 *   **UX Interaction:** The resulting statistical significance letters (e.g., 'a', 'b', 'ab') are dynamically rendered directly atop the individual plot geometries, allowing for immediate visual interpretation of statistical differences between soil or field groups.
 
@@ -79,6 +80,8 @@ This module leverages machine learning explainability to discover non-linear rel
 *   **Target:** Select the primary soil parameter you wish to explain.
 *   **Predictors:** Select the environmental or secondary variables acting as potential influences.
 *   **Permutations:** A slider controls the robustness of the Random Forest variable importance calculation (default: 50).
+*   **Number of Trees (ntree):** Controls the depth and complexity of the underlying Random Forest model. Higher values (e.g., 500) ensure extreme stability in permutations but take longer.
+*   **SHAP Sample Size (Max):** Since calculating SHAP explanations is computationally intense, this slider dictates the maximum random subsample size. Lower values execute faster for quick exploration; higher values provide more robust, comprehensive representations of the dataset.
 
 **5.2 Functional Effect Plots**
 Users can toggle between two advanced explainability frameworks:

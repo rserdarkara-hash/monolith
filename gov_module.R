@@ -11,7 +11,9 @@ gov_factors_ui <- function(id) {
           ),
           shiny::uiOutput(ns("gov_target_ui")),
           shiny::uiOutput(ns("gov_predictors_ui")),
-          shiny::sliderInput(ns("gov_permutations"), "Permutations (for RF importance)", min = 10, max = 100, value = 50, step = 10),
+          shiny::sliderInput(ns("gov_permutations"), "Permutations (for RF importance)", min = 10, max = 100, value = 50, step = 10, ticks = FALSE),
+          shiny::sliderInput(ns("gov_ntree"), "Number of Trees (ntree)", min = 50, max = 500, value = 100, step = 50, ticks = FALSE),
+          shiny::sliderInput(ns("gov_shap_size"), shiny::tags$span("SHAP Sample Size (Max)", shiny::tags$i(class = "fa fa-info-circle", title = "Lower values calculate faster but are less stable; higher values take longer but represent the dataset better.", style = "color: #007bff; cursor: help; margin-left: 5px;")), min = 50, max = 1000, value = 100, step = 50, ticks = FALSE),
           shiny::actionButton(ns("gov_run_btn"), "Run Analysis", class = "btn-primary btn-block"),
           shiny::hr(),
           shiny::h4("Plot Settings"),
@@ -21,7 +23,7 @@ gov_factors_ui <- function(id) {
           shiny::conditionalPanel(
             condition = sprintf("output['%s'] == 'running'", ns("gov_ready")),
             shiny::div(style = "text-align: center; padding: 100px 50px; background-color: rgba(255,255,255,0.02); border-radius: 8px; border: 2px dashed #007bff; margin-bottom: 20px; transition: all 0.3s ease;",
-              shiny::div(class = "premium-spinner", style = "margin: 0 auto 20px auto; border-top-color: #007bff; width: 60px; height: 60px; border-radius: 50%; border: 5px solid rgba(0,0,0,0.05); animation: premium-spin 1.2s cubic-bezier(0.5, 0, 0.5, 1) infinite;"),
+              shiny::icon("circle-notch", class = "fa-spin fa-4x", style = "color: #007bff; margin-bottom: 20px;"),
               shiny::h3("Executing Machine Learning Analytics...", style = "color: #007bff; font-weight: bold; margin-bottom: 10px;"),
               shiny::p("Fitting high-dimensional Random Forest models and extracting explanatory SHAP, PDP, and ALE profiles in the background.", style = "color: #666; font-size: 1.1em;"),
               shiny::p("The dashboard remains fully responsive. You can view other tabs or start other operations.", style = "color: #888; font-style: italic; font-size: 0.9em; margin-top: 15px;")
@@ -138,13 +140,19 @@ gov_factors_server <- function(id, data_reactive, vars_metadata_reactive) {
       
       target_col <- input$gov_target
       n_perms <- input$gov_permutations
+      ntree_val <- input$gov_ntree
+      shap_size_val <- input$gov_shap_size
       
       promises::future_promise({
+        library(DALEX)
+        library(randomForest)
         compute_governing_factors(
           df = df, 
           target_col = target_col, 
           predictors = preds, 
-          n_permutations = n_perms
+          n_permutations = n_perms,
+          rf_ntree = ntree_val,
+          shap_sample_size = shap_size_val
         )
       }) %...>% (function(res) {
         shinyjs::enable("gov_run_btn")

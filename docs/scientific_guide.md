@@ -137,7 +137,9 @@ Geostatistical models require fitting a theoretical continuous curve (e.g., Sphe
 - **Range (<i>a</i>):** The maximum distance of spatial autocorrelation. Beyond this distance lag, points are statistically independent.
 
 **Auto-Fit vs. Manual Tuning:**
-The dashboard employs an automated least-squares fitting algorithm to establish a baseline. However, automated fits can get trapped in local minima or overfit to outliers at high lag distances. You may switch to **Manual Tuning** to prioritize the fit at shorter lags, which have the greatest impact on kriging weights.
+The dashboard employs an automated least-squares fitting algorithm to establish a baseline. 
+- **Robust Fallback Engine:** To prevent mathematical crashes (e.g., singular matrix inversion) on difficult datasets, the auto-fit engine features a dynamic multi-model fallback. It sequentially attempts to fit Ste (Stein's), Sph (Spherical), Exp (Exponential), Gau (Gaussian), and Mat (Matern) models. If standard range fitting fails, it recursively falls back to estimating ranges at `max_dist/3` and `max_dist/2` to ensure a stable curve is successfully mapped.
+- **Manual Override:** However, automated fits can get trapped in local minima or overfit to outliers at high lag distances. You may switch to **Manual Tuning** to prioritize the fit at shorter lags, which have the greatest impact on kriging weights.
 
 ---
 
@@ -234,9 +236,11 @@ For advanced models (Regression Kriging and Random Forest Kriging), the uncertai
 
 ## 8. Data Analytics & PCA Protocols
 
-### 8.1 Multicollinearity Filter
+### 8.1 Multicollinearity Filter (PCA & Spatial Models)
 
-The PCA module implements an automated strict collinearity check. Before executing standard PCA, it scans the numerical matrix for pairwise correlations > 0.95. If detected, it actively halts the execution and alerts the user, requiring a manual override or parameter drop. This is a critical statistical guardrail that prevents severe distortion of the loading vectors.
+The system actively guards against severe multicollinearity which can destabilize multivariate mathematical models. 
+* **PCA Module:** Before executing standard PCA, it scans the numerical matrix for pairwise correlations > 0.95. If detected, it actively halts the execution and alerts the user, requiring a manual override or parameter drop. This is a critical statistical guardrail that prevents severe distortion of the loading vectors.
+* **Geostatistical Engine (RK, RFK, CK):** Before launching multivariate spatial interpolations (Regression Kriging, Random Forest Kriging, or Co-Kriging), the system performs a Variance Inflation Factor (VIF) check on the selected auxiliary variables. If variables with a VIF > 10 are detected, an interactive modal halts the process, advising the user to "Auto-Drop and Continue" or force execution. If auto-dropped, the variables are strictly purged from both the interpolation algorithms and downstream diagnostic reports (e.g., Variable Importance plots).
 
 ---
 

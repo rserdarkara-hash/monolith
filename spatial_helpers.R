@@ -516,7 +516,7 @@ sanitize_spatial_predictions <- function(res_sf) {
   return(res_sf)
 }
 
-apply_kriging_pipeline <- function(engine = c("OK", "RK", "RFK"), data, target_var, grid_p, lags, method_params, aux_vars = NULL, l = "region", prefix = "act") {
+apply_kriging_pipeline <- function(engine = c("OK", "RK", "RFK"), data, target_var, grid_p, lags, method_params, aux_vars = NULL, l = "region", prefix = "act", vif_threshold = 10) {
   engine <- match.arg(engine)
   res <- init_interpolation_res()
   
@@ -533,8 +533,8 @@ apply_kriging_pipeline <- function(engine = c("OK", "RK", "RFK"), data, target_v
   } else {
     update_progress_file(l, prefix, 10, 100)
     krig_res <- tryCatch({
-      if (engine == "RK" && length(aux_vars) > 1) {
-        vif_res <- check_vif(st_drop_geometry(data)[, aux_vars, drop = FALSE])
+      if (engine %in% c("RK", "RFK") && length(aux_vars) > 1) {
+        vif_res <- check_vif(st_drop_geometry(data)[, aux_vars, drop = FALSE], threshold = vif_threshold)
         if (length(vif_res$dropped) > 0) {
           res$log_msg <- paste0(res$log_msg, " [VIF] Dropped: ", paste(vif_res$dropped, collapse=", "))
           aux_vars <- vif_res$kept
@@ -621,12 +621,12 @@ apply_OK <- function(data, target_var, grid_p, lags, method_params, l = "region"
   apply_kriging_pipeline("OK", data, target_var, grid_p, lags, method_params, NULL, l, prefix)
 }
 
-apply_RK <- function(data, target_var, grid_p, lags, method_params, aux_vars, l = "region", prefix = "act") {
-  apply_kriging_pipeline("RK", data, target_var, grid_p, lags, method_params, aux_vars, l, prefix)
+apply_RK <- function(data, target_var, grid_p, lags, method_params, aux_vars, l = "region", prefix = "act", vif_threshold = 10) {
+  apply_kriging_pipeline("RK", data, target_var, grid_p, lags, method_params, aux_vars, l, prefix, vif_threshold)
 }
 
-apply_RFK <- function(data, target_var, grid_p, lags, method_params, aux_vars, l = "region", prefix = "act") {
-  apply_kriging_pipeline("RFK", data, target_var, grid_p, lags, method_params, aux_vars, l, prefix)
+apply_RFK <- function(data, target_var, grid_p, lags, method_params, aux_vars, l = "region", prefix = "act", vif_threshold = 10) {
+  apply_kriging_pipeline("RFK", data, target_var, grid_p, lags, method_params, aux_vars, l, prefix, vif_threshold)
 }
 
 apply_CK <- function(data, target_var, grid_p, lags, method_params, aux_vars, l = "region", prefix = "act") {
@@ -824,14 +824,14 @@ apply_TPS <- function(data, target_var, grid_p, method_params, l = "region", pre
   return(res)
 }
 
-apply_interpolation <- function(data, target_var, method, grid_p, aux_vars, lags, method_params, l, prefix) {
+apply_interpolation <- function(data, target_var, method, grid_p, aux_vars, lags, method_params, l, prefix, vif_threshold = 10) {
   res <- tryCatch({
     if(method == "OK") {
       apply_OK(data, target_var, grid_p, lags, method_params, l, prefix)
     } else if(method == "RK" && length(aux_vars) > 0) {
-      apply_RK(data, target_var, grid_p, lags, method_params, aux_vars, l, prefix)
+      apply_RK(data, target_var, grid_p, lags, method_params, aux_vars, l, prefix, vif_threshold)
     } else if(method == "RFK" && length(aux_vars) > 0) {
-      apply_RFK(data, target_var, grid_p, lags, method_params, aux_vars, l, prefix)
+      apply_RFK(data, target_var, grid_p, lags, method_params, aux_vars, l, prefix, vif_threshold)
     } else if(method == "CK" && length(aux_vars) > 0) {
       apply_CK(data, target_var, grid_p, lags, method_params, aux_vars, l, prefix)
     } else if(method == "IDW") {
@@ -872,7 +872,7 @@ get_joint_scale_values <- function(r1_packed, r2_packed, match_scales, is_uncert
 }
 
 
-compute_governing_factors <- function(df, target_col, predictors, n_permutations = 10) {
+compute_governing_factors <- function(df, target_col, predictors, n_permutations = 10, rf_ntree = 100, shap_sample_size = 100) {
   req_cols <- c(target_col, predictors)
   df_clean <- df[, req_cols, drop = FALSE]
   df_clean <- df_clean[complete.cases(df_clean), , drop = FALSE]
@@ -881,7 +881,7 @@ compute_governing_factors <- function(df, target_col, predictors, n_permutations
   
   formula_str <- paste(target_col, "~ .")
   set.seed(12345)
-  rf_model <- randomForest::randomForest(as.formula(formula_str), data = df_clean, ntree = 100, importance = TRUE)
+  rf_model <- randomForest::randomForest(as.formula(formula_str), data = df_clean, ntree = rf_ntree, importance = TRUE)
   
   explainer_rf <- DALEX::explain(
     model = rf_model, 
@@ -905,7 +905,7 @@ compute_governing_factors <- function(df, target_col, predictors, n_permutations
   pdp_df <- as.data.frame(pdp_prof$agr_profiles)
 
   set.seed(12345)
-  sample_idx <- sample(1:nrow(df_clean), min(20, nrow(df_clean)))
+  sample_idx <- sample(seq_len(nrow(df_clean)), min(shap_sample_size, nrow(df_clean)))
   shap_list <- lapply(sample_idx, function(i) {
     sp <- DALEX::predict_parts(explainer_rf, new_observation = df_clean[i, predictors, drop = FALSE], type = "shap")
     sp <- as.data.frame(sp)
@@ -970,7 +970,7 @@ validate_and_project_sf <- function(pts_sf, current_crs = NULL) {
   return(pts_sf)
 }
 
-run_regional_interpolation <- function(item, current_method, current_crs, aux_vars, shp_bound, b_type, buff_mode, b_dist, res_mode, grid_res, crs_sel, comp_mode, val_type, progress_dir_val = tempdir(), session_id_val = "default", cancel_file_val = NULL) {
+run_regional_interpolation <- function(item, current_method, current_crs, aux_vars, shp_bound, b_type, buff_mode, b_dist, res_mode, grid_res, crs_sel, comp_mode, val_type, progress_dir_val = tempdir(), session_id_val = "default", cancel_file_val = NULL, vif_threshold = 10) {
   options(monolith_progress_dir = progress_dir_val)
   options(monolith_session_id = session_id_val)
   

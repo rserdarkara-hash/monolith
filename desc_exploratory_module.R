@@ -297,8 +297,9 @@ desc_exploratory_server <- function(id, data_reactive, vars_metadata_reactive) {
                   "Statistical Significance Tests",
                   shiny::uiOutput(ns("desc_normality_indicator"), inline = TRUE)
               ),
-              shiny::checkboxGroupInput(ns("desc_stat_tests"), "Select Test (Choose One):", 
-                                 choices = c("ANOVA" = "anova", "Duncan's" = "duncan", "Tukey's HSD" = "tukey"), inline = TRUE),
+              shiny::checkboxGroupInput(ns("desc_stat_tests"), 
+                                 shiny::HTML("Select Test (Choose One) <span title='For non-normal data distributions, non-parametric Kruskal-Wallis is highly recommended.'>\u2139\uFE0F</span>:"), 
+                                 choices = c("ANOVA" = "anova", "Duncan's" = "duncan", "Tukey's HSD" = "tukey", "Kruskal-Wallis" = "kruskal"), inline = TRUE),
               shiny::radioButtons(ns("desc_stat_letter_pos"), "Letter Placement:", choices = c("Above Data" = "above", "Top of Plot" = "top"), inline = TRUE)
           )
         },
@@ -574,7 +575,7 @@ desc_exploratory_server <- function(id, data_reactive, vars_metadata_reactive) {
                  form_gam <- as.formula(paste0("`", y_var, "` ~ s(`", var, "`, bs = 'cs')"))
                  
                  if (f == "linear") summary(lm(form_lin, data = sub_df))$r.squared
-                 else if (f == "polynomial") { if(length(unique(sub_df[[var]])) > 2) summary(lm(form_poly, data = sub_df))$r.squared else NA }
+                 else if (f == "polynomial") { if(length(unique(sub_df[[var]])) > 3) summary(lm(form_poly, data = sub_df))$r.squared else NA }
                  else if (f == "loess") { mod <- loess(form_lin, data = sub_df, span=0.7); cor(sub_df[[y_var]], fitted(mod))^2 }
                  else if (f == "gam") { if(requireNamespace("mgcv", quietly=TRUE)) summary(mgcv::gam(form_gam, data = sub_df))$r.sq else NA }
                  else NA
@@ -594,7 +595,7 @@ desc_exploratory_server <- function(id, data_reactive, vars_metadata_reactive) {
                      mod <- summary(lm(form_lin, data = sub_df))
                      if(!is.null(mod$fstatistic)) pf(mod$fstatistic[1], mod$fstatistic[2], mod$fstatistic[3], lower.tail=FALSE) else NA
                  } else if (f == "polynomial") { 
-                     if(length(unique(sub_df[[var]])) > 2) {
+                     if(length(unique(sub_df[[var]])) > 3) {
                          mod <- summary(lm(form_poly, data = sub_df))
                          if(!is.null(mod$fstatistic)) pf(mod$fstatistic[1], mod$fstatistic[2], mod$fstatistic[3], lower.tail=FALSE) else NA
                      } else NA 
@@ -735,6 +736,7 @@ desc_exploratory_server <- function(id, data_reactive, vars_metadata_reactive) {
         v2 <- input$corr_var_2
         df_clean <- na.omit(df[, c(v1, v2)])
         if(nrow(df_clean) < 3) return(NULL)
+        showNotification("Note: Lagged Cross-Correlation (CCF) is designed for sequentially ordered time-series. If data is strictly spatial or cross-sectional, interpretations may be invalid.", type = "warning", duration = 8)
         max_lag <- input$corr_max_lag %||% 10
         ccf_res <- ccf(df_clean[[v1]], df_clean[[v2]], lag.max = max_lag, plot = FALSE)
         res_df <- data.frame(Lag = ccf_res$lag[,1,1], CrossCorrelation = round(ccf_res$acf[,1,1], 3))
@@ -846,6 +848,12 @@ desc_exploratory_server <- function(id, data_reactive, vars_metadata_reactive) {
         
         vars_lab <- get_var_labels(input$pca_vars, vars_metadata_reactive())
         df_clean <- na.omit(df[, input$pca_vars, drop=FALSE])
+        
+        dropped_rows <- nrow(df) - nrow(df_clean)
+        if (dropped_rows > 0) {
+            showNotification(sprintf("Warning: %d rows were dropped due to missing values (NA) in the selected variables.", dropped_rows), type = "warning", duration = 10)
+        }
+        
         colnames(df_clean) <- vars_lab
         
         tryCatch({
@@ -866,7 +874,7 @@ desc_exploratory_server <- function(id, data_reactive, vars_metadata_reactive) {
           shiny::h4(shiny::icon("exclamation-triangle"), "High Collinearity Detected!"),
           shiny::p("The following variable pairs have a correlation > 0.95. This can severely distort PCA results (multicollinearity)."),
           shiny::tags$ul(
-            lapply(1:nrow(pca_rv$collinear_pairs), function(i) {
+            lapply(seq_len(nrow(pca_rv$collinear_pairs)), function(i) {
               shiny::tags$li(paste0(pca_rv$collinear_pairs$var1[i], " & ", pca_rv$collinear_pairs$var2[i], " (r = ", round(pca_rv$collinear_pairs$r[i], 3), ")"))
             })
           ),

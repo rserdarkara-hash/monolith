@@ -729,6 +729,11 @@ get_stat_letters <- function(df, var_name, group_col, test_type) {
       df_let <- data.frame(group = rownames(res$groups), letter = as.character(res$groups$groups))
       colnames(df_let)[1] <- group_col
       return(df_let)
+    } else if (test_type == "kruskal") {
+      res <- agricolae::kruskal(df_proc[[var_name]], df_proc[[group_col]], console = FALSE)
+      df_let <- data.frame(group = rownames(res$groups), letter = as.character(res$groups$groups))
+      colnames(df_let)[1] <- group_col
+      return(df_let)
     } else if (test_type == "anova" || n_groups == 2) {
       s_aov <- summary(aov_res)
       f_val <- s_aov[[1]][["F value"]][1]
@@ -767,7 +772,8 @@ add_stat_layer <- function(p, df, var_name, group_col, stat_test, stat_letter_po
                    max_y <- max(sub_df$Value, na.rm = TRUE)
                    l_df$y_pos <- max_y + (max_y - min(sub_df$Value, na.rm=TRUE)) * 0.1
                } else {
-                   agg_df <- aggregate(Value ~ get(group_col), data = sub_df, max, na.rm = TRUE)
+                   form <- as.formula(paste0("Value ~ `", group_col, "`"))
+                   agg_df <- aggregate(form, data = sub_df, max, na.rm = TRUE)
                    colnames(agg_df) <- c(group_col, "y_pos")
                    l_df <- merge(l_df, agg_df, by = group_col)
                }
@@ -817,6 +823,8 @@ generate_core_plot <- function(df, var_name, y_var = NULL, group_col = NULL, plo
     df$group_id <- factor("All")
     group_col <- "group_id"
   }
+  
+  if (!"index_seq" %in% colnames(df)) df$index_seq <- seq_len(nrow(df))
   
   p <- ggplot() + theme_minimal()
   
@@ -1322,8 +1330,7 @@ generate_pca_loadings <- function(pca_res, pc = 1) {
 generate_pca_contribution <- function(pca_res, pc = 1) {
 
   loadings <- pca_res$rotation[, pc]
-  eig <- pca_res$sdev[pc]^2
-  contrib <- (loadings^2 / eig) * 100
+  contrib <- (loadings^2) * 100
   
   df_cont <- data.frame(Variable = names(contrib), Contribution = contrib)
   df_cont <- df_cont[order(df_cont$Contribution, decreasing = TRUE), ]
@@ -1345,8 +1352,8 @@ generate_pca_contribution <- function(pca_res, pc = 1) {
 
 generate_pca_cos2 <- function(pca_res, axes = 1:2) {
 
-  loadings <- pca_res$rotation[, axes, drop=FALSE]
-  cos2 <- rowSums(loadings^2)
+  coord <- sweep(pca_res$rotation[, axes, drop=FALSE], 2, pca_res$sdev[axes], "*")
+  cos2 <- rowSums(coord^2)
   
   df_cos2 <- data.frame(Variable = names(cos2), Cos2 = cos2)
   df_cos2 <- df_cos2[order(df_cos2$Cos2, decreasing = TRUE), ]
@@ -1461,7 +1468,8 @@ add_styled_points <- function(map, pts_sf, color_by = "none", custom_colors = NU
                               label_size = 11, marker_size = 3,
                               popup_fn = NULL) {
 
-  pts_view <- if (sf::st_crs(pts_sf)$epsg != 4326) sf::st_transform(pts_sf, 4326) else pts_sf
+  crs_obj <- sf::st_crs(pts_sf)
+  pts_view <- if (is.na(crs_obj$epsg) || crs_obj$epsg != 4326) sf::st_transform(pts_sf, 4326) else pts_sf
   if (nrow(pts_view) == 0) return(map)
 
   use_groups <- color_by != "none" && color_by %in% colnames(pts_view)

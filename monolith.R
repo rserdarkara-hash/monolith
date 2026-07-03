@@ -233,19 +233,26 @@ robust_vgm_fit <- function(v_emp, v_data) {
   if (initial_nugget > initial_sill) initial_nugget <- initial_sill * 0.9
   initial_psill <- max(initial_sill - initial_nugget, initial_sill * 0.1)
   
-  initial_range <- max_dist / 4
+  ranges <- c(max_dist / 10, max_dist / 5, max_dist / 4, max_dist / 2)
   models <- c("Sph", "Exp", "Gau", "Mat") # Added Matern
   
   fits <- lapply(models, function(m) {
-    tryCatch({
-      start_kappa <- if(m == "Mat") 1.5 else 0.5
-      f <- gstat::fit.variogram(v_emp, gstat::vgm(psill = initial_psill, model = m, range = initial_range, nugget = initial_nugget, kappa = start_kappa))
-      sse <- attr(f, "SSErr")
-      if (!is.null(sse) && f$range[2] > (max_dist/100) && f$range[2] < max_dist * 2 && f$psill[2] > 0) {
-        return(list(fit = f, sse = sse))
-      }
-      return(NULL)
-    }, error = function(e) NULL)
+    best_m_fit <- NULL
+    best_m_sse <- Inf
+    for (r in ranges) {
+      tryCatch({
+        start_kappa <- if(m == "Mat") 1.5 else 0.5
+        f <- gstat::fit.variogram(v_emp, gstat::vgm(psill = initial_psill, model = m, range = r, nugget = initial_nugget, kappa = start_kappa))
+        sse <- attr(f, "SSErr")
+        if (!is.null(sse) && f$range[2] > (max_dist/100) && f$range[2] < max_dist * 2 && f$psill[2] > 0) {
+          if (sse < best_m_sse) {
+            best_m_sse <- sse
+            best_m_fit <- list(fit = f, sse = sse)
+          }
+        }
+      }, error = function(e) NULL)
+    }
+    return(best_m_fit)
   })
   
   valid_fits <- Filter(Negate(is.null), fits)
@@ -2028,7 +2035,7 @@ server <- function(input, output, session) {
     }
     
     df <- tryCatch({
-      if (tolower(ext) == "csv") read.csv(input$user_file$datapath)
+      if (tolower(ext) == "csv") as.data.frame(data.table::fread(input$user_file$datapath))
       else if (tolower(ext) %in% c("xls", "xlsx")) readxl::read_excel(input$user_file$datapath)
       else NULL
     }, error = function(e) { 
@@ -2073,7 +2080,7 @@ server <- function(input, output, session) {
     dir.create(temp_dir, showWarnings = FALSE, recursive = TRUE)
     session$onSessionEnded(function() { unlink(temp_dir, recursive = TRUE) })
     
-    for(i in 1:nrow(input$user_shp)) {
+    for(i in seq_len(nrow(input$user_shp))) {
       file.copy(input$user_shp$datapath[i], file.path(temp_dir, input$user_shp$name[i]), overwrite = TRUE)
     }
     shp_file <- input$user_shp$name[grep("\\.shp$", input$user_shp$name, ignore.case = TRUE)]
@@ -2867,7 +2874,7 @@ server <- function(input, output, session) {
 
         tabs[[1]] <- tabPanel("All",
           tags$ul(style="font-size: 0.85em; padding-left: 15px; margin-top: 5px; list-style-type: none;",
-            lapply(1:nrow(res_all), function(i) {
+            lapply(seq_len(nrow(res_all)), function(i) {
               tags$li(sprintf("%s: %.3f (p=%.3f)", res_all$Label[i], res_all$Corr[i], res_all$Pval[i]))
             })
           )
@@ -2881,7 +2888,7 @@ server <- function(input, output, session) {
           
           tabPanel(cat,
             tags$ul(style="font-size: 0.85em; padding-left: 15px; margin-top: 5px; list-style-type: none;",
-              lapply(1:nrow(res_cat), function(i) {
+              lapply(seq_len(nrow(res_cat)), function(i) {
                 tags$li(sprintf("%s: %.3f (p=%.3f)", res_cat$Label[i], res_cat$Corr[i], res_cat$Pval[i]))
               })
             )
@@ -3296,6 +3303,22 @@ server <- function(input, output, session) {
     }
   }
 
+  observeEvent(input$vif_drop_btn, {
+    removeModal()
+    rv$vif_choice_made <- 10
+    rv$proceed_vif <- runif(1)
+  })
+
+  observeEvent(input$vif_keep_btn, {
+    removeModal()
+    rv$vif_choice_made <- Inf
+    rv$proceed_vif <- runif(1)
+  })
+
+  observeEvent(list(input$method, input$aux_vars), {
+    rv$vif_choice_made <- NULL
+  })
+
   observeEvent(input$run, {
     if (isTRUE(rv$model_running)) {
       showNotification("A model run is already in progress.", type = "warning")
@@ -3307,6 +3330,36 @@ server <- function(input, output, session) {
       showNotification("Please select at least one auxiliary variable for RK/RFK/CK model generation.", type = "error")
       return()
     }
+
+    if (input$method %in% c("RK", "RFK", "CK") && length(input$aux_vars) > 1 && is.null(rv$vif_choice_made)) {
+       source("spatial_helpers.R", local = TRUE)
+       df_aux <- sf::st_drop_geometry(rv$user_data)[, input$aux_vars, drop = FALSE]
+       vif_res <- check_vif(df_aux, threshold = 10)
+       
+       if (length(vif_res$dropped) > 0) {
+          showModal(modalDialog(
+            title = tags$div(style = "color: #d9534f; font-weight: bold;", icon("exclamation-triangle"), "High Multicollinearity Detected"),
+            tags$p("High correlation / multicollinearity detected among the selected variables. This may destabilize the spatial estimation model."),
+            tags$p(tags$b("Variables recommended to be dropped:"), paste(vif_res$dropped, collapse=", ")),
+            tags$p("What would you like to do?"),
+            footer = tagList(
+              actionButton("vif_drop_btn", "Auto-Drop and Continue", class = "btn-success"),
+              actionButton("vif_keep_btn", "Keep All (Not Recommended)", class = "btn-warning"),
+              modalButton("Cancel")
+            ),
+            easyClose = FALSE
+          ))
+          return()
+       }
+    }
+    
+    rv$proceed_vif <- runif(1)
+  })
+
+  observeEvent(rv$proceed_vif, {
+    vif_thresh <- if (!is.null(rv$vif_choice_made)) rv$vif_choice_made else 10
+    rv$vif_choice_made <- NULL
+    rv$active_vif_thresh <- vif_thresh
     
     meta <- get_current_meta()
     req(meta)
@@ -3690,6 +3743,8 @@ server <- function(input, output, session) {
     log_comp_mode <- comp_mode
     log_n_locs <- length(df_list)
     log_sample_counts <- sapply(df_list, function(x) nrow(x$pts_data))
+    
+    vif_thresh_local <- rv$active_vif_thresh
 
     promises::future_promise({
       setwd(main_wd)
@@ -3732,7 +3787,8 @@ server <- function(input, output, session) {
           val_type = val_type,
           progress_dir_val = progress_dir_val,
           session_id_val = session_id_val,
-          cancel_file_val = cancel_file_val
+          cancel_file_val = cancel_file_val,
+          vif_threshold = vif_thresh_local
         )
       }, .options = furrr::furrr_options(
         seed = 12345,
@@ -4431,7 +4487,7 @@ server <- function(input, output, session) {
        if(is.infinite(abs_max_p) || is.na(abs_max_p)) abs_max_p <- 1
        pal_pts <- colorNumeric("RdBu", domain = c(-abs_max_p, abs_max_p), na.color = "black")
        df_clean <- st_drop_geometry(pts_view)
-       popups <- vapply(1:nrow(df_clean), function(i) generate_popup(df_clean[i, ]), character(1))
+       popups <- vapply(seq_len(nrow(df_clean)), function(i) generate_popup(df_clean[i, ]), character(1))
        
        m <- m %>% addCircleMarkers(data = pts_view, radius = 5, color = "black", weight = 1,
                                   fillColor = ~pal_pts(resid), fillOpacity = 0.9,
