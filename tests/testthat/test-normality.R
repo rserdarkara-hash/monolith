@@ -30,7 +30,7 @@ test_that("returns 'insufficient' for NULL input", {
 
 # ── Method dispatch ────────────────────────────────────────────────────────
 
-test_that("uses Shapiro-Wilk for n < 50", {
+test_that("uses Shapiro-Wilk for n < 5000", {
   x <- rnorm(30)
   res <- compute_normality(x)
   expect_match(res$method, "Shapiro-Wilk")
@@ -38,11 +38,11 @@ test_that("uses Shapiro-Wilk for n < 50", {
   expect_equal(res$n, 30)
 })
 
-test_that("uses Lilliefors test for n >= 50", {
-  x <- rnorm(60)
+test_that("uses Lilliefors test for n >= 5000", {
+  x <- rnorm(5000)
   res <- compute_normality(x)
   expect_match(res$method, "Lilliefors")
-  expect_equal(res$n, 60)
+  expect_equal(res$n, 5000)
 })
 
 # ── Classification ─────────────────────────────────────────────────────────
@@ -68,12 +68,12 @@ test_that("detects a two-point distribution as non-normal (Shapiro-Wilk)", {
 
 test_that("Lilliefors path returns valid classification for uniform data", {
   set.seed(1)
-  x <- runif(60, 0, 100)
+  x <- runif(5000, 0, 100)
   res <- compute_normality(x)
   # Lilliefors has lower power; we only assert the output is well-formed.
   # The classification itself is probabilistic — don't assert a specific value.
   expect_match(res$method, "Lilliefors")
-  expect_equal(res$n, 60)
+  expect_equal(res$n, 5000)
   expect_true(res$status %in% c("normal", "not_normal"))
   expect_true(!is.na(res$statistic))
   expect_true(!is.na(res$p_value))

@@ -1098,7 +1098,7 @@ generate_correlation_heatmap <- function(df, vars, method = "pearson", cormat = 
   p <- ggplot(cormat_df, aes(x=Var1, y=Var2, fill=Corr)) + 
     geom_tile(color = "white") +
     geom_text(aes(label = round(Corr, 2)), color = ifelse(abs(cormat_df$Corr) > 0.5, "white", "black"), size=3) +
-    scale_fill_gradient2(low = "red", high = "blue", mid = "white", midpoint = 0, limit = c(-1,1), name=paste(tools::toTitleCase(method), "\nCorrelation")) +
+    scale_fill_gradient2(low = "red", high = "blue", mid = "white", midpoint = 0, limits = c(-1,1), name=paste(tools::toTitleCase(method), "\nCorrelation")) +
     theme_minimal() + 
     theme(axis.text.x = element_text(angle = 45, vjust = 1, hjust = 1)) +
     labs(x="", y="", title="Hierarchical Clustering Correlation Heatmap")
@@ -1183,7 +1183,7 @@ generate_partial_correlation <- function(df, vars, control_vars = NULL, method =
   p <- ggplot(cormat_df, aes(x=Var1, y=Var2, fill=pCorr)) + 
     geom_tile(color = "white") +
     geom_text(aes(label = round(pCorr, 2)), color = ifelse(abs(cormat_df$pCorr) > 0.5, "white", "black"), size=3) +
-    scale_fill_gradient2(low = "red", high = "blue", mid = "white", midpoint = 0, limit = c(-1,1), name="Partial\nCorrelation") +
+    scale_fill_gradient2(low = "red", high = "blue", mid = "white", midpoint = 0, limits = c(-1,1), name="Partial\nCorrelation") +
     theme_minimal() + 
     theme(axis.text.x = element_text(angle = 45, vjust = 1, hjust = 1)) +
     labs(x="", y="", title=ifelse(is.null(control_vars) || length(control_vars)==0, 
@@ -1211,7 +1211,7 @@ generate_correlogram <- function(df, vars, method = "pearson", cormat = NULL) {
   p <- ggplot(cormat_df, aes(x=Var1, y=Var2, color=Corr, size=abs(Corr))) + 
     geom_point() +
     scale_size_continuous(range = c(1, 15), guide="none") +
-    scale_color_gradient2(low = "red", high = "blue", mid = "white", midpoint = 0, limit = c(-1,1)) +
+    scale_color_gradient2(low = "red", high = "blue", mid = "white", midpoint = 0, limits = c(-1,1)) +
     theme_minimal() + 
     theme(axis.text.x = element_text(angle = 45, vjust = 1, hjust = 1)) +
     labs(x="", y="", title="Correlogram")

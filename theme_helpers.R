@@ -231,6 +231,41 @@ create_app_theme <- function(light_blue, dark_bg, content_bg, font_family, map_t
     .popover.right > .arrow:after {
       border-right-color: {{box_bg}} !important;
     }
+    
+    /* Primary Button Readability */
+    .btn-primary {
+      background-color: {{light_blue}} !important;
+      border-color: {{light_blue}} !important;
+      color: {{header_text_color}} !important;
+    }
+    .btn-primary:hover, .btn-primary:focus, .btn-primary:active, .btn-primary.active {
+      background-color: {{light_blue}} !important;
+      border-color: {{light_blue}} !important;
+      color: {{header_text_color}} !important;
+      opacity: 0.9;
+    }
+
+    /* Correlation Tab Pills Readability */
+    #cor_tabs.nav-pills > li > a {
+      color: {{sidebar_text_color}} !important;
+      background-color: rgba(255, 255, 255, 0.08) !important;
+      margin-right: 4px;
+      opacity: 0.85;
+      transition: all 0.2s ease;
+    }
+    #cor_tabs.nav-pills > li > a:hover {
+      color: {{sidebar_text_color}} !important;
+      background-color: rgba(255, 255, 255, 0.2) !important;
+      opacity: 1;
+    }
+    #cor_tabs.nav-pills > li.active > a,
+    #cor_tabs.nav-pills > li.active > a:hover,
+    #cor_tabs.nav-pills > li.active > a:focus {
+      color: {{header_text_color}} !important;
+      background-color: {{light_blue}} !important;
+      font-weight: bold !important;
+      opacity: 1;
+    }
     ",
     .open = "{{",
     .close = "}}"
