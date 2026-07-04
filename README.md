@@ -28,6 +28,7 @@ Whether you are mapping soil physicochemistry, analyzing topographical interacti
 - [How to Cite](#how-to-cite)
 - [Contributing & Support](#contributing--support)
 - [License](#license)
+- [Disclaimer](#disclaimer)
 
 # Key Features
 
@@ -273,3 +274,9 @@ This project features a dual-licensing structure to protect both open-source con
 
 *   **Software & Source Code**: The core codebase of **Monolith** is licensed under the **GNU General Public License v3.0 (GPL-3.0)**. You are free to run, study, share, and modify the software, provided all derivative works remain open-source under the same terms. See the [LICENSE](LICENSE) file for the full legal text.
 *   **Sample Datasets**: The files within the [sample_data/](sample_data/) directory are **not** open-source. They are provided solely for demonstrating and testing the application. You are strictly prohibited from publishing, redistributing, or using these datasets in any scientific publications or external projects. See the `sample_data/DATA_LICENSE` file for the full terms and restrictions.
+
+# Disclaimer
+
+Monolith is provided **"as is"**, without warranty of any kind — express or implied — including, but not limited to, warranties of merchantability, fitness for a particular purpose, and non-infringement, as set out in Sections 15 and 16 of the [GPL-3.0 license](LICENSE). In no event shall the author be liable for any claim, damages, or other liability arising from the use of this software.
+
+In particular, for scientific and applied use: the quality of any interpolation, classification, or statistical output depends on the input data, sampling design, and model assumptions you choose. **You are responsible for validating the results for your own application** — including any agronomic, environmental, or management decision informed by them. The diagnostic tools built into Monolith (cross-validation metrics, residual maps, variogram inspection) exist precisely to support that validation; please use them.
