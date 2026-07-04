@@ -80,6 +80,13 @@ test_that("compute_governing_factors removes rows with NAs in target/predictors"
   expect_true(nrow(result$importance) >= 1)
 })
 
+test_that("compute_governing_factors SHAP values are reproducible across calls", {
+  df <- make_test_df(30)
+  r1 <- compute_governing_factors(df, "a", c("b", "c"))
+  r2 <- compute_governing_factors(df, "a", c("b", "c"))
+  expect_equal(r1$shap, r2$shap)
+})
+
 test_that("compute_governing_factors explainer is class 'explainer'", {
   df <- make_test_df(30)
   result <- compute_governing_factors(df, "a", c("b", "c", "d"))

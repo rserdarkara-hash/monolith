@@ -396,10 +396,13 @@ ui <- fluidPage(
       div(style="background-color: #f8f9fa; padding: 10px; border: 1px solid #ddd;",
           h4("1. Context"),
           selectInput("locality", "Locality", choices = NULL, multiple = TRUE),
-          selectInput("subset", HTML(paste0("Data Subset", info_tooltip("data_subset_info", "Use this filter when mapping predicted parameters from single-split or similar models. Selecting 'Train', 'Test', or 'Validation' restricts the analysis to that specific data partition."))), choices = c("All" = "all", "Test" = "Test", "Train" = "Train", "Validation" = "Validation"), selected = "all"),
           selectInput("var_category", "Variable Category", choices = NULL),
           selectInput("var_id", "Variable", choices = NULL),
           selectInput("value_type", HTML(paste0("Primary View", info_tooltip("primary_view_info", "<b>Actual Values (observed):</b> Maps the raw observed/measured ground-truth data points directly without any machine learning predictions.<br><br><span style='border-top: 1px solid #ddd; display: block; margin: 8px 0;'></span><b>Machine Learning Predictions:</b> Use these options if you want to map predicted parameters from your machine learning models:<br><br>• <b>Best Predictions (_cve):</b> Maps predicted values from the cross-validation ensemble (CVE), which represent the best overall ML predictions.<br><br>• <b>Single Split Predictions (_ss):</b> Maps predicted values from a single train/test split partition.<br><br>• <b>Residuals (v - pv):</b> Maps model residuals (difference between observed Actual and ML Predicted values) to study local spatial error patterns."))), choices = c("Actual Values" = "actual", "Best Predictions (_cve)" = "pred", "Single Split Predictions (_ss)" = "pred_ss", "Residuals (v - pv)" = "resid")),
+                     conditionalPanel(
+                       condition = "input.value_type == 'pred_ss'",
+                       selectInput("subset", HTML(paste0("Data Subset", info_tooltip("data_subset_info", "Restricts the Single Split (_ss) view to one data partition (e.g. Train/Test/Validation), read from a 'subset' column in the uploaded data. Available choices are detected when a dataset containing such a column is loaded."))), choices = c("All" = "all"), selected = "all")
+                     ),
                      conditionalPanel(
                        condition = "['pred', 'pred_ss', 'resid'].includes(input.value_type)",
                        checkboxInput("comp_mode", HTML(paste0("Comparison Mode", info_tooltip("comp_mode", "Splits the viewer to compare Actual vs. Predicted maps. Useful for visual validation."))), FALSE)
@@ -851,6 +854,21 @@ server <- function(input, output, session) {
   leaflet_proj_cache <- new.env(parent = emptyenv())
   area_calc_cache <- new.env(parent = emptyenv())
 
+  # Cache keys embed rv$run_counter, so entries from previous runs are
+  # unreachable — cleared at each run start to stop unbounded memory growth.
+  clear_raster_caches <- function() {
+    rm(list = ls(envir = leaflet_proj_cache), envir = leaflet_proj_cache)
+    rm(list = ls(envir = area_calc_cache), envir = area_calc_cache)
+  }
+
+  get_projected_raster <- function(r, cache_key) {
+    if (exists(cache_key, envir = leaflet_proj_cache)) return(get(cache_key, envir = leaflet_proj_cache))
+    if (inherits(r, "PackedSpatRaster")) r <- terra::unwrap(r)
+    r_proj <- tryCatch(terra::project(r, "EPSG:4326"), error = function(e) NULL)
+    assign(cache_key, r_proj, envir = leaflet_proj_cache)
+    r_proj
+  }
+
   render_resid_plot <- function(cv_data_reactive, title_suffix = "") {
     renderPlot({
       req(input$sel_loc_stats, cv_data_reactive())
@@ -956,13 +974,17 @@ server <- function(input, output, session) {
      
      if(!is.null(rv$cv_metrics_act[[l]])) {
        cv_l <- rv$cv_metrics_act[[l]]
+       n_obs_l <- if(!is.null(rv$cv_data_act[[l]])) nrow(rv$cv_data_act[[l]]) else NA
        cv_table <- data.frame(Metric = names(cv_l), Value = as.character(round(as.numeric(cv_l), 4)))
+       cv_table <- rbind(data.frame(Metric = "CV Type", Value = cv_type_label(n_obs_l)), cv_table)
        register_export_item(paste0("table_cv_loc_", l), paste(meta$label, "-", l, "- Model CV Metrics (Actual)"), "table", cv_table, meta$category)
      }
-     
+
      if((comp_mode || val_type != "actual") && !is.null(rv$cv_metrics_pre[[l]])) {
        cv_l_p <- rv$cv_metrics_pre[[l]]
+       n_obs_l_p <- if(!is.null(rv$cv_data_pre[[l]])) nrow(rv$cv_data_pre[[l]]) else NA
        cv_table_p <- data.frame(Metric = names(cv_l_p), Value = as.character(round(as.numeric(cv_l_p), 4)))
+       cv_table_p <- rbind(data.frame(Metric = "CV Type", Value = cv_type_label(n_obs_l_p)), cv_table_p)
        register_export_item(paste0("table_cv_pre_loc_", l), paste(meta$label, "-", l, "- Model CV Metrics (Predicted)"), "table", cv_table_p, meta$category)
      }
      
@@ -1652,12 +1674,10 @@ server <- function(input, output, session) {
         n_plots <- length(plot_items)
         has_tables <- length(table_items) > 0
         total_steps <- n_plots + (if(has_tables) 1 else 0)
-        current_step <- 0
-        
+
         files_to_zip <- c()
-        
+
         if(has_tables) {
-          current_step <- current_step + 1
           incProgress(1/total_steps, detail = "Compiling statistical tables into Excel...")
           
           timestamp <- format(Sys.time(), "%Y%m%d_%H%M%S")
@@ -1690,7 +1710,6 @@ server <- function(input, output, session) {
         }
         
         for (i in seq_along(plot_items)) {
-          current_step <- current_step + i
           item <- plot_items[[i]]
           incProgress(1/total_steps, detail = paste("Exporting Plot:", item$label))
           
@@ -1739,9 +1758,28 @@ server <- function(input, output, session) {
     ))
   }
 
-  observeEvent(input$main_map_draw_new_feature, { handle_new_feature(input$main_map_draw_new_feature) })
-  observeEvent(input$comp_map_left_draw_new_feature, { handle_new_feature(input$comp_map_left_draw_new_feature) })
-  observeEvent(input$comp_map_right_draw_new_feature, { handle_new_feature(input$comp_map_right_draw_new_feature) })
+  # One handler set per map: a newly drawn shape opens the assign-locality
+  # modal, and polygons are also kept in rv$drawn_polygons for map exports.
+  # Keys are prefixed with the map id — leaflet ids are only unique per map.
+  for (.map_id in c("main_map", "comp_map_left", "comp_map_right")) local({
+    map_id <- .map_id
+    poly_key <- function(feat) paste0(map_id, "_", feat$properties$`_leaflet_id`)
+    observeEvent(input[[paste0(map_id, "_draw_new_feature")]], {
+      feat <- input[[paste0(map_id, "_draw_new_feature")]]
+      if (feat$geometry$type %in% c("Polygon", "MultiPolygon")) rv$drawn_polygons[[poly_key(feat)]] <- feat
+      handle_new_feature(feat)
+    })
+    observeEvent(input[[paste0(map_id, "_draw_edited_features")]], {
+      for (feat in input[[paste0(map_id, "_draw_edited_features")]]$features) {
+        if (feat$geometry$type %in% c("Polygon", "MultiPolygon")) rv$drawn_polygons[[poly_key(feat)]] <- feat
+      }
+    })
+    observeEvent(input[[paste0(map_id, "_draw_deleted_features")]], {
+      for (feat in input[[paste0(map_id, "_draw_deleted_features")]]$features) {
+        rv$drawn_polygons[[poly_key(feat)]] <- NULL
+      }
+    })
+  })
 
   observeEvent(input$save_group, {
     req(rv$drawn_feature, input$new_group_name, rv$user_data, rv$mapping$x, rv$mapping$y)
@@ -2105,7 +2143,14 @@ server <- function(input, output, session) {
     new_choices <- c("ALL", unique(df[[input$map_loc %||% cols[1]]]))
     selected_locs <- intersect(curr_locs, new_choices)
     updateSelectInput(session, "locality", choices = new_choices, selected = selected_locs)
-    
+
+    subset_col <- find_subset_column(cols)
+    subset_choices <- if (!is.na(subset_col)) {
+      vals <- sort(unique(na.omit(as.character(df[[subset_col]]))))
+      c("All" = "all", setNames(vals, vals))
+    } else c("All" = "all")
+    updateSelectInput(session, "subset", choices = subset_choices, selected = "all")
+
     shinyjs::runjs("setTimeout(function() { $('html, body').animate({ scrollTop: $('#map_x').offset().top - 20 }, 1000); }, 500);")
   })
 
@@ -2246,15 +2291,23 @@ server <- function(input, output, session) {
             if(is.null(sub_pts)) next
             
             if (nrow(sub_pts) > 1) {
-                 sub_pts_m <- tryCatch(sf::st_transform(sub_pts, 3857), error = function(e) sub_pts)
-                 sub_coords_m <- sf::st_coordinates(sub_pts_m)
-                 sub_knn <- FNN::get.knn(sub_coords_m, k = 1)
-                 l_res <- mean(sub_knn$nn.dist) * 0.5
-
-                 if (is_degree && identical(sub_pts, sub_pts_m)) {
+                 if (!is_degree) {
+                    # Analysis CRS is metric: measure nearest-neighbor
+                    # distances directly in the CRS the grid is built in.
+                    sub_knn <- FNN::get.knn(sf::st_coordinates(sub_pts), k = 1)
+                    l_res <- mean(sub_knn$nn.dist) * 0.5
+                 } else {
+                    sub_pts_m <- tryCatch(sf::st_transform(sub_pts, 3857), error = function(e) sub_pts)
+                    sub_knn <- FNN::get.knn(sf::st_coordinates(sub_pts_m), k = 1)
+                    l_res <- mean(sub_knn$nn.dist) * 0.5
                     lat_c <- mean(sf::st_coordinates(sf::st_transform(sub_pts, 4326))[,2])
-                    m_per_deg <- 111319 * cos(lat_c * pi / 180)
-                    l_res <- l_res * m_per_deg
+                    if (identical(sub_pts, sub_pts_m)) {
+                       # 3857 transform failed; distances are still in degrees
+                       l_res <- l_res * 111319 * cos(lat_c * pi / 180)
+                    } else {
+                       # Web Mercator inflates distances by 1/cos(latitude)
+                       l_res <- l_res * cos(lat_c * pi / 180)
+                    }
                  }
             } else l_res <- final_rec
 
@@ -2778,9 +2831,16 @@ server <- function(input, output, session) {
         x_col <- rv$mapping$x
         y_col <- rv$mapping$y
         if (!is.null(x_col) && !is.null(y_col) && x_col %in% colnames(rv$user_data) && y_col %in% colnames(rv$user_data)) {
-          xs <- rv$user_data[[x_col]]
-          ys <- rv$user_data[[y_col]]
-          max_dist <- sqrt((max(xs, na.rm=TRUE) - min(xs, na.rm=TRUE))^2 + (max(ys, na.rm=TRUE) - min(ys, na.rm=TRUE))^2)
+          # The range slider parameterizes a variogram fitted in the analysis
+          # CRS (metric), so its scale must be measured there — the raw x/y
+          # columns may be in degrees.
+          coords_df <- rv$user_data[, c(x_col, y_col)]
+          coords_df <- coords_df[complete.cases(coords_df), , drop = FALSE]
+          max_dist <- tryCatch({
+            pts_proj <- st_transform(st_as_sf(coords_df, coords = c(x_col, y_col), crs = rv$mapping$crs), input$crs_selection)
+            bb <- st_bbox(pts_proj)
+            as.numeric(sqrt((bb["xmax"] - bb["xmin"])^2 + (bb["ymax"] - bb["ymin"])^2))
+          }, error = function(e) NA_real_)
           if (!is.na(max_dist) && max_dist > 0) {
             max_range <- round(max_dist * 1.5, 0)
             step_range <- round(max_range / 100, 0)
@@ -2936,7 +2996,7 @@ server <- function(input, output, session) {
         )
       })
     
-      output$cor_ranks_modal_ui <- renderUI({ NULL })  # --- TPS Optimization ---
+  # --- TPS Optimization ---
   tps_opt_vals <- reactiveVal(NULL)
   observeEvent(input$opt_tps, {
     req(rv$user_data, input$var_id, input$method == "TPS")
@@ -3620,6 +3680,7 @@ server <- function(input, output, session) {
     rv$model_running <- TRUE
 
     rv$run_counter <- rv$run_counter + 1L
+    clear_raster_caches()
     method_params_list <- list(
       "IDW" = paste0("IDW Power: ", input$idw_p, " | Nmax: ", input$idw_nmax),
       "TPS" = paste0("TPS Lambda: ", input$tps_lambda),
@@ -3694,8 +3755,9 @@ server <- function(input, output, session) {
     
     df_list <- lapply(locs, function(l) {
       sub_df <- rv$user_data %>% filter(!!sym(current_loc_col) == l)
-      if (val_type == "pred_ss" && "subset" %in% colnames(sub_df) && subset_val != "all") {
-        sub_df <- sub_df %>% filter(subset == subset_val)
+      subset_col <- find_subset_column(colnames(sub_df))
+      if (val_type == "pred_ss" && !is.na(subset_col) && subset_val != "all") {
+        sub_df <- sub_df[!is.na(sub_df[[subset_col]]) & sub_df[[subset_col]] == subset_val, , drop = FALSE]
       }
       
       pts_data <- sub_df
@@ -4325,28 +4387,23 @@ server <- function(input, output, session) {
           m <- m %>% addControl(html = vgm_warn_html, position = "bottomleft")
         }
         r_names <- names(r_list)
-        vv_list <- lapply(seq_along(r_list), function(i) {
-          r <- r_list[[i]]
+        layer_key <- function(i) {
           r_name <- if (!is.null(r_names) && length(r_names) >= i && !is.na(r_names[i]) && r_names[i] != "") r_names[i] else as.character(i)
-          cache_key <- paste0(rv$run_counter, "_", lab, "_", r_name)
-          
-          if (exists(cache_key, envir = leaflet_proj_cache)) {
-            r_proj <- get(cache_key, envir = leaflet_proj_cache)
-          } else {
-            if (inherits(r, "PackedSpatRaster")) r <- terra::unwrap(r)
-            r_proj <- tryCatch(terra::project(r, "EPSG:4326"), error = function(e) NULL)
-            assign(cache_key, r_proj, envir = leaflet_proj_cache)
-          }
-          if (is.null(r_proj)) return(NULL)
-          
-          is_uncertainty <- isTruthy(input$show_uncertainty) && input$method %in% c("OK", "RK", "RFK", "CK") && "var1.var" %in% names(r_proj)
-          active_layer <- if (is_uncertainty) {
-            al <- r_proj[["var1.var"]]
+          paste0(rv$run_counter, "_", lab, "_", r_name)
+        }
+        select_active_layer <- function(r_w) {
+          is_uncertainty <- isTruthy(input$show_uncertainty) && input$method %in% c("OK", "RK", "RFK", "CK") && "var1.var" %in% names(r_w)
+          if (is_uncertainty) {
+            al <- r_w[["var1.var"]]
             if (input$uncertainty_type == "se") sqrt(al) else al
           } else {
-            if("var1.pred" %in% names(r_proj)) r_proj[["var1.pred"]] else r_proj[[1]]
+            if("var1.pred" %in% names(r_w)) r_w[["var1.pred"]] else r_w[[1]]
           }
-          as.vector(values(active_layer, na.rm=TRUE))
+        }
+        vv_list <- lapply(seq_along(r_list), function(i) {
+          r_proj <- get_projected_raster(r_list[[i]], layer_key(i))
+          if (is.null(r_proj)) return(NULL)
+          as.vector(values(select_active_layer(r_proj), na.rm=TRUE))
         })
         vv <- unlist(vv_list)
         vv_scale <- joint_vv() %||% vv
@@ -4358,17 +4415,7 @@ server <- function(input, output, session) {
           pal <- colorNumeric("RdBu", domain = c(-abs_max, abs_max), na.color = "transparent")
           
           for (i in seq_along(r_list)) {
-            r <- r_list[[i]]
-            r_name <- if (!is.null(r_names) && length(r_names) >= i && !is.na(r_names[i]) && r_names[i] != "") r_names[i] else as.character(i)
-            cache_key <- paste0(rv$run_counter, "_", lab, "_", r_name)
-            
-            if (exists(cache_key, envir = leaflet_proj_cache)) {
-              r_w <- get(cache_key, envir = leaflet_proj_cache)
-            } else {
-              if (inherits(r, "PackedSpatRaster")) r <- terra::unwrap(r)
-              r_w <- tryCatch(terra::project(r, "EPSG:4326"), error = function(e) NULL)
-              assign(cache_key, r_w, envir = leaflet_proj_cache)
-            }
+            r_w <- get_projected_raster(r_list[[i]], layer_key(i))
             if (is.null(r_w)) next
             active_layer <- if("var1.pred" %in% names(r_w)) r_w[["var1.pred"]] else r_w[[1]]
             m <- m %>% addRasterImage(active_layer, colors = pal, opacity = 0.8)
@@ -4380,27 +4427,9 @@ server <- function(input, output, session) {
             pal <- colorBin(params$colors, bins = params$brks, na.color = "transparent", right = FALSE)
             
             for (i in seq_along(r_list)) {
-              r <- r_list[[i]]
-              r_name <- if (!is.null(r_names) && length(r_names) >= i && !is.na(r_names[i]) && r_names[i] != "") r_names[i] else as.character(i)
-              cache_key <- paste0(rv$run_counter, "_", lab, "_", r_name)
-              
-              if (exists(cache_key, envir = leaflet_proj_cache)) {
-                r_w <- get(cache_key, envir = leaflet_proj_cache)
-              } else {
-                if (inherits(r, "PackedSpatRaster")) r <- terra::unwrap(r)
-                r_w <- tryCatch(terra::project(r, "EPSG:4326"), error = function(e) NULL)
-                assign(cache_key, r_w, envir = leaflet_proj_cache)
-              }
+              r_w <- get_projected_raster(r_list[[i]], layer_key(i))
               if (is.null(r_w)) next
-              
-              is_uncertainty <- isTruthy(input$show_uncertainty) && input$method %in% c("OK", "RK", "RFK", "CK") && "var1.var" %in% names(r_w)
-              active_layer <- if (is_uncertainty) {
-                al <- r_w[["var1.var"]]
-                if (input$uncertainty_type == "se") sqrt(al) else al
-              } else {
-                if("var1.pred" %in% names(r_w)) r_w[["var1.pred"]] else r_w[[1]]
-              }
-              m <- m %>% addRasterImage(active_layer, colors = pal, opacity = 0.8)
+              m <- m %>% addRasterImage(select_active_layer(r_w), colors = pal, opacity = 0.8)
             }
             m <- m %>% leaflet::addLegend(colors = params$colors, labels = params$leg_labels, opacity = 0.8, title = paste(meta$label, meta$unit))
           }
@@ -4410,27 +4439,9 @@ server <- function(input, output, session) {
             pal <- colorBin(params$colors, bins = params$brks, na.color = "transparent", right = FALSE)
             
             for (i in seq_along(r_list)) {
-              r <- r_list[[i]]
-              r_name <- if (!is.null(r_names) && length(r_names) >= i && !is.na(r_names[i]) && r_names[i] != "") r_names[i] else as.character(i)
-              cache_key <- paste0(rv$run_counter, "_", lab, "_", r_name)
-              
-              if (exists(cache_key, envir = leaflet_proj_cache)) {
-                r_w <- get(cache_key, envir = leaflet_proj_cache)
-              } else {
-                if (inherits(r, "PackedSpatRaster")) r <- terra::unwrap(r)
-                r_w <- tryCatch(terra::project(r, "EPSG:4326"), error = function(e) NULL)
-                assign(cache_key, r_w, envir = leaflet_proj_cache)
-              }
+              r_w <- get_projected_raster(r_list[[i]], layer_key(i))
               if (is.null(r_w)) next
-              
-              is_uncertainty <- isTruthy(input$show_uncertainty) && input$method %in% c("OK", "RK", "RFK", "CK") && "var1.var" %in% names(r_w)
-              active_layer <- if (is_uncertainty) {
-                al <- r_w[["var1.var"]]
-                if (input$uncertainty_type == "se") sqrt(al) else al
-              } else {
-                if("var1.pred" %in% names(r_w)) r_w[["var1.pred"]] else r_w[[1]]
-              }
-              m <- m %>% addRasterImage(active_layer, colors = pal, opacity = 0.8)
+              m <- m %>% addRasterImage(select_active_layer(r_w), colors = pal, opacity = 0.8)
             }
             m <- m %>% leaflet::addLegend(colors = params$colors, labels = params$leg_labels, opacity = 0.8, title = paste(meta$label, meta$unit))
           }
@@ -4439,29 +4450,11 @@ server <- function(input, output, session) {
                  else colorNumeric(meta$palette, vv_scale, na.color = "transparent")
                  
           for (i in seq_along(r_list)) {
-            r <- r_list[[i]]
-            r_name <- if (!is.null(r_names) && length(r_names) >= i && !is.na(r_names[i]) && r_names[i] != "") r_names[i] else as.character(i)
-            cache_key <- paste0(rv$run_counter, "_", lab, "_", r_name)
-            
-            if (exists(cache_key, envir = leaflet_proj_cache)) {
-              r_w <- get(cache_key, envir = leaflet_proj_cache)
-            } else {
-              if (inherits(r, "PackedSpatRaster")) r <- terra::unwrap(r)
-              r_w <- tryCatch(terra::project(r, "EPSG:4326"), error = function(e) NULL)
-              assign(cache_key, r_w, envir = leaflet_proj_cache)
-            }
+            r_w <- get_projected_raster(r_list[[i]], layer_key(i))
             if (is.null(r_w)) next
-            
-            is_uncertainty <- isTruthy(input$show_uncertainty) && input$method %in% c("OK", "RK", "RFK", "CK") && "var1.var" %in% names(r_w)
-            active_layer <- if (is_uncertainty) {
-              al <- r_w[["var1.var"]]
-              if (input$uncertainty_type == "se") sqrt(al) else al
-            } else {
-              if("var1.pred" %in% names(r_w)) r_w[["var1.pred"]] else r_w[[1]]
-            }
-            m <- m %>% addRasterImage(active_layer, colors = pal, opacity = 0.8)
+            m <- m %>% addRasterImage(select_active_layer(r_w), colors = pal, opacity = 0.8)
           }
-          
+
           v_range <- diff(range(vv_scale, na.rm=TRUE))
           d_format <- if(is.na(v_range)) 2 else if(v_range < 0.01) 6 else if(v_range < 0.1) 4 else 2
           m <- m %>% leaflet::addLegend(pal = pal, values = vv_scale, title = paste(meta$label, meta$unit), labFormat = labelFormat(digits = d_format))
@@ -5160,12 +5153,13 @@ server <- function(input, output, session) {
           }
         }))
         if(is.null(all_cv) || nrow(all_cv) == 0) {
-          empty_df <- data.frame(Source=label, RMSE=NA, R2_Corr=NA, R2_NSE=NA, Bias_ME=NA, RPD_Prec=NA, SMAPE_Pct=NA, Moran_I=NA)
+          empty_df <- data.frame(Source=paste0(label, " (pooled CV)"), RMSE=NA, R2_Corr=NA, R2_NSE=NA, Bias_ME=NA, RPD_Prec=NA, SMAPE_Pct=NA, Moran_I=NA)
           names(empty_df) <- c("Source", "RMSE", "R2 (Corr)", "R2 (NSE/Trad)", "Bias (ME)", "RPD (Prec)", "SMAPE (%)", "Moran's I")
           return(empty_df)
         }
-        
+
         res <- perform_cv(all_cv)
+        src_label <- paste0(label, " (pooled per-locality CV, n=", res$n, ")")
         rmse <- res$rmse
         r2 <- res$r2
         nse <- res$nse
@@ -5175,6 +5169,12 @@ server <- function(input, output, session) {
         moran_i <- res$moran_i
       } else {
         res <- cv_list[[loc]]
+        n_obs <- if(!is.null(data_list[[loc]])) nrow(data_list[[loc]]) else NA
+        src_label <- if(!is.null(res)) {
+          paste0(label, " (", cv_type_label(n_obs), ", n=", res$n, ")")
+        } else {
+          paste0(label, " (CV)")
+        }
         rmse <- if(!is.null(res)) res$rmse else NA
         r2   <- if(!is.null(res)) res$r2 else NA
         nse  <- if(!is.null(res)) res$nse else NA
@@ -5184,7 +5184,7 @@ server <- function(input, output, session) {
         moran_i <- if(!is.null(res)) res$moran_i else NA
       }
                   res_df <- data.frame(
-                    Source = label,
+                    Source = src_label,
                     RMSE = round(rmse, 4),
                     R2_Corr = round(r2, 4),
                     R2_NSE = round(nse, 4),
@@ -5197,9 +5197,9 @@ server <- function(input, output, session) {
                     res_df
                     }
 
-                    m_act <- get_metrics_df(rv$cv_metrics_act, rv$cv_data_act, "Actual Model (CV)")
+                    m_act <- get_metrics_df(rv$cv_metrics_act, rv$cv_data_act, "Actual Model")
                     if(rv$has_predictions) {
-                    m_pre <- get_metrics_df(rv$cv_metrics_pre, rv$cv_data_pre, "Predicted Model (CV)")
+                    m_pre <- get_metrics_df(rv$cv_metrics_pre, rv$cv_data_pre, "Predicted Model")
                     return(rbind(m_act, m_pre))
                     } else {
                     return(m_act)
@@ -5309,29 +5309,6 @@ server <- function(input, output, session) {
   })
 
 
-  observeEvent(input$main_map_draw_new_feature, {
-    feat <- input$main_map_draw_new_feature
-    if(feat$geometry$type %in% c("Polygon", "MultiPolygon")) {
-      rv$drawn_polygons[[as.character(feat$properties$`_leaflet_id`)]] <- feat
-    }
-  })
-  
-  observeEvent(input$main_map_draw_edited_features, {
-    feats <- input$main_map_draw_edited_features$features
-    for (feat in feats) {
-      if(feat$geometry$type %in% c("Polygon", "MultiPolygon")) {
-        rv$drawn_polygons[[as.character(feat$properties$`_leaflet_id`)]] <- feat
-      }
-    }
-  })
-  
-  observeEvent(input$main_map_draw_deleted_features, {
-    feats <- input$main_map_draw_deleted_features$features
-    for (feat in feats) {
-      rv$drawn_polygons[[as.character(feat$properties$`_leaflet_id`)]] <- NULL
-    }
-  })
-  
   get_drawn_sf <- reactive({
     polys <- rv$drawn_polygons
     if(length(polys) == 0) return(NULL)

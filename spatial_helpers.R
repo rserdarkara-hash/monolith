@@ -812,7 +812,10 @@ apply_TPS <- function(data, target_var, grid_p, method_params, l = "region", pre
     }
     
     
-    cv_res <- data.frame(observed = data[[target_var]], var1.pred = cv_vals, x = raw_pts[,1], y = raw_pts[,2])
+    cv_res <- sf::st_as_sf(
+      data.frame(observed = data[[target_var]], var1.pred = cv_vals, x = raw_pts[,1], y = raw_pts[,2]),
+      coords = c("x", "y"), crs = sf::st_crs(data), remove = FALSE
+    )
     res$cv_obj <- cv_res
     res$cv_metrics <- perform_cv(cv_res)
     res$residuals <- get_cv_residuals(cv_res, nrow(data))
@@ -914,12 +917,22 @@ compute_governing_factors <- function(df, target_col, predictors, n_permutations
 
   set.seed(12345)
   sample_idx <- sample(seq_len(nrow(df_clean)), min(shap_sample_size, nrow(df_clean)))
-  shap_list <- lapply(sample_idx, function(i) {
+
+  # Per-observation SHAP is embarrassingly parallel. This runs inside the
+  # gov-module future_promise worker, where the nested plan is sequential, so
+  # escalate to multisession only for workloads big enough to amortize worker
+  # startup. seed = TRUE gives each observation its own L'Ecuyer RNG stream,
+  # making results identical under any plan (sequential or parallel).
+  if (length(sample_idx) >= 50 && future::nbrOfWorkers() == 1L && future::availableCores() > 1L) {
+    old_plan <- future::plan(future::multisession, workers = min(future::availableCores() - 1L, 8L))
+    on.exit(future::plan(old_plan), add = TRUE)
+  }
+  shap_list <- furrr::future_map(sample_idx, function(i) {
     sp <- DALEX::predict_parts(explainer_rf, new_observation = df_clean[i, predictors, drop = FALSE], type = "shap")
     sp <- as.data.frame(sp)
     sp$obs_id <- i
     sp
-  })
+  }, .options = furrr::furrr_options(seed = TRUE, packages = c("DALEX", "randomForest")))
   shap_df <- do.call(rbind, shap_list)
 
   shap_val_df <- data.frame(

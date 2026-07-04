@@ -97,3 +97,18 @@ test_that("match_metadata_columns assigns palettes", {
     expect_true("palette" %in% names(result[[1]]))
   }
 })
+
+# ── find_subset_column ──────────────────────────────────────────────────────
+
+test_that("find_subset_column detects the partition column case-insensitively", {
+  expect_equal(find_subset_column(c("x", "y", "subset")), "subset")
+  expect_equal(find_subset_column(c("x", "Subset", "z")), "Subset")
+  expect_equal(find_subset_column("SUBSET"), "SUBSET")
+  expect_equal(find_subset_column(c("subset", "Subset")), "subset")
+})
+
+test_that("find_subset_column returns NA when no partition column exists", {
+  expect_true(is.na(find_subset_column(c("x", "y", "value"))))
+  expect_true(is.na(find_subset_column(c("subset_id", "my_subset"))))
+  expect_true(is.na(find_subset_column(character(0))))
+})

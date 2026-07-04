@@ -825,7 +825,7 @@ desc_exploratory_server <- function(id, data_reactive, vars_metadata_reactive) {
       )
     })
     
-    pca_rv <- shiny::reactiveValues(res = NULL, data = NULL, cols = NULL, collinearity_warn = FALSE, collinear_pairs = NULL)
+    pca_rv <- shiny::reactiveValues(res = NULL, data = NULL, cols = NULL, groups = NULL, collinearity_warn = FALSE, collinear_pairs = NULL)
     
     shiny::observeEvent(input$run_pca_btn, {
       req(rv_analytics_data(), input$pca_vars)
@@ -848,19 +848,21 @@ desc_exploratory_server <- function(id, data_reactive, vars_metadata_reactive) {
         pca_rv$collinear_pairs <- NULL
         
         vars_lab <- get_var_labels(input$pca_vars, vars_metadata_reactive())
-        df_clean <- na.omit(df[, input$pca_vars, drop=FALSE])
-        
+        keep <- stats::complete.cases(df[, input$pca_vars, drop=FALSE])
+        df_clean <- df[keep, input$pca_vars, drop=FALSE]
+
         dropped_rows <- nrow(df) - nrow(df_clean)
         if (dropped_rows > 0) {
             showNotification(sprintf("Warning: %d rows were dropped due to missing values (NA) in the selected variables.", dropped_rows), type = "warning", duration = 10)
         }
-        
+
         colnames(df_clean) <- vars_lab
-        
+
         tryCatch({
           pca_rv$res <- prcomp(df_clean, scale. = input$pca_scale, center = TRUE)
           pca_rv$data <- df_clean
           pca_rv$cols <- vars_lab
+          pca_rv$groups <- if ("group_id" %in% colnames(df)) df$group_id[keep] else NULL
           shiny::updateTextInput(session, "pca_ready_flag", value = "yes")
         }, error = function(e) {
           showNotification(paste("PCA Failed:", e$message), type="error")
@@ -889,13 +891,15 @@ desc_exploratory_server <- function(id, data_reactive, vars_metadata_reactive) {
       df <- rv_filtered_analytics_data()
       
       vars_lab <- get_var_labels(input$pca_vars, vars_metadata_reactive())
-      df_clean <- na.omit(df[, input$pca_vars, drop=FALSE])
+      keep <- stats::complete.cases(df[, input$pca_vars, drop=FALSE])
+      df_clean <- df[keep, input$pca_vars, drop=FALSE]
       colnames(df_clean) <- vars_lab
-      
+
       tryCatch({
         pca_rv$res <- prcomp(df_clean, scale. = input$pca_scale, center = TRUE)
         pca_rv$data <- df_clean
         pca_rv$cols <- vars_lab
+        pca_rv$groups <- if ("group_id" %in% colnames(df)) df$group_id[keep] else NULL
         pca_rv$collinearity_warn <- FALSE
         shiny::updateTextInput(session, "pca_ready_flag", value = "yes")
       }, error = function(e) {
@@ -937,7 +941,7 @@ desc_exploratory_server <- function(id, data_reactive, vars_metadata_reactive) {
           p <- generate_pca_scree(pca_rv$res)
        } else if (p_type == "biplot") {
           req(input$pca_pc_x, input$pca_pc_y)
-          aligned_df <- rv_analytics_data()[rownames(pca_rv$res$x), , drop = FALSE]
+          aligned_df <- data.frame(group_id = pca_rv$groups %||% factor(rep("All", nrow(pca_rv$res$x))))
           p <- generate_pca_biplot(pca_rv$res, aligned_df, pc_x = input$pca_pc_x, pc_y = input$pca_pc_y, group_col = "group_id")
        } else if (p_type == "loadings") {
           req(input$pca_pc_single)
@@ -953,7 +957,7 @@ desc_exploratory_server <- function(id, data_reactive, vars_metadata_reactive) {
        } else if (p_type == "mahalanobis") {
           p <- generate_pca_mahalanobis(pca_rv$res)
        } else if (p_type == "3d_biplot") {
-          aligned_df <- rv_analytics_data()[rownames(pca_rv$res$x), , drop = FALSE]
+          aligned_df <- data.frame(group_id = pca_rv$groups %||% factor(rep("All", nrow(pca_rv$res$x))))
           p <- generate_pca_biplot_3d(pca_rv$res, aligned_df, pc_x = input$pca_pc_x, pc_y = input$pca_pc_y, pc_z = input$pca_pc_z, group_col="group_id")
        }
           p

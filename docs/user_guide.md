@@ -49,20 +49,22 @@ The application requires cleanly structured, georeferenced tabular data.
 **1.1 Locality (Spatial Grouping)**
 * **Locality Selection:** The app uses your designated "Grouping" column to partition the dataset (Step 2). You can select a single field (e.g., "Zone A") or "ALL" to run a batch-parallelized interpolation across multiple separate spatial domains simultaneously.
 
-**1.2 Data Subsetting**
-* **Interrogation Modes:** Depends on `subset` column availability. You can toggle between the full dataset ("All") or specific modeling splits such as "Train", "Test", or "Validation" if you are mapping actual and predicted pedo-parameters.
-
-**1.3 Variable Selection & Category**
+**1.2 Variable Selection & Category**
 * **Variable Category:** To keep the interface clean, variables are organized into folders (e.g., "Soil Physicochemistry", "Environmental Data", "Terrain", "Satellite Indices") based on your metadata file or automated detection.
 * **Variable:** This selects the target "Actual" variable column: As the app uses automated suffix and label matching, selecting a target like `Total N (%)` automatically links it to the column `tn`, and well as to its different prediction columns, `tn_cve` and `tn_ss` in the background if those columns are available.
 
-**1.4 Primary View & Comparison Mode**
+**1.3 Primary View & Comparison Mode**
 This determines the mathematical "lens" through which you see the field:
 * **Actual Values:** Displays the interpolated surface of your raw measured data.
 * **Best Predictions (_cve):** Displays the interpolated surface of the machine learning model's cross-validated estimates.
 * **Single Split Predictions (_ss):** Displays the surface for a specific data-split prediction.
 * **Residuals (v - pv):** It calculates the localized difference between what you measured and what the model you used to predicted that parameter predicted.
 * **Comparison Mode:** When enabled for predictions, the dashboard splits into a synchronized dual-map view. This allows for a side-by-side "visual audit" of the Actual data vs. the Model's predictions to identify spatial bias.
+
+**1.4 Data Subset (Single Split view only)**
+* When the Primary View is set to **Single Split Predictions (_ss)**, a **Data Subset** dropdown appears directly beneath it. It restricts the mapped data to one modeling partition (e.g., "Train", "Test", or "Validation") before interpolation.
+* The available choices are read from a `subset` column in your uploaded dataset (matched case-insensitively, so `Subset` or `SUBSET` also work). If the dataset has no such column, only "All" is offered and no filtering occurs.
+* The filter applies exclusively to the Single Split view; all other views always use the full dataset.
 
 ## Mapping: 2. Spatial Engine Selection & Tuning
 Once selections are made, the main interface transitions to the analytical module. If you wish to generate uncertainity maps instead of running spatial interpolation of the parameters, tick the relevant mark at the bottom of the spatial engine.

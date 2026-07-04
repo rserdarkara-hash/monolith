@@ -740,6 +740,16 @@ process_grouping_vars <- function(df, vars, types) {
 
 
 
+cv_type_label <- function(n_obs) {
+  if (is.null(n_obs) || length(n_obs) == 0 || is.na(n_obs)) return("CV")
+  if (n_obs <= 50) "LOOCV" else "10-fold CV"
+}
+
+find_subset_column <- function(cols) {
+  hit <- grep("^subset$", cols, ignore.case = TRUE, value = TRUE)
+  if (length(hit) == 0) NA_character_ else hit[1]
+}
+
 get_stat_letters <- function(df, var_name, group_col, test_type) {
   df_proc <- df[!is.na(df[[var_name]]) & !is.na(df[[group_col]]), ]
   if (nrow(df_proc) < 3) return(NULL)

@@ -1,7 +1,12 @@
 # test-interpolation-pipeline.R — tests for init_interpolation_res,
 # sanitize_spatial_predictions, safe_run_cv, suggest_lmc_model,
 # calc_scientific_lags, merge_wrapped_rasters, get_joint_scale_values,
-# and validate_and_project_sf.
+# validate_and_project_sf, the apply_* interpolation engines
+# (IDW/TPS/OK/RK/RFK/CK) and the apply_interpolation dispatcher.
+#
+# Engine calls write progress files via update_progress_file(); the
+# monolith_progress_dir option is unset in tests, so they go to tempdir()
+# and leave no trace in the repo.
 
 # ── init_interpolation_res ─────────────────────────────────────────────────
 
@@ -226,4 +231,197 @@ test_that("validate_and_project_sf leaves projected data unchanged", {
   pts <- make_test_points(10)  # already UTM zone 33
   pts_proj <- validate_and_project_sf(pts)
   expect_equal(sf::st_crs(pts_proj)$epsg, sf::st_crs(pts)$epsg)
+})
+
+# ── apply_TPS CV object ───────────────────────────────────────────────────
+
+test_that("apply_TPS returns cv_obj as sf carrying the input CRS", {
+  pts <- make_test_points(15)
+  grid <- make_test_grid_safe(pts, res = 200)
+  # fields::Tps always runs its GCV grid search for diagnostics, which warns
+  # about endpoint minima on small noisy data — irrelevant to what we test here
+  res <- suppressWarnings(apply_TPS(pts, "v", grid, list(tps_lambda = 0.01)))
+  expect_s3_class(res$cv_obj, "sf")
+  expect_equal(sf::st_crs(res$cv_obj), sf::st_crs(pts))
+  expect_true(all(c("observed", "var1.pred") %in% colnames(res$cv_obj)))
+  # CV metrics must still compute from the sf object
+  expect_false(is.na(res$cv_metrics$rmse))
+})
+
+# ── apply_IDW ─────────────────────────────────────────────────────────────
+
+test_that("apply_IDW returns predictions, CV metrics and residuals", {
+  pts <- make_test_points(15)
+  grid <- make_test_grid_safe(pts, res = 200)
+  res <- apply_IDW(pts, "v", grid, list(idw_p = 2, idw_nmax = 12))
+
+  expect_s3_class(res$res_sf, "sf")
+  expect_true("var1.pred" %in% colnames(res$res_sf))
+  preds <- res$res_sf$var1.pred
+  expect_false(any(is.nan(preds) | is.infinite(preds)))
+  # IDW is a convex combination of observations, so predictions are bounded
+  # by the observed data range
+  ok_preds <- preds[!is.na(preds)]
+  expect_true(all(ok_preds >= min(pts$v) - 1e-9 & ok_preds <= max(pts$v) + 1e-9))
+
+  expect_false(is.na(res$cv_metrics$rmse))
+  expect_length(res$residuals, 15)
+})
+
+test_that("apply_IDW reproduces observed values at data locations", {
+  pts <- make_test_points(12)
+  # Predict at the sample locations themselves: IDW must be exact there
+  res <- apply_IDW(pts, "v", pts, list(idw_p = 2, idw_nmax = 12))
+  expect_equal(res$res_sf$var1.pred, pts$v, tolerance = 1e-8)
+})
+
+# ── apply_TPS exactness ───────────────────────────────────────────────────
+
+test_that("apply_TPS with lambda = 0 interpolates data points exactly", {
+  pts <- make_test_points(15)
+  # fields::Tps warns about its GCV diagnostics grid on small noisy data;
+  # irrelevant here since lambda is fixed at 0
+  res <- suppressWarnings(apply_TPS(pts, "v", pts, list(tps_lambda = 0)))
+  expect_equal(res$res_sf$var1.pred, pts$v, tolerance = 1e-4)
+})
+
+# ── apply_OK ──────────────────────────────────────────────────────────────
+
+test_that("apply_OK returns variogram, fit, predictions and CV results", {
+  pts <- make_test_points(20)
+  grid <- make_test_grid_safe(pts, res = 200)
+  lags <- calc_scientific_lags(pts)
+  res <- suppressWarnings(apply_OK(pts, "v", grid, lags, list()))
+
+  expect_s3_class(res$v_emp, "gstatVariogram")
+  expect_s3_class(res$fit, "variogramModel")
+  expect_true(all(c("var1.pred", "var1.var") %in% colnames(res$res_sf)))
+  # Kriging variance must be non-negative (up to numerical noise)
+  vv <- res$res_sf$var1.var
+  expect_true(all(vv[!is.na(vv)] >= -1e-6))
+  expect_false(is.na(res$cv_metrics$rmse))
+  expect_length(res$residuals, 20)
+})
+
+test_that("apply_OK uses a supplied pre_fit variogram instead of refitting", {
+  pts <- make_test_points(15)
+  grid <- make_test_grid_safe(pts, res = 200)
+  lags <- calc_scientific_lags(pts)
+  manual_fit <- gstat::vgm(psill = var(pts$v), model = "Sph",
+                           range = lags$cutoff / 2, nugget = 0.1)
+  res <- suppressWarnings(
+    apply_OK(pts, "v", grid, lags, list(pre_fit = manual_fit))
+  )
+  expect_identical(res$fit, manual_fit)
+})
+
+# ── apply_RK ──────────────────────────────────────────────────────────────
+
+test_that("apply_RK fits an lm trend and kriges its residuals", {
+  pts <- make_test_points(15)
+  pts$v <- pts$v + 0.5 * pts$aux1   # real trend so the regression is meaningful
+  grid <- make_test_grid_safe(pts, res = 200)
+  lags <- calc_scientific_lags(pts)
+  res <- suppressWarnings(apply_RK(pts, "v", grid, lags, list(), c("aux1")))
+
+  expect_s3_class(res$model_summary, "summary.lm")
+  expect_false(grepl("Falling back to OK", res$log_msg, fixed = TRUE))
+  expect_s3_class(res$res_sf, "sf")
+  expect_true(all(c("var1.pred", "var1.var") %in% colnames(res$res_sf)))
+  expect_length(res$residuals, 15)
+})
+
+test_that("apply_RK falls back to OK when trend prediction fails", {
+  pts <- make_test_points(12)
+  grid <- make_test_grid_safe(pts, res = 200)
+  lags <- calc_scientific_lags(pts)
+  # grid_aux lacking the covariate column makes predict.lm fail
+  # deterministically, which must trigger the OK fallback
+  bad_grid_aux <- sf::st_drop_geometry(grid)[, c("x", "y")]
+  res <- suppressWarnings(
+    apply_RK(pts, "v", grid, lags, list(grid_aux = bad_grid_aux), c("aux1"))
+  )
+  expect_match(res$log_msg, "RK failed")
+  expect_s3_class(res$res_sf, "sf")
+  expect_true("var1.pred" %in% colnames(res$res_sf))
+  expect_false(is.na(res$cv_metrics$rmse))
+})
+
+# ── apply_RFK ─────────────────────────────────────────────────────────────
+
+test_that("apply_RFK returns rf model with requested ntree and predictions", {
+  pts <- make_test_points(12)
+  pts$v <- pts$v + 0.5 * pts$aux1
+  grid <- make_test_grid_safe(pts, res = 200)
+  lags <- calc_scientific_lags(pts)
+  set.seed(99)
+  res <- suppressWarnings(
+    apply_RFK(pts, "v", grid, lags, list(rf_ntree = 50), c("aux1"))
+  )
+
+  expect_s3_class(res$rf_model, "randomForest")
+  expect_equal(res$rf_model$ntree, 50)
+  expect_false(grepl("Falling back to OK", res$log_msg, fixed = TRUE))
+  expect_s3_class(res$res_sf, "sf")
+  expect_true(all(c("var1.pred", "var1.var") %in% colnames(res$res_sf)))
+})
+
+# ── apply_CK ──────────────────────────────────────────────────────────────
+
+test_that("apply_CK returns predictions labelled Co-Kriging or OK fallback", {
+  pts <- make_test_points(15)
+  pts$v <- pts$v + 0.5 * pts$aux1   # correlated secondary for the LMC
+  grid <- make_test_grid_safe(pts, res = 200)
+  lags <- calc_scientific_lags(pts)
+  res <- suppressWarnings(apply_CK(pts, "v", grid, lags, list(), c("aux1")))
+
+  expect_s3_class(res$res_sf, "sf")
+  expect_true(all(c("var1.pred", "model_type") %in% colnames(res$res_sf)))
+  expect_true(all(res$res_sf$model_type %in%
+                    c("Co-Kriging", "Ordinary Kriging (Fallback)")))
+  # The prediction column must be renamed to the engine-agnostic var1.pred,
+  # and an observed column perform_cv recognizes must be present (gstat.cv
+  # returns plain "observed"), so CV metrics compute
+  if (!is.null(res$cv_obj)) {
+    expect_true("var1.pred" %in% names(res$cv_obj))
+    expect_true(any(grepl("(^|\\.)observed$", names(res$cv_obj))))
+    expect_false(is.na(res$cv_metrics$rmse))
+  }
+})
+
+# ── apply_interpolation dispatcher ────────────────────────────────────────
+
+test_that("apply_interpolation dispatches IDW identically to apply_IDW", {
+  pts <- make_test_points(15)
+  grid <- make_test_grid_safe(pts, res = 200)
+  lags <- calc_scientific_lags(pts)
+  mp <- list(idw_p = 2, idw_nmax = 12)
+  res_d <- apply_interpolation(pts, "v", "IDW", grid, character(0), lags,
+                               mp, "region", "act")
+  res_i <- apply_IDW(pts, "v", grid, mp)
+  expect_equal(res_d$res_sf$var1.pred, res_i$res_sf$var1.pred)
+  expect_equal(res_d$cv_metrics, res_i$cv_metrics)
+})
+
+test_that("apply_interpolation returns error result for unknown method", {
+  pts <- make_test_points(10)
+  grid <- make_test_grid_safe(pts, res = 200)
+  lags <- calc_scientific_lags(pts)
+  res <- apply_interpolation(pts, "v", "NOPE", grid, character(0), lags,
+                             list(), "region", "act")
+  expect_null(res$res_sf)
+  expect_null(res$cv_metrics)
+  expect_match(res$log_msg, "Unknown interpolation method: NOPE")
+})
+
+test_that("apply_interpolation treats RK without aux vars as an error", {
+  # Current contract: covariate methods require aux_vars; with none supplied
+  # the dispatcher falls through to the unknown-method error
+  pts <- make_test_points(10)
+  grid <- make_test_grid_safe(pts, res = 200)
+  lags <- calc_scientific_lags(pts)
+  res <- apply_interpolation(pts, "v", "RK", grid, character(0), lags,
+                             list(), "region", "act")
+  expect_null(res$res_sf)
+  expect_match(res$log_msg, "Unknown interpolation method: RK")
 })

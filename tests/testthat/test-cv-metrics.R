@@ -250,3 +250,19 @@ test_that("get_cv_residuals extracts residual column when pred/obs missing", {
   res <- get_cv_residuals(cv_df, 5)
   expect_equal(res, c(-2, 1, -1, 2, -3))
 })
+
+
+# ── cv_type_label ─────────────────────────────────────────────────────────
+
+test_that("cv_type_label reports LOOCV for n <= 50 and 10-fold above", {
+  expect_equal(cv_type_label(3), "LOOCV")
+  expect_equal(cv_type_label(50), "LOOCV")
+  expect_equal(cv_type_label(51), "10-fold CV")
+  expect_equal(cv_type_label(500), "10-fold CV")
+})
+
+test_that("cv_type_label falls back to generic CV for unknown n", {
+  expect_equal(cv_type_label(NA), "CV")
+  expect_equal(cv_type_label(NULL), "CV")
+  expect_equal(cv_type_label(integer(0)), "CV")
+})
