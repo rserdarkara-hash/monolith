@@ -82,8 +82,8 @@ test_that("get_default_palette returns nutrient palette when matched", {
 test_that("get_default_palette returns category-based palettes", {
   expect_equal(get_default_palette("NDVI", "Environmental Data"), "RdYlBu")
   expect_equal(get_default_palette("B4", "Landsat Data"), "viridis")
-  expect_equal(get_default_palette("VV", "Sentinel Data"), "plasma")
-  expect_equal(get_default_palette("merged_var", "Merged Data"), "inferno")
+  expect_equal(get_default_palette("VV", "Sentinel Data"), "viridis")
+  expect_equal(get_default_palette("merged_var", "Merged Data"), "viridis")
   expect_equal(get_default_palette("Slope", "Terrain Data"), "BrBG")
 })
 

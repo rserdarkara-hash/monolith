@@ -52,6 +52,8 @@ By incorporating the cross-covariance matrix, CK utilizes dense secondary sampli
 
 **Covariate Kriging Fallback (CK/RK/RFK):** When interpolating covariates across the spatial grid, if covariate kriging fails (e.g., due to pure nugget effects or collinearity collapses), the pipeline implements an automatic and silent `tryCatch` fallback to IDW (p=2, nmax=12). Documenting this increases transparency on how the spatial engine ensures map generation succeeds.
 
+**Local Search Neighborhood (nmax):** By default, Co-Kriging employs a local search neighborhood restricted to the nearest 15 observations (`nmax=15`). This prevents the exponential matrix growth associated with Global Co-Kriging, which computes the cross-covariance across the entire dataset simultaneously. Restricting `nmax` ensures optimal computational speed without degrading the geostatistical accuracy, as distant points have marginal weights. To modify this fixed parameter, a developer can locate `apply_CK` in `spatial_helpers.R` and adjust the `nmax = 15` argument inside the `gstat()` function calls.
+
 ### 1.5 Inverse Distance Weighting (IDW)
 
 **Mathematical Intuition:** A purely deterministic method. The estimated value is a weighted average of known points, where the weight is inversely proportional to the distance <i>d</i> raised to a or power <i>p</i> (usually <i>p=2</i>):
@@ -147,13 +149,14 @@ The dashboard employs an automated least-squares fitting algorithm to establish 
 * **Logic**: The application performs an automated search to find the optimal **Distance Power** that minimizes the spatial interpolation error for each specific locality.
 * **Optimization Engine**: The system executes a cross-validation loop to find the optimal power factor, testing values from **0.5 to 5.0**. If the dataset has 50 or fewer observations, it uses **Leave-One-Out Cross-Validation (LOOCV)**.
 * **Large Dataset Handling**: For larger datasets (typically > 50 points), the engine automatically switches to **5-Fold Cross-Validation** to maintain computational efficiency without sacrificing statistical reliability.
+* **Consistency & Reproducibility**: To ensure a fair comparison across all candidate power factors and maintain true reproducibility, the engine generates a single, deterministic fold-assignment vector (using a fixed random seed). This shared partition removes fold-induced evaluation noise, ensuring the optimal power is selected strictly based on its distance-decay performance.
 * **Local Adaptation**: As the soil variability is site-specific, the "Optimize" button calculates a unique power factor for every selected locality. 
 
 ### 4.3 TPS Optimization
-* **Logic**: The software optimizes the **Smoothing Parameter** to achieve the ideal mathematical balance between honoring every individual data point and creating a generalized regional trend.
+* **Logic**: The software optimizes the **Smoothing Parameter** to achieve the ideal mathematical balance between honoring every individual data point and creating a generalized regional trend. By default, the TPS lambda parameter is set to `< 0` (Auto GCV) to apply this natively during interpolation.
 * **GCV Diagnostics**: The engine utilizes **Generalized Cross-Validation (GCV)** within the `fields::Tps` algorithm to automatically find the optimal lambda.
 * **Interpretation**: The "Best Lambda" is defined as the value achieving the lowest GCV score. A lambda of 0 indicates an "Exact Interpolator" (zero error at sample points), while higher values indicate a "Smoothing Spline," which is often better for handling noisy sensor data.
-* **Visualization**: The resulting **GCV Curve** is plotted in the Scientific Analysis tab, allowing the user to verify if the optimization process reached a clear mathematical minimum.
+* **Visualization**: If the user explicitly clicks the "Optimize TPS Lambda" button, the engine runs an explicit grid search to extract the optimal value, overriding the Auto mode. The resulting **GCV Curve** is then plotted in the Scientific Analysis tab, allowing the user to verify if the optimization process reached a clear mathematical minimum.
 
 ---
 
@@ -257,3 +260,8 @@ To ensure "scientific reproducibility" across identical runs, the cross-validati
 The spatial distance threshold for defining neighbors in the Moran's I test is calculated dynamically, but relies on a hardcoded multiplier of `5` (`mean(knn_res$nn.dist, na.rm = TRUE) * 5`).
 * **Where to change:** `calc_moran` function inside `spatial_helpers.R`.
 * **How to change:** Locate the `d_thresh` variable and adjust the multiplier (e.g., from `* 5` to `* 3`) if you are working with data where the range of spatial autocorrelation is expected to be much narrower or broader.
+
+### 9.3 LOOCV vs k-Fold CV Threshold
+By default, the engine uses Leave-One-Out Cross-Validation (LOOCV) when the number of observations is 50 or fewer, and switches to 10-Fold Cross-Validation when n > 50.
+* **Where to change:** `perform_kriging_loocv` function inside `spatial_helpers.R`.
+* **How to change:** Locate `if (nrow(pts) <= 50)` inside `perform_kriging_loocv` and change `50` to your preferred threshold.

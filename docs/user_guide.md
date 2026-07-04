@@ -87,12 +87,14 @@ Once selections are made, the main interface transitions to the analytical modul
      - If IDW method is selected, the related panel will appear.
      - The interface provides a dynamic slider panel that calculates optimal parameters on a per-locality basis. When optimized, a reactive table details the exact Power factor chosen for *each independent spatial domain*.
      - Adjust the `number of neighbors` before optimizing for the optimum `IDW factor`. A specific tooltip advises users to restrict `idw_nmax` (default 12) before optimization to prevent distant, unrelated points from distorting local predictions. 
+     - The optimization process uses a deterministic cross-validation technique. This ensures that repeated optimizations on the same data yield identical results, guaranteeing complete reproducibility.
      - Manual override will be available if you deem it necessary.
      
 **2.c. TPS Optimization** 
      - If TPS method is selected, the related panel will appear.
-     - Simply click to button to achieve locality specific `lambda` values. Similar to IDW, this generates a reactive table detailing the exact Lambda chosen for each independent spatial domain.
-     - Manual override will be available if you deem it necessary.
+     - By default, the lambda slider is set to `< 0` (Auto GCV Optimization). This means the system automatically utilizes Generalized Cross-Validation to determine the optimal smoothing parameter natively during interpolation.
+     - You can optionally click the "Optimize TPS Lambda" button to explicitly calculate and extract the locality-specific `lambda` values, generating a reactive table to view them.
+     - Manual override is available if you deem it necessary. Note that setting `Lambda = 0` forces exact interpolation (no smoothing).
      
 **3. Define the Grid Resolution:**
   The resolution determines the size of each pixel in your final map.

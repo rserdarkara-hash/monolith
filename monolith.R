@@ -1,5 +1,6 @@
 
 source("global.R")
+source("spatial_helpers.R")
 
 estimate_run_duration <- function(loc_sample_counts, method, comp_mode, cores) {
   # History aware run duration estimator
@@ -199,52 +200,82 @@ clean_gstat_env <- function(vgm_obj) {
 robust_vgm_fit <- function(v_emp, v_data) {
   initial_sill <- var(v_data, na.rm=TRUE)
   if (is.na(initial_sill) || initial_sill == 0) initial_sill <- 1
-  
+
   max_dist <- if (!is.null(v_emp) && nrow(v_emp) > 0) max(v_emp$dist, na.rm = TRUE) else 1.0
   if (is.na(max_dist) || is.infinite(max_dist) || max_dist <= 0) {
     max_dist <- 1.0 # Safe default positive distance fallback
   }
-  
+
+  vgm_diag <- function(n_tried, n_flawed, flawed_winner) {
+    list(n_tried = n_tried, n_flawed = n_flawed, flawed_winner = flawed_winner)
+  }
+
   if (is.null(v_emp) || nrow(v_emp) < 5) {
     # Skip fitting to prevent gstat::fit.variogram from crashing R on very small empirical variograms
-    return(gstat::vgm(psill = initial_sill * 0.8, "Sph", range = max_dist/2, nugget = initial_sill * 0.2))
+    fallback <- gstat::vgm(psill = initial_sill * 0.8, "Sph", range = max_dist/2, nugget = initial_sill * 0.2)
+    attr(fallback, "is_fallback") <- TRUE
+    attr(fallback, "vgm_diagnostics") <- vgm_diag(0L, 0L, FALSE)
+    return(fallback)
   }
-  
+
   initial_nugget <- min(v_emp$gamma)
   if (initial_nugget == 0) initial_nugget <- max(initial_sill * 1e-6, 1e-6)
-  
+
   if (initial_nugget > initial_sill) initial_nugget <- initial_sill * 0.9
   initial_psill <- max(initial_sill - initial_nugget, initial_sill * 0.1)
-  
+
   ranges <- c(max_dist / 10, max_dist / 5, max_dist / 4, max_dist / 2)
   models <- c("Sph", "Exp", "Gau", "Mat") # Added Matern
-  
-  fits <- lapply(models, function(m) {
-    best_m_fit <- NULL
-    best_m_sse <- Inf
+
+  # gstat reports singular fits via attr(, "singular") but non-convergence
+  # only as a C-level warning, so the warning itself is the detection signal.
+  # These are expected while screening candidates and are muffled; anything
+  # unrecognized still propagates.
+  screening_warning <- "No convergence after|singular model|singular covariance"
+
+  candidates <- list()
+  for (m in models) {
     for (r in ranges) {
-      tryCatch({
-        start_kappa <- if(m == "Mat") 1.5 else 0.5
-        f <- gstat::fit.variogram(v_emp, gstat::vgm(psill = initial_psill, model = m, range = r, nugget = initial_nugget, kappa = start_kappa))
-        sse <- attr(f, "SSErr")
-        if (!is.null(sse) && f$range[2] > (max_dist/100) && f$range[2] < max_dist * 2 && f$psill[2] > 0) {
-          if (sse < best_m_sse) {
-            best_m_sse <- sse
-            best_m_fit <- list(fit = f, sse = sse)
+      start_kappa <- if (m == "Mat") 1.5 else 0.5
+      flawed <- FALSE
+      f <- tryCatch({
+        withCallingHandlers(
+          gstat::fit.variogram(v_emp, gstat::vgm(psill = initial_psill, model = m, range = r, nugget = initial_nugget, kappa = start_kappa)),
+          warning = function(w) {
+            if (grepl(screening_warning, conditionMessage(w))) {
+              flawed <<- TRUE
+              invokeRestart("muffleWarning")
+            }
           }
-        }
+        )
       }, error = function(e) NULL)
+      if (is.null(f)) next
+      flawed <- flawed || isTRUE(attr(f, "singular"))
+      sse <- attr(f, "SSErr")
+      in_window <- !is.null(sse) && !is.na(sse) && f$range[2] > (max_dist/100) && f$range[2] < max_dist * 2 && f$psill[2] > 0
+      candidates[[length(candidates) + 1]] <- list(fit = f, sse = sse, flawed = flawed, in_window = in_window)
     }
-    return(best_m_fit)
-  })
-  
-  valid_fits <- Filter(Negate(is.null), fits)
-  best_fit <- NULL
-  if (length(valid_fits) > 0) {
-    best_idx <- which.min(sapply(valid_fits, function(x) x$sse))
-    best_fit <- valid_fits[[best_idx]]$fit
   }
-  
+
+  n_tried <- length(candidates)
+  n_flawed <- sum(vapply(candidates, function(x) x$flawed, logical(1)))
+  eligible <- Filter(function(x) x$in_window, candidates)
+  clean_pool <- Filter(function(x) !x$flawed, eligible)
+  flawed_pool <- Filter(function(x) x$flawed, eligible)
+
+  pick_best <- function(pool) pool[[which.min(vapply(pool, function(x) x$sse, numeric(1)))]]$fit
+
+  best_fit <- NULL
+  flawed_winner <- FALSE
+  if (length(clean_pool) > 0) {
+    best_fit <- pick_best(clean_pool)
+  } else if (length(flawed_pool) > 0) {
+    # No clean candidate anywhere: still better than the heuristic fallback, but flagged.
+    best_fit <- pick_best(flawed_pool)
+    flawed_winner <- TRUE
+    attr(best_fit, "flawed_winner") <- TRUE
+  }
+
   if (is.null(best_fit)) {
     if (initial_nugget > initial_sill * 0.8) {
       best_fit <- gstat::vgm(psill = initial_sill * 0.05, "Sph", range = max_dist/10, nugget = initial_sill * 0.95)
@@ -253,6 +284,7 @@ robust_vgm_fit <- function(v_emp, v_data) {
     }
     attr(best_fit, "is_fallback") <- TRUE
   }
+  attr(best_fit, "vgm_diagnostics") <- vgm_diag(n_tried, n_flawed, flawed_winner)
   return(best_fit)
 }
 
@@ -380,13 +412,16 @@ ui <- fluidPage(
         br(),
         div(style="background-color: #e7f5ff; padding: 10px; border: 1px solid #a5d8ff;",
             h4("2. Spatial Engine"),
-            selectInput("method", HTML(paste0("Interpolation", info_tooltip("method_info", "Cross-validation folds use a fixed random seed (12345) for reproducibility. See Scientific Guide to change this."))), 
+            selectInput("method", HTML(paste0("Interpolation", info_tooltip("method_info", "Models use Leave-One-Out CV (LOOCV) for n <= 50, and 10-fold CV for n > 50. Cross-validation folds use a fixed random seed (12345) for reproducibility. See Scientific Guide Section 9 to change these hardcoded parameters."))), 
                         choices = c("Ordinary Kriging" = "OK", 
                                     "Regression Kriging" = "RK",
                                     "Random Forest Kriging" = "RFK",
                                     "Co-Kriging" = "CK",
                                     "IDW" = "IDW", 
                                     "Thin Plate Spline (TPS)" = "TPS")),
+            conditionalPanel(condition = "input.method == 'CK'",
+              helpText(HTML("<em style='color: inherit; font-size: 0.9em;'>Note: CK uses nmax=15 by default to ensure optimal speed. See Scientific Guide to change it.</em>"))
+            ),
             
                        conditionalPanel(condition = "['RK', 'RFK', 'CK'].includes(input.method)",
                          div(style = "background-color: #f3f0ff; padding: 10px; border: 1px solid #d0bfff; border-radius: 4px; margin-bottom: 10px;",
@@ -449,12 +484,12 @@ ui <- fluidPage(
                 tuning_ui(
                     id = "tps", label = "TPS LAMBDA",
                     global_slider_id = "tps_lambda", manual_slider_id = "tps_m_lambda",
-                    global_slider_args = list(label = "Global Smoothing (Lambda)", min = 0, max = 1, value = 0, step = 0.001),
-                    manual_slider_args = list(label = "Lambda", min = 0, max = 1, value = 0, step = 0.001),
+                    global_slider_args = list(label = "Global Smoothing (Lambda)", min = -1, max = 1, value = -1, step = 0.001),
+                    manual_slider_args = list(label = "Lambda", min = -1, max = 1, value = -1, step = 0.001),
                     optimize_btn_label = "OPTIMIZE TPS LAMBDA",
                     manual_btn_label = "Apply Manual Lambda",
                     outer_style = "background-color: #fff4e6; padding: 10px; border: 1px solid #ffd8a8; border-radius: 4px; margin-bottom: 10px;",
-                    extra_ui = p(style="font-size: 0.8em; opacity: 0.8;", "Lambda = 0: Exact interpolation; Lambda > 0: Smoothing.")
+                    extra_ui = p(style="font-size: 0.8em; opacity: 0.8;", "Lambda < 0: Auto (GCV Optimization); Lambda = 0: Exact interpolation; Lambda > 0: Manual Smoothing.")
                 )
             ),
             
@@ -720,7 +755,7 @@ ui <- fluidPage(
                      column(4,
                             div(style = "background-color: #fff9db; padding: 15px; border: 2px solid #fab005; border-radius: 8px; margin-bottom: 20px;",
                               h4("Spatial Interpolation Statistics"),
-                              tags$p(style="font-size: 0.85em; opacity: 0.8; font-style: italic;", "Model-specific diagnostics and performance metrics (RMSE, R )."),
+                              tags$p(style="font-size: 0.85em; opacity: 0.8; font-style: italic;", "Model-specific diagnostics and performance metrics (RMSE, R2)."),
                               conditionalPanel(condition = "input.method == 'OK'",
                                 h5("Variogram Parameters"), div(class="table-container", tableOutput("vgm_params_table")),
                                 hr(style="opacity: 0.3;")
@@ -824,8 +859,12 @@ server <- function(input, output, session) {
       
       if(loc == "Total (Combined)") {
          sf_list <- lapply(df_list, function(x) {
-           if(inherits(x, "sf")) return(x)
-           if(is.data.frame(x) && "x" %in% colnames(x) && "y" %in% colnames(x)) return(st_as_sf(x, coords = c("x", "y"), crs = rv$mapping$crs))
+           if(inherits(x, "sf")) return(sf::st_transform(x, 3857))
+           if(is.data.frame(x) && "x" %in% colnames(x) && "y" %in% colnames(x)) {
+             tryCatch({
+               return(st_as_sf(x, coords = c("x", "y"), crs = rv$mapping$crs) %>% sf::st_transform(3857))
+             }, error = function(e) return(NULL))
+           }
            return(NULL)
          })
          sf_list <- sf_list[!sapply(sf_list, is.null)]
@@ -1039,8 +1078,8 @@ server <- function(input, output, session) {
      if(input$method %in% c("IDW", "TPS")) {
        param_df <- data.frame(
          Param = if(input$method == "IDW") "Power (p)" else "Lambda",
-         Actual = as.character(round(get_regional_param(input$method, l, "act"), 6)),
-         Predicted = if(comp_mode || val_type != "actual") as.character(round(get_regional_param(input$method, l, "pre"), 6)) else "NA"
+         Actual = format_param_val(input$method, get_regional_param(input$method, l, "act")),
+         Predicted = if(comp_mode || val_type != "actual") format_param_val(input$method, get_regional_param(input$method, l, "pre")) else "NA"
        )
        register_export_item(paste0("table_params_loc_", l), paste(meta$label, "-", l, "- Model Parameters"), "table", param_df, meta$category)
      }
@@ -1751,10 +1790,20 @@ server <- function(input, output, session) {
     rv$drawn_feature <- NULL
   })
   
-  get_regional_param <- function(type, loc, target, default = 2.0) {
+  get_regional_param <- function(type, loc, target, default = NULL) {
     field <- if(type == "IDW") "idw_factors" else "tps_lambdas"
     val <- rv[[field]][[loc]][[target]]
-    if(is.null(val)) default else val
+    if(is.null(val)) {
+      if(!is.null(default)) return(default)
+      if(type == "IDW") return(2.0)
+      if(type == "TPS") return(-1.0)
+    }
+    return(val)
+  }
+  
+  format_param_val <- function(type, val) {
+    if(type == "TPS" && !is.na(val) && val < 0) return("Auto (GCV)")
+    as.character(round(val, 6))
   }
   
   set_regional_param <- function(type, loc, target, value) {
@@ -2470,7 +2519,7 @@ server <- function(input, output, session) {
           p("Designed for high-performance parallel processing and spatial diagnostics, multi-scale interpolation via kriging, inverse distance weighting, and thin plate splines with practical multi-criteria optimization."),
           p("Supported with the Descriptive and Exploratory Suite with dynamic visualizations and statistics."),
           hr(),
-          p(strong("A vibe-coded product of `that` couple of months following the loose of institutional e-mail address.")),
+          p(strong("A vibe-coded product of `that` couple of months following the loss of institutional e-mail address.")),
           p(style = "color: #666; font-size: 0.9em;", "  by Recep Serdar Kara in cooperation with Gemini CLI - 2026")
       )
     ))
@@ -2489,7 +2538,7 @@ server <- function(input, output, session) {
   })
   
   joint_vv <- reactive({
-    is_uncertainty <- input$value_type %in% c("pred_ss", "uncert")
+    is_uncertainty <- isTruthy(input$show_uncertainty) && isTruthy(input$method %in% c("OK", "RK", "RFK", "CK"))
     get_joint_scale_values(rv$rast, rv$rast_pred, input$match_scales, is_uncertainty)
   })
 
@@ -2588,7 +2637,7 @@ server <- function(input, output, session) {
         rcl_mat[i, ] <- c(brks[i], brks[i+1], i)
       }
       
-      is_viridis <- meta$palette == "viridis" || meta$palette == "inferno"
+      is_viridis <- meta$palette == "viridis"
       colors <- if(is_viridis) {
         viridis::viridis(n_c_actual, option = meta$palette)
       } else {
@@ -2711,10 +2760,6 @@ server <- function(input, output, session) {
                 choicesOpt = list(content = names(choices)))
   })
 
-  observeEvent(input$var_id, {
-    req(input$var_id); meta <- get_current_meta(); req(meta)
-    updateTextInput(session, "exp_title", value = paste(meta$label, "- Soil Mapping"))
-  })
 
   observe({
     req(rv$user_data, input$var_id, rv$mapping$vars)
@@ -3255,6 +3300,46 @@ server <- function(input, output, session) {
   })
 
 
+  calculate_run_estimates <- function() {
+    meta <- get_current_meta()
+    req(meta)
+    
+    loc_col <- rv$mapping$loc
+    selected_locs <- if ("ALL" %in% input$locality || length(input$locality) == 0) {
+      if (!is.null(rv$user_data) && !is.null(loc_col) && loc_col %in% colnames(rv$user_data)) {
+        unique(na.omit(rv$user_data[[loc_col]]))
+      } else "Unknown"
+    } else {
+      input$locality
+    }
+    n_locs <- length(selected_locs)
+    if (n_locs == 0) n_locs <- 1
+    
+    comp_mode <- isTruthy(input$comp_mode) || isTruthy(input$value_type != "actual")
+    cores <- tryCatch(future::nbrOfWorkers(), error = function(e) 1)
+    if (is.null(cores) || cores < 1) cores <- 1
+    
+    loc_sample_counts <- numeric(n_locs)
+    if (!is.null(rv$user_data) && !is.null(loc_col) && loc_col %in% colnames(rv$user_data) && !("Unknown" %in% selected_locs)) {
+      for (idx in seq_along(selected_locs)) {
+        l <- selected_locs[idx]
+        n_samples <- nrow(rv$user_data[rv$user_data[[loc_col]] == l, ])
+        loc_sample_counts[idx] <- if (is.null(n_samples) || is.na(n_samples) || n_samples == 0) 50 else n_samples
+      }
+    } else {
+      loc_sample_counts <- rep(50, n_locs)
+    }
+    
+    est_res <- estimate_run_duration(loc_sample_counts, input$method, comp_mode, cores)
+    
+    return(list(
+      meta = meta,
+      n_locs = n_locs,
+      estimate_text = est_res$estimate_text,
+      is_long_run = est_res$is_long_run
+    ))
+  }
+
   archive_and_proceed <- function(action, meta, n_locs, estimate_text, is_long_run) {
     if (action == "archive") {
       current_cfg <- rv$run_config_summary
@@ -3318,7 +3403,6 @@ server <- function(input, output, session) {
     }
 
     if (input$method %in% c("RK", "RFK", "CK") && length(input$aux_vars) > 1 && is.null(rv$vif_choice_made)) {
-       source("spatial_helpers.R", local = TRUE)
        df_aux <- sf::st_drop_geometry(rv$user_data)[, input$aux_vars, drop = FALSE]
        vif_res <- check_vif(df_aux, threshold = 10)
        
@@ -3347,39 +3431,11 @@ server <- function(input, output, session) {
     rv$vif_choice_made <- NULL
     rv$active_vif_thresh <- vif_thresh
     
-    meta <- get_current_meta()
-    req(meta)
-    
-    loc_col <- rv$mapping$loc
-    selected_locs <- if ("ALL" %in% input$locality || length(input$locality) == 0) {
-      if (!is.null(rv$user_data) && !is.null(loc_col) && loc_col %in% colnames(rv$user_data)) {
-        unique(na.omit(rv$user_data[[loc_col]]))
-      } else NULL
-    } else {
-      input$locality
-    }
-    n_locs <- length(selected_locs)
-    if (n_locs == 0) n_locs <- 1
-    
-    comp_mode <- isTruthy(input$comp_mode) || isTruthy(input$value_type != "actual")
-    cores <- tryCatch(future::nbrOfWorkers(), error = function(e) 1)
-    if (is.null(cores) || cores < 1) cores <- 1
-    
-    loc_sample_counts <- numeric(n_locs)
-    if (!is.null(rv$user_data) && !is.null(loc_col) && loc_col %in% colnames(rv$user_data) && length(selected_locs) > 0) {
-      for (idx in seq_along(selected_locs)) {
-        l <- selected_locs[idx]
-        n_samples <- nrow(rv$user_data[rv$user_data[[loc_col]] == l, ])
-        loc_sample_counts[idx] <- if (is.null(n_samples) || is.na(n_samples) || n_samples == 0) 50 else n_samples
-      }
-    } else {
-      loc_sample_counts <- rep(50, n_locs)
-    }
-    
-    est_res <- estimate_run_duration(loc_sample_counts, input$method, comp_mode, cores)
-    estimate_text <- est_res$estimate_text
-    is_long_run <- est_res$is_long_run
-    n_models <- est_res$n_models
+    est <- calculate_run_estimates()
+    meta <- est$meta
+    n_locs <- est$n_locs
+    estimate_text <- est$estimate_text
+    is_long_run <- est$is_long_run
     
     if (!is.null(rv$run_config_summary) && length(rv$export_registry) > 0) {
       if (rv$auto_archive_choice == "archive") {
@@ -3420,36 +3476,11 @@ server <- function(input, output, session) {
       rv$auto_archive_choice <- "archive"
     }
     
-    meta <- get_current_meta()
-    loc_col <- rv$mapping$loc
-    selected_locs <- if ("ALL" %in% input$locality || length(input$locality) == 0) {
-      if (!is.null(rv$user_data) && !is.null(loc_col) && loc_col %in% colnames(rv$user_data)) {
-        unique(na.omit(rv$user_data[[loc_col]]))
-      } else "Unknown"
-    } else {
-      input$locality
-    }
-    n_locs <- length(selected_locs)
-    comp_mode <- isTruthy(input$comp_mode) || isTruthy(input$value_type != "actual")
-    
-    cores <- tryCatch(future::nbrOfWorkers(), error = function(e) 1)
-    if (is.null(cores) || cores < 1) cores <- 1
-    
-    loc_sample_counts <- numeric(n_locs)
-    if (!is.null(rv$user_data) && !is.null(loc_col) && loc_col %in% colnames(rv$user_data) && !("Unknown" %in% selected_locs)) {
-      for (idx in seq_along(selected_locs)) {
-        l <- selected_locs[idx]
-        n_samples <- nrow(rv$user_data[rv$user_data[[loc_col]] == l, ])
-        loc_sample_counts[idx] <- if (is.null(n_samples) || is.na(n_samples) || n_samples == 0) 50 else n_samples
-      }
-    } else {
-      loc_sample_counts <- rep(50, n_locs)
-    }
-    
-    est_res <- estimate_run_duration(loc_sample_counts, input$method, comp_mode, cores)
-    estimate_text <- est_res$estimate_text
-    is_long_run <- est_res$is_long_run
-    n_models <- est_res$n_models
+    est <- calculate_run_estimates()
+    meta <- est$meta
+    n_locs <- est$n_locs
+    estimate_text <- est$estimate_text
+    is_long_run <- est$is_long_run
     
     archive_and_proceed("archive", meta, n_locs, estimate_text, is_long_run)
   })
@@ -3460,36 +3491,11 @@ server <- function(input, output, session) {
       rv$auto_archive_choice <- "discard"
     }
     
-    meta <- get_current_meta()
-    loc_col <- rv$mapping$loc
-    selected_locs <- if ("ALL" %in% input$locality || length(input$locality) == 0) {
-      if (!is.null(rv$user_data) && !is.null(loc_col) && loc_col %in% colnames(rv$user_data)) {
-        unique(na.omit(rv$user_data[[loc_col]]))
-      } else "Unknown"
-    } else {
-      input$locality
-    }
-    n_locs <- length(selected_locs)
-    comp_mode <- isTruthy(input$comp_mode) || isTruthy(input$value_type != "actual")
-    
-    cores <- tryCatch(future::nbrOfWorkers(), error = function(e) 1)
-    if (is.null(cores) || cores < 1) cores <- 1
-    
-    loc_sample_counts <- numeric(n_locs)
-    if (!is.null(rv$user_data) && !is.null(loc_col) && loc_col %in% colnames(rv$user_data) && !("Unknown" %in% selected_locs)) {
-      for (idx in seq_along(selected_locs)) {
-        l <- selected_locs[idx]
-        n_samples <- nrow(rv$user_data[rv$user_data[[loc_col]] == l, ])
-        loc_sample_counts[idx] <- if (is.null(n_samples) || is.na(n_samples) || n_samples == 0) 50 else n_samples
-      }
-    } else {
-      loc_sample_counts <- rep(50, n_locs)
-    }
-    
-    est_res <- estimate_run_duration(loc_sample_counts, input$method, comp_mode, cores)
-    estimate_text <- est_res$estimate_text
-    is_long_run <- est_res$is_long_run
-    n_models <- est_res$n_models
+    est <- calculate_run_estimates()
+    meta <- est$meta
+    n_locs <- est$n_locs
+    estimate_text <- est$estimate_text
+    is_long_run <- est$is_long_run
     
     archive_and_proceed("discard", meta, n_locs, estimate_text, is_long_run)
   })
@@ -4314,12 +4320,9 @@ server <- function(input, output, session) {
       r_list <- Filter(Negate(is.null), r_list)
       
       if (length(r_list) > 0) {
-        fallback_locs <- c()
-        for(n in names(rv$v_fit_list)) {
-          if(isTRUE(attr(rv$v_fit_list[[n]], "is_fallback"))) fallback_locs <- c(fallback_locs, n)
-        }
-        if(length(fallback_locs) > 0) {
-          m <- m %>% addControl(html = paste0("<div id='vgm_fallback_warn' style='color:red; font-weight:bold; background:white; padding:5px 25px 5px 5px; border-radius:4px; position:relative;'><button onclick='document.getElementById(\"vgm_fallback_warn\").style.display=\"none\";' style='position:absolute; top:2px; right:2px; background:none; border:none; color:red; font-size:16px; font-weight:bold; cursor:pointer;'>&times;</button>Note: Variogram fit failed for some localities (", paste(fallback_locs, collapse=", "), ").<br>A fallback spherical model was applied to prevent application failure. Interpret interpolations with caution.</div>"), position = "bottomleft")
+        vgm_warn_html <- build_vgm_warning_html(rv$v_fit_list)
+        if (!is.null(vgm_warn_html)) {
+          m <- m %>% addControl(html = vgm_warn_html, position = "bottomleft")
         }
         r_names <- names(r_list)
         vv_list <- lapply(seq_along(r_list), function(i) {
@@ -5005,8 +5008,8 @@ server <- function(input, output, session) {
     type <- input$method
     data.frame(
       Param = if(type == "IDW") "Power (p)" else "Lambda",
-      Actual = as.character(round(get_regional_param(type, loc, "act"), 6)),
-      Predicted = as.character(round(get_regional_param(type, loc, "pre"), 6))
+      Actual = format_param_val(type, get_regional_param(type, loc, "act")),
+      Predicted = format_param_val(type, get_regional_param(type, loc, "pre"))
     )
   })
 
@@ -5139,20 +5142,26 @@ server <- function(input, output, session) {
       if(loc == "Total (Combined)") {
         all_cv <- do.call(rbind, lapply(data_list, function(x) {
           if(inherits(x, "sf")) {
-            coords <- sf::st_coordinates(x)
-            df <- sf::st_drop_geometry(x)
+            x_proj <- sf::st_transform(x, 3857)
+            coords <- sf::st_coordinates(x_proj)
+            df <- sf::st_drop_geometry(x_proj)
             if(!"x" %in% colnames(df)) df$x <- coords[,1]
             if(!"y" %in% colnames(df)) df$y <- coords[,2]
             return(df)
           } else if(inherits(x, "Spatial")) {
-            return(as.data.frame(x))
+            x_sf <- sf::st_as_sf(x) %>% sf::st_transform(3857)
+            coords <- sf::st_coordinates(x_sf)
+            df <- sf::st_drop_geometry(x_sf)
+            if(!"x" %in% colnames(df)) df$x <- coords[,1]
+            if(!"y" %in% colnames(df)) df$y <- coords[,2]
+            return(df)
           } else {
             return(as.data.frame(x))
           }
         }))
         if(is.null(all_cv) || nrow(all_cv) == 0) {
           empty_df <- data.frame(Source=label, RMSE=NA, R2_Corr=NA, R2_NSE=NA, Bias_ME=NA, RPD_Prec=NA, SMAPE_Pct=NA, Moran_I=NA)
-          names(empty_df) <- c("Source", "RMSE", "R  (Corr)", "R  (NSE/Trad)", "Bias (ME)", "RPD (Prec)", "SMAPE (%)", "Moran's I")
+          names(empty_df) <- c("Source", "RMSE", "R2 (Corr)", "R2 (NSE/Trad)", "Bias (ME)", "RPD (Prec)", "SMAPE (%)", "Moran's I")
           return(empty_df)
         }
         
@@ -5184,7 +5193,7 @@ server <- function(input, output, session) {
                     SMAPE_Pct = round(smape, 4),
                     Moran_I = if(is.na(moran_i)) '<span title="No Spatial Structure Detected">NA*</span>' else as.character(round(moran_i, 4))
                     )
-                    names(res_df) <- c("Source", "RMSE", "R  (Corr)", "R  (NSE/Trad)", "Bias (ME)", "RPD (Prec)", "SMAPE (%)", "Moran's I")
+                    names(res_df) <- c("Source", "RMSE", "R2 (Corr)", "R2 (NSE/Trad)", "Bias (ME)", "RPD (Prec)", "SMAPE (%)", "Moran's I")
                     res_df
                     }
 
@@ -5221,7 +5230,7 @@ server <- function(input, output, session) {
           nmae_val <- if(!is.na(mae_val) && mean_v != 0) (mae_val / mean_v) * 100 else NA
           
               data.frame(
-                Metric = c("R  (NSE/Traditional)", "R  (Correlation)", "RMSE", "NRMSE (%)", "MAE", "NMAE (%)", "MBE (Bias)", "Lin's CCC (Agree)", "RPD (Precision)", "RPIQ", "SMAPE (%)"),
+                Metric = c("R2 (NSE/Traditional)", "R2 (Correlation)", "RMSE", "NRMSE (%)", "MAE", "NMAE (%)", "MBE (Bias)", "Lin's CCC (Agree)", "RPD (Precision)", "RPIQ", "SMAPE (%)"),
                 Value = c(round(rsq_trad, 4), round(rsq_val, 4), round(rmse_val, 4), round(nrmse_val, 4), round(mae_val, 4), round(nmae_val, 4), round(mbe_val, 4), round(ccc_val, 4), round(rpd_val, 4), round(rpiq_val, 4), round(smape_val, 4))
               )        })
   output$kappa_table <- renderTable({
@@ -5299,129 +5308,7 @@ server <- function(input, output, session) {
     }
   })
 
-  build_export_plot <- function(target, title, vv_scale = NULL, subtitle = NULL) {
-    if(is.null(target)) return(ggplot() + annotate("text", x=0.5, y=0.5, label="Awaiting model results...") + theme_void())
-    meta <- get_current_meta()
-    if(is.null(meta)) return(ggplot() + annotate("text", x=0.5, y=0.5, label="Awaiting metadata...") + theme_void())
-    
-    current_method <- rv$run_method[[input$var_id]]
-    is_uncertainty <- isTruthy(input$show_uncertainty) && current_method %in% c("OK", "RK", "RFK", "CK")
-    if (is_uncertainty && input$value_type != "resid" && input$exp_layer != "resid") {
-        if (input$uncertainty_type == "se") meta$label <- paste(meta$label, "(Std Error)")
-        else meta$label <- paste(meta$label, "(Variance)")
-        meta$palette <- "inferno"
-    }
-    
-    is_viridis <- meta$palette == "viridis" || meta$palette == "inferno"
-    
-    p <- tryCatch({
-      if(input$color_style %in% c("agro", "bin") && !is_uncertainty && input$value_type != "resid" && input$exp_layer != "resid") {
-        params <- classification_params()
-        if(is.null(params)) return(ggplot() + annotate("text", x=0.5, y=0.5, label="Awaiting classification parameters...") + theme_void())
-        target_c <- classify(target[[1]], params$rcl_mat, right = FALSE)
-        df_plot <- as.data.frame(target_c, xy = TRUE)
-        if(nrow(df_plot) == 0) return(ggplot() + annotate("text", x=0.5, y=0.5, label="No data in classified raster.") + theme_void())
-        colnames(df_plot) <- c("x", "y", "val")
-        
-        pixel_counts <- as.numeric(table(factor(df_plot$val, levels = 1:params$n_c)))
-        new_labels <- sapply(1:params$n_c, function(i) {
-          if (pixel_counts[i] == 0) paste0(params$leg_labels[i], " (0 ha)")
-          else paste0(params$leg_labels[i], "       ")
-        })
-        
-        missing_levels <- which(pixel_counts == 0)
-        if(length(missing_levels) > 0) {
-          dummy_df <- data.frame(x = NA, y = NA, val = missing_levels)
-          df_plot <- rbind(df_plot, dummy_df)
-        }
-        
-        df_plot$val <- factor(df_plot$val, levels = 1:params$n_c, labels = new_labels)
-        
-        ggplot(df_plot, aes(x = x, y = y, fill = val)) + 
-          geom_tile() + 
-          scale_fill_manual(values = setNames(params$colors, new_labels), limits = new_labels, na.value = "transparent", name = meta$label, drop = FALSE) +
-          coord_equal()
-      } else if(input$value_type == "resid" || (input$exp_layer == "resid")) {
-        vv <- as.vector(values(target, na.rm=TRUE))
-        abs_max <- max(abs(vv), na.rm = TRUE)
-        if(is.infinite(abs_max) || is.na(abs_max)) abs_max <- 1
-        ggplot() + geom_spatraster(data = target) + 
-          scale_fill_distiller(palette = "RdBu", direction = 1, limits = c(-abs_max, abs_max), 
-                               na.value = "transparent", name = "Residual")
-      } else {
-        bp <- ggplot() + geom_spatraster(data = target)
-        if(is_viridis) bp + scale_fill_viridis_c(option = meta$palette, name = meta$unit, na.value = "transparent", limits = if(!is.null(vv_scale)) range(vv_scale, na.rm=T) else NULL)
-        else bp + scale_fill_distiller(palette=meta$palette, direction=1, name=meta$unit, na.value="transparent", limits = if(!is.null(vv_scale)) range(vv_scale, na.rm=T) else NULL)
-      }
-    }, error = function(e) {
-      ggplot() + annotate("text", x=0.5, y=0.5, label=paste("Plot Error:", e$message)) + theme_void()
-    })
-    
-    font_base <- if (is.null(input$exp_font_base)) 11 else input$exp_font_base
-    title_size <- if (is.null(input$exp_title_size)) 14 else input$exp_title_size
-    exp_scale <- isTruthy(input$exp_scale)
 
-    p <- p + theme_minimal(base_size = font_base) +
-        theme(plot.title = element_text(size = title_size, face = "bold"),
-              plot.subtitle = element_text(size = font_base, face = "italic"),
-              axis.text.x = element_text(angle = 90, vjust = 0.5, hjust = 1),
-              legend.text = element_text(angle = 90, hjust = 0.5),
-              legend.title = element_text(angle = 90, hjust = 0.5),
-              plot.margin = ggplot2::margin(40, 10, 10, 10)) +
-        labs(title = title, subtitle = subtitle)
-
-    if(exp_scale) p <- p + coord_sf(clip = "off") + annotation_scale(location = "bl", width_hint = 0.4, pad_y = unit(-2.5, "cm")) + theme(plot.margin = ggplot2::margin(10, 10, 70, 10))
-    p  }
-
-  get_export_plot <- function() {
-    meta <- get_current_meta()
-    if(is.null(meta)) return(ggplot() + annotate("text", x=0.5, y=0.5, label="Please select a variable.") + theme_void())
-    
-        current_method <- rv$run_method[[input$var_id]]
-        method_lab <- if(!is.null(current_method)) {
-          m_name <- get_method_label(current_method)
-          paste0("Method: ", m_name)
-        } else NULL
-    
-        get_active_layer <- function(r_obj) {
-          if(is.null(r_obj)) return(NULL)
-          r_w <- r_obj
-          if(inherits(r_w, "PackedSpatRaster")) r_w <- terra::unwrap(r_w)
-          is_uncertainty <- isTruthy(input$show_uncertainty) && current_method %in% c("OK", "RK", "RFK", "CK") && "var1.var" %in% names(r_w)
-          if (is_uncertainty) {
-            layer <- r_w[["var1.var"]]
-            if (input$uncertainty_type == "se") layer <- sqrt(layer)
-            return(layer)
-          } else {
-            if("var1.pred" %in% names(r_w)) return(r_w[["var1.pred"]]) else return(r_w[[1]])
-          }
-        }
-    
-        if(input$exp_layer == "comp") {
-          r_act <- get_active_layer(rv$rast)
-          r_pre <- get_active_layer(rv$rast_pred)
-          v_scale <- if(input$match_scales && !is.null(r_act) && !is.null(r_pre)) {
-            c(as.vector(values(r_act, na.rm=T)), as.vector(values(r_pre, na.rm=T)))
-          } else NULL
-              p1 <- build_export_plot(r_act, paste0("[", meta$category, "] ", meta$label, " - Actual"), v_scale, subtitle = method_lab)
-              p2 <- build_export_plot(r_pre, paste0("[", meta$category, "] ", meta$label, " - Predicted"), v_scale, subtitle = method_lab)
-              return(p1 + p2 + plot_layout(ncol = 2, guides = "collect") & theme(legend.position = "bottom"))
-            }
-            
-            target_raw <- switch(input$exp_layer,
-              "act" = rv$rast,
-              "pre" = rv$rast_pred,
-              "resid" = rv$rast_res,
-              "view" = if(input$value_type == "actual") rv$rast else if(input$value_type == "resid") rv$rast_res else rv$rast_pred,
-              rv$rast # fallback
-            )
-            target <- get_active_layer(target_raw)
-            
-            single_title <- if(input$exp_title == "Soil Mapping") {
-               paste0("[", meta$category, "] ", meta$label, " - ", input$exp_layer)
-            } else input$exp_title
-            
-            build_export_plot(target, single_title, subtitle = method_lab)  }
   observeEvent(input$main_map_draw_new_feature, {
     feat <- input$main_map_draw_new_feature
     if(feat$geometry$type %in% c("Polygon", "MultiPolygon")) {
@@ -5499,25 +5386,7 @@ server <- function(input, output, session) {
     }
   )
 
-  output$export_preview <- renderPlot({ get_export_plot() })
-  output$dl_map <- downloadHandler(
-    filename = function() { paste0("Map_", format(Sys.time(), "%H%M%S"), ".", tolower(input$exp_format %||% "png")) },
-    content = function(file) {
-      p <- get_export_plot()
-      
-      ext <- tolower(input$exp_format %||% "png")
-      if (inherits(p, "trellis")) {
-        if (ext == "png") png(file, width = (if(isTruthy(input$styler_width)) input$styler_width else 10), height = (if(isTruthy(input$styler_height)) input$styler_height else 8), units = "in", res = 300)
-        else if (ext == "tiff") tiff(file, width = (if(isTruthy(input$styler_width)) input$styler_width else 10), height = (if(isTruthy(input$styler_height)) input$styler_height else 8), units = "in", res = 300)
-        else if (ext == "pdf") pdf(file, width = (if(isTruthy(input$styler_width)) input$styler_width else 10), height = (if(isTruthy(input$styler_height)) input$styler_height else 8))
-        else jpeg(file, width = (if(isTruthy(input$styler_width)) input$styler_width else 10), height = (if(isTruthy(input$styler_height)) input$styler_height else 8), units = "in", res = 300)
-        print(p)
-        dev.off()
-      } else {
-      ggsave(file, plot = p, device = if(ext == "pdf") "pdf" else (if(ext == "tiff") "tiff" else NULL), width = input$styler_width %||% 10, height = (if(isTruthy(input$styler_height)) input$styler_height else 8), dpi = 300)
-      }
-      }
-      )
+
       }
       if (Sys.getenv("SHINY_PORT") != "" || interactive()) {  shinyApp(ui, server)
 }

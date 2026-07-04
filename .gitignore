@@ -1,5 +1,11 @@
-.Rproj.user
+.Rproj.user/
+.Rbuildignore
+monolith.Rproj
 .Rhistory
 .RData
-.Ruserdata
+.Ruserdata/
 run_history/
+CLAUDE.md
+.claude/
+Re-submission-GEODERMA/
+.antigravitycli/

@@ -7,7 +7,7 @@ required_packages <- c(
   "ggplot2", "ggpubr", "plotly", "RColorBrewer", "viridis", "latticeExtra",
   "patchwork", "fresh", "showtext", "scales", "commonmark", "glue",
   "randomForest", "DALEX", "yardstick", "agricolae", "mgcv",
-  "future", "furrr", "promises", "nortest"
+  "future", "furrr", "promises", "nortest", "data.table", "fs"
 )
 
 missing_packages <- required_packages[!(required_packages %in% installed.packages()[, "Package"])]

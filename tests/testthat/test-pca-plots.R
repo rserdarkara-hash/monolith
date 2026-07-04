@@ -33,6 +33,21 @@ test_that("generate_pca_biplot with group_col adds colors", {
   expect_s3_class(p, "ggplot")
 })
 
+test_that("generate_pca_biplot handles na.omit correctly when caller aligns dataframe", {
+  df <- make_test_df(30)
+  df$a[c(2, 5, 10)] <- NA
+  df_clean <- na.omit(df[, c("a", "b", "c", "d", "e")])
+  pca <- prcomp(df_clean, scale. = TRUE, center = TRUE)
+  
+  # Without alignment, it should error
+  expect_error(generate_pca_biplot(pca, df, pc_x = 1, pc_y = 2, group_col = "cat1"))
+  
+  # With caller alignment (the fix applied in the module)
+  aligned_df <- df[rownames(pca$x), , drop = FALSE]
+  p <- generate_pca_biplot(pca, aligned_df, pc_x = 1, pc_y = 2, group_col = "cat1")
+  expect_s3_class(p, "ggplot")
+})
+
 # ── generate_pca_loadings ─────────────────────────────────────────────────
 
 test_that("generate_pca_loadings returns ggplot", {
@@ -87,5 +102,18 @@ test_that("generate_pca_biplot_3d with group_col adds coloring", {
   df <- make_test_df(30)
   p <- generate_pca_biplot_3d(pca, df, pc_x = 1, pc_y = 2, pc_z = 3,
                               group_col = "cat1")
+  expect_s3_class(p, "plotly")
+})
+
+test_that("generate_pca_biplot_3d handles na.omit correctly when caller aligns dataframe", {
+  df <- make_test_df(30)
+  df$a[c(2, 5, 10)] <- NA
+  df_clean <- na.omit(df[, c("a", "b", "c", "d", "e")])
+  pca <- prcomp(df_clean, scale. = TRUE, center = TRUE)
+  
+  expect_error(generate_pca_biplot_3d(pca, df, pc_x = 1, pc_y = 2, pc_z = 3, group_col = "cat1"))
+  
+  aligned_df <- df[rownames(pca$x), , drop = FALSE]
+  p <- generate_pca_biplot_3d(pca, aligned_df, pc_x = 1, pc_y = 2, pc_z = 3, group_col = "cat1")
   expect_s3_class(p, "plotly")
 })

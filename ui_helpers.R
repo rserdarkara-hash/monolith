@@ -72,9 +72,9 @@ get_default_palette <- function(var_name, category = "Soil", label = NULL) {
   } else if (category == "Landsat Data") {
     "viridis"
   } else if (category == "Sentinel Data") {
-    "plasma"
+    "viridis"
   } else if (category == "Merged Data") {
-    "inferno"
+    "viridis"
   } else if (category == "Terrain Data") {
     "BrBG"
   } else {
@@ -115,6 +115,39 @@ get_buffer_multiplier <- function(method) {
     return(buffer_multipliers[[method]])
   }
   return(2.0)
+}
+
+# Builds the Map Viewer variogram-quality banner from the per-locality fit
+# list. Red = heuristic fallback (fit failed entirely); amber = auto-fit had
+# to select a non-converged/singular candidate. Returns NULL when clean.
+build_vgm_warning_html <- function(v_fit_list) {
+  fallback_keys <- character(0)
+  flawed_keys <- character(0)
+  for (n in names(v_fit_list)) {
+    if (isTRUE(attr(v_fit_list[[n]], "is_fallback"))) {
+      fallback_keys <- c(fallback_keys, n)
+    } else if (isTRUE(attr(v_fit_list[[n]], "flawed_winner"))) {
+      flawed_keys <- c(flawed_keys, n)
+    }
+  }
+  if (length(fallback_keys) == 0 && length(flawed_keys) == 0) return(NULL)
+
+  red_part <- if (length(fallback_keys) > 0) {
+    paste0("<span style='color:red;'>Note: Variogram fit failed for some localities (",
+           paste(fallback_keys, collapse = ", "),
+           ").<br>A fallback spherical model was applied to prevent application failure. Interpret interpolations with caution.</span>")
+  } else ""
+  amber_part <- if (length(flawed_keys) > 0) {
+    paste0("<span style='color:#e67700;'>Auto-fit selected a non-converged or singular variogram for: ",
+           paste(flawed_keys, collapse = ", "),
+           ".<br>Interpret interpolations with caution.</span>")
+  } else ""
+  sep <- if (nzchar(red_part) && nzchar(amber_part)) "<br>" else ""
+
+  paste0("<div id='vgm_fallback_warn' style='font-weight:bold; background:white; padding:5px 25px 5px 5px; border-radius:4px; position:relative;'>",
+         "<button onclick='document.getElementById(\"vgm_fallback_warn\").style.display=\"none\";' style='position:absolute; top:2px; right:2px; background:none; border:none; color:red; font-size:16px; font-weight:bold; cursor:pointer;'>&times;</button>",
+         red_part, sep, amber_part,
+         "</div>")
 }
 
 tuning_ui <- function(id, label, 
@@ -211,7 +244,7 @@ generate_base_plot <- function(item, input, agro_params = NULL) {
                             na.value = "transparent", name = leg_name, drop = FALSE) +
           coord_sf()
       } else {
-        is_viridis <- pal_name %in% c("viridis", "magma", "inferno", "plasma", "cividis")
+        is_viridis <- pal_name %in% c("viridis", "cividis")
         if (input$color_style == "bin") {
           if(is_viridis) bp <- bp + scale_fill_viridis_b(option = pal_name, na.value = "transparent", n.breaks = 5, name = leg_name)
           else bp <- bp + scale_fill_fermenter(palette = pal_name, direction = 1, na.value = "transparent", n.breaks = 5, name = leg_name)
@@ -714,6 +747,7 @@ get_stat_letters <- function(df, var_name, group_col, test_type) {
   df_proc[[group_col]] <- as.factor(as.character(df_proc[[group_col]]))
   n_groups <- length(levels(df_proc[[group_col]]))
   if (n_groups < 2) return(NULL)
+  if (nrow(df_proc) <= n_groups) return(NULL)
   
   tryCatch({
     formula_str <- paste0("`", var_name, "` ~ `", group_col, "`")

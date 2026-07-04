@@ -140,3 +140,20 @@ make_metrics_known <- function() {
     rmse      = 0.0
   )
 }
+
+#' Create an empirical variogram + data vector whose candidate fits reliably
+#' trigger gstat non-convergence/singular screening warnings under
+#' robust_vgm_fit's 4-model x 4-range grid (seeds verified 2026-07-04:
+#' seed 1 = all 16 candidates flawed; seed 12 = clean Gau winner).
+make_hostile_vgm_input <- function(n = 9, seed = 1) {
+  set.seed(seed)
+  df <- data.frame(
+    x = runif(n, 450000, 451000),
+    y = runif(n, 5800000, 5801000),
+    v = rnorm(n, 50, 10)
+  )
+  pts <- sf::st_as_sf(df, coords = c("x", "y"), crs = 32633)
+  lags <- calc_scientific_lags(pts)
+  v_emp <- gstat::variogram(v ~ 1, pts, width = lags$width, cutoff = lags$cutoff)
+  list(v_emp = v_emp, v_data = df$v)
+}

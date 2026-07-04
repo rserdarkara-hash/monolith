@@ -104,3 +104,13 @@ test_that("get_stat_letters handles NA values in group column", {
   result <- get_stat_letters(df, "value", "group", "anova")
   expect_true(!is.null(result))
 })
+
+test_that("get_stat_letters returns NULL when N <= k (zero error df)", {
+  # 3 observations across 3 groups means k=3, N=3
+  df <- data.frame(
+    value = c(10, 15, 20),
+    group = factor(c("A", "B", "C"))
+  )
+  result <- get_stat_letters(df, "value", "group", "tukey")
+  expect_null(result)
+})

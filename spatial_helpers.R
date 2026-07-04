@@ -329,10 +329,22 @@ optimize_idw_p <- function(pts, target_var, nmax = 12) {
   factors <- seq(0.5, 5.0, by = 0.5)
   form <- as.formula(paste0("`", target_var, "` ~ 1"))
   
-  folds <- if(nrow(pts) > 50) 5 else nrow(pts)
+  n_folds <- if(nrow(pts) > 50) 5 else nrow(pts)
+  
+  if (exists(".Random.seed", envir = .GlobalEnv)) {
+    old_seed <- get(".Random.seed", envir = .GlobalEnv)
+    on.exit(assign(".Random.seed", old_seed, envir = .GlobalEnv))
+  }
+  
+  if (n_folds == nrow(pts)) {
+    fold_assign <- 1:nrow(pts)
+  } else {
+    set.seed(12345)
+    fold_assign <- sample(rep(1:n_folds, length.out = nrow(pts)))
+  }
 
   rmses <- sapply(factors, function(f) {
-    cv <- tryCatch({ krige.cv(form, pts, nmax = nmax, set = list(idp = f), nfold = folds, debug.level = 0) }, error = function(e) NULL)
+    cv <- tryCatch({ krige.cv(form, pts, nmax = nmax, set = list(idp = f), nfold = fold_assign, debug.level = 0) }, error = function(e) NULL)
     if(!is.null(cv)) {
       return(sqrt(mean(cv$residual^2, na.rm = TRUE)))
     } else {
@@ -641,9 +653,9 @@ apply_CK <- function(data, target_var, grid_p, lags, method_params, aux_vars, l 
     }
     
     form_ok <- reformulate("1", response = target_var)
-    g <- gstat(NULL, id = target_var, formula = form_ok, data = data_scaled)
+    g <- gstat(NULL, id = target_var, formula = form_ok, data = data_scaled, nmax = 15)
     for(av in aux_vars) {
-      g <- gstat(g, id = av, formula = as.formula(paste0("`", av, "` ~ 1")), data = data_scaled)
+      g <- gstat(g, id = av, formula = as.formula(paste0("`", av, "` ~ 1")), data = data_scaled, nmax = 15)
     }
     
     vm <- variogram(g, width = lags$width, cutoff = lags$cutoff)
@@ -761,9 +773,14 @@ apply_TPS <- function(data, target_var, grid_p, method_params, l = "region", pre
     max_range <- max(xM - xm, yM - ym)
     if(max_range == 0) max_range <- 1
     pts_sc <- cbind((raw_pts[,1]-xm)/max_range, (raw_pts[,2]-ym)/max_range)
+    tps_lam <- method_params$tps_lambda
+    fit_tps <- function(x, y) {
+      if (is.null(tps_lam) || tps_lam < 0) fields::Tps(x, y) else fields::Tps(x, y, lambda = tps_lam)
+    }
+    
     gr_raw <- st_coordinates(grid_p)
     gr_sc <- cbind((gr_raw[,1]-xm)/max_range, (gr_raw[,2]-ym)/max_range)
-    mod <- fields::Tps(pts_sc, data[[target_var]], lambda = method_params$tps_lambda)
+    mod <- fit_tps(pts_sc, data[[target_var]])
     p_v <- fields::predict.Krig(mod, gr_sc)
     
     n_pts <- nrow(data)
@@ -776,7 +793,7 @@ apply_TPS <- function(data, target_var, grid_p, method_params, l = "region", pre
       for (i in seq_len(k)) {
         test_idx <- which(folds == i)
         tmp_mod <- tryCatch({
-          fields::Tps(pts_sc[-test_idx, , drop=FALSE], data[[target_var]][-test_idx], lambda = method_params$tps_lambda)
+          fit_tps(pts_sc[-test_idx, , drop=FALSE], data[[target_var]][-test_idx])
         }, error = function(e) NULL)
         
         if (!is.null(tmp_mod)) {
@@ -788,7 +805,7 @@ apply_TPS <- function(data, target_var, grid_p, method_params, l = "region", pre
     } else {
       cv_vals <- vapply(1:n_pts, function(i) {
         tryCatch({
-          tmp_mod <- fields::Tps(pts_sc[-i, , drop=FALSE], data[[target_var]][-i], lambda = method_params$tps_lambda)
+          tmp_mod <- fit_tps(pts_sc[-i, , drop=FALSE], data[[target_var]][-i])
           as.numeric(fields::predict.Krig(tmp_mod, pts_sc[i, , drop=FALSE]))
         }, error = function(e) NA_real_)
       }, numeric(1))
@@ -1105,7 +1122,7 @@ run_regional_interpolation <- function(item, current_method, current_crs, aux_va
     
     grid_aux <- grid_p
     cov_log_msg <- ""
-    if (current_method %in% c("RK", "RFK", "CK") && length(aux_vars) > 0) {
+    if (current_method %in% c("RK", "RFK") && length(aux_vars) > 0) {
         lags_cov <- calc_scientific_lags(pts)
         mp_cov <- list(idw_p = m_params$idw_p_act, idw_nmax = m_params$idw_nmax)
         krig_cov <- krige_covariates(pts, grid_p, aux_vars, lags_cov, mp_cov)

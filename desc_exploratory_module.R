@@ -937,7 +937,8 @@ desc_exploratory_server <- function(id, data_reactive, vars_metadata_reactive) {
           p <- generate_pca_scree(pca_rv$res)
        } else if (p_type == "biplot") {
           req(input$pca_pc_x, input$pca_pc_y)
-          p <- generate_pca_biplot(pca_rv$res, rv_analytics_data(), pc_x = input$pca_pc_x, pc_y = input$pca_pc_y, group_col = "group_id")
+          aligned_df <- rv_analytics_data()[rownames(pca_rv$res$x), , drop = FALSE]
+          p <- generate_pca_biplot(pca_rv$res, aligned_df, pc_x = input$pca_pc_x, pc_y = input$pca_pc_y, group_col = "group_id")
        } else if (p_type == "loadings") {
           req(input$pca_pc_single)
           p <- generate_pca_loadings(pca_rv$res, pc = input$pca_pc_single)
@@ -952,7 +953,8 @@ desc_exploratory_server <- function(id, data_reactive, vars_metadata_reactive) {
        } else if (p_type == "mahalanobis") {
           p <- generate_pca_mahalanobis(pca_rv$res)
        } else if (p_type == "3d_biplot") {
-          p <- generate_pca_biplot_3d(pca_rv$res, rv_analytics_data(), pc_x = input$pca_pc_x, pc_y = input$pca_pc_y, pc_z = input$pca_pc_z, group_col="group_id")
+          aligned_df <- rv_analytics_data()[rownames(pca_rv$res$x), , drop = FALSE]
+          p <- generate_pca_biplot_3d(pca_rv$res, aligned_df, pc_x = input$pca_pc_x, pc_y = input$pca_pc_y, pc_z = input$pca_pc_z, group_col="group_id")
        }
           p
        })
