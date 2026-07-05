@@ -27,7 +27,7 @@ A central dropdown allows you to switch between over a dozen high-fidelity visua
 **2.2 Significance Testing (ANOVA, Kruskal-Wallis & Post-Hoc)**
 *   When utilizing categorical variance plots (Boxplot, Violin, Sina), the UI natively integrates ANOVA testing for normally distributed data.
 *   **Non-Parametric Testing:** For data that violates normality assumptions, the UI includes a Kruskal-Wallis test option, complete with a contextual tooltip recommendation.
-*   Users can select post-hoc methods (Duncan's or Tukey's HSD).
+*   Users can select post-hoc methods (Duncan's or Tukey's HSD). For the Kruskal-Wallis option, the pairwise post-hoc comparisons behind the significance letters are Benjamini-Hochberg (BH) adjusted, consistent with the FDR policy used in the correlation table.
 *   **UX Interaction:** The resulting statistical significance letters (e.g., 'a', 'b', 'ab') are dynamically rendered directly atop the individual plot geometries, allowing for immediate visual interpretation of statistical differences between soil or field groups.
 
 **2.3 Ghosting Overlay**
@@ -50,11 +50,11 @@ This module evaluates the linear and monotonic relationships between all numeric
 **3.2 Plot Type Selection**
 *   **Hierarchical Heatmap:** Automatically clusters highly correlated variables together.
 *   **Correlation Network:** Visualizes relationships as a node-edge graph, where edge thickness dictates correlation strength.
-*   **Partial Correlation:** Allows users to calculate correlations while mathematically controlling for the effect of a third variable (via regression residual extraction).
+*   **Partial Correlation:** Allows users to calculate correlations while mathematically controlling for the effect of a third variable (via regression residual extraction). The accompanying p-values account for the controls: with *k* control variables partialled out, significance is computed on *n − 2 − k* degrees of freedom (Pearson/Spearman t-statistic; Kendall uses a normal approximation with effective sample size *n − k*), rather than the naive *n − 2* of a plain correlation test. If any variable cannot be residualized against the controls, the table aborts with an explicit error instead of silently reporting raw correlations.
 *   **Correlogram, Lagged CCF:** For spatial or sequential lag analysis.
 
 **3.3 Data Table**
-*   A reactive data table (`DT::dataTableOutput`) below the plot provides the exact numerical correlation matrix for rigorous inspection and export.
+*   A reactive data table (`DT::dataTableOutput`) below the plot provides the exact numerical correlation matrix for rigorous inspection and export. Pairwise tables report both the raw p-value and a Benjamini-Hochberg adjusted column computed across all pairs shown.
 
 ---
 
@@ -89,6 +89,12 @@ This module leverages machine learning explainability to discover non-linear rel
 Users can toggle between two advanced explainability frameworks:
 *   **ALE (Accumulated Local Effects):** A faster, unbiased alternative to Partial Dependence Plots that maps the main effect of a predictor on the target variable.
 *   **PDP (Partial Dependence Plot):** Shows the marginal effect of a feature on the predicted outcome.
+
+**5.3 SHAP Dependence Plot**
+*   Each point is the per-observation SHAP attribution of the most important predictor: how much that predictor shifts the model's prediction for that sample away from the dataset-mean prediction, in the target variable's own units. Values therefore sum (across all predictors) to the deviation of the sample's prediction from the mean.
+
+**5.4 Tabular Data Metrics**
+*   The metrics table lists the permutation importance (dropout loss) of each governing factor and leads with an **RF model quality row — out-of-bag (OOB) % variance explained** — so the reliability of the Random Forest behind the importance and SHAP results can be judged directly. Low OOB values mean the explainability outputs describe a weak model and should be interpreted cautiously.
 
 ---
 

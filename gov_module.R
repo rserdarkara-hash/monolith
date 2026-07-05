@@ -194,6 +194,9 @@ gov_factors_server <- function(id, data_reactive, vars_metadata_reactive) {
         vip_df <- vip_df[!vip_df$variable %in% c("_baseline_", "_full_model_", "(Intercept)"), ]
         vip_df <- vip_df[order(vip_df$dropout_loss, decreasing = FALSE), ]
         vip_df$variable_label <- sapply(as.character(vip_df$variable), function(v) get_var_label(v, vars_metadata_reactive()))
+        # make.unique: two predictors sharing a metadata label would otherwise
+        # crash factor() with duplicated levels (T20)
+        vip_df$variable_label <- make.unique(unname(vip_df$variable_label))
         vip_df$variable_label <- factor(vip_df$variable_label, levels = vip_df$variable_label)
         
         ggplot2::ggplot(vip_df, ggplot2::aes(x = variable_label, y = dropout_loss)) + 
@@ -282,9 +285,20 @@ gov_factors_server <- function(id, data_reactive, vars_metadata_reactive) {
       vip_df <- vip_df[order(vip_df$dropout_loss, decreasing = TRUE), ]
       
       vip_df$variable <- sapply(as.character(vip_df$variable), function(v) get_var_label(v, vars_metadata_reactive()))
-      colnames(vip_df) <- c("Governing Factor", "Importance (Dropout Loss)")
-      
-      DT::datatable(vip_df, options = list(pageLength = 5, dom = 't', scrollX = TRUE), rownames = FALSE)
+
+      # T18: report the quality of the RF model behind the SHAP/importance
+      # results — OOB % variance explained (pseudo-R² on out-of-bag data)
+      oob_rsq <- tryCatch(utils::tail(gov_rv$res$model$rsq, 1), error = function(e) NULL)
+      if (!is.null(oob_rsq) && length(oob_rsq) == 1 && is.finite(oob_rsq)) {
+        vip_df <- rbind(
+          data.frame(variable = "RF model quality: OOB variance explained (%)",
+                     dropout_loss = round(100 * oob_rsq, 2)),
+          vip_df
+        )
+      }
+      colnames(vip_df) <- c("Governing Factor / Metric", "Value (Dropout Loss | OOB %)")
+
+      DT::datatable(vip_df, options = list(pageLength = 6, dom = 't', scrollX = TRUE), rownames = FALSE)
     })
     
     gov_build_imp_plot <- function() { shiny::req(gov_rv$res); gov_create_plot("importance", expanded = TRUE) }

@@ -910,7 +910,15 @@ compute_governing_factors <- function(df, target_col, predictors, n_permutations
   df_clean <- df_clean[complete.cases(df_clean), , drop = FALSE]
   
   if (nrow(df_clean) < 10) return(NULL) # Not enough data
-  
+
+  # Two-sided seed sandbox (same convention as perform_kriging_loocv):
+  # restore the caller's RNG state, or remove the state set.seed() created
+  old_seed <- if (exists(".Random.seed", envir = .GlobalEnv, inherits = FALSE)) get(".Random.seed", envir = .GlobalEnv, inherits = FALSE) else NULL
+  on.exit({
+    if (!is.null(old_seed)) assign(".Random.seed", old_seed, envir = .GlobalEnv)
+    else if (exists(".Random.seed", envir = .GlobalEnv, inherits = FALSE)) rm(".Random.seed", envir = .GlobalEnv)
+  }, add = TRUE)
+
   formula_str <- paste(target_col, "~ .")
   set.seed(12345)
   rf_model <- randomForest::randomForest(as.formula(formula_str), data = df_clean, ntree = rf_ntree, importance = TRUE)
@@ -975,8 +983,12 @@ compute_governing_factors <- function(df, target_col, predictors, n_permutations
   shap_val_df <- data.frame(
     feature_value = df_clean[[top_var]][sample_idx],
     contribution = sapply(sample_idx, function(i) {
-      sub <- shap_df[shap_df$obs_id == i & shap_df$variable_name == top_var, ]
-      if(nrow(sub) > 0) sum(sub$contribution) else 0
+      # predict_parts(type = "shap") returns B+1 rows per variable: the
+      # aggregated attribution (B == 0) plus one row per permutation.
+      # Summing them inflates the value by a factor of B+1 — take only the
+      # aggregated B == 0 row (T14, fixed 2026-07-05).
+      sub <- shap_df[shap_df$obs_id == i & shap_df$variable_name == top_var & shap_df$B == 0, ]
+      if(nrow(sub) > 0) mean(sub$contribution) else 0
     })
   )
 

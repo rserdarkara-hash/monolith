@@ -206,7 +206,7 @@ desc_exploratory_server <- function(id, data_reactive, vars_metadata_reactive) {
         choices_named <- valid_cols
       }
       
-      curr_sel <- intersect(input$analytics_group_vars, choices_named)
+      curr_sel <- intersect(shiny::isolate(input$analytics_group_vars), choices_named)
       shiny::updateSelectInput(session, "analytics_group_vars", choices = choices_named, selected = curr_sel)
     })
     
@@ -264,8 +264,10 @@ desc_exploratory_server <- function(id, data_reactive, vars_metadata_reactive) {
       df <- rv_analytics_data()
       if ("group_id" %in% colnames(df)) {
         levels_present <- levels(df$group_id)
-        shiny::selectInput(ns("analytics_active_group"), "Select Active Groups to Compare", 
-                    choices = levels_present, multiple = TRUE, selected = levels_present)
+        curr_sel <- intersect(shiny::isolate(input$analytics_active_group), levels_present)
+        if (length(curr_sel) == 0) curr_sel <- levels_present
+        shiny::selectInput(ns("analytics_active_group"), "Select Active Groups to Compare",
+                    choices = levels_present, multiple = TRUE, selected = curr_sel)
       }
     })
     
@@ -288,7 +290,11 @@ desc_exploratory_server <- function(id, data_reactive, vars_metadata_reactive) {
       }
       
       p_type <- input$desc_plot_type %||% "histogram"
-      sel_x <- if(isTruthy(desc_vars_state$x)) desc_vars_state$x else valid_named[1]
+      # isolate: selections are restored on re-render (plot type / data change) but
+      # must not themselves invalidate this renderUI, or every click rebuilds the
+      # inputs mid-interaction and fights the user (add/remove feedback loop)
+      sel_state <- shiny::isolate(shiny::reactiveValuesToList(desc_vars_state))
+      sel_x <- if(isTruthy(sel_state$x)) sel_state$x else valid_named[1]
       
       shiny::tagList(
         if (!(p_type %in% c("parallel", "radar"))) {
@@ -299,7 +305,7 @@ desc_exploratory_server <- function(id, data_reactive, vars_metadata_reactive) {
         },
         if (p_type %in% c("boxplot", "violin", "sinaplot", "scatter", "density_heatmap", "xyz_surface")) {
           choices_y <- if(p_type %in% c("boxplot", "violin", "sinaplot")) c("None" = "", valid_named) else valid_named
-          sel_y <- if(isTruthy(desc_vars_state$y)) desc_vars_state$y else { if(p_type %in% c("boxplot", "violin", "sinaplot")) "" else valid_cols[2] }
+          sel_y <- if(isTruthy(sel_state$y)) sel_state$y else { if(p_type %in% c("boxplot", "violin", "sinaplot")) "" else valid_cols[2] }
           shiny::selectInput(ns("desc_var_y"), "Secondary Variable (Y)", choices = choices_y, selected = sel_y)
         },
         if (p_type %in% c("boxplot", "violin", "sinaplot")) {
@@ -318,12 +324,12 @@ desc_exploratory_server <- function(id, data_reactive, vars_metadata_reactive) {
           shiny::selectInput(ns("desc_scatter_fit"), "Add Trend Line", choices = c("None" = "none", "Linear (lm)" = "linear", "Loess" = "loess", "Polynomial (degree 2)" = "polynomial", "GAM" = "gam"))
         },
         if (p_type %in% c("xyz_surface")) {
-          sel_z <- if(isTruthy(desc_vars_state$z)) desc_vars_state$z else num_cols[3]
+          sel_z <- if(isTruthy(sel_state$z)) sel_state$z else num_cols[3]
           shiny::selectInput(ns("desc_var_z"), "Tertiary Variable (Z)", choices = num_named, selected = sel_z)
         },
         if (p_type %in% c("parallel", "radar")) {
           label_text <- ifelse(p_type == "radar", "Select Variables (Min 3)", "Select Variables (Min 2)")
-          sel_m <- if(length(desc_vars_state$multi) > 0) desc_vars_state$multi else head(num_cols, 3)
+          sel_m <- if(length(sel_state$multi) > 0) sel_state$multi else head(num_cols, 3)
           shiny::selectInput(ns("desc_vars_multi"), label_text, choices = num_named, multiple = TRUE, selected = sel_m)
         },
         if (p_type == "xyz_surface") {
@@ -333,10 +339,13 @@ desc_exploratory_server <- function(id, data_reactive, vars_metadata_reactive) {
       )
     })
     
-    shiny::observeEvent(input$desc_var_x, { desc_vars_state$x <- input$desc_var_x })
-    shiny::observeEvent(input$desc_var_y, { desc_vars_state$y <- input$desc_var_y })
-    shiny::observeEvent(input$desc_var_z, { desc_vars_state$z <- input$desc_var_z })
-    shiny::observeEvent(input$desc_vars_multi, { desc_vars_state$multi <- input$desc_vars_multi })
+    # ignoreNULL = FALSE so deselections ("" from the None choice / Clear button,
+    # NULL from emptying the multi-select) are recorded too; otherwise the isolated
+    # renderUI above restores removed variables on the next plot-type change
+    shiny::observeEvent(input$desc_var_x, { desc_vars_state$x <- input$desc_var_x }, ignoreNULL = FALSE)
+    shiny::observeEvent(input$desc_var_y, { desc_vars_state$y <- input$desc_var_y }, ignoreNULL = FALSE)
+    shiny::observeEvent(input$desc_var_z, { desc_vars_state$z <- input$desc_var_z }, ignoreNULL = FALSE)
+    shiny::observeEvent(input$desc_vars_multi, { desc_vars_state$multi <- input$desc_vars_multi }, ignoreNULL = FALSE)
     output$desc_normality_indicator <- shiny::renderUI({
       req(rv_filtered_analytics_data())
       req(input$desc_var_x)
@@ -760,24 +769,34 @@ desc_exploratory_server <- function(id, data_reactive, vars_metadata_reactive) {
         df <- apply_labels_to_df(df, vars, vars_metadata_reactive())
         vars_lab <- get_var_labels(vars, vars_metadata_reactive())
         
+        n_controls <- 0
         if (p_type == "partial") {
           c_vars <- input$corr_vars_control
           if(!is.null(c_vars) && length(c_vars) > 0) {
              df <- apply_labels_to_df(df, c_vars, vars_metadata_reactive())
              c_vars_lab <- get_var_labels(c_vars, vars_metadata_reactive())
-             
+
              all_vars <- unique(c(vars_lab, c_vars_lab))
              df_clean <- na.omit(df[, all_vars, drop=FALSE])
              if(nrow(df_clean) < 5) return(NULL)
-             
+
              res_list <- list()
              for (v in vars_lab) {
                mod <- try(lm(as.formula(paste0("`", v, "` ~ ", paste(paste0("`", c_vars_lab, "`"), collapse=" + "))), data=df_clean), silent=TRUE)
                if(!inherits(mod, "try-error")) res_list[[v]] <- residuals(mod)
              }
-             if(length(res_list) == length(vars_lab)) {
-                 df_clean <- as.data.frame(res_list)
+             if(length(res_list) < length(vars_lab)) {
+                 # T16: never fall back to raw correlations while the table is
+                 # labelled partial — abort and tell the user which variables
+                 # could not be residualized
+                 failed_vars <- setdiff(vars_lab, names(res_list))
+                 showNotification(paste0("Partial correlation table aborted: could not residualize ",
+                                         paste(failed_vars, collapse = ", "),
+                                         " against the control variables."), type = "error", duration = 8)
+                 return(NULL)
              }
+             df_clean <- as.data.frame(res_list)
+             n_controls <- length(c_vars_lab)
           } else {
              df_clean <- na.omit(df[, vars_lab, drop=FALSE])
           }
@@ -794,11 +813,32 @@ desc_exploratory_server <- function(id, data_reactive, vars_metadata_reactive) {
               for(j in (i+1):n_v) {
                  ct <- tryCatch(cor.test(df_clean[[i]], df_clean[[j]], method = method), error=function(e) NULL)
                  if(!is.null(ct)) {
+                    p_val <- ct$p.value
+                    if (n_controls > 0) {
+                       # T15: cor.test on residuals uses df = n - 2, ignoring
+                       # the k control variables partialled out. Recompute the
+                       # p-value with the partial-correlation df = n - 2 - k
+                       # (same conventions as ppcor::pcor.test)
+                       r_est <- unname(ct$estimate)
+                       n_obs <- nrow(df_clean)
+                       if (method == "kendall") {
+                          n_eff <- n_obs - n_controls
+                          if (n_eff > 2) {
+                             z_stat <- 3 * r_est * sqrt(n_eff * (n_eff - 1)) / sqrt(2 * (2 * n_eff + 5))
+                             p_val <- 2 * pnorm(-abs(z_stat))
+                          } else p_val <- NA_real_
+                       } else {
+                          df_t <- n_obs - 2 - n_controls
+                          if (df_t > 0) {
+                             p_val <- if (abs(r_est) >= 1) 0 else 2 * pt(-abs(r_est * sqrt(df_t / (1 - r_est^2))), df_t)
+                          } else p_val <- NA_real_
+                       }
+                    }
                     res_list[[length(res_list)+1]] <- data.frame(
                         Variable_1 = colnames(df_clean)[i],
                         Variable_2 = colnames(df_clean)[j],
                         Correlation = round(ct$estimate, 3),
-                        p_raw = ct$p.value
+                        p_raw = p_val
                     )
                  }
               }

@@ -573,9 +573,6 @@ ui <- fluidPage(
                                       tags$b("Tip:"), "You do not need to upload custom shapefiles! Standard boundary types (Convex, Concave, Strict, or Wrapped Hulls) can be selected and configured dynamically in the Sidebar panel once your dataset is loaded.")
                         )
                      ),
-                     conditionalPanel(condition = "output.file_uploaded",
-                       downloadButton("export_updated_data", "Export Updated Dataset", class = "btn-success", style = "margin-bottom: 15px;")
-                     ),
                      hr(),
                      conditionalPanel(condition = "output.file_uploaded",
                         h3("Step 2: Spatial Mapping"),
@@ -622,7 +619,7 @@ ui <- fluidPage(
                              ),
                              div(style="margin-bottom:10px; display: flex; align-items: center; gap: 10px; flex-wrap: wrap; background-color: #f8f9fa; padding: 10px; border-radius: 5px; border: 1px solid #ddd;",
                              div(style="display: flex; align-items: center; gap: 10px; margin-right: 15px;",
-                                 checkboxInput("show_points_viewer", "Show Points", FALSE, width = "auto"),
+                                 checkboxInput("show_points_viewer", HTML(paste0("Show Points", info_tooltip("show_points_info", "Rendering the sampling points on the map can take a while — up to ~30 seconds depending on the number of samples and the size of the dataset. The map stays responsive while the points are being drawn."))), FALSE, width = "auto"),
                                  checkboxInput("show_res_overlay", "Show Res", FALSE, width = "auto"),
                                  checkboxInput("show_north", "North Arrow", FALSE, width = "auto"),
                                  checkboxInput("show_borders", "Borders", FALSE, width = "auto"),
@@ -644,7 +641,10 @@ ui <- fluidPage(
                                           title = "Point Styling Options"),
                              div(class="map-toolbar-export-container", style="display: flex; align-items: center; gap: 5px; border-left: 1px solid #ccc; padding-left: 10px;",
                                  selectInput("polygon_export_format", NULL, choices = c("Shapefile (ZIP)" = "shp", "GeoJSON" = "geojson", "KML" = "kml", "GPKG" = "gpkg"), selected = "shp", width = "120px", selectize = FALSE),
-                                 downloadButton("polygon_download_btn", "Export Polygon", class = "btn-success btn-sm", style = "padding: 4px 10px; font-size: 12px; line-height: 1.5; border-radius: 3px;")
+                                 downloadButton("polygon_download_btn", "Export Manually Drawn Polygon", class = "btn-success btn-sm", style = "padding: 4px 10px; font-size: 12px; line-height: 1.5; border-radius: 3px;",
+                                                title = "Available once you have drawn at least one polygon on the map using the drawing toolbar (left edge of the map). Downloads all drawn polygons in the format selected on the left."),
+                                 downloadButton("export_updated_data", "Export Updated Dataset", class = "btn-success btn-sm", style = "padding: 4px 10px; font-size: 12px; line-height: 1.5; border-radius: 3px;",
+                                                title = "Use after modifying your dataset in the app - e.g. after drawing a polygon on the map and saving it as a new group ('Assign Locality / Analysis Group'). Downloads the current dataset as .xlsx, including the 'Assigned_Locality' column.")
                              )
                          ),
                          shinyjs::hidden(
@@ -2161,7 +2161,9 @@ server <- function(input, output, session) {
     cols <- colnames(df)
     updateSelectInput(session, "map_x", choices = cols, selected = grep("\\bx\\b|^lon|^longitude", cols, ignore.case=TRUE, value=TRUE)[1])
     updateSelectInput(session, "map_y", choices = cols, selected = grep("\\by\\b|^lat|^latitude", cols, ignore.case=TRUE, value=TRUE)[1])
-    updateSelectInput(session, "map_loc", choices = cols, selected = grep("loc|site|farm|id|group", cols, ignore.case=TRUE, value=TRUE)[1])
+    loc_guess <- grep("loc|site|farm|id|group", cols, ignore.case=TRUE, value=TRUE)[1]
+    if (is.na(loc_guess)) loc_guess <- cols[1]
+    updateSelectInput(session, "map_loc", choices = cols, selected = loc_guess)
     
     new_vars <- list()
     num_cols <- cols[sapply(df, is.numeric)]
@@ -2180,7 +2182,9 @@ server <- function(input, output, session) {
     rv$pop_up_vars <- num_cols[!grepl("\\bx\\b|\\by\\b|lon|lat|latitude|longitude", num_cols, ignore.case=TRUE)]
     
     curr_locs <- isolate(input$locality)
-    new_choices <- c("ALL", unique(df[[input$map_loc %||% cols[1]]]))
+    # T21: input$map_loc is still the pre-updateSelectInput value here — use
+    # the freshly guessed column instead of the stale input
+    new_choices <- c("ALL", unique(df[[loc_guess]]))
     selected_locs <- intersect(curr_locs, new_choices)
     updateSelectInput(session, "locality", choices = new_choices, selected = selected_locs)
 

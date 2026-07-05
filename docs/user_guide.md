@@ -7,7 +7,7 @@ The application requires cleanly structured, georeferenced tabular data.
    - Click `Browse...` to upload your file. 
    - The system accepts `.csv` and `.xlsx` files. Your file must contain distinct columns for X coordinates, Y coordinates and at least one variable of interest.
    - Sample data sets are available in the app directory: 
-      - `samp_data_1.xlsx` (paired with the variable list `samp_var_list.xlsx`) is a demonstration subset containing three localities (Kale, Yorga, Altinova) drawn from the soil dataset of Kara et al. (2026). It is provided only to exercise the app; the complete dataset is published openly under CC BY 4.0 on Mendeley Data (https://doi.org/10.17632/8548bmgxh9.1), while the demo files' own usage terms are given in `sample_data/DATA_LICENSE`.
+      - `samp_data_1.xlsx` (paired with the variable list `samp_var_list.xlsx`) is a demonstration subset containing three localities (Kale, Yorga, Altinova) drawn from the soil dataset of Kara et al. (2026). It is provided only to exercise the app; the complete dataset is published openly under CC BY 4.0 on Mendeley Data (https://doi.org/10.17632/8548bmgxh9.1; inactive until publication), while the demo files' own usage terms are given in `sample_data/DATA_LICENSE`.
         - *Kara, R. S., Ongun, A. R., Almaz, C., Çiçek, G., Tepecik, M., & Yilgan, F. (2026). Diagnostic modeling of nutrients to support agroecosystem transitioning in tobacco soils: A stratified evaluation framework based on clay-organic matter-lime interactions [Manuscript submitted for publication]. Department of Soil Science and Soil Protection, Czech University of Life Sciences Prague*); 
       - the small data set is in `samp_data_2.xlsx` (dummy soil phsysicochemistry and hydrology data for Pardubice/Czech Republic - dummy data for a sunflower field under controlled drainage)
 
@@ -66,6 +66,19 @@ This determines the mathematical "lens" through which you see the field:
 * When the Primary View is set to **Single Split ML Predictions (_ss)**, a **Data Subset** dropdown appears directly beneath it. It restricts the mapped data to one modeling partition (e.g., "Train", "Test", or "Validation") before interpolation.
 * The available choices are read from a `subset` column in your uploaded dataset (matched case-insensitively, so `Subset` or `SUBSET` also work). If the dataset has no such column, only "All" is offered and no filtering occurs.
 * The filter applies exclusively to the Single Split view; all other views always use the full dataset.
+
+**1.5 Drawing on the Map: Custom Groups & Exports**
+
+The interactive maps (Map Viewer and both comparison maps) carry a **drawing toolbar** on the left edge of the map. It lets you sketch polygons, rectangles, and point markers directly on the map — and this is the basis for two workflows:
+
+* **Assigning a custom locality / analysis group:**
+    1. Draw a shape around the points you want to group (polygon or rectangle tools).
+    2. When you finish the shape, an **"Assign Locality / Analysis Group"** dialog opens automatically. Enter a group name (e.g., "Zone A") and click **Save Group**.
+    3. All sample points falling inside the shape are written to an `Assigned_Locality` column in your dataset (the app reports how many points were captured). You can then select this column as the Locality/Grouping column in the Data Setup tab to run analyses on your custom zones.
+* **Exporting your work** — two buttons sit at the right end of the Map Viewer toolbar (hover over them in the app for a reminder of when they apply):
+    * **Export Manually Drawn Polygon:** Available once you have drawn at least one polygon on the map. Downloads *all* drawn polygons in the format chosen in the adjacent dropdown (Shapefile ZIP, GeoJSON, KML, or GPKG), so you can reuse the boundaries in a GIS.
+    * **Export Updated Dataset:** Use after you have modified the dataset inside the app — most commonly after saving one or more drawn groups as described above. Downloads the current dataset as `.xlsx`, including the `Assigned_Locality` column, so the group assignments survive beyond the session.
+* Shapes can be edited or deleted with the toolbar's edit/delete tools; the polygon export always reflects the current set of shapes. Note that deleting a shape does **not** undo a group assignment already saved from it.
 
 ## Mapping: 2. Spatial Engine Selection & Tuning
 Once selections are made, the main interface transitions to the analytical module. If you wish to generate uncertainity maps instead of running spatial interpolation of the parameters, tick the relevant mark at the bottom of the spatial engine.

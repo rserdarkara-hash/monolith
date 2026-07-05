@@ -786,8 +786,10 @@ get_stat_letters <- function(df, var_name, group_col, test_type) {
       df_let <- data.frame(group = rownames(res$groups), letter = as.character(res$groups$groups))
       colnames(df_let)[1] <- group_col
       return(df_let)
-    } else if (test_type == "kruskal") {
-      res <- agricolae::kruskal(df_proc[[var_name]], df_proc[[group_col]], console = FALSE)
+    } else if (test_type == "kruskal" && requireNamespace("agricolae", quietly = TRUE)) {
+      # BH-adjusted pairwise comparisons, consistent with the correlation
+      # table's BH policy (T17, decided 2026-07-05)
+      res <- agricolae::kruskal(df_proc[[var_name]], df_proc[[group_col]], p.adj = "BH", console = FALSE)
       df_let <- data.frame(group = rownames(res$groups), letter = as.character(res$groups$groups))
       colnames(df_let)[1] <- group_col
       return(df_let)
@@ -843,6 +845,10 @@ add_stat_layer <- function(p, df, var_name, group_col, stat_test, stat_letter_po
               p <- p + geom_text(data = all_letters, aes(x = -Inf, y = y_pos, label = letter), hjust = -0.1, vjust = 1, size = 3.5, fontface = "italic", inherit.aes = FALSE)
            } else {
               p <- p + geom_text(data = all_letters, aes(x = .data[[group_col]], y = y_pos, label = letter), vjust = -0.5, size = 4, fontface = "bold", inherit.aes = FALSE)
+              # vjust = -0.5 draws the glyph above y_pos; the default 5% scale
+              # expansion is not always enough headroom, cutting letters in
+              # half at the panel top — widen the upper expansion
+              p <- p + scale_y_continuous(expand = expansion(mult = c(0.05, 0.15)))
            }
        }
    } else {
@@ -864,6 +870,9 @@ add_stat_layer <- function(p, df, var_name, group_col, stat_test, stat_letter_po
                    l_df <- merge(l_df, agg_df, by = group_col)
                }
                p <- p + geom_text(data = l_df, aes(x = .data[[group_col]], y = y_pos, label = letter), vjust = -0.5, size = 4, fontface = "bold", inherit.aes = FALSE)
+               # Same headroom fix as the faceted branch: keep the letters
+               # from being clipped at the panel top
+               p <- p + scale_y_continuous(expand = expansion(mult = c(0.05, 0.15)))
            }
        }
    }
@@ -871,6 +880,32 @@ add_stat_layer <- function(p, df, var_name, group_col, stat_test, stat_letter_po
 }
 
 
+
+# Categorical group axes (boxplot/violin/sina): when many groups or long
+# interaction labels ("A | B | C") would crowd the x axis, drop the axis
+# text entirely — group identity is already colour-coded in the legend
+hide_x_labels_if_crowded <- function(p, df, group_col) {
+  if (is.null(group_col) || !group_col %in% colnames(df)) return(p)
+  lv <- unique(as.character(df[[group_col]]))
+  lv <- lv[!is.na(lv)]
+  if (length(lv) >= 6 || (length(lv) > 1 && max(nchar(lv)) > 12)) {
+    p <- p + theme(axis.text.x = element_blank(), axis.ticks.x = element_blank(),
+                   axis.title.x = element_blank())
+  }
+  return(p)
+}
+
+# Variable-name x axes (parallel coordinates): the names are NOT in the
+# legend, so rotate rather than hide when crowded
+rotate_x_labels_if_crowded <- function(p, df, group_col) {
+  if (is.null(group_col) || !group_col %in% colnames(df)) return(p)
+  lv <- unique(as.character(df[[group_col]]))
+  lv <- lv[!is.na(lv)]
+  if (length(lv) >= 6 || (length(lv) > 1 && max(nchar(lv)) > 12)) {
+    p <- p + theme(axis.text.x = element_text(angle = 45, hjust = 1, vjust = 1))
+  }
+  return(p)
+}
 
 generate_core_plot <- function(df, var_name, y_var = NULL, group_col = NULL, plot_type = "histogram", scatter_fit = "none", stat_test = NULL, stat_letter_pos = "above") {
 
@@ -894,9 +929,10 @@ generate_core_plot <- function(df, var_name, y_var = NULL, group_col = NULL, plo
     } else {
       p <- ggplot(df_long, aes(x = .data[[group_col]], y = Value, fill = .data[[group_col]])) + geom_violin(alpha = 0.7)
     }
-    p <- p + facet_wrap(~Variable, scales = "free_y") + theme_minimal() + 
+    p <- p + facet_wrap(~Variable, scales = "free_y") + theme_minimal() +
          labs(title = paste(tools::toTitleCase(plot_type), "Comparison"), x = "Group", y = "Value", fill = "Group")
     p <- add_stat_layer(p, df_long, "Value", group_col, stat_test, stat_letter_pos, facet_var = "Variable")
+    p <- hide_x_labels_if_crowded(p, df_long, group_col)
   } else {
     p <- ggplot(df) + theme_minimal()
     
@@ -938,6 +974,7 @@ generate_core_plot <- function(df, var_name, y_var = NULL, group_col = NULL, plo
     
     if (plot_type %in% c("boxplot", "violin")) {
       p <- add_stat_layer(p, df, var_name, group_col, stat_test, stat_letter_pos)
+      p <- hide_x_labels_if_crowded(p, df, group_col)
     }
     
     p <- p + labs(title = paste(tools::toTitleCase(plot_type), "of", var_name),
@@ -987,7 +1024,11 @@ generate_ghosted_plot <- function(df_global, df_local, var_name, y_var = NULL, g
   
   p <- p + labs(title = paste("Ghosted", tools::toTitleCase(plot_type), "of", var_name),
                 x = var_name, fill = "Group", color = "Group")
-  
+
+  if (plot_type %in% c("boxplot", "violin")) {
+    p <- hide_x_labels_if_crowded(p, df_local, group_col)
+  }
+
   return(p)
 }
 
@@ -1018,13 +1059,15 @@ generate_advanced_plot <- function(df, vars, group_col = NULL, plot_type = "qq",
             labs(title="Sina-style Plot Comparison")
        
        p <- add_stat_layer(p, df_long, "Value", group_col, stat_test, stat_letter_pos, facet_var = "Variable")
+       p <- hide_x_labels_if_crowded(p, df_long, group_col)
     } else {
-       p <- ggplot(df, aes(x = .data[[group_col]], y = .data[[v1]], fill = .data[[group_col]])) + 
-            geom_violin(alpha=0.5, color=NA) + 
-            geom_jitter(aes(color = .data[[group_col]]), width = 0.2, alpha=0.7) + 
+       p <- ggplot(df, aes(x = .data[[group_col]], y = .data[[v1]], fill = .data[[group_col]])) +
+            geom_violin(alpha=0.5, color=NA) +
+            geom_jitter(aes(color = .data[[group_col]]), width = 0.2, alpha=0.7) +
             labs(title="Sina-style Plot")
-       
+
        p <- add_stat_layer(p, df, v1, group_col, stat_test, stat_letter_pos)
+       p <- hide_x_labels_if_crowded(p, df, group_col)
     }
   } else if (plot_type %in% c("ridge", "joyplot")) {
     p <- ggplot(df, aes(x = .data[[v1]], fill = .data[[group_col]])) + 
@@ -1051,8 +1094,9 @@ generate_advanced_plot <- function(df, vars, group_col = NULL, plot_type = "qq",
           long_df <- rbind(long_df, data.frame(id=df_sub$id, variable=v, value=norm_val, group=as.character(df_sub[[group_col]])))
         }
       }
-      p <- ggplot(long_df, aes(x=variable, y=value, group=id, color=group)) + 
+      p <- ggplot(long_df, aes(x=variable, y=value, group=id, color=group)) +
            geom_line(alpha=0.4) + labs(title="Parallel Coordinates")
+      p <- rotate_x_labels_if_crowded(p, long_df, "variable")
     } else {
       p <- ggplot() + annotate("text", x=0, y=0, label="Parallel coords requires >=2 vars")
     }

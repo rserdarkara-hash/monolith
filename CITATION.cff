@@ -6,7 +6,7 @@ authors:
   - family-names: Kara
     given-names: R. Serdar
     email: r.serdarkara@gmail.com
-version: 0.9.8e
+version: 1.0.0
 date-released: "2026-07-05"
 license: GPL-3.0
 repository-code: "https://github.com/rserdarkara-hash/monolith"

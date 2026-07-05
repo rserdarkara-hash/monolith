@@ -92,3 +92,25 @@ test_that("compute_governing_factors explainer is class 'explainer'", {
   result <- compute_governing_factors(df, "a", c("b", "c", "d"))
   expect_s3_class(result$explainer, "explainer")
 })
+
+test_that("SHAP dependence contributions have per-observation magnitude (T14)", {
+  df <- make_test_df(30)
+  result <- compute_governing_factors(df, "a", "b")
+  # With a single predictor every SHAP permutation attributes the full
+  # deviation to that variable, so contribution(i) = f(x_i) - mean(f(X))
+  # exactly. The pre-T14 bug summed the aggregated B = 0 row PLUS all
+  # permutation rows returned by predict_parts, inflating this by B + 1
+  # (26x with the DALEX default B = 25) — this assertion pins the magnitude.
+  preds <- predict(result$model, newdata = df)
+  set.seed(12345)
+  sample_idx <- sample(seq_len(nrow(df)), min(100, nrow(df)))
+  expected <- preds[sample_idx] - mean(preds)
+  expect_equal(result$shap$contribution, unname(expected), tolerance = 1e-6)
+})
+
+test_that("compute_governing_factors does not perturb the caller's RNG (T19)", {
+  df <- make_test_df(30)
+  set.seed(123); expected_draw <- runif(1)
+  set.seed(123); invisible(compute_governing_factors(df, "a", c("b", "c"))); actual_draw <- runif(1)
+  expect_equal(actual_draw, expected_draw)
+})

@@ -1,8 +1,8 @@
 ![Monolith — Spatial Analysis Dashboard](assets/banner.png)
 
-# Monolith 0.9.8e — Spatial Analysis Dashboard
+# Monolith 1.0.0 — Spatial Analysis Dashboard
 
-[![Version](https://img.shields.io/badge/version-0.9.8e-6f42c1)](#)
+[![Version](https://img.shields.io/badge/version-1.0.0-6f42c1)](#)
 [![R](https://img.shields.io/badge/R-%E2%89%A5%204.5.0-276DC3?logo=r&logoColor=white)](https://cran.r-project.org/)
 [![Shiny](https://img.shields.io/badge/built%20with-Shiny-1f77b4)](https://shiny.posit.co/)
 [![License: GPL v3](https://img.shields.io/badge/license-GPL--3.0-blue)](LICENSE)
@@ -76,6 +76,8 @@ Whether you are mapping soil physicochemistry, analyzing topographical interacti
 
 ## Mapping Predictions and Interpreting Spatial Resonance of Prediction Errors
 
+> **Note:** How well machine-learning predictions agree with the true (measured) values is only half of the story — the deviations that emerge once those predictions are mapped are just as important. A model with acceptable global accuracy can still produce spatially clustered errors, and these only become visible when the predictions and their residuals are examined as surfaces.
+
 **1. Visual Validation**
 
 Monolith generates side-by-side "Actual" and "Predicted" surfaces. By matching the color scales, you can instantly verify if the model captures the true variance of the field or just smooths the data.
@@ -142,7 +144,7 @@ The full dependency suite, grouped by function:
 | **Parallelization / Async** | `future`, `furrr`, `promises` |
 
 <details>
-<summary><strong>Tested version matrix</strong> — the exact package versions Monolith 0.9.8e is developed and validated against (click to expand)</summary>
+<summary><strong>Tested version matrix</strong> — the exact package versions Monolith 1.0.0 is developed and validated against (click to expand)</summary>
 
 <br>
 
@@ -252,7 +254,7 @@ Human oversight remained central throughout: all methodological choices, model f
   title   = {Monolith: A Spatial Analysis Dashboard for Geostatistical Modeling and Mapping},
   author  = {Kara, R. Serdar},
   year    = {2026},
-  version = {0.9.8e},
+  version = {1.0.0},
   url     = {https://github.com/rserdarkara-hash/monolith},
   note    = {R Shiny application, GPL-3.0}
 }
