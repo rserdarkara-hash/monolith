@@ -11,4 +11,14 @@ By using, cloning, or downloading this repository, you agree to the following te
 3. **No Redistribution**: You may not copy, share, redistribute, sublicense, or sell the sample datasets, either in their original form or in any modified or derived format, without the prior written consent of the copyright owner, Recep Serdar Kara.
 4. **No Ownership Transfer**: No ownership rights, intellectual property rights, or research exploitation rights to this data are transferred to any user of this repository.
 
+## Relationship to the Published Dataset
+
+The files in this directory are a small **demonstration subset**, curated solely to let users try the Monolith application. They are not the authoritative dataset and are not intended for analysis or reuse.
+
+The complete study dataset is published separately as the **version of record** on Mendeley Data under a **CC BY 4.0** license:
+
+> Kara, R. S., Ongun, A. R., Almaz, C., Çiçek, G., Tepecik, M., & Yilgan, F. (2026). Physicochemical and Nutritional Soil Properties, Geolocation, and Environmental Covariates for Nutrient Prediction in Transitioning Tobacco Agroecosystems (Denizli, Turkey). Mendeley Data, V1. https://doi.org/10.17632/8548bmgxh9.1
+
+If you wish to use these data for research, analysis, or publication, obtain the complete dataset from Mendeley Data under its CC BY 4.0 terms — not from this repository. The restrictions above apply only to the demonstration files bundled here.
+
 For inquiries regarding the authorized use, licensing, or collaborations involving these datasets, please contact the author: Recep Serdar Kara.
