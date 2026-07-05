@@ -88,6 +88,14 @@ test_that("generate_pca_mahalanobis returns ggplot", {
   expect_s3_class(p, "ggplot")
 })
 
+test_that("generate_pca_mahalanobis handles exactly collinear variables", {
+  df <- make_collinear_df()
+  df$v2 <- df$v1  # exact duplicate -> zero-variance PC -> singular cov(scores)
+  pca <- prcomp(df, scale. = TRUE)
+  p <- generate_pca_mahalanobis(pca)
+  expect_s3_class(p, "ggplot")
+})
+
 # ── generate_pca_biplot_3d ────────────────────────────────────────────────
 
 test_that("generate_pca_biplot_3d returns plotly object", {

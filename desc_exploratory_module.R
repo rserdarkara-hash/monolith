@@ -1,4 +1,14 @@
 
+# Caveat shown with the Contribution / cos2 controls when the PCA was run
+# without scaling: both diagnostics implicitly assume unit-variance inputs,
+# so unscaled results are dominated by the high-variance variables.
+unscaled_pca_note <- function() {
+  shiny::helpText(
+    shiny::icon("info-circle"),
+    "PCA was run without scaling: contribution and cos2 values are dominated by high-variance variables and are not comparable across variables measured on different scales."
+  )
+}
+
 compute_normality <- function(x) {
   default_res <- list(
     status = "insufficient",
@@ -825,7 +835,7 @@ desc_exploratory_server <- function(id, data_reactive, vars_metadata_reactive) {
       )
     })
     
-    pca_rv <- shiny::reactiveValues(res = NULL, data = NULL, cols = NULL, groups = NULL, collinearity_warn = FALSE, collinear_pairs = NULL)
+    pca_rv <- shiny::reactiveValues(res = NULL, data = NULL, cols = NULL, groups = NULL, collinearity_warn = FALSE, collinear_pairs = NULL, scaled = TRUE)
     
     shiny::observeEvent(input$run_pca_btn, {
       req(rv_analytics_data(), input$pca_vars)
@@ -860,6 +870,7 @@ desc_exploratory_server <- function(id, data_reactive, vars_metadata_reactive) {
 
         tryCatch({
           pca_rv$res <- prcomp(df_clean, scale. = input$pca_scale, center = TRUE)
+          pca_rv$scaled <- isTRUE(input$pca_scale)
           pca_rv$data <- df_clean
           pca_rv$cols <- vars_lab
           pca_rv$groups <- if ("group_id" %in% colnames(df)) df$group_id[keep] else NULL
@@ -897,6 +908,7 @@ desc_exploratory_server <- function(id, data_reactive, vars_metadata_reactive) {
 
       tryCatch({
         pca_rv$res <- prcomp(df_clean, scale. = input$pca_scale, center = TRUE)
+        pca_rv$scaled <- isTRUE(input$pca_scale)
         pca_rv$data <- df_clean
         pca_rv$cols <- vars_lab
         pca_rv$groups <- if ("group_id" %in% colnames(df)) df$group_id[keep] else NULL
@@ -924,9 +936,15 @@ desc_exploratory_server <- function(id, data_reactive, vars_metadata_reactive) {
              shiny::numericInput(ns("pca_pc_z"), "Z-Axis (PC)", value = 3, min = 1, max = n_pcs)
           )
        } else if (p_type %in% c("loadings", "contrib")) {
-          shiny::numericInput(ns("pca_pc_single"), "Select PC", value = 1, min = 1, max = n_pcs)
+          shiny::tagList(
+             shiny::numericInput(ns("pca_pc_single"), "Select PC", value = 1, min = 1, max = n_pcs),
+             if (p_type == "contrib" && !isTRUE(pca_rv$scaled)) unscaled_pca_note()
+          )
        } else if (p_type == "cos2") {
-          shiny::selectInput(ns("pca_cos2_axes"), "Select PCs to evaluate", choices = 1:n_pcs, multiple = TRUE, selected = 1:min(2, n_pcs))
+          shiny::tagList(
+             shiny::selectInput(ns("pca_cos2_axes"), "Select PCs to evaluate", choices = 1:n_pcs, multiple = TRUE, selected = 1:min(2, n_pcs)),
+             if (!isTRUE(pca_rv$scaled)) unscaled_pca_note()
+          )
        } else {
           NULL
        }

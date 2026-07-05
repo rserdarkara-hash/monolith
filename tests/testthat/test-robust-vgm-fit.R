@@ -90,11 +90,36 @@ test_that("build_vgm_warning_html renders red fallback and amber flawed sections
   f_fb <- make_mock_vgm(); attr(f_fb, "is_fallback") <- TRUE
   f_fw <- make_mock_vgm(); attr(f_fw, "flawed_winner") <- TRUE
   html <- build_vgm_warning_html(list(LocA_act = f_fb, LocB_pre = f_fw, LocC_act = make_mock_vgm()))
-  expect_match(html, "LocA_act", fixed = TRUE)
-  expect_match(html, "LocB_pre", fixed = TRUE)
-  expect_match(html, "fallback spherical model", fixed = TRUE)
+  expect_match(html, "LocA (actual)", fixed = TRUE)
+  expect_match(html, "LocB (predicted)", fixed = TRUE)
+  expect_match(html, "default spherical variogram model", fixed = TRUE)
   expect_match(html, "non-converged or singular", fixed = TRUE)
-  expect_no_match(html, "LocC_act", fixed = TRUE)
+  expect_no_match(html, "LocC", fixed = TRUE)
+})
+
+test_that("build_vgm_warning_html filters by target and strips the suffix", {
+  f_fb <- make_mock_vgm(); attr(f_fb, "is_fallback") <- TRUE
+  f_fw <- make_mock_vgm(); attr(f_fw, "flawed_winner") <- TRUE
+  fits <- list(LocA_act = f_fb, LocB_pre = f_fw)
+
+  html_act <- build_vgm_warning_html(fits, target = "act")
+  expect_match(html_act, "LocA", fixed = TRUE)
+  expect_no_match(html_act, "LocA_act", fixed = TRUE)
+  expect_no_match(html_act, "LocB", fixed = TRUE)
+
+  html_pre <- build_vgm_warning_html(fits, target = "pre")
+  expect_match(html_pre, "LocB", fixed = TRUE)
+  expect_no_match(html_pre, "LocA", fixed = TRUE)
+
+  # NULL when the only flagged fits belong to the other target
+  expect_null(build_vgm_warning_html(list(LocA_act = f_fb), target = "pre"))
+})
+
+test_that("banner close button targets its own container, not a fixed id", {
+  f_fw <- make_mock_vgm(); attr(f_fw, "flawed_winner") <- TRUE
+  html <- build_vgm_warning_html(list(L1_act = f_fw))
+  expect_match(html, "this.parentElement.style.display", fixed = TRUE)
+  expect_no_match(html, "getElementById", fixed = TRUE)
 })
 
 test_that("amber-only banner omits the red section", {
@@ -107,6 +132,6 @@ test_that("amber-only banner omits the red section", {
 test_that("red-only banner omits the amber section", {
   f_fb <- make_mock_vgm(); attr(f_fb, "is_fallback") <- TRUE
   html <- build_vgm_warning_html(list(L1_act = f_fb))
-  expect_match(html, "fallback spherical model", fixed = TRUE)
+  expect_match(html, "default spherical variogram model", fixed = TRUE)
   expect_no_match(html, "non-converged or singular", fixed = TRUE)
 })

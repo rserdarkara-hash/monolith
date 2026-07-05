@@ -307,7 +307,6 @@ ui <- fluidPage(
       .header-panel { background-color: #2c3e50; color: white; padding: 10px 20px; margin-bottom: 20px; border-radius: 0 0 10px 10px; display: flex; justify-content: space-between; align-items: center; }
       .header-title { margin: 0; font-weight: bold; font-size: 24px; }
       .header-controls { display: flex; align-items: center; gap: 20px; }
-      .info-btn { background: none; border: 1px solid #ecf0f1; color: #ecf0f1; border-radius: 50%; width: 25px; height: 25px; display: flex; align-items: center; justify-content: center; cursor: pointer; }
       .table-container { width: 100%; overflow-x: auto; font-size: 0.95em; margin-bottom: 10px; }
       .table-container table { width: 100% !important; margin-bottom: 0; background-color: #ffffff !important; color: #000000 !important; }
       .table-container th { background-color: #f8f9fa !important; color: #000000 !important; }
@@ -380,11 +379,6 @@ ui <- fluidPage(
               display: inline-block !important;
             }
           ")),
-          div(style = "display: flex; flex-direction: column; align-items: flex-start; font-size: 0.8em; line-height: 1; margin-right: 5px;",
-              checkboxInput("show_north", "North Arrow", FALSE),
-              checkboxInput("show_borders", "Borders", FALSE),
-              checkboxInput("show_scale", "Map Scale", FALSE)
-          ),
           theme_switcher_ui("theme_mod"),
           actionButton("info_btn", "", icon = icon("info"), class = "btn-header-circle"),
           actionButton("about_btn", "", icon = icon("question"), class = "btn-header-circle")
@@ -398,14 +392,14 @@ ui <- fluidPage(
           selectInput("locality", "Locality", choices = NULL, multiple = TRUE),
           selectInput("var_category", "Variable Category", choices = NULL),
           selectInput("var_id", "Variable", choices = NULL),
-          selectInput("value_type", HTML(paste0("Primary View", info_tooltip("primary_view_info", "<b>Actual Values (observed):</b> Maps the raw observed/measured ground-truth data points directly without any machine learning predictions.<br><br><span style='border-top: 1px solid #ddd; display: block; margin: 8px 0;'></span><b>Machine Learning Predictions:</b> Use these options if you want to map predicted parameters from your machine learning models:<br><br>• <b>Best Predictions (_cve):</b> Maps predicted values from the cross-validation ensemble (CVE), which represent the best overall ML predictions.<br><br>• <b>Single Split Predictions (_ss):</b> Maps predicted values from a single train/test split partition.<br><br>• <b>Residuals (v - pv):</b> Maps model residuals (difference between observed Actual and ML Predicted values) to study local spatial error patterns."))), choices = c("Actual Values" = "actual", "Best Predictions (_cve)" = "pred", "Single Split Predictions (_ss)" = "pred_ss", "Residuals (v - pv)" = "resid")),
+          selectInput("value_type", HTML(paste0("Primary View", info_tooltip("primary_view_info", "<b>Actual Values (observed):</b> Maps the raw observed/measured ground-truth data points directly without any machine learning predictions.<br><br><span style='border-top: 1px solid #ddd; display: block; margin: 8px 0;'></span><b>Machine Learning Predictions:</b> Use these options if you want to map predicted parameters from your machine learning models:<br><br>• <b>Best ML Predictions (_cve):</b> Maps predicted values from the cross-validation ensemble (CVE), which represent the best overall ML predictions.<br><br>• <b>Single Split ML Predictions (_ss):</b> Maps predicted values from a single train/test split partition.<br><br>• <b>Residuals (v - pv) of ML Predictions:</b> Maps ML model residuals (observed Actual value minus the ML Predicted value uploaded in your dataset) to study local spatial error patterns. These are NOT errors of the interpolation itself."))), choices = c("Actual Values" = "actual", "Best ML Predictions (_cve)" = "pred", "Single Split ML Predictions (_ss)" = "pred_ss", "Residuals (v - pv) of ML Predictions" = "resid")),
                      conditionalPanel(
                        condition = "input.value_type == 'pred_ss'",
                        selectInput("subset", HTML(paste0("Data Subset", info_tooltip("data_subset_info", "Restricts the Single Split (_ss) view to one data partition (e.g. Train/Test/Validation), read from a 'subset' column in the uploaded data. Available choices are detected when a dataset containing such a column is loaded."))), choices = c("All" = "all"), selected = "all")
                      ),
                      conditionalPanel(
                        condition = "['pred', 'pred_ss', 'resid'].includes(input.value_type)",
-                       checkboxInput("comp_mode", HTML(paste0("Comparison Mode", info_tooltip("comp_mode", "Splits the viewer to compare Actual vs. Predicted maps. Useful for visual validation."))), FALSE)
+                       checkboxInput("comp_mode", HTML(paste0("Comparison Mode", info_tooltip("comp_mode", "Splits the viewer to compare the Actual (observed) map against the map of your uploaded ML predictions. Useful for visual validation."))), FALSE)
                      ),          conditionalPanel(condition = "input.comp_mode && ['pred', 'pred_ss'].includes(input.value_type)", 
                            checkboxInput("sep_fit", HTML(paste0("Fit Actual/Predicted Separately", info_tooltip("sep_fit_info", "If checked, optimizes variograms separately for actual and predicted data. If unchecked, applies actual variogram to predictions."))), TRUE),
                            checkboxInput("match_scales", HTML(paste0("Match Scales", info_tooltip("match_info", "Forces the map legends for Actual and Predicted data to use the same color range."))), FALSE))
@@ -440,10 +434,11 @@ ui <- fluidPage(
              
                        conditionalPanel(condition = "input.value_type == 'resid'",
                          div(style = "background-color: #fff5f5; padding: 10px; border: 1px solid #ffc9c9; border-radius: 4px; margin-bottom: 10px;",
-                           div(style = "display: flex; justify-content: space-between; align-items: center;",
-                             h5("Residual Diagnostics"),
-                             actionButton("resid_info_btn", "i", class = "info-btn")
+                           div(style = "display: flex; align-items: center;",
+                             h5("Residual Diagnostics", style = "margin-top: 0; margin-bottom: 0;"),
+                             actionLink("resid_info_btn", label = NULL, icon = icon("info-circle"), style = "color: #17a2b8; margin-left: 5px;")
                            ),
+                           tags$p(style="font-size: 0.85em; margin: 5px 0;", tags$em("Residuals = observed values minus the ML-predicted values uploaded in your dataset. They diagnose your external ML model, not the interpolation itself.")),
                            tags$p(style="font-size: 0.85em; margin-bottom: 5px;", tags$b("Interpolated Delta:"), " Difference between two full surfaces (actual - prediction). Reveals regional zones of consistent over/under-prediction."),
                            tags$p(style="font-size: 0.85em; margin-bottom: 0;", tags$b("Interpolated Point Errors:"), " Kriged map of local prediction errors. Acts as an 'Uncertainty Map' highlighting exact points of model failure.")
                          )
@@ -530,7 +525,8 @@ ui <- fluidPage(
             conditionalPanel(condition = "['OK', 'RK', 'RFK', 'CK'].includes(input.method)",
               checkboxInput("show_uncertainty", "Map Uncertainty Instead of Interpolation", FALSE),
               conditionalPanel(condition = "input.show_uncertainty",
-                radioButtons("uncertainty_type", "Metric", choices = c("Variance" = "var", "Standard Error" = "se"), selected = "se", inline = TRUE)
+                radioButtons("uncertainty_type", "Metric", choices = c("Variance" = "var", "Standard Error" = "se"), selected = "se", inline = TRUE),
+                p(style="font-size: 0.8em; opacity: 0.8; margin-bottom: 0;", "Variance is in squared units of the variable; SE shares the variable's unit. Uncertainty layers always use a continuous palette — Agronomic/Binned class breaks apply to concentration maps only.")
               )
             ),
             conditionalPanel(condition = "!['OK', 'RK', 'RFK', 'CK'].includes(input.method)",
@@ -628,6 +624,9 @@ ui <- fluidPage(
                              div(style="display: flex; align-items: center; gap: 10px; margin-right: 15px;",
                                  checkboxInput("show_points_viewer", "Show Points", FALSE, width = "auto"),
                                  checkboxInput("show_res_overlay", "Show Res", FALSE, width = "auto"),
+                                 checkboxInput("show_north", "North Arrow", FALSE, width = "auto"),
+                                 checkboxInput("show_borders", "Borders", FALSE, width = "auto"),
+                                 checkboxInput("show_scale", "Map Scale", FALSE, width = "auto"),
                                  selectInput("base_map_layer", NULL,
                                              choices = c("Satellite (Esri)" = "Esri.WorldImagery",
                                                          "Topographic" = "OpenTopoMap",
@@ -2248,35 +2247,25 @@ server <- function(input, output, session) {
     
     crs_obj <- validate_crs(input$crs_selection, "Invalid CRS provided:")
     req(crs_obj)
-    is_degree <- grepl("degree", crs_obj$units_gdal %||% "meters", ignore.case = TRUE)
-    
+
     pts <- tryCatch({
       st_as_sf(df, coords = c("x", "y"), crs = input$map_crs) %>% st_transform(input$crs_selection)
     }, error = function(e) NULL)
     req(pts)
-    coords <- st_coordinates(pts)
-    
-    knn_res <- FNN::get.knn(coords, k = 1)
-    avg_nn_dist <- mean(knn_res$nn.dist)
-    
-    rec_res <- avg_nn_dist * 0.5 
-    
-    bbox <- st_bbox(pts)
-    width <- bbox["xmax"] - bbox["xmin"]
-    height <- bbox["ymax"] - bbox["ymin"]
-    max_dim <- max(width, height)
-    min_res_by_dim <- max_dim / 300 
-    
+
+    # The grid_res slider is metric and interpolation always runs in a
+    # projected CRS, so the suggestion is measured in metres even when the
+    # analysis CRS is geographic (calc_metric_spacing handles the conversion).
+    spacing <- calc_metric_spacing(pts)
+    req(is.finite(spacing$mean_nn))
+
+    rec_res <- spacing$mean_nn * 0.5
+    min_res_by_dim <- spacing$max_dim / 300
+
     final_rec <- max(rec_res, min_res_by_dim)
-    
-    if (is_degree) {
-       final_rec <- max(0.00001, min(0.01, round(final_rec, 6)))
-       reasoning <- sprintf("Suggested: %.6f deg. Optimized for %s.", final_rec, loc_context)
-    } else {
-       final_rec <- max(0.1, min(500, round(final_rec, 1)))
-       reasoning <- sprintf("Suggested: %.1f m. Optimized for %s.", final_rec, loc_context)
-    }
-    
+    final_rec <- max(0.1, min(500, round(final_rec, 1)))
+    reasoning <- sprintf("Suggested: %.1f m. Optimized for %s.", final_rec, loc_context)
+
     if (input$res_mode != "fixed") updateSliderInput(session, "grid_res", value = final_rec)
     output$res_reasoning <- renderText({ reasoning })
     
@@ -2291,24 +2280,7 @@ server <- function(input, output, session) {
             if(is.null(sub_pts)) next
             
             if (nrow(sub_pts) > 1) {
-                 if (!is_degree) {
-                    # Analysis CRS is metric: measure nearest-neighbor
-                    # distances directly in the CRS the grid is built in.
-                    sub_knn <- FNN::get.knn(sf::st_coordinates(sub_pts), k = 1)
-                    l_res <- mean(sub_knn$nn.dist) * 0.5
-                 } else {
-                    sub_pts_m <- tryCatch(sf::st_transform(sub_pts, 3857), error = function(e) sub_pts)
-                    sub_knn <- FNN::get.knn(sf::st_coordinates(sub_pts_m), k = 1)
-                    l_res <- mean(sub_knn$nn.dist) * 0.5
-                    lat_c <- mean(sf::st_coordinates(sf::st_transform(sub_pts, 4326))[,2])
-                    if (identical(sub_pts, sub_pts_m)) {
-                       # 3857 transform failed; distances are still in degrees
-                       l_res <- l_res * 111319 * cos(lat_c * pi / 180)
-                    } else {
-                       # Web Mercator inflates distances by 1/cos(latitude)
-                       l_res <- l_res * cos(lat_c * pi / 180)
-                    }
-                 }
+                 l_res <- calc_metric_spacing(sub_pts)$mean_nn * 0.5
             } else l_res <- final_rec
 
             l_res <- max(1, min(5000, l_res))
@@ -2518,17 +2490,20 @@ server <- function(input, output, session) {
       pal <- m$palette
     }
     
+    pred_col <- if(!is.null(m$pred) && length(m$pred) == 1 && !is.na(m$pred) && nzchar(m$pred)) as.character(m$pred) else NULL
+    pred_ss_col <- if(!is.null(m$pred_ss) && length(m$pred_ss) == 1 && !is.na(m$pred_ss) && nzchar(m$pred_ss)) as.character(m$pred_ss) else NULL
+
     view_col <- switch(input$value_type,
       "actual" = as.character(m$actual),
-      "pred"   = if(!is.null(m$pred)) as.character(m$pred) else NULL,
-      "pred_ss"= if(!is.null(m$pred_ss)) as.character(m$pred_ss) else NULL,
+      "pred"   = pred_col,
+      "pred_ss"= pred_ss_col,
       "resid"  = as.character(m$actual)
     )
-    
+
     list(
       actual = as.character(m$actual),
-      pred = if(!is.null(m$pred)) as.character(m$pred) else NULL,
-      pred_ss = if(!is.null(m$pred_ss)) as.character(m$pred_ss) else NULL,
+      pred = pred_col,
+      pred_ss = pred_ss_col,
       view_col = view_col,
       label = as.character(m$label %||% m$actual),
       palette = as.character(pal),
@@ -2548,6 +2523,31 @@ server <- function(input, output, session) {
     filtered <- Filter(function(x) x$category == sel_cat, vars)
     choices <- setNames(sapply(filtered, function(x) x$actual), sapply(filtered, function(x) x$label))
     updateSelectInput(session, "var_id", choices = choices)
+  })
+
+  # Guard: only offer ML prediction/residual views when the selected variable
+  # actually has the corresponding prediction column in the uploaded data.
+  observeEvent(list(input$var_id, rv$mapping$vars), {
+    var <- input$var_id
+    if (is.null(var) || var == "" || is.null(rv$mapping$vars)) return(NULL)
+    idx <- which(sapply(rv$mapping$vars, function(x) x$actual == var))
+    if (length(idx) == 0) return(NULL)
+    m <- rv$mapping$vars[[idx[1]]]
+
+    has_col <- function(x) !is.null(x) && length(x) == 1 && !is.na(x) && nzchar(x)
+    choices <- c("Actual Values" = "actual")
+    if (has_col(m$pred)) choices <- c(choices, "Best ML Predictions (_cve)" = "pred")
+    if (has_col(m$pred_ss)) choices <- c(choices, "Single Split ML Predictions (_ss)" = "pred_ss")
+    if (has_col(m$pred)) choices <- c(choices, "Residuals (v - pv) of ML Predictions" = "resid")
+
+    sel <- if (isTruthy(input$value_type) && input$value_type %in% choices) input$value_type else "actual"
+    updateSelectInput(session, "value_type", choices = choices, selected = sel)
+
+    # No prediction columns at all: Comparison Mode has nothing to compare,
+    # so clear it even though its (hidden) checkbox keeps its last state.
+    if (!has_col(m$pred) && !has_col(m$pred_ss) && isTRUE(input$comp_mode)) {
+      updateCheckboxInput(session, "comp_mode", value = FALSE)
+    }
   })
 
   observeEvent(input$info_btn, {
@@ -4051,8 +4051,10 @@ server <- function(input, output, session) {
       if(!is.null(params_k) && (comp_mode || val_type != "actual")) {
         df_k <- df_perf
         brks_k <- c(-Inf, params_k$rcl_mat[-1, 1], Inf)
-        df_k$act_bin <- cut(df_k$v, breaks = brks_k, labels = params_k$labels, include.lowest = TRUE)
-        df_k$pred_bin <- cut(df_k$pv, breaks = brks_k, labels = params_k$labels, include.lowest = TRUE)
+        # right = FALSE matches the map classification (terra::classify with
+        # right = FALSE): classes are [low, high)
+        df_k$act_bin <- cut(df_k$v, breaks = brks_k, labels = params_k$labels, include.lowest = TRUE, right = FALSE)
+        df_k$pred_bin <- cut(df_k$pv, breaks = brks_k, labels = params_k$labels, include.lowest = TRUE, right = FALSE)
         df_k <- df_k[!is.na(df_k$act_bin) & !is.na(df_k$pred_bin), ]
         if(nrow(df_k) >= 3) {
           kappa_total <- data.frame(
@@ -4280,8 +4282,8 @@ server <- function(input, output, session) {
       easyClose = TRUE,
       tags$div(
         h4("Mathematical Formula"),
-        p(HTML("<b>Residual = Observed (Actual Data Uploaded) - Predicted Value</b>")),
-        p("A residual is the deviation of the model from the actual measured value at a given location. All residuals in this dashboard are derived from your primary target variable (e.g. Actual Nitrogen - Predicted Nitrogen)."),
+        p(HTML("<b>Residual = Observed value (v) - ML Predicted value (pv)</b>")),
+        p("A residual is the deviation of your machine learning model from the actual measured value at a given location. Both columns come from your uploaded dataset: the observed measurements and the predictions of the external ML model you supplied (e.g. Actual Nitrogen - ML Predicted Nitrogen). Residuals therefore diagnose that ML model's error, not the error of the interpolation performed in this dashboard."),
         hr(),
         h4("Available Residual Types"),
         tags$ul(
@@ -4339,15 +4341,7 @@ server <- function(input, output, session) {
         }
         
         if (buff_mode_val == "dynamic" && input$boundary_type == "wrapped") {
-          val <- switch(method_val,
-            "TPS" = 1.0 * base_res,
-            "IDW" = 2.0 * base_res,
-            "OK"  = 3.0 * base_res,
-            "CK"  = 3.0 * base_res,
-            "RK"  = 3.0 * base_res,
-            "RFK" = 3.0 * base_res,
-            2.0 * base_res
-          )
+          val <- get_buffer_multiplier(method_val) * base_res
           val <- max(5, min(2000, val))
           paste0(round(val, 1), " m")
         } else {
@@ -4382,7 +4376,10 @@ server <- function(input, output, session) {
       r_list <- Filter(Negate(is.null), r_list)
       
       if (length(r_list) > 0) {
-        vgm_warn_html <- build_vgm_warning_html(rv$v_fit_list)
+        vgm_target <- if (lab %in% c("actual", "Actual")) "act"
+                      else if (lab %in% c("pred", "pred_ss", "Predicted")) "pre"
+                      else NULL  # residual maps derive from both fits
+        vgm_warn_html <- build_vgm_warning_html(rv$v_fit_list, target = vgm_target)
         if (!is.null(vgm_warn_html)) {
           m <- m %>% addControl(html = vgm_warn_html, position = "bottomleft")
         }
@@ -4409,19 +4406,34 @@ server <- function(input, output, session) {
         vv_scale <- joint_vv() %||% vv
         
         is_viridis <- meta$palette == "viridis"
+        is_uncert_view <- isTruthy(input$show_uncertainty) && input$method %in% c("OK", "RK", "RFK", "CK")
+        legend_title <- if (is_uncert_view) {
+          if (input$uncertainty_type == "se") {
+            paste0("SE: ", meta$label, if (nzchar(meta$unit)) paste0(" ", meta$unit) else "")
+          } else {
+            paste0("Variance: ", meta$label, if (nzchar(meta$unit)) paste0(" (", meta$unit, ")^2") else " (squared units)")
+          }
+        } else paste(meta$label, meta$unit)
         if(input$value_type == "resid" || lab == "resid_raster") {
-          abs_max <- max(abs(vv), na.rm = TRUE)
-          if(is.infinite(abs_max) || is.na(abs_max)) abs_max <- 1
-          pal <- colorNumeric("RdBu", domain = c(-abs_max, abs_max), na.color = "transparent")
-          
+          # The residual view always displays the var1.pred difference, so the
+          # palette domain must come from that layer too (vv would hold the
+          # var1.var difference when show_uncertainty is on)
+          resid_layers <- list()
           for (i in seq_along(r_list)) {
             r_w <- get_projected_raster(r_list[[i]], layer_key(i))
             if (is.null(r_w)) next
-            active_layer <- if("var1.pred" %in% names(r_w)) r_w[["var1.pred"]] else r_w[[1]]
-            m <- m %>% addRasterImage(active_layer, colors = pal, opacity = 0.8)
+            resid_layers[[length(resid_layers) + 1]] <- if("var1.pred" %in% names(r_w)) r_w[["var1.pred"]] else r_w[[1]]
+          }
+          vv_resid <- unlist(lapply(resid_layers, function(al) as.vector(values(al, na.rm = TRUE))))
+          abs_max <- max(abs(vv_resid), na.rm = TRUE)
+          if(is.infinite(abs_max) || is.na(abs_max)) abs_max <- 1
+          pal <- colorNumeric("RdBu", domain = c(-abs_max, abs_max), na.color = "transparent")
+
+          for (al in resid_layers) {
+            m <- m %>% addRasterImage(al, colors = pal, opacity = 0.8)
           }
           m <- m %>% leaflet::addLegend(pal = pal, values = c(-abs_max, abs_max), title = paste("Resid:", meta$label))
-        } else if(input$color_style == "agro") {
+        } else if(input$color_style == "agro" && !is_uncert_view) {
           params <- agro_params()
           if(!is.null(params)) {
             pal <- colorBin(params$colors, bins = params$brks, na.color = "transparent", right = FALSE)
@@ -4433,7 +4445,7 @@ server <- function(input, output, session) {
             }
             m <- m %>% leaflet::addLegend(colors = params$colors, labels = params$leg_labels, opacity = 0.8, title = paste(meta$label, meta$unit))
           }
-        } else if(input$color_style == "bin") {
+        } else if(input$color_style == "bin" && !is_uncert_view) {
           params <- classification_params()
           if(!is.null(params)) {
             pal <- colorBin(params$colors, bins = params$brks, na.color = "transparent", right = FALSE)
@@ -4457,13 +4469,14 @@ server <- function(input, output, session) {
 
           v_range <- diff(range(vv_scale, na.rm=TRUE))
           d_format <- if(is.na(v_range)) 2 else if(v_range < 0.01) 6 else if(v_range < 0.1) 4 else 2
-          m <- m %>% leaflet::addLegend(pal = pal, values = vv_scale, title = paste(meta$label, meta$unit), labFormat = labelFormat(digits = d_format))
+          m <- m %>% leaflet::addLegend(pal = pal, values = vv_scale, title = legend_title, labFormat = labelFormat(digits = d_format))
         }
       }
     }
 
     
     if(lab == "resid_points") {
+       req(rv$sf, "resid" %in% colnames(rv$sf))
        pts_view <- st_transform(rv$sf, 4326)
        abs_max_p <- max(abs(pts_view$resid), na.rm=T)
        if(is.infinite(abs_max_p) || is.na(abs_max_p)) abs_max_p <- 1
@@ -4534,9 +4547,9 @@ server <- function(input, output, session) {
     
     type_lab <- switch(input$value_type,
            "actual" = "Actual Data View",
-           "pred" = "Best Predictions View (_cve)",
-           "pred_ss" = "Single Split Predictions View (_ss)",
-           "resid" = "Residuals View (Actual - Predicted)")
+           "pred" = "Best ML Predictions View (_cve)",
+           "pred_ss" = "Single Split ML Predictions View (_ss)",
+           "resid" = "ML Residuals View (Actual - ML Predicted)")
     
     current_method <- rv$run_method[[input$var_id]]
     method_lab <- if(!is.null(current_method)) {
@@ -4575,9 +4588,8 @@ server <- function(input, output, session) {
     if(input$value_type == "resid") return(paste0(prefix, " - Point Residuals", method_lab))
     
     type_lab <- switch(input$value_type,
-           "pred" = "Best Predictions (_cve)",
-           "pred_ss" = "Split Predictions (_ss)",
-           "resid" = "Residuals (v - pv)")
+           "pred" = "Best ML Predictions (_cve)",
+           "pred_ss" = "Single Split ML Predictions (_ss)")
     paste0(prefix, " - ", type_lab, method_lab)
   })
 
@@ -4844,7 +4856,10 @@ server <- function(input, output, session) {
         req(rv$sf, col_resid %in% colnames(rv$sf))
         formula_obj <- as.formula(paste(col_resid, "~ 1"))
         df_filtered <- rv$sf[!is.na(rv$sf[[col_resid]]), ]
-        p_res <- plot(variogram(formula_obj, df_filtered), main = list(label = paste("Global Internal Residual Variogram", title_suffix), cex = 0.85), scales = list(cex = 0.75))
+        # Unlike the per-locality plots (internal trend-residual variogram of
+        # the fitted model), the combined view pools CV residuals across
+        # localities — label it as such.
+        p_res <- plot(variogram(formula_obj, df_filtered), main = list(label = paste("Pooled CV Residual Variogram", title_suffix), cex = 0.85), scales = list(cex = 0.75))
         print(p_res)
       } else {
         req(rv$v_emp_list[[paste0(loc, "_", type)]], rv$v_fit_list[[paste0(loc, "_", type)]])
@@ -5252,8 +5267,10 @@ server <- function(input, output, session) {
       breaks <- c(-Inf, params$rcl_mat[-1, 1], Inf)
       labels <- params$labels
       
-      df$act_bin <- cut(df$v, breaks = breaks, labels = labels, include.lowest = TRUE)
-      df$pred_bin <- cut(df$pv, breaks = breaks, labels = labels, include.lowest = TRUE)
+      # right = FALSE matches the map classification (terra::classify with
+      # right = FALSE): classes are [low, high)
+      df$act_bin <- cut(df$v, breaks = breaks, labels = labels, include.lowest = TRUE, right = FALSE)
+      df$pred_bin <- cut(df$pv, breaks = breaks, labels = labels, include.lowest = TRUE, right = FALSE)
       
       df <- df[!is.na(df$act_bin) & !is.na(df$pred_bin), ]
       df$act_bin <- factor(df$act_bin, levels = labels)
@@ -5365,6 +5382,4 @@ server <- function(input, output, session) {
 
 
       }
-      if (Sys.getenv("SHINY_PORT") != "" || interactive()) {  shinyApp(ui, server)
-}
 shinyApp(ui = ui, server = server)

@@ -1,8 +1,8 @@
 ![Monolith — Spatial Analysis Dashboard](assets/banner.png)
 
-# Monolith 0.9.8c — Spatial Analysis Dashboard
+# Monolith 0.9.8d — Spatial Analysis Dashboard
 
-[![Version](https://img.shields.io/badge/version-0.9.8c-6f42c1)](#)
+[![Version](https://img.shields.io/badge/version-0.9.8d-6f42c1)](#)
 [![R](https://img.shields.io/badge/R-%E2%89%A5%204.5.0-276DC3?logo=r&logoColor=white)](https://cran.r-project.org/)
 [![Shiny](https://img.shields.io/badge/built%20with-Shiny-1f77b4)](https://shiny.posit.co/)
 [![License: GPL v3](https://img.shields.io/badge/license-GPL--3.0-blue)](LICENSE)
@@ -142,7 +142,7 @@ The full dependency suite, grouped by function:
 | **Parallelization / Async** | `future`, `furrr`, `promises` |
 
 <details>
-<summary><strong>Tested version matrix</strong> — the exact package versions Monolith 0.9.8c is developed and validated against (click to expand)</summary>
+<summary><strong>Tested version matrix</strong> — the exact package versions Monolith 0.9.8d is developed and validated against (click to expand)</summary>
 
 <br>
 
@@ -254,7 +254,7 @@ A manuscript describing Monolith's methodology and validation is currently under
   title   = {Monolith: A Spatial Analysis Dashboard for Geostatistical Modeling and Mapping},
   author  = {Kara, R. Serdar},
   year    = {2026},
-  version = {0.9.8c},
+  version = {0.9.8d},
   url     = {https://github.com/rserdarkara-hash/monolith},
   note    = {R Shiny application, GPL-3.0}
 }

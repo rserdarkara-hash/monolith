@@ -69,6 +69,8 @@ A dedicated high-dimensional dimensionality reduction module.
 **4.2 Plot Settings**
 *   **Types:** Scree Plot, Biplot (2D), Biplot (3D), Loadings, Contribution, Cumulative Variance, and Mahalanobis Distance.
 *   **Controls:** Dynamic numeric inputs appear based on the plot type to select specific Principal Components (e.g., X-Axis PC 1, Y-Axis PC 2) or assess specific loading contributions.
+*   **Scaling Caveat (Contribution & cos2):** Both diagnostics implicitly assume the PCA was run on scaled, unit-variance inputs. If "Scale & Center Data" was unchecked when the PCA was executed, the values are dominated by the high-variance variables and are not comparable across variables measured on different scales — the module displays an inline note under the plot controls in that case.
+*   **Mahalanobis Distance:** Distances are computed on the PC scores using their theoretical diagonal covariance (the squared component standard deviations). Near-zero-variance components — which arise when PCA is force-executed on collinear variables — are excluded from the distance (and from the chi-square threshold's degrees of freedom), so the outlier plot remains available instead of failing on a singular covariance matrix.
 
 ---
 

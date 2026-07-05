@@ -30,6 +30,24 @@ test_that("calc_moran handles duplicated coordinates by jittering", {
   expect_true(is.na(moran_val) || is.numeric(moran_val))
 })
 
+test_that("calc_moran is reproducible for duplicate coordinates and preserves RNG state", {
+  set.seed(7)
+  n <- 12
+  coords <- cbind(runif(n, 450000, 451000), runif(n, 5800000, 5801000))
+  coords[n, ] <- coords[n - 1, ]  # one exact duplicate pair
+  residuals <- rnorm(n)
+
+  set.seed(1); m1 <- suppressWarnings(calc_moran(residuals, coords))
+  set.seed(2); m2 <- suppressWarnings(calc_moran(residuals, coords))
+  expect_false(is.na(m1))
+  expect_identical(m1, m2)
+
+  # The jitter must not consume or perturb the caller's RNG stream
+  set.seed(123); expected_draw <- runif(1)
+  set.seed(123); invisible(suppressWarnings(calc_moran(residuals, coords))); actual_draw <- runif(1)
+  expect_identical(actual_draw, expected_draw)
+})
+
 test_that("calc_moran returns value in [-1, 1] or NA for valid inputs", {
   set.seed(42)
   n <- 10

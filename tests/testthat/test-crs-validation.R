@@ -39,3 +39,39 @@ test_that("validate_crs EPSG:32633 returns a projected CRS", {
   # UTM zone 33N is a projected CRS
   expect_false(sf::st_is_longlat(result))
 })
+
+# ── calc_metric_spacing ────────────────────────────────────────────────────
+# Backs the grid-resolution suggestion: must return metres for BOTH projected
+# and geographic analysis CRSs (the grid_res slider is metric and
+# interpolation always runs in a projected CRS).
+
+test_that("calc_metric_spacing returns NA for NULL or single-point input", {
+  expect_true(is.na(calc_metric_spacing(NULL)$mean_nn))
+  pts1 <- sf::st_as_sf(data.frame(x = 500000, y = 5000000),
+                       coords = c("x", "y"), crs = 32635)
+  expect_true(is.na(calc_metric_spacing(pts1)$mean_nn))
+})
+
+test_that("calc_metric_spacing measures projected coordinates directly", {
+  # 3 points 100 m apart on a line in UTM 35N
+  pts <- sf::st_as_sf(data.frame(x = c(500000, 500100, 500200), y = 5500000),
+                      coords = c("x", "y"), crs = 32635)
+  sp <- calc_metric_spacing(pts)
+  expect_equal(sp$mean_nn, 100, tolerance = 1e-9)
+  expect_equal(sp$max_dim, 200, tolerance = 1e-9)
+})
+
+test_that("calc_metric_spacing converts geographic coordinates to metres", {
+  # Points 0.001 deg longitude apart at ~50N:
+  # true spacing ~ 111320 * cos(50 deg) * 0.001 ~ 71.6 m
+  pts <- sf::st_as_sf(
+    data.frame(x = seq(14, by = 0.001, length.out = 5), y = 50),
+    coords = c("x", "y"), crs = 4326
+  )
+  sp <- calc_metric_spacing(pts)
+  expected <- 111320 * cos(50 * pi / 180) * 0.001
+  expect_equal(sp$mean_nn, expected, tolerance = 0.02)
+  # crucially metres, not degrees
+  expect_gt(sp$mean_nn, 1)
+  expect_gt(sp$max_dim, 4 * sp$mean_nn * 0.98)
+})

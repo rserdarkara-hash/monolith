@@ -56,13 +56,14 @@ The application requires cleanly structured, georeferenced tabular data.
 **1.3 Primary View & Comparison Mode**
 This determines the mathematical "lens" through which you see the field:
 * **Actual Values:** Displays the interpolated surface of your raw measured data.
-* **Best Predictions (_cve):** Displays the interpolated surface of the machine learning model's cross-validated estimates.
-* **Single Split Predictions (_ss):** Displays the surface for a specific data-split prediction.
-* **Residuals (v - pv):** It calculates the localized difference between what you measured and what the model you used to predicted that parameter predicted.
+* **Best ML Predictions (_cve):** Displays the interpolated surface of the machine learning model's cross-validated estimates.
+* **Single Split ML Predictions (_ss):** Displays the surface for a specific data-split prediction.
+* **Residuals (v - pv) of ML Predictions:** Calculates the localized difference between what you measured (v) and what your uploaded machine learning model predicted (pv). These residuals diagnose the ML model, not the interpolation performed by the dashboard.
+* The ML prediction and residual views are only offered when the selected variable actually has the corresponding prediction column in your uploaded data (`_cve` for Best ML Predictions and Residuals, `_ss` for Single Split ML Predictions). If a variable has no prediction columns, the Primary View is limited to **Actual Values**.
 * **Comparison Mode:** When enabled for predictions, the dashboard splits into a synchronized dual-map view. This allows for a side-by-side "visual audit" of the Actual data vs. the Model's predictions to identify spatial bias.
 
 **1.4 Data Subset (Single Split view only)**
-* When the Primary View is set to **Single Split Predictions (_ss)**, a **Data Subset** dropdown appears directly beneath it. It restricts the mapped data to one modeling partition (e.g., "Train", "Test", or "Validation") before interpolation.
+* When the Primary View is set to **Single Split ML Predictions (_ss)**, a **Data Subset** dropdown appears directly beneath it. It restricts the mapped data to one modeling partition (e.g., "Train", "Test", or "Validation") before interpolation.
 * The available choices are read from a `subset` column in your uploaded dataset (matched case-insensitively, so `Subset` or `SUBSET` also work). If the dataset has no such column, only "All" is offered and no filtering occurs.
 * The filter applies exclusively to the Single Split view; all other views always use the full dataset.
 
@@ -99,7 +100,7 @@ Once selections are made, the main interface transitions to the analytical modul
      - Manual override is available if you deem it necessary. Note that setting `Lambda = 0` forces exact interpolation (no smoothing).
      
 **3. Define the Grid Resolution:**
-  The resolution determines the size of each pixel in your final map.
+  The resolution determines the size of each pixel in your final map. Resolutions and their automatic suggestions are always in **metres** — even if you selected a geographic (degree-based) mapping CRS, the app measures point spacing in metres behind the scenes, because interpolation always runs in a projected CRS.
 * **Auto (Per Locality):** The app calculates the average distance between nearest-neighbor samples for *each specific field* and sets the pixel size to 50% of that distance. This tries to enable high-density plots to get high-detail maps, while sparse regions stay computationally efficient.
 * **Auto (Global):** Uses the average point density of the *entire dataset* to set a uniform resolution across all maps.
 * **Fixed:** Provides manual control. 
@@ -119,6 +120,7 @@ Once selections are made, the main interface transitions to the analytical modul
      - **History-Aware Logic:** If sufficient prior runs exist in the `.csv` log for the chosen method, the engine uses a linear model to predict runtime based on sample counts.
      - **Cold-Start Method Multipliers:** If no history exists, it uses base multipliers: RFK (1.0x), RK (1.0x), and CK (1.3x) which are calibrated from real measurements. OK (0.5x), IDW (0.5x), and TPS (0.3x) are currently unverified estimates based on theoretical complexity.
    - Click **Run Interpolation** and proceed to **Map Viewer** tab. The system will perform cross-validation (Leave-One-Out CV for 50 or fewer observations, or 10-fold CV for larger datasets) *(Note: cross-validation utilizes a fixed random seed by default; see the Scientific Guide Section 9 for customization)*, generate the surface, and populate the Validation Diagnostics table with RMSE, R², and Moran's I metrics *(Note: Moran's I uses a hardcoded distance threshold multiplier; see the Scientific Guide Section 9 for customization)*.
+   - **Automatic Fallbacks:** If an engine cannot be fitted for a locality (e.g., TPS on a degenerate point layout, or CK/RK/RFK model failures), the app automatically falls back to a simpler engine and reports this in the run log and as a warning notification — check the log if a map looks different from the method you selected.
    - **Responsive Diagnostic Views:** The UI employs `shinyjs` to dynamically toggle the visibility of complex validation diagnostics (like the RF Variable Importance Plot, Internal Residual Variogram, or TPS GCV Diagnostic Plot) based on the active Spatial Engine and whether the user is viewing `Actual` or `Predicted` data. This prevents empty plots from rendering and provides visual cleanliness.
 
 ---

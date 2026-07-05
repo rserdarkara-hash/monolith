@@ -120,14 +120,27 @@ get_buffer_multiplier <- function(method) {
 # Builds the Map Viewer variogram-quality banner from the per-locality fit
 # list. Red = heuristic fallback (fit failed entirely); amber = auto-fit had
 # to select a non-converged/singular candidate. Returns NULL when clean.
-build_vgm_warning_html <- function(v_fit_list) {
+# `target` limits the banner to the fits a specific map actually used:
+# "act" (actual maps), "pre" (predicted maps), or NULL for both (residual
+# maps, which derive from both fits).
+build_vgm_warning_html <- function(v_fit_list, target = NULL) {
+  # "LocA_act" -> "LocA" when the map's target is known, otherwise
+  # "LocA (actual)" so mixed banners stay unambiguous.
+  display_key <- function(n) {
+    base <- sub("_(act|pre)$", "", n)
+    if (!is.null(target)) return(base)
+    suffix <- if (grepl("_act$", n)) " (actual)" else if (grepl("_pre$", n)) " (predicted)" else ""
+    paste0(base, suffix)
+  }
+
   fallback_keys <- character(0)
   flawed_keys <- character(0)
   for (n in names(v_fit_list)) {
+    if (!is.null(target) && !grepl(paste0("_", target, "$"), n)) next
     if (isTRUE(attr(v_fit_list[[n]], "is_fallback"))) {
-      fallback_keys <- c(fallback_keys, n)
+      fallback_keys <- c(fallback_keys, display_key(n))
     } else if (isTRUE(attr(v_fit_list[[n]], "flawed_winner"))) {
-      flawed_keys <- c(flawed_keys, n)
+      flawed_keys <- c(flawed_keys, display_key(n))
     }
   }
   if (length(fallback_keys) == 0 && length(flawed_keys) == 0) return(NULL)
@@ -135,17 +148,17 @@ build_vgm_warning_html <- function(v_fit_list) {
   red_part <- if (length(fallback_keys) > 0) {
     paste0("<span style='color:red;'>Note: Variogram fit failed for some localities (",
            paste(fallback_keys, collapse = ", "),
-           ").<br>A fallback spherical model was applied to prevent application failure. Interpret interpolations with caution.</span>")
+           ").<br>A default spherical variogram model was used instead so the map could still be produced. The map is shown, but its spatial structure was not estimated from your data &mdash; interpret interpolations with caution.</span>")
   } else ""
   amber_part <- if (length(flawed_keys) > 0) {
     paste0("<span style='color:#e67700;'>Auto-fit selected a non-converged or singular variogram for: ",
            paste(flawed_keys, collapse = ", "),
-           ".<br>Interpret interpolations with caution.</span>")
+           ".<br>No candidate model converged cleanly, so the best-scoring (lowest-error) fit was used to build this map. The map is still valid to explore, but variogram parameters may be imprecise &mdash; interpret interpolations with caution.</span>")
   } else ""
   sep <- if (nzchar(red_part) && nzchar(amber_part)) "<br>" else ""
 
-  paste0("<div id='vgm_fallback_warn' style='font-weight:bold; background:white; padding:5px 25px 5px 5px; border-radius:4px; position:relative;'>",
-         "<button onclick='document.getElementById(\"vgm_fallback_warn\").style.display=\"none\";' style='position:absolute; top:2px; right:2px; background:none; border:none; color:red; font-size:16px; font-weight:bold; cursor:pointer;'>&times;</button>",
+  paste0("<div class='vgm-fallback-warn' style='font-weight:bold; background:white; padding:5px 25px 5px 5px; border-radius:4px; position:relative;'>",
+         "<button onclick='this.parentElement.style.display=\"none\";' style='position:absolute; top:2px; right:2px; background:none; border:none; color:red; font-size:16px; font-weight:bold; cursor:pointer;'>&times;</button>",
          red_part, sep, amber_part,
          "</div>")
 }
@@ -1421,13 +1434,17 @@ generate_pca_cumvar <- function(pca_res) {
 
 generate_pca_mahalanobis <- function(pca_res) {
 
-  scores <- as.data.frame(pca_res$x)
+  # PC scores are uncorrelated by construction, so their covariance is
+  # diag(sdev^2); near-zero-variance PCs (collinear inputs) would make that
+  # matrix numerically singular, so they are excluded from the distance
+  keep <- pca_res$sdev > max(pca_res$sdev) * 1e-8
+  scores <- as.data.frame(pca_res$x[, keep, drop = FALSE])
   center <- colMeans(scores)
-  cov_mat <- cov(scores)
-  
+  cov_mat <- diag(pca_res$sdev[keep]^2, nrow = sum(keep))
+
   md <- mahalanobis(scores, center, cov_mat)
   df_md <- data.frame(Index = 1:length(md), Distance = md)
-  
+
   thresh <- qchisq(0.975, df = ncol(scores))
   
   p <- ggplot(df_md, aes(x = Index, y = Distance)) +

@@ -60,6 +60,15 @@ test_that("safe_run_cv catches errors and stores error message", {
   expect_null(res$cv_obj)
 })
 
+test_that("safe_run_cv drops pre-set training residuals when CV fails", {
+  res <- init_interpolation_res()
+  res$residuals <- 1:5  # training residuals, set by RK/RFK for the variogram step
+  res <- safe_run_cv(res, stop("boom"), "RK", 5)
+  expect_null(res$cv_obj)
+  expect_null(res$residuals)
+  expect_match(res$log_msg, "RK CV Error", fixed = TRUE)
+})
+
 test_that("safe_run_cv stores cv_obj on success", {
   pts <- make_test_points(10)
   cv_df <- data.frame(
@@ -283,6 +292,44 @@ test_that("apply_TPS with lambda = 0 interpolates data points exactly", {
   # irrelevant here since lambda is fixed at 0
   res <- suppressWarnings(apply_TPS(pts, "v", pts, list(tps_lambda = 0)))
   expect_equal(res$res_sf$var1.pred, pts$v, tolerance = 1e-4)
+})
+
+test_that("apply_TPS logs and writes a warning file when it falls back to IDW", {
+  pts <- make_test_points(12)
+  grid <- make_test_grid_safe(pts, res = 200)
+
+  tmp <- tempfile("tps_fallback_")
+  dir.create(tmp)
+  old_progress_dir <- getOption("monolith_progress_dir")
+  old_session_id  <- getOption("monolith_session_id")
+  options(monolith_progress_dir = tmp, monolith_session_id = "tps_fb")
+  on.exit({
+    options(monolith_progress_dir = old_progress_dir,
+            monolith_session_id  = old_session_id)
+    unlink(tmp, recursive = TRUE)
+  }, add = TRUE)
+
+  testthat::with_mocked_bindings(
+    {
+      # the app always passes the IDW params alongside tps_lambda (see mp_a
+      # in run_regional_interpolation), so the fallback can use them
+      res <- apply_TPS(pts, "v", grid, list(tps_lambda = 0.01, idw_p = 2, idw_nmax = 12),
+                       l = "loc_A", prefix = "act")
+    },
+    Tps = function(...) stop("forced TPS failure"),
+    .package = "fields"
+  )
+
+  # Fallback still yields IDW predictions and CV results
+  expect_s3_class(res$res_sf, "sf")
+  expect_false(is.na(res$cv_metrics$rmse))
+  # The fallback must be visible in the run log, like the CK/RFK fallbacks
+  expect_match(res$log_msg, "TPS failed", fixed = TRUE)
+  expect_match(res$log_msg, "Falling back to IDW", fixed = TRUE)
+  # ... and in the per-locality warning file
+  warn_file <- file.path(tmp, "warn_tps_fb_loc_A_act.txt")
+  expect_true(file.exists(warn_file))
+  expect_match(readLines(warn_file), "IDW fallback", fixed = TRUE)
 })
 
 # ── apply_OK ──────────────────────────────────────────────────────────────

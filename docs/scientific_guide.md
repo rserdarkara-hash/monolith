@@ -70,6 +70,8 @@ IDW assumes that points closer to the target are more similar. It does not accou
 
 **Agronomical Example:** Generating smooth elevation contours or temperature gradients where abrupt discontinuities are physically implausible.
 
+**Engine Fallback (TPS → IDW):** If the TPS fit fails entirely for a locality (e.g., a degenerate point configuration), the pipeline automatically substitutes an IDW interpolation using the active IDW parameters. The substitution is recorded in the run log (`TPS failed: … Falling back to IDW.`) and surfaced as a per-locality warning, so fallback outputs are never mistaken for genuine TPS results.
+
 ---
 
 ## 2. Grid Resolution Logic
@@ -82,6 +84,8 @@ When resolution is determined dynamically, the engine utilizes a **Fast Nearest 
 <div style="text-align:center;"><i>R<sub>rec</sub> = 0.5 &times; Expected Nearest-Neighbor Distance (h<sub>NN</sub>)</i></div>
 <br>
 This ensures that the mapped grid spacing is directly proportional to your physical sampling spacing, preventing the generation of artificial, unmeasured detail.
+
+All resolution recommendations are computed and expressed in **metres**, regardless of the analysis CRS. If a geographic (degree-based) CRS is selected, nearest-neighbor distances and extents are measured via a Web Mercator (EPSG:3857) projection corrected by cos(latitude) (`calc_metric_spacing()` in `spatial_helpers.R`). Interpolation itself always runs in a projected CRS, so metric pixel sizes remain valid.
 
 ### 2.2 Auto (Per Locality)
 In this mode, the FNN point-density analysis is run **independently** for each locality. If Locality A is densely sampled, it receives a fine resolution (e.g. 50 m); if Locality B is sparsely sampled, it receives a coarse resolution (e.g. 150 m). This is the most geostatistically rigorous approach for multi-site studies.
@@ -96,7 +100,7 @@ The user manually overrides the dynamic recommendations by adjusting a slider in
 
 ## 3. Spatial Boundary & Dynamic Buffering Systems
 
-Defining the boundary (or clipping mask) of your interpolation is critical to determine the physical extent of predictions. Unconstrained interpolation can lead to high-risk extrapolation. Monolith v0.9.6b implements an automated **Dynamic Buffering** engine that scales the boundary padding of each locality based on the active resolution and the mathematical constraints of the selected interpolation method.
+Defining the boundary (or clipping mask) of your interpolation is critical to determine the physical extent of predictions. Unconstrained interpolation can lead to high-risk extrapolation. Monolith implements an automated **Dynamic Buffering** engine that scales the boundary padding of each locality based on the active resolution and the mathematical constraints of the selected interpolation method.
 
 ### 3.1 Boundary Types
 * **Convex Hull / Concave Hull:** Mathematical envelopes drawn tightly around the outer limits of your data points. They connect the outermost sample coordinates like a shrink-wrap and **do not use or support buffer padding**.
@@ -151,6 +155,7 @@ The dashboard employs an automated least-squares fitting algorithm to establish 
 * **Large Dataset Handling**: For larger datasets (typically > 50 points), the engine automatically switches to **5-Fold Cross-Validation** to maintain computational efficiency without sacrificing statistical reliability.
 * **Consistency & Reproducibility**: To ensure a fair comparison across all candidate power factors and maintain true reproducibility, the engine generates a single, deterministic fold-assignment vector (using a fixed random seed). This shared partition removes fold-induced evaluation noise, ensuring the optimal power is selected strictly based on its distance-decay performance.
 * **Local Adaptation**: As the soil variability is site-specific, the "Optimize" button calculates a unique power factor for every selected locality. 
+* **Interpretation Caveat**: The power factor is selected and subsequently evaluated on the same cross-validation data (no nested/outer CV loop). The reported CV metrics for an optimized IDW model may therefore be mildly optimistic, since the power was tuned to minimize exactly that error. This is a deliberate, documented trade-off: a nested CV would multiply the computational cost for a single tuning parameter with a coarse candidate grid, where the selection-induced optimism is small. Compare methods with this in mind.
 
 ### 4.3 TPS Optimization
 * **Logic**: The software optimizes the **Smoothing Parameter** to achieve the ideal mathematical balance between honoring every individual data point and creating a generalized regional trend. By default, the TPS lambda parameter is set to `< 0` (Auto GCV) to apply this natively during interpolation.
@@ -192,7 +197,11 @@ By dropping points according to this partition, we generate a dataset of predict
 - **SMAPE (Symmetric Mean Absolute Percentage Error):** Standardizes absolute errors as percentages, preventing extreme inflation when actual values are near zero.
 
 - **Moran's I (Spatial Autocorrelation of Residuals):**
-  Evaluates whether the LOOCV errors are randomly distributed across the field. If Moran's I is significantly positive, errors are clustered (e.g., the model consistently underestimates in the north and overestimates in the south). This indicates the model failed to capture a macroscopic spatial trend, and an RK or RFK approach might be required. The system uses FNN (k=1) and `spdep` for rapid spatial weights matrix construction when calculating the spatial autocorrelation of residuals. **Note:** The spatial distance threshold for defining neighbors uses a hardcoded multiplier. See Section 9 for details on adjusting this.
+  Evaluates whether the LOOCV errors are randomly distributed across the field. If Moran's I is significantly positive, errors are clustered (e.g., the model consistently underestimates in the north and overestimates in the south). This indicates the model failed to capture a macroscopic spatial trend, and an RK or RFK approach might be required. The system uses FNN (k=1) and `spdep` for rapid spatial weights matrix construction when calculating the spatial autocorrelation of residuals. Datasets containing duplicated coordinates are handled by separating the duplicates with a negligible jitter (±10⁻⁸ map units) applied under a fixed internal seed, so Moran's I is exactly reproducible between runs and the global RNG state is left untouched. **Note:** The spatial distance threshold for defining neighbors uses a hardcoded multiplier. See Section 9 for details on adjusting this.
+
+- **Classification Performance (Accuracy, Cohen's Kappa, Weighted Kappa, MCC):** Observed and predicted values are binned into classes and compared as a confusion problem. For **agronomical classes**, the bin intervals are left-closed `[low, high)` — identical to the map classification (`terra::classify(..., right = FALSE)`) — so a value lying exactly on a class boundary receives the same class in the performance tables and on the classified map. **Quartile** binning uses the conventional right-closed intervals on the observed quartiles.
+
+**Residual semantics on CV failure:** All residual-based diagnostics (validation metrics, pooled CV residual variograms, Moran's I) are computed strictly from cross-validation residuals. If cross-validation fails for a locality, its residuals are left empty rather than silently substituted with model training residuals — CV and training residuals are never mixed.
 
 ---
 
@@ -225,9 +234,10 @@ In Kriging, the uncertainty is a function of the **Spatial Configuration** of yo
 
 ### 7.2 Uncertainty Metrics
 The application allows you to toggle between two primary metrics for visualizing spatial risk:
-* **Kriging Variance**: Represents the theoretical mean squared error of the prediction. It is particularly useful for comparing the relative stability and fit of different variogram models.
+* **Kriging Variance**: Represents the theoretical mean squared error of the prediction, expressed in the *squared* units of the variable (e.g., (mg/kg)² for potassium). Because of the squaring, its legend values are much larger than the variable's typical range — an SE of 130 mg/kg corresponds to a variance of ~17,000 (mg/kg)². It is particularly useful for comparing the relative stability and fit of different variogram models.
 * **Standard Error**: The square root of the variance, expressed in the same units as your primary soil parameter (e.g., %TN or pH units).
 * **Use Case**: This is the most practical metric for agronomists. For example, if a point predicts **2.0% Nitrogen** with a **Standard Error of 0.2**, you can be approximately 95% confident the true value lies between 1.6% and 2.4%.
+* **Display note**: Uncertainty layers are always rendered with a continuous color scale, and the map legend states the metric and its unit (e.g., "Variance: K (mg/kg)²"). Agronomic and Binned classification breaks are defined for concentrations and are therefore not applied to uncertainty surfaces.
 
 ### 7.3 Hybrid Model Uncertainty (RK & RFK)
 For advanced models (Regression Kriging and Random Forest Kriging), the uncertainty is "Combined" to provide a rigorous error surface:

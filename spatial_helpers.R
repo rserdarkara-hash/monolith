@@ -70,6 +70,13 @@ calc_moran <- function(residuals, coords) {
   tryCatch({
     coords_matrix <- as.matrix(coords)
     if (any(duplicated(coords_matrix))) {
+      # Separate duplicates under a sandboxed RNG so Moran's I is
+      # reproducible and the caller's RNG stream is not perturbed
+      if (exists(".Random.seed", envir = .GlobalEnv)) {
+        old_seed <- get(".Random.seed", envir = .GlobalEnv)
+        on.exit(assign(".Random.seed", old_seed, envir = .GlobalEnv))
+      }
+      set.seed(12345)
       coords_matrix[,1] <- jitter(coords_matrix[,1], amount = 1e-8)
       coords_matrix[,2] <- jitter(coords_matrix[,2], amount = 1e-8)
       coords <- coords_matrix
@@ -194,12 +201,6 @@ update_progress_file <- function(l, prefix, step, total) {
   
   tryCatch({
     writeLines(as.character(pct), file_name)
-  }, error = function(e) {
-  })
-  
-  tryCatch({
-    debug_file <- file.path(progress_dir, paste0("progress_debug_", session_id, ".log"))
-    write(paste0("update_progress_file: l=", l, ", prefix=", prefix, ", pct=", pct, ", file=", file_name, ", dir=", progress_dir), file = debug_file, append = TRUE)
   }, error = function(e) {
   })
 }
@@ -512,6 +513,11 @@ safe_run_cv <- function(res, expr, label, n_data) {
   res$cv_metrics <- perform_cv(cv_obj)
   if (!is.null(cv_obj)) {
     res$residuals <- get_cv_residuals(cv_obj, n_data)
+  } else {
+    # CV failed: drop any training residuals set earlier (RK/RFK set them
+    # for the variogram step) so model_resid_* never mixes semantics —
+    # res$residuals holds CV residuals or nothing
+    res$residuals <- NULL
   }
   return(res)
 }
@@ -666,7 +672,7 @@ apply_CK <- function(data, target_var, grid_p, lags, method_params, aux_vars, l 
     
     g_or_err <- tryCatch({
       fit_obj <- fit.lmc(vm, g, vgm(var(data_scaled[[target_var]]), m_type, lags$cutoff / 2, 0), correct.diagonal = 1.01)
-      res$log_msg <- paste0(res$log_msg, "\n[Warning] LMC applied correct.diagonal=1.01 to force positive definiteness.")
+      res$log_msg <- paste0(res$log_msg, "\nLMC fitted with correct.diagonal = 1.01 (standard stabilization applied to every CK fit to keep the coregionalization matrices positive definite).")
       fit_obj
     }, error = function(e) {
       list(error_msg = paste0("LMC Fit Failed: ", e$message, ". Falling back to OK."))
@@ -822,6 +828,8 @@ apply_TPS <- function(data, target_var, grid_p, method_params, l = "region", pre
     
     grid_p %>% mutate(var1.pred = as.vector(p_v))
   }, error = function(e) {
+    res$log_msg <<- paste0(res$log_msg, "\nTPS failed: ", e$message, ". Falling back to IDW.")
+    write_warning_file(l, prefix, "TPS failed, using IDW fallback.")
     idw_fallback <- apply_IDW(data, target_var, grid_p, method_params, l, prefix)
     res$cv_obj <<- idw_fallback$cv_obj
     res$cv_metrics <<- idw_fallback$cv_metrics
@@ -1212,6 +1220,35 @@ run_regional_interpolation <- function(item, current_method, current_crs, aux_va
   })
   
   return(res_out)
+}
+
+# Mean 1-NN distance and bounding-box max dimension in METRES for a point set
+# in any CRS. Geographic coordinates are measured via EPSG:3857 with a
+# cos(latitude) correction (Web Mercator inflates distances by 1/cos(lat));
+# if that transform fails, degree distances are scaled by 111319*cos(lat).
+calc_metric_spacing <- function(pts) {
+  if (is.null(pts) || nrow(pts) < 2) return(list(mean_nn = NA_real_, max_dim = NA_real_))
+
+  crs_units <- sf::st_crs(pts)$units_gdal
+  if (!is.null(crs_units) && !is.na(crs_units) && grepl("degree", crs_units, ignore.case = TRUE)) {
+    pts_m <- tryCatch(sf::st_transform(pts, 3857), error = function(e) pts)
+    lat_c <- mean(sf::st_coordinates(sf::st_transform(pts, 4326))[, 2])
+    dist_scale <- if (identical(pts_m, pts)) {
+      111319 * cos(lat_c * pi / 180)
+    } else {
+      cos(lat_c * pi / 180)
+    }
+    coords <- sf::st_coordinates(pts_m)
+  } else {
+    dist_scale <- 1
+    coords <- sf::st_coordinates(pts)
+  }
+
+  knn_res <- FNN::get.knn(coords, k = 1)
+  list(
+    mean_nn = mean(knn_res$nn.dist) * dist_scale,
+    max_dim = max(diff(range(coords[, 1])), diff(range(coords[, 2]))) * dist_scale
+  )
 }
 
 calc_scientific_lags <- function(sf_pts) {
