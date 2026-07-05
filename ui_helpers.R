@@ -1514,7 +1514,7 @@ generate_group_palette <- function(groups, palette_name = "Set1") {
 add_styled_points <- function(map, pts_sf, color_by = "none", custom_colors = NULL,
                               show_labels = FALSE, label_field = "none",
                               label_size = 11, marker_size = 3,
-                              popup_fn = NULL) {
+                              popup_fn = NULL, legend_layer_id = NULL) {
 
   crs_obj <- sf::st_crs(pts_sf)
   pts_view <- if (is.na(crs_obj$epsg) || crs_obj$epsg != 4326) sf::st_transform(pts_sf, 4326) else pts_sf
@@ -1543,7 +1543,8 @@ add_styled_points <- function(map, pts_sf, color_by = "none", custom_colors = NU
       colors = unname(custom_colors[groups]),
       labels = groups,
       title = color_by,
-      opacity = 0.9
+      opacity = 0.9,
+      layerId = legend_layer_id
     )
   } else {
     fill_colors <- "cyan"

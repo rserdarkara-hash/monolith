@@ -798,13 +798,20 @@ desc_exploratory_server <- function(id, data_reactive, vars_metadata_reactive) {
                         Variable_1 = colnames(df_clean)[i],
                         Variable_2 = colnames(df_clean)[j],
                         Correlation = round(ct$estimate, 3),
-                        P_Value = format.pval(ct$p.value, digits=3, eps=0.001)
+                        p_raw = ct$p.value
                     )
                  }
               }
            }
            if(length(res_list) > 0) {
               res_df <- do.call(rbind, res_list)
+              # Benjamini-Hochberg adjustment across all tested pairs (decided
+              # 2026-07-05, user sign-off): raw p-values stay visible, the BH
+              # column controls the false discovery rate over the whole table
+              res_df$P_Value <- format.pval(res_df$p_raw, digits = 3, eps = 0.001)
+              res_df$P_Adj <- format.pval(p.adjust(res_df$p_raw, method = "BH"), digits = 3, eps = 0.001)
+              res_df$p_raw <- NULL
+              colnames(res_df) <- c("Variable 1", "Variable 2", "Correlation", "P Value", "P Value (BH-adj.)")
               return(DT::datatable(res_df, options = list(pageLength = 10, dom = 'tip', scrollX = TRUE)))
            }
         }

@@ -110,6 +110,11 @@ calc_moran <- function(residuals, coords) {
     weights <- 1 / dists
     weights[is.infinite(weights)] <- 0
     diag(weights) <- 0
+    # Row-standardize (decided 2026-07-05, user sign-off) so this fallback
+    # matches the primary spdep path's nb2listw(style = "W") convention
+    row_sums <- rowSums(weights, na.rm = TRUE)
+    row_sums[row_sums == 0] <- 1
+    weights <- weights / row_sums
     mean_res <- mean(residuals, na.rm = TRUE)
     diffs <- residuals - mean_res
     numerator <- n * sum(weights * outer(diffs, diffs), na.rm = TRUE)
@@ -331,12 +336,16 @@ optimize_idw_p <- function(pts, target_var, nmax = 12) {
   form <- as.formula(paste0("`", target_var, "` ~ 1"))
   
   n_folds <- if(nrow(pts) > 50) 5 else nrow(pts)
-  
-  if (exists(".Random.seed", envir = .GlobalEnv)) {
-    old_seed <- get(".Random.seed", envir = .GlobalEnv)
-    on.exit(assign(".Random.seed", old_seed, envir = .GlobalEnv))
-  }
-  
+
+  # Two-sided seed sandbox: restore the caller's RNG state, or remove the
+  # state set.seed() created if none existed before (same pattern as
+  # perform_kriging_loocv)
+  old_seed <- if (exists(".Random.seed", envir = .GlobalEnv, inherits = FALSE)) get(".Random.seed", envir = .GlobalEnv, inherits = FALSE) else NULL
+  on.exit({
+    if (!is.null(old_seed)) assign(".Random.seed", old_seed, envir = .GlobalEnv)
+    else if (exists(".Random.seed", envir = .GlobalEnv, inherits = FALSE)) rm(".Random.seed", envir = .GlobalEnv)
+  }, add = TRUE)
+
   if (n_folds == nrow(pts)) {
     fold_assign <- 1:nrow(pts)
   } else {
@@ -793,8 +802,12 @@ apply_TPS <- function(data, target_var, grid_p, method_params, l = "region", pre
     update_progress_file(l, prefix, 40, 100)
     if (n_pts > 50) {
       k <- 10
+      # Sandbox the fold-assignment seed so it does not overwrite the
+      # caller's RNG stream (fold assignment itself is unchanged)
+      old_seed <- if (exists(".Random.seed", envir = .GlobalEnv, inherits = FALSE)) get(".Random.seed", envir = .GlobalEnv, inherits = FALSE) else NULL
       set.seed(12345)
       folds <- sample(cut(seq_len(n_pts), breaks = k, labels = FALSE))
+      if (!is.null(old_seed)) assign(".Random.seed", old_seed, envir = .GlobalEnv) else rm(".Random.seed", envir = .GlobalEnv)
       cv_vals <- numeric(n_pts)
       for (i in seq_len(k)) {
         test_idx <- which(folds == i)
@@ -891,7 +904,7 @@ get_joint_scale_values <- function(r1_packed, r2_packed, match_scales, is_uncert
 }
 
 
-compute_governing_factors <- function(df, target_col, predictors, n_permutations = 10, rf_ntree = 100, shap_sample_size = 100) {
+compute_governing_factors <- function(df, target_col, predictors, n_permutations = 10, rf_ntree = 100, shap_sample_size = 100, cores_hint = NULL) {
   req_cols <- c(target_col, predictors)
   df_clean <- df[, req_cols, drop = FALSE]
   df_clean <- df_clean[complete.cases(df_clean), , drop = FALSE]
@@ -928,12 +941,28 @@ compute_governing_factors <- function(df, target_col, predictors, n_permutations
 
   # Per-observation SHAP is embarrassingly parallel. This runs inside the
   # gov-module future_promise worker, where the nested plan is sequential, so
-  # escalate to multisession only for workloads big enough to amortize worker
-  # startup. seed = TRUE gives each observation its own L'Ecuyer RNG stream,
-  # making results identical under any plan (sequential or parallel).
-  if (length(sample_idx) >= 50 && future::nbrOfWorkers() == 1L && future::availableCores() > 1L) {
-    old_plan <- future::plan(future::multisession, workers = min(future::availableCores() - 1L, 8L))
-    on.exit(future::plan(old_plan), add = TRUE)
+  # escalate only for workloads big enough to amortize worker startup.
+  # seed = TRUE gives each observation its own L'Ecuyer RNG stream, making
+  # results identical under any plan (sequential or parallel).
+  # T13 (same pattern as the T12 run pipeline): a PSOCK worker reports
+  # availableCores() = 1, so the caller passes the core count in from the
+  # main session (cores_hint); the in-process default keeps direct calls
+  # (tests, scripts) working. The cluster is owned explicitly and torn down
+  # on exit, with mc.cores restored for the reused promise worker.
+  if (is.null(cores_hint)) {
+    cores_hint <- tryCatch(as.integer(future::availableCores()), error = function(e) 1L)
+  }
+  n_shap_workers <- min(max(0L, cores_hint - 1L), 8L)
+  if (length(sample_idx) >= 50 && n_shap_workers >= 2L && future::nbrOfWorkers() == 1L) {
+    old_mc_cores <- getOption("mc.cores")
+    options(mc.cores = n_shap_workers)
+    shap_cl <- parallelly::makeClusterPSOCK(n_shap_workers)
+    old_plan <- future::plan(future::cluster, workers = shap_cl)
+    on.exit({
+      future::plan(old_plan)
+      parallel::stopCluster(shap_cl)
+      options(mc.cores = old_mc_cores)
+    }, add = TRUE)
   }
   shap_list <- furrr::future_map(sample_idx, function(i) {
     sp <- DALEX::predict_parts(explainer_rf, new_observation = df_clean[i, predictors, drop = FALSE], type = "shap")
@@ -1190,7 +1219,9 @@ run_regional_interpolation <- function(item, current_method, current_crs, aux_va
     
     if(!is.null(r_a) && !is.null(r_p)) res_out$r_res <- terra::wrap(r_a - r_p)
     
-    pts_err_raw <- pts_data %>% dplyr::filter(!is.na(v), !is.na(pv))
+    # x/y must be filtered too: pts_data is the raw upload, and st_as_sf
+    # errors on NA coordinates, which would abort the rest of this locality
+    pts_err_raw <- pts_data %>% dplyr::filter(!is.na(x), !is.na(y), !is.na(v), !is.na(pv))
     if(nrow(pts_err_raw) >= 3) {
         pts_err <- sf::st_as_sf(pts_err_raw, coords=c("x","y"), crs=utm_crs) %>%
                    dplyr::mutate(err = v - pv)

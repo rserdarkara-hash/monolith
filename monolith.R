@@ -845,7 +845,7 @@ ui <- fluidPage(
 
 server <- function(input, output, session) {
 
-  session_id <- paste0("session_", shiny:::createUniqueId(8))
+  session_id <- paste0("session_", substr(session$token, 1, 16))
   session_progress_dir <- file.path(tempdir(), "monolith_progress", session_id)
   
   dir.create(session_progress_dir, recursive = TRUE, showWarnings = FALSE)
@@ -1174,6 +1174,13 @@ server <- function(input, output, session) {
   session_state$comp_maps_rendered <- FALSE
   session_state$minimap_rendered <- FALSE
 
+  # T10: bumped by every map renderLeaflet. Overlay observers depend on it so
+  # proxy-managed layers (points, borders, controls) are re-applied after each
+  # full re-render; leafletProxy defers until after the flush, so the calls
+  # land on the freshly rendered widget.
+  map_overlay_rev <- reactiveVal(0L)
+  overlay_map_ids <- c("main_map", "comp_map_left", "comp_map_right")
+
   rv <- reactiveValues(
     user_data = NULL, # Uploaded data
     has_predictions = FALSE, # Tracks interpolation state
@@ -1321,10 +1328,8 @@ server <- function(input, output, session) {
         current_cfg <- isolate(rv$run_config_summary)
         current_reg <- isolate(rv$export_registry)
         if (!is.null(current_cfg) && length(current_reg) > 0) {
-          rv$run_history <- c(
-            list(list(config = current_cfg, registry = current_reg)),
-            history_list[-idx]
-          )
+          push_run_history(list(config = current_cfg, registry = current_reg),
+                           base = history_list[-idx])
         } else {
           rv$run_history <- history_list[-idx]
         }
@@ -1734,11 +1739,17 @@ server <- function(input, output, session) {
         }
       })
       
+      if (length(files_to_zip) == 0) {
+        unlink(temp_dir, recursive = TRUE)
+        showNotification("Batch export failed: none of the selected assets could be exported. Check the Log tab for details.", type = "error", duration = 10)
+        stop("No assets could be exported.")
+      }
+
       zip_path <- file.path(temp_dir, "export.zip")
       zip::zip(zipfile = zip_path, files = files_to_zip, root = temp_dir)
-      
+
       file.copy(zip_path, file)
-      
+
       unlink(temp_dir, recursive = TRUE)
     }
   )
@@ -1890,17 +1901,47 @@ server <- function(input, output, session) {
     )
   })
 
-  generate_popup <- function(data_row) {
+  # T8: resolve each popup variable to its data column once per point set, so
+  # generate_popup does a plain lookup per point instead of up to four regex
+  # searches per variable per point. Returns a popup_fn(data_row) closure.
+  make_popup_fn <- function(cnames) {
+    resolve_col <- function(key) {
+      key <- as.character(key)
+      if (key %in% cnames) return(key)
+      idx <- grep(paste0("^", key, "$"), cnames, ignore.case = TRUE)
+      if (length(idx) > 0) return(cnames[idx[1]])
+      idx <- grep(paste0(key, "$"), cnames, ignore.case = TRUE)
+      if (length(idx) > 0) return(cnames[idx[1]])
+      idx <- grep(key, cnames, ignore.case = TRUE)
+      if (length(idx) > 0) return(cnames[idx[1]])
+      NA_character_
+    }
+    cache <- popup_metadata_cache()
+    keys <- unique(c(
+      unlist(lapply(cache$grouped_vars, function(cvs) vapply(cvs, function(v) as.character(v$actual), character(1)))),
+      as.character(setdiff(cache$vars_to_show, cache$meta_actuals))
+    ))
+    col_map <- vapply(keys, resolve_col, character(1))
+    function(data_row) generate_popup(data_row, col_map = col_map)
+  }
+
+  generate_popup <- function(data_row, col_map = NULL) {
     data_row <- as.list(data_row)
     names_in_row <- names(data_row)
-    
+
     find_val <- function(key) {
+      key <- as.character(key)
+      if (!is.null(col_map) && key %in% names(col_map)) {
+        col <- col_map[[key]]
+        if (is.na(col)) return(NULL)
+        return(data_row[[col]])
+      }
       if (key %in% names_in_row) return(data_row[[key]])
       idx <- grep(paste0("^", key, "$"), names_in_row, ignore.case = TRUE)
       if (length(idx) > 0) return(data_row[[idx[1]]])
       idx <- grep(paste0(key, "$"), names_in_row, ignore.case = TRUE)
       if (length(idx) > 0) return(data_row[[idx[1]]])
-      idx <- grep(as.character(key), names_in_row, ignore.case = TRUE)
+      idx <- grep(key, names_in_row, ignore.case = TRUE)
       if (length(idx) > 0) return(data_row[[idx[1]]])
       return(NULL)
     }
@@ -2221,8 +2262,16 @@ server <- function(input, output, session) {
   observeEvent(input$crs_selection, {
     req(input$crs_selection)
 
-    updateSliderInput(session, "grid_res", label = "Resolution (m)",
-                      min = 1, max = 500, value = 50, step = 1)
+    # In fixed mode the user chose the value deliberately — only refresh the
+    # slider frame; in auto modes the suggestion observer overwrites the value
+    # right after anyway
+    if (isTRUE(input$res_mode == "fixed")) {
+      updateSliderInput(session, "grid_res", label = "Resolution (m)",
+                        min = 1, max = 500, step = 1)
+    } else {
+      updateSliderInput(session, "grid_res", label = "Resolution (m)",
+                        min = 1, max = 500, value = 50, step = 1)
+    }
   })
   observeEvent(list(rv$user_data, input$map_x, input$map_y, input$crs_selection, input$locality, input$res_mode), {
     req(rv$user_data, input$map_x, input$map_y, input$crs_selection, input$locality, input$res_mode)
@@ -2573,10 +2622,28 @@ server <- function(input, output, session) {
           p("Supported with the Descriptive and Exploratory Suite with dynamic visualizations and statistics."),
           hr(),
           p(strong("A vibe-coded product of `that` couple of months following the loss of institutional e-mail address.")),
-          p(style = "color: #666; font-size: 0.9em;", "  by Recep Serdar Kara in cooperation with Gemini CLI - 2026")
+          p(style = "color: #666; font-size: 0.9em;", "  by Recep Serdar Kara in cooperation with Gemini CLI - 2026"),
+          hr(),
+          tags$details(
+            tags$summary(style = "cursor: pointer; color: #007bff;", "Session Info (reproducibility)"),
+            tags$pre(style = "text-align: left; font-size: 0.72em; max-height: 250px; overflow-y: auto; margin-top: 8px;",
+                     paste(utils::capture.output(utils::sessionInfo()), collapse = "\n"))
+          ),
+          downloadButton("download_session_info", "Download session info (.txt)", class = "btn-sm btn-default", style = "margin-top: 8px;")
       )
     ))
   })
+
+  output$download_session_info <- downloadHandler(
+    filename = function() { paste0("monolith_session_info_", format(Sys.time(), "%Y%m%d_%H%M%S"), ".txt") },
+    content = function(file) {
+      writeLines(c(
+        paste0("Monolith session info — generated ", format(Sys.time(), "%Y-%m-%d %H:%M:%S")),
+        "",
+        utils::capture.output(utils::sessionInfo())
+      ), file)
+    }
+  )
   
   output$render_user_guide <- renderUI({
     withMathJax(HTML(commonmark::markdown_html(paste(readLines("docs/user_guide.md", warn = FALSE), collapse = "\n"))))
@@ -3376,8 +3443,10 @@ server <- function(input, output, session) {
     if (n_locs == 0) n_locs <- 1
     
     comp_mode <- isTruthy(input$comp_mode) || isTruthy(input$value_type != "actual")
-    cores <- tryCatch(future::nbrOfWorkers(), error = function(e) 1)
-    if (is.null(cores) || cores < 1) cores <- 1
+    # mirror the nested-worker topology the run pipeline actually uses (T12)
+    cores <- tryCatch(as.integer(future::availableCores()), error = function(e) 1L)
+    if (is.null(cores) || is.na(cores) || cores < 1) cores <- 1L
+    cores <- if (n_locs > 1) max(1L, min(cores - 1L, n_locs)) else 1L
     
     loc_sample_counts <- numeric(n_locs)
     if (!is.null(rv$user_data) && !is.null(loc_col) && loc_col %in% colnames(rv$user_data) && !("Unknown" %in% selected_locs)) {
@@ -3400,12 +3469,27 @@ server <- function(input, output, session) {
     ))
   }
 
+  # T7: archived registries hold wrapped rasters, so an unbounded archive
+  # grows RAM run after run — keep only the most recent few
+  MAX_RUN_HISTORY <- 5L
+  push_run_history <- function(entry, base = NULL) {
+    hist <- c(list(entry), if (is.null(base)) rv$run_history else base)
+    if (length(hist) > MAX_RUN_HISTORY) {
+      n_drop <- length(hist) - MAX_RUN_HISTORY
+      hist <- hist[seq_len(MAX_RUN_HISTORY)]
+      showNotification(paste0("Run archive limit (", MAX_RUN_HISTORY, ") reached — ", n_drop,
+                              " oldest archived run(s) discarded to free memory."),
+                       type = "warning", duration = 8)
+    }
+    rv$run_history <- hist
+  }
+
   archive_and_proceed <- function(action, meta, n_locs, estimate_text, is_long_run) {
     if (action == "archive") {
       current_cfg <- rv$run_config_summary
       current_reg <- rv$export_registry
       if (!is.null(current_cfg) && length(current_reg) > 0) {
-        rv$run_history <- c(list(list(config = current_cfg, registry = current_reg)), rv$run_history)
+        push_run_history(list(config = current_cfg, registry = current_reg))
       }
     } else if (action == "discard") {
       rv$v_fit_list <- list()
@@ -3792,7 +3876,6 @@ server <- function(input, output, session) {
     this_token <- rv$run_token
 
     log_start_time <- Sys.time()
-    log_cores <- tryCatch(future::nbrOfWorkers(), error = function(e) 1)
     log_method <- current_method
     log_comp_mode <- comp_mode
     log_n_locs <- length(df_list)
@@ -3800,63 +3883,122 @@ server <- function(input, output, session) {
     
     vif_thresh_local <- rv$active_vif_thresh
 
+    # T6: single source of truth for every helper the interpolation worker
+    # needs. future_promise ships them into the worker's global env via
+    # `globals` (robust_vgm_fit / clean_gstat_env live in monolith.R and
+    # get_buffer_multiplier in ui_helpers.R, so the worker's
+    # source("spatial_helpers.R") alone does NOT define them); the inner
+    # furrr::future_map re-declares the same names for any nested workers.
+    interp_globals <- c(
+      "run_regional_interpolation", "calc_scientific_lags", "robust_vgm_fit",
+      "apply_interpolation", "apply_OK", "apply_RK", "apply_RFK", "apply_CK",
+      "apply_IDW", "apply_TPS", "perform_kriging_loocv", "safe_run_cv",
+      "optimize_idw_p", "clean_gstat_env",
+      "apply_kriging_pipeline", "check_vif", "krige_covariates", "get_buffer_multiplier",
+      "sanitize_spatial_predictions", "validate_and_project_sf", "suggest_lmc_model",
+      ".cv_to_df", "detect_cv_columns"
+    )
+    # Materialize the helpers ONCE here in the main session. A plain named
+    # list referenced by symbol is shipped reliably by automatic globals
+    # detection; future_promise does NOT honor future's structure(TRUE, add=)
+    # globals idiom (verified 2026-07-05 — the add= names silently never
+    # reached the worker). mget() also fails fast if a helper is missing.
+    interp_helper_values <- mget(interp_globals, inherits = TRUE)
+
+    # T12: nested futures default to a sequential plan, so without an explicit
+    # escalation all localities run one after another inside the single
+    # future_promise worker. The nested worker count is decided HERE in the
+    # main session (availableCores() introspection inside a PSOCK worker is
+    # unreliable) and shipped into the worker as plain data. Numerics are
+    # plan-independent: furrr's fixed seed assigns one L'Ecuyer stream per
+    # locality regardless of topology.
+    cores_hint <- tryCatch(as.integer(future::availableCores()), error = function(e) 1L)
+    nested_workers <- if (length(df_list) > 1L) max(1L, min(cores_hint - 1L, length(df_list))) else 1L
+    # record the ACTUAL parallelism in run_history.csv so the duration
+    # estimator calibrates against what really happened
+    log_cores <- nested_workers
+
     promises::future_promise({
       setwd(main_wd)
+      # Define the helpers in the worker's GLOBAL env: functions sourced from
+      # spatial_helpers.R resolve robust_vgm_fit & co. through their
+      # enclosure (the worker's globalenv), not through the future's eval env
+      list2env(interp_helper_values, envir = globalenv())
       source("spatial_helpers.R", local = FALSE)
-      
-      force_globals <- list(
-        run_regional_interpolation, calc_scientific_lags, robust_vgm_fit, 
-        apply_interpolation, apply_OK, apply_RK, apply_RFK, apply_CK, 
-        apply_IDW, apply_TPS, perform_kriging_loocv, safe_run_cv, 
-        optimize_idw_p, clean_gstat_env,
-        apply_kriging_pipeline, check_vif, krige_covariates, get_buffer_multiplier,
-        sanitize_spatial_predictions, validate_and_project_sf, suggest_lmc_model,
-        .cv_to_df, detect_cv_columns
+
+      nested_cl <- NULL
+      old_mc_cores <- getOption("mc.cores")
+      if (nested_workers >= 2L && future::nbrOfWorkers() == 1L) {
+        # PSOCK workers report mc.cores = 1; the main session allocated
+        # nested_workers cores to this batch, so tell parallelly before
+        # spawning or its worker-count guard misfires. Owning the cluster
+        # explicitly (instead of plan(multisession)) guarantees a clean
+        # teardown in the finally block below.
+        options(mc.cores = nested_workers)
+        nested_cl <- parallelly::makeClusterPSOCK(nested_workers)
+        future::plan(future::cluster, workers = nested_cl)
+      }
+
+      # Exact export set for the nested workers, as a named list: neither
+      # furrr nor future_promise honors future's structure(TRUE, add=)
+      # globals idiom, and the bare character-vector form omits the run
+      # parameters.
+      furrr_globals <- c(
+        interp_helper_values,
+        list(main_wd = main_wd,
+             current_method = current_method, current_crs = current_crs, aux_vars = aux_vars,
+             shp_bound = shp_bound, b_type = b_type, buff_mode = buff_mode, b_dist = b_dist,
+             res_mode = res_mode, grid_res = grid_res, crs_sel = crs_sel,
+             comp_mode = comp_mode, val_type = val_type,
+             progress_dir_val = progress_dir_val, session_id_val = session_id_val,
+             cancel_file_val = cancel_file_val, vif_thresh_local = vif_thresh_local)
       )
-      
-      res_all <- furrr::future_map(df_list, function(item) {
-        force_globals_nested <- list(
-          run_regional_interpolation, calc_scientific_lags, robust_vgm_fit, 
-          apply_interpolation, apply_OK, apply_RK, apply_RFK, apply_CK, 
-          apply_IDW, apply_TPS, perform_kriging_loocv, safe_run_cv, 
-          optimize_idw_p, clean_gstat_env,
-          apply_kriging_pipeline, check_vif, krige_covariates, get_buffer_multiplier,
-          sanitize_spatial_predictions, validate_and_project_sf, suggest_lmc_model,
-          .cv_to_df, detect_cv_columns
-        )
-        
-        run_regional_interpolation(
-          item = item,
-          current_method = current_method,
-          current_crs = current_crs,
-          aux_vars = aux_vars,
-          shp_bound = shp_bound,
-          b_type = b_type,
-          buff_mode = buff_mode,
-          b_dist = b_dist,
-          res_mode = res_mode,
-          grid_res = grid_res,
-          crs_sel = crs_sel,
-          comp_mode = comp_mode,
-          val_type = val_type,
-          progress_dir_val = progress_dir_val,
-          session_id_val = session_id_val,
-          cancel_file_val = cancel_file_val,
-          vif_threshold = vif_thresh_local
-        )
-      }, .options = furrr::furrr_options(
-        seed = 12345,
-        globals = c(
-          "run_regional_interpolation", "calc_scientific_lags", "robust_vgm_fit",
-          "apply_interpolation", "apply_OK", "apply_RK", "apply_RFK", "apply_CK",
-          "apply_IDW", "apply_TPS", "perform_kriging_loocv", "safe_run_cv",
-          "optimize_idw_p", "clean_gstat_env",
-          "apply_kriging_pipeline", "check_vif", "krige_covariates", "get_buffer_multiplier",
-          "sanitize_spatial_predictions", "validate_and_project_sf", "suggest_lmc_model",
-          ".cv_to_df", "detect_cv_columns"
-        )
-      ))
-      return(res_all)
+
+      tryCatch({
+        furrr::future_map(df_list, function(item) {
+          # Nested workers are fresh processes: define the FULL helper set the
+          # same way the promise worker does. The globals list above only
+          # ships the entry points plus the helpers living outside
+          # spatial_helpers.R (robust_vgm_fit, clean_gstat_env,
+          # get_buffer_multiplier) — not every internal spatial_helpers
+          # function they call.
+          source(file.path(main_wd, "spatial_helpers.R"), local = FALSE)
+          run_regional_interpolation(
+            item = item,
+            current_method = current_method,
+            current_crs = current_crs,
+            aux_vars = aux_vars,
+            shp_bound = shp_bound,
+            b_type = b_type,
+            buff_mode = buff_mode,
+            b_dist = b_dist,
+            res_mode = res_mode,
+            grid_res = grid_res,
+            crs_sel = crs_sel,
+            comp_mode = comp_mode,
+            val_type = val_type,
+            progress_dir_val = progress_dir_val,
+            session_id_val = session_id_val,
+            cancel_file_val = cancel_file_val,
+            vif_threshold = vif_thresh_local
+          )
+        }, .options = furrr::furrr_options(
+          seed = 12345,
+          globals = furrr_globals,
+          # packages used UNQUALIFIED in the helper call graph; namespaced
+          # calls (terra::, FNN::, randomForest::, ...) need no attaching
+          packages = c("sf", "gstat", "dplyr")
+        ))
+      }, finally = {
+        # tear the nested cluster down and restore mc.cores so the (reused)
+        # promise worker returns to the plain single-threaded state other
+        # future_promise tasks expect
+        if (!is.null(nested_cl)) {
+          future::plan(future::sequential)
+          parallel::stopCluster(nested_cl)
+          options(mc.cores = old_mc_cores)
+        }
+      })
     }, seed = 12345) %...>% (function(res_all) {
       if (this_token != rv$run_token) return()
       
@@ -4366,8 +4508,13 @@ server <- function(input, output, session) {
     df
   }, striped = TRUE, hover = TRUE, bordered = TRUE, width = "100%")
 
+  # T10: draw_map only builds what requires re-encoding raster layers (run
+  # results, value type, classification/palette/uncertainty). Cheap overlays
+  # (styled points, borders, north arrow, scale, resolution box, base tiles)
+  # are applied by leafletProxy observers keyed on map_overlay_rev, so
+  # toggling them no longer re-renders the whole widget.
   draw_map <- function(r_obj, lab) {
-    current_tiles <- input$base_map_layer %||% "Esri.WorldImagery"
+    current_tiles <- isolate(input$base_map_layer) %||% "Esri.WorldImagery"
     
     if((is.null(r_obj) || (is.list(r_obj) && length(r_obj) == 0)) && lab != "resid_points") return(leaflet(options = leafletOptions(zoomControl = FALSE)) %>% addProviderTiles(current_tiles, layerId="base_tiles"))
     
@@ -4496,7 +4643,8 @@ server <- function(input, output, session) {
        if(is.infinite(abs_max_p) || is.na(abs_max_p)) abs_max_p <- 1
        pal_pts <- colorNumeric("RdBu", domain = c(-abs_max_p, abs_max_p), na.color = "black")
        df_clean <- st_drop_geometry(pts_view)
-       popups <- vapply(seq_len(nrow(df_clean)), function(i) generate_popup(df_clean[i, ]), character(1))
+       popup_builder <- make_popup_fn(colnames(df_clean))
+       popups <- vapply(seq_len(nrow(df_clean)), function(i) popup_builder(df_clean[i, ]), character(1))
        
        m <- m %>% addCircleMarkers(data = pts_view, radius = 5, color = "black", weight = 1,
                                   fillColor = ~pal_pts(resid), fillOpacity = 0.9,
@@ -4504,56 +4652,111 @@ server <- function(input, output, session) {
        m <- m %>% leaflet::addLegend(pal = pal_pts, values = c(-abs_max_p, abs_max_p), title = paste("Point Resid:", meta$label))
     }
     
-    if(input$show_points_viewer && lab != "resid_raster" && lab != "resid_points") {
-      pts_view <- st_transform(rv$sf, 4326)
-      if(nrow(pts_view) > 0) {
-        color_by <- input$pt_color_by %||% "none"
-        label_field <- input$pt_label_field %||% "none"
+    m
+  }
 
-        m <- add_styled_points(m, pts_view,
-          color_by = color_by,
+  # --- T10: proxy-managed overlays (no raster re-encode on toggle) ---
+
+  # Styled sampling points + labels + their legend
+  observe({
+    map_overlay_rev()
+    show <- isTRUE(input$show_points_viewer)
+    is_resid <- isTruthy(input$value_type) && input$value_type == "resid"
+    pts <- rv$sf
+
+    pts_view <- NULL
+    popup_fn <- NULL
+    if (show && !is.null(pts) && nrow(pts) > 0) {
+      pts_view <- tryCatch(st_transform(pts, 4326), error = function(e) NULL)
+      if (!is.null(pts_view)) popup_fn <- make_popup_fn(colnames(st_drop_geometry(pts_view)))
+    }
+
+    for (map_id in overlay_map_ids) {
+      proxy <- leafletProxy(map_id) %>%
+        clearGroup("styled_points") %>%
+        clearGroup("styled_labels") %>%
+        removeControl("styled_points_legend")
+      # Same rule as the old draw_map: no styled points on the residual
+      # comparison maps (resid_raster / resid_points views)
+      eligible <- map_id == "main_map" || !is_resid
+      if (eligible && !is.null(pts_view)) {
+        add_styled_points(proxy, pts_view,
+          color_by = input$pt_color_by %||% "none",
           custom_colors = rv$pt_style_colors,
           show_labels = isTRUE(input$pt_show_labels),
-          label_field = label_field,
+          label_field = input$pt_label_field %||% "none",
           label_size = input$pt_label_size %||% 11,
           marker_size = input$pt_marker_size %||% 3,
-          popup_fn = generate_popup
+          popup_fn = popup_fn,
+          legend_layer_id = "styled_points_legend"
         )
       }
     }
-    
-    if(input$show_borders && !is.null(rv$bound)) {
-      m <- m %>% addPolygons(data = st_transform(st_as_sf(rv$bound), 4326), fill = FALSE, color = "white", weight = 2)
+  })
+
+  # Boundary outlines
+  observe({
+    map_overlay_rev()
+    bound_4326 <- if (isTRUE(input$show_borders) && !is.null(rv$bound)) {
+      tryCatch(st_transform(st_as_sf(rv$bound), 4326), error = function(e) NULL)
+    } else NULL
+    for (map_id in overlay_map_ids) {
+      proxy <- leafletProxy(map_id) %>% clearGroup("bound_borders")
+      if (!is.null(bound_4326)) {
+        proxy %>% addPolygons(data = bound_4326, fill = FALSE, color = "white", weight = 2, group = "bound_borders")
+      }
     }
-    
-    if(input$show_north) {
-      m <- m %>% addControl(html="<div style='text-align: center; color: white; font-family: Arial, sans-serif; pointer-events: none;'><div style='font-size: 16px; font-weight: bold; line-height: 1; margin-bottom: 4px; text-shadow: 1px 1px 2px black;'>N</div><svg width='30' height='30' viewBox='0 0 24 24' style='filter: drop-shadow(1px 1px 2px black);'><polygon points='12,2 7,22 12,17 17,22' fill='#e74c3c' stroke='white' stroke-width='1.5'/><polygon points='12,2 7,22 12,17' fill='#c0392b' stroke='white' stroke-width='1.5'/></svg></div>", position="topleft")
+  })
+
+  # North arrow
+  north_arrow_html <- "<div style='text-align: center; color: white; font-family: Arial, sans-serif; pointer-events: none;'><div style='font-size: 16px; font-weight: bold; line-height: 1; margin-bottom: 4px; text-shadow: 1px 1px 2px black;'>N</div><svg width='30' height='30' viewBox='0 0 24 24' style='filter: drop-shadow(1px 1px 2px black);'><polygon points='12,2 7,22 12,17 17,22' fill='#e74c3c' stroke='white' stroke-width='1.5'/><polygon points='12,2 7,22 12,17' fill='#c0392b' stroke='white' stroke-width='1.5'/></svg></div>"
+  observe({
+    map_overlay_rev()
+    show <- isTRUE(input$show_north)
+    for (map_id in overlay_map_ids) {
+      proxy <- leafletProxy(map_id) %>% removeControl("north_ctrl")
+      if (show) proxy %>% addControl(html = north_arrow_html, position = "topleft", layerId = "north_ctrl")
     }
-    if(input$show_scale) {
-      m <- m %>% htmlwidgets::onRender("
-        function(el, x) {
-          var map = this;
-          var scale = L.control.scale({position: 'bottomleft', metric: true, imperial: false}).addTo(map);
-          var c = document.getElementById('distance_scale_container');
-          if(c) {
-            c.innerHTML = '';
-            var s = scale.getContainer();
-            s.style.margin = '0 auto';
-            s.style.border = '1px solid #ccc';
-            s.style.borderRadius = '4px';
-            c.appendChild(s);
+  })
+
+  # Per-locality resolution box
+  observe({
+    map_overlay_rev()
+    show <- isTRUE(input$show_res_overlay) && length(rv$loc_resolutions) > 0
+    res_html <- if (show) {
+      paste0("<div style='background:white; padding:5px; border-radius:4px; border: 1px solid #ccc; font-size:12px; font-family:sans-serif;'><b>Resolutions:</b><br>", paste(names(rv$loc_resolutions), sapply(rv$loc_resolutions, function(x) round(x,2)), sep=": ", collapse="<br>"), "</div>")
+    } else NULL
+    for (map_id in overlay_map_ids) {
+      proxy <- leafletProxy(map_id) %>% removeControl("res_overlay_ctrl")
+      if (!is.null(res_html)) proxy %>% addControl(html = res_html, position = "bottomright", layerId = "res_overlay_ctrl")
+    }
+  })
+
+  # Distance scale. The control lives in the external #distance_scale_container
+  # (a global setInterval relocates any .leaflet-control-scale there), so it is
+  # toggled with plain JS on the live map instances instead of a re-render.
+  observe({
+    map_overlay_rev()
+    show <- isTRUE(input$show_scale)
+    shinyjs::runjs(sprintf("
+      setTimeout(function() {
+        var show = %s;
+        var c = document.getElementById('distance_scale_container');
+        if (c) c.innerHTML = '';
+        ['main_map','comp_map_left','comp_map_right'].forEach(function(id) {
+          var el = document.getElementById(id);
+          if (!el || el.offsetParent === null) return;
+          var w = HTMLWidgets.find('#' + id);
+          if (!w || !w.getMap) return;
+          var map = w.getMap();
+          if (map._monolithScale) { try { map.removeControl(map._monolithScale); } catch(e) {} map._monolithScale = null; }
+          if (show) {
+            map._monolithScale = L.control.scale({position: 'bottomleft', metric: true, imperial: false}).addTo(map);
           }
-        }
-      ")
-    }
-    
-    if(input$show_res_overlay && length(rv$loc_resolutions) > 0) {
-      res_html <- paste0("<div style='background:white; padding:5px; border-radius:4px; border: 1px solid #ccc; font-size:12px; font-family:sans-serif;'><b>Resolutions:</b><br>", paste(names(rv$loc_resolutions), sapply(rv$loc_resolutions, function(x) round(x,2)), sep=": ", collapse="<br>"), "</div>")
-      m <- m %>% addControl(html=res_html, position="bottomright")
-    }
-    
-    m
-  }
+        });
+      }, 400);
+    ", if (show) "true" else "false"))
+  })
 
   output$main_map_title <- renderText({
     req(input$value_type); meta <- get_current_meta(); req(meta)
@@ -4608,9 +4811,13 @@ server <- function(input, output, session) {
   })
 
   observeEvent(input$base_map_layer, {
-    leafletProxy("main_map") %>%
-      clearTiles() %>%
-      addProviderTiles(input$base_map_layer, layerId="base_tiles", options = providerTileOptions(zIndex = -10))
+    # draw_map reads the tile choice under isolate(), so this proxy swap is
+    # the only path that updates tiles on an already-rendered map
+    for (map_id in overlay_map_ids) {
+      leafletProxy(map_id) %>%
+        clearTiles() %>%
+        addProviderTiles(input$base_map_layer, layerId="base_tiles", options = providerTileOptions(zIndex = -10))
+    }
   })
 
   observeEvent(input$refresh_map_area, {
@@ -4661,6 +4868,7 @@ server <- function(input, output, session) {
               else rv$rast_list_pre
     m <- draw_map(target, input$value_type)
     session_state$main_map_rendered <- TRUE
+    map_overlay_rev(isolate(map_overlay_rev()) + 1L)
     m
   })
 
@@ -4672,6 +4880,7 @@ server <- function(input, output, session) {
       draw_map(rv$rast_list_act, "Actual")
     }
     session_state$comp_maps_rendered <- TRUE
+    map_overlay_rev(isolate(map_overlay_rev()) + 1L)
     m
   })
 
@@ -4683,6 +4892,7 @@ server <- function(input, output, session) {
       draw_map(rv$rast_list_pre, "Predicted")
     }
     session_state$comp_maps_rendered <- TRUE
+    map_overlay_rev(isolate(map_overlay_rev()) + 1L)
     m
   })
       output$locality_pan_ui <- renderUI({

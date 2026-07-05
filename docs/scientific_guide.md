@@ -245,6 +245,8 @@ For advanced models (Regression Kriging and Random Forest Kriging), the uncertai
 * **Residual Uncertainty**: Captures the Kriging error of the remaining unexplained variation.
 * **Total Map**: The final uncertainty map for RK/RFK is the mathematical sum of both the trend variance and the residual kriging variance, providing a comprehensive "Full-Model" error surface.
 
+**Important — the trend-uncertainty term differs between RK and RFK.** For RK, the trend component is the parametric standard error of the linear-model prediction (`se.fit²`), i.e. the variance of the estimated mean surface. For RFK, no closed-form standard error exists, so the trend component is a widely used heuristic: the **between-tree variance** of the Random Forest ensemble (the spread of the individual trees' predictions around the ensemble mean). This between-tree spread reflects model instability rather than a formal predictive variance, and it typically **understates** the true predictive uncertainty of the forest. The RK and RFK uncertainty maps are therefore not directly comparable in magnitude, and RFK uncertainty should be interpreted as a relative (where is the model least stable?) rather than an absolute (what is the 95% interval?) error measure. Both maps remain labeled "Variance"/"SE" for UI consistency. Formal alternatives (e.g., the infinitesimal jackknife of Wager et al., 2014, or quantile regression forests) would change the numeric surfaces and are deliberately not applied.
+
 ---
 
 ## 8. Data Analytics & PCA Protocols

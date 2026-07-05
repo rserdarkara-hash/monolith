@@ -142,17 +142,22 @@ gov_factors_server <- function(id, data_reactive, vars_metadata_reactive) {
       n_perms <- input$gov_permutations
       ntree_val <- input$gov_ntree
       shap_size_val <- input$gov_shap_size
-      
+      # T13: computed HERE in the main session — inside the promise worker
+      # availableCores() reports 1, which is why the SHAP escalation never
+      # fired before
+      cores_hint_val <- tryCatch(as.integer(future::availableCores()), error = function(e) 1L)
+
       promises::future_promise({
         library(DALEX)
         library(randomForest)
         compute_governing_factors(
-          df = df, 
-          target_col = target_col, 
-          predictors = preds, 
+          df = df,
+          target_col = target_col,
+          predictors = preds,
           n_permutations = n_perms,
           rf_ntree = ntree_val,
-          shap_sample_size = shap_size_val
+          shap_sample_size = shap_size_val,
+          cores_hint = cores_hint_val
         )
       }) %...>% (function(res) {
         shinyjs::enable("gov_run_btn")

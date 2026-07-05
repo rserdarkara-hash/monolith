@@ -1,0 +1,18 @@
+cff-version: 1.2.0
+message: "If you use Monolith, please cite it as below. A manuscript describing Monolith's methodology and validation is currently under review; until it is published, please cite the software directly."
+title: "Monolith: A Spatial Analysis Dashboard for Geostatistical Modeling and Mapping"
+type: software
+authors:
+  - family-names: Kara
+    given-names: R. Serdar
+    email: r.serdarkara@gmail.com
+version: 0.9.8e
+date-released: "2026-07-05"
+license: GPL-3.0
+repository-code: "https://github.com/rserdarkara-hash/monolith"
+keywords:
+  - geostatistics
+  - kriging
+  - spatial-interpolation
+  - soil-science
+  - shiny
