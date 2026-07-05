@@ -594,10 +594,10 @@ ui <- fluidPage(
                         leafletOutput("setup_minimap", height = "400px"),
                         hr(),
                         h3("Step 4: Variable Mapping & Verification"),
-                        tags$p(style="margin-top: -8px; font-size: 13px; color: #777; font-style: italic; margin-bottom: 12px;", 
-                               "(Confirm mapped variables below after uploading)"),
-                        tags$p("Pair your Target (Actual) variables with their Predictions. You can map them manually or upload a metadata file."),
                         fileInput("meta_file", "Upload Variable List (Optional)", accept = c(".xlsx", ".xls", ".csv")),
+                        tags$p("Pair your Target (Actual) variables with their Predictions. You can map them manually below."),
+                        tags$p(style="margin-top: -8px; font-size: 13px; color: #777; font-style: italic; margin-bottom: 12px;", 
+                               "(If you modify the auto-detected pairs, please click 'CONFIRM VARIABLE MAPPING' at the bottom)"),
                         shinycssloaders::withSpinner(uiOutput("var_mapping_ui"), type = 6, color = "#2ecc71")
                      )
                  )
@@ -3939,19 +3939,33 @@ server <- function(input, output, session) {
     if(length(valid_a) > 0) {
       rv$rast <- merge_wrapped_rasters(valid_a)
       register_export_item("map_actual", paste(meta$label, "- Actual Map"), "map", rv$rast, meta$category)
+      
+      temp_rast_a <- terra::unwrap(rv$rast)
+      if ("var1.var" %in% names(temp_rast_a)) {
+        uncert_var_a <- temp_rast_a[["var1.var"]]
+        register_export_item("map_uncert_var_act", paste(meta$label, "- Uncertainty Map (Variance - Actual)"), "map", terra::wrap(uncert_var_a), meta$category)
+        register_export_item("map_uncert_se_act", paste(meta$label, "- Uncertainty Map (SE - Actual)"), "map", terra::wrap(sqrt(uncert_var_a)), meta$category)
+      }
     }
     if(length(valid_p) > 0) {
       rv$rast_pred <- merge_wrapped_rasters(valid_p)
       rv$has_predictions <- TRUE
       register_export_item("map_predicted", paste(meta$label, "- Predicted Map"), "map", rv$rast_pred, meta$category)
+      
+      temp_rast_p <- terra::unwrap(rv$rast_pred)
+      if ("var1.var" %in% names(temp_rast_p)) {
+        uncert_var_p <- temp_rast_p[["var1.var"]]
+        register_export_item("map_uncert_var_pre", paste(meta$label, "- Uncertainty Map (Variance - Predicted)"), "map", terra::wrap(uncert_var_p), meta$category)
+        register_export_item("map_uncert_se_pre", paste(meta$label, "- Uncertainty Map (SE - Predicted)"), "map", terra::wrap(sqrt(uncert_var_p)), meta$category)
+      }
     }
     if(length(valid_r) > 0) {
       rv$rast_res <- merge_wrapped_rasters(valid_r)
-      register_export_item("map_residuals", paste(meta$label, "- Residual Map (Delta)"), "map", rv$rast_res, meta$category)
+      register_export_item("map_residuals", paste(meta$label, "- ML Predictions Residual Map (Delta)"), "map", rv$rast_res, meta$category)
     }
     if(length(valid_pr) > 0) {
       rv$rast_point_res <- merge_wrapped_rasters(valid_pr)
-      register_export_item("map_point_residuals", paste(meta$label, "- Point Error Map"), "map", rv$rast_point_res, meta$category)
+      register_export_item("map_point_residuals", paste(meta$label, "- ML Predictions Point Error Map"), "map", rv$rast_point_res, meta$category)
     }
     
     if(!is.null(rv$rast) && !is.null(rv$rast_pred)) {
