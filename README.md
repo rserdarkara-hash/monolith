@@ -1,6 +1,6 @@
 ![Monolith — Spatial Analysis Dashboard](assets/banner.png)
 
-# Monolith 1.0.0 — Spatial Analysis Dashboard
+# Monolith Spatial Analysis Dashboard v1.0.0
 
 [![Version](https://img.shields.io/badge/version-1.0.0-6f42c1)](#)
 [![R](https://img.shields.io/badge/R-%E2%89%A5%204.5.0-276DC3?logo=r&logoColor=white)](https://cran.r-project.org/)
