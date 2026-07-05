@@ -247,8 +247,6 @@ Human oversight remained central throughout: all methodological choices, model f
 
 # How to Cite
 
-A manuscript describing Monolith's methodology and validation is currently under review at *Geoderma*. Until it is published, please cite the software directly:
-
 ```bibtex
 @software{monolith2026,
   title   = {Monolith: A Spatial Analysis Dashboard for Geostatistical Modeling and Mapping},
