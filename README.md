@@ -76,7 +76,7 @@ Whether you are mapping soil physicochemistry, analyzing topographical interacti
 
 ## Mapping Predictions and Interpreting Spatial Resonance of Prediction Errors
 
-> **Note:** How well machine-learning predictions agree with the true (measured) values is only half of the story — the deviations that emerge once those predictions are mapped are just as important. A model with acceptable global accuracy can still produce spatially clustered errors, and these only become visible when the predictions and their residuals are examined as surfaces.
+> **Note:** How well machine-learning predictions agree with the true (measured) values is only half of the story: the deviations that emerge once those predictions are mapped are just as important. A model with acceptable global accuracy can still produce spatially clustered errors, and these only become visible when the predictions and their residuals are examined as surfaces.
 
 **1. Visual Validation**
 
@@ -173,6 +173,17 @@ Newer CRAN releases are expected to work; if you encounter an inconsistency, mat
 **Runtime environment:** R 4.5.2 (ucrt) · GDAL 3.11.4 · GEOS 3.13.1 · PROJ 9.7.0 · Windows 11 (also runs on macOS and Linux).
 
 </details>
+
+### Reproducible installation with `renv` (optional)
+
+For an exact, one-command reproduction of the validated environment, the repository ships a [`renv`](https://rstudio.github.io/renv/) lockfile (`renv.lock`) pinning all 220 packages of the dependency tree (including transitive dependencies) to the versions in the matrix above. From the project root:
+
+```r
+install.packages("renv")   # once
+renv::restore()             # reads renv.lock; confirm the prompt to activate the project
+```
+
+This installs the pinned versions into a project-local library without touching your global R library. It is entirely optional — the Auto-Installation Hook described above remains the default path and installs current CRAN releases instead.
 
 ## 4. Application Structure
 

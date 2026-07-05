@@ -1,0 +1,37 @@
+name: tests
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    env:
+      # Serve pre-built Linux binaries where available; renv falls back to
+      # source builds (CRAN archive) for pinned versions no longer current.
+      RENV_CONFIG_REPOS_OVERRIDE: https://packagemanager.posit.co/cran/latest
+      DOWNLOAD_STATIC_LIBV8: 1
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install system libraries for the spatial stack
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            libgdal-dev libgeos-dev libproj-dev libudunits2-dev \
+            libcurl4-openssl-dev libssl-dev libxml2-dev \
+            libfontconfig1-dev libfreetype6-dev libharfbuzz-dev libfribidi-dev \
+            libpng-dev libtiff5-dev libjpeg-dev
+
+      - uses: r-lib/actions/setup-r@v2
+        with:
+          r-version: "4.5.2"
+          use-public-rspm: true
+
+      - name: Restore pinned packages from renv.lock
+        uses: r-lib/actions/setup-renv@v2
+
+      - name: Run testthat suite
+        run: Rscript tests/testthat.R
