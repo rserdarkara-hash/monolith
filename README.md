@@ -243,7 +243,7 @@ The first run is slow because the harness sources the full application (all 49 p
 
 # Development & AI Assistance
 
-Monolith was built with AI-assisted development tools and is disclosed here in the interest of scientific transparency: the codebase was written with **Gemini CLI / Antigravity**, then systematically audited and refined with **Claude Code (Fable 5)** — covering debugging, performance optimization, and line-by-line verification of the mathematical implementations (interpolation engines, variogram fitting, cross-validation metrics).
+Monolith was built with AI-assisted development tools and is disclosed here in the interest of scientific transparency: the codebase was written with **Antigravity CLI**, then systematically audited and refined with **Claude Code (Fable 5)** — covering debugging, performance optimization, and line-by-line verification of the mathematical implementations (interpolation engines, variogram fitting, cross-validation metrics).
 
 Human oversight remained central throughout: all methodological choices, model formulations, and scientific decisions were specified, reviewed, and validated by the author. Numeric behavior is guarded by the `testthat` suite described [above](#testing--reproducibility), and any change that alters numeric results is treated as a scientific decision requiring explicit justification. Responsibility for the correctness of the software rests with the author, not the tools.
 
