@@ -4,7 +4,7 @@ Copyright (c) 2026 Recep Serdar Kara.
 
 The data files in this `sample_data/` directory — `samp_data_1.xlsx` and its
 paired variable list `samp_var_list.xlsx` — are a demonstration subset of the
-study dataset of Kara et al. (2026). They are released under the
+data from the studies of Kara et al. (2026a, 2026b). They are released under the
 **Creative Commons Attribution 4.0 International (CC BY 4.0)** license
 (https://creativecommons.org/licenses/by/4.0/).
 
@@ -14,9 +14,18 @@ by CC BY 4.0.
 
 ## Required attribution
 
-If you use these data, cite the dataset version of record:
+These files include modeled predictions from the associated study. If you use
+them, cite **both** the paper the predictions derive from and the dataset
+version of record:
 
-> Kara, R. S., Ongun, A. R., Almaz, C., Çiçek, G., & Tepecik, M. (2026).
+> Kara, R. S., Ongun, A. R., Almaz, C., Çiçek, G., Tepecik, M., & Yilgan, F.
+> (2026a). Diagnostic modeling of nutrients to support agroecosystem
+> transitioning in tobacco soils: A stratified evaluation framework based on
+> clay-organic matter-lime interactions [Manuscript submitted for publication].
+> Department of Soil Science and Soil Protection, Czech University of Life
+> Sciences Prague.
+>
+> Kara, R. S., Ongun, A. R., Almaz, C., Çiçek, G., & Tepecik, M. (2026b).
 > Physicochemical and Nutritional Soil Properties, Geolocation, and
 > Environmental Covariates for Nutrient Prediction in Transitioning Tobacco
 > Agroecosystems (Denizli, Turkey). Mendeley Data, V1.

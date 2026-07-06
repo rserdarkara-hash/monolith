@@ -279,7 +279,13 @@ Human oversight remained central throughout: all methodological choices, model f
 
 *This section will be updated with the full journal reference and DOI upon acceptance.*
 
-**Using the sample data?** The bundled demonstration files are released under CC BY 4.0; if you use them, please also cite the Mendeley dataset (see [sample_data/DATA_LICENSE](sample_data/DATA_LICENSE)).
+**Using the sample data?** The bundled demonstration files are released under CC BY 4.0 and include modeled predictions from the associated study. If you use them, please cite **both** the paper the predictions derive from and the dataset version of record:
+
+> Kara, R. S., Ongun, A. R., Almaz, C., Çiçek, G., Tepecik, M., & Yilgan, F. (2026a). Diagnostic modeling of nutrients to support agroecosystem transitioning in tobacco soils: A stratified evaluation framework based on clay-organic matter-lime interactions [Manuscript submitted for publication]. Department of Soil Science and Soil Protection, Czech University of Life Sciences Prague.
+>
+> Kara, R. S., Ongun, A. R., Almaz, C., Çiçek, G., & Tepecik, M. (2026b). Physicochemical and Nutritional Soil Properties, Geolocation, and Environmental Covariates for Nutrient Prediction in Transitioning Tobacco Agroecosystems (Denizli, Turkey). *Mendeley Data*, V1. https://doi.org/10.17632/8548bmgxh9.1 *(DOI currently inactive; resolves once the associated publication is released.)*
+
+See [sample_data/DATA_LICENSE](sample_data/DATA_LICENSE) for the full terms.
 
 # Contributing & Support
 
@@ -292,7 +298,7 @@ Human oversight remained central throughout: all methodological choices, model f
 This project uses a dual-licensing structure — one license for the software, a separate one for the bundled sample data:
 
 *   **Software & Source Code**: The core codebase of **Monolith** is licensed under the **GNU General Public License v3.0 (GPL-3.0)**. You are free to run, study, share, and modify the software, provided all derivative works remain open-source under the same terms. See the [LICENSE](LICENSE) file for the full legal text.
-*   **Sample Datasets**: The files in the [sample_data/](sample_data/) directory (`samp_data_1.xlsx`, `samp_var_list.xlsx`) are a demonstration subset of the study dataset of Kara et al. (2026), released under the **Creative Commons Attribution 4.0 International (CC BY 4.0)** license. You may use, share, and adapt them for any purpose provided you cite the dataset version of record on Mendeley Data ([10.17632/8548bmgxh9.1](https://doi.org/10.17632/8548bmgxh9.1)). See the [sample_data/DATA_LICENSE](sample_data/DATA_LICENSE) file for the full terms.
+*   **Sample Datasets**: The files in the [sample_data/](sample_data/) directory (`samp_data_1.xlsx`, `samp_var_list.xlsx`) are a demonstration subset of the data from the studies of Kara et al. (2026a, 2026b), released under the **Creative Commons Attribution 4.0 International (CC BY 4.0)** license. You may use, share, and adapt them for any purpose provided you give appropriate credit — this includes citing **both** the associated paper and the Mendeley dataset (see [How to Cite](#how-to-cite) and [sample_data/DATA_LICENSE](sample_data/DATA_LICENSE) for the exact references and terms; the Mendeley DOI is currently inactive and will resolve once the associated publication is released).
 
 # Disclaimer
 
