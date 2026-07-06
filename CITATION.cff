@@ -26,12 +26,11 @@ version: 1.0.0
 date-released: "2026-07-05"
 license: GPL-3.0
 repository-code: "https://github.com/rserdarkara-hash/monolith"
-# Add after the first Zenodo release mints the DOI:
-# doi: "10.5281/zenodo.XXXXXXX"          # concept DOI (all versions)
-# identifiers:
-#   - type: doi
-#     value: "10.5281/zenodo.XXXXXXX"
-#     description: "Concept DOI resolving to the latest Monolith release"
+doi: "10.5281/zenodo.21130951"
+identifiers:
+  - type: doi
+    value: "10.5281/zenodo.21130951"
+    description: "Concept DOI resolving to the latest Monolith release"
 keywords:
   - geostatistics
   - kriging

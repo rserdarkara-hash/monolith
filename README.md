@@ -7,9 +7,7 @@
 [![Shiny](https://img.shields.io/badge/built%20with-Shiny-1f77b4)](https://shiny.posit.co/)
 [![License: GPL v3](https://img.shields.io/badge/license-GPL--3.0-blue)](LICENSE)
 [![Platform](https://img.shields.io/badge/platform-Windows%20%7C%20macOS%20%7C%20Linux-lightgrey)](#1-system-prerequisites)
-[![DOI](https://img.shields.io/badge/DOI-pending%20Zenodo%20release-lightgrey)](#how-to-cite)
-<!-- DOI PLACEHOLDER: after the first Zenodo release mints the concept DOI, replace the badge line above with:
-[![DOI](https://zenodo.org/badge/DOI/10.5281/zenodo.XXXXXXX.svg)](https://doi.org/10.5281/zenodo.XXXXXXX) -->
+[![DOI](https://zenodo.org/badge/DOI/10.5281/zenodo.21130951.svg)](https://doi.org/10.5281/zenodo.21130951)
 
 
 *Monolith* is an R Shiny application designed for proper spatial statistical analysis, geostatistical modeling, and mapping. It provides a comprehensive toolkit for exploring spatial variability, and you may find it well-suited for research in soil science, life sciences, and agronomy.
@@ -266,12 +264,14 @@ Human oversight remained central throughout: all methodological choices, model f
 
 ```bibtex
 @software{monolith2026,
-  title   = {Monolith: A Spatial Analysis Dashboard for Geostatistical Modeling and Mapping},
-  author  = {Kara, R. Serdar},
-  year    = {2026},
-  version = {1.0.0},
-  url     = {https://github.com/rserdarkara-hash/monolith},
-  note    = {R Shiny application, GPL-3.0}
+  title     = {Monolith: A Spatial Analysis Dashboard for Geostatistical Modeling and Mapping},
+  author    = {Kara, R. Serdar},
+  year      = {2026},
+  version   = {1.0.0},
+  doi       = {10.5281/zenodo.21130951},
+  publisher = {Zenodo},
+  url       = {https://github.com/rserdarkara-hash/monolith},
+  note      = {R Shiny application, GPL-3.0}
 }
 ```
 
