@@ -786,9 +786,9 @@ desc_exploratory_server <- function(id, data_reactive, vars_metadata_reactive) {
                if(!inherits(mod, "try-error")) res_list[[v]] <- residuals(mod)
              }
              if(length(res_list) < length(vars_lab)) {
-                 # T16: never fall back to raw correlations while the table is
-                 # labelled partial — abort and tell the user which variables
-                 # could not be residualized
+                 # Never fall back to raw correlations while the table is
+                 # labelled partial: abort and tell the user which variables
+                 # could not be residualized.
                  failed_vars <- setdiff(vars_lab, names(res_list))
                  showNotification(paste0("Partial correlation table aborted: could not residualize ",
                                          paste(failed_vars, collapse = ", "),
@@ -815,10 +815,10 @@ desc_exploratory_server <- function(id, data_reactive, vars_metadata_reactive) {
                  if(!is.null(ct)) {
                     p_val <- ct$p.value
                     if (n_controls > 0) {
-                       # T15: cor.test on residuals uses df = n - 2, ignoring
-                       # the k control variables partialled out. Recompute the
-                       # p-value with the partial-correlation df = n - 2 - k
-                       # (same conventions as ppcor::pcor.test)
+                       # cor.test on residuals uses df = n - 2, ignoring the k
+                       # control variables partialled out. Recompute the p-value
+                       # with the partial-correlation df = n - 2 - k (same
+                       # convention as ppcor::pcor.test).
                        r_est <- unname(ct$estimate)
                        n_obs <- nrow(df_clean)
                        if (method == "kendall") {

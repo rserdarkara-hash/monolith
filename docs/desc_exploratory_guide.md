@@ -69,8 +69,8 @@ A dedicated high-dimensional dimensionality reduction module.
 **4.2 Plot Settings**
 *   **Types:** Scree Plot, Biplot (2D), Biplot (3D), Loadings, Contribution, Cumulative Variance, and Mahalanobis Distance.
 *   **Controls:** Dynamic numeric inputs appear based on the plot type to select specific Principal Components (e.g., X-Axis PC 1, Y-Axis PC 2) or assess specific loading contributions.
-*   **Scaling Caveat (Contribution & cos2):** Both diagnostics implicitly assume the PCA was run on scaled, unit-variance inputs. If "Scale & Center Data" was unchecked when the PCA was executed, the values are dominated by the high-variance variables and are not comparable across variables measured on different scales — the module displays an inline note under the plot controls in that case.
-*   **Mahalanobis Distance:** Distances are computed on the PC scores using their theoretical diagonal covariance (the squared component standard deviations). Near-zero-variance components — which arise when PCA is force-executed on collinear variables — are excluded from the distance (and from the chi-square threshold's degrees of freedom), so the outlier plot remains available instead of failing on a singular covariance matrix.
+*   **Scaling Caveat (Contribution & cos2):** Both diagnostics implicitly assume the PCA was run on scaled, unit-variance inputs. If "Scale & Center Data" was unchecked when the PCA was executed, the values are dominated by the high-variance variables and are not comparable across variables measured on different scales; the module displays an inline note under the plot controls in that case.
+*   **Mahalanobis Distance:** Distances are computed on the PC scores using their theoretical diagonal covariance (the squared component standard deviations). Near-zero-variance components, which arise when PCA is force-executed on collinear variables, are excluded from the distance (and from the chi-square threshold's degrees of freedom), so the outlier plot remains available instead of failing on a singular covariance matrix.
 
 ---
 
@@ -94,7 +94,7 @@ Users can toggle between two advanced explainability frameworks:
 *   Each point is the per-observation SHAP attribution of the most important predictor: how much that predictor shifts the model's prediction for that sample away from the dataset-mean prediction, in the target variable's own units. Values therefore sum (across all predictors) to the deviation of the sample's prediction from the mean.
 
 **5.4 Tabular Data Metrics**
-*   The metrics table lists the permutation importance (dropout loss) of each governing factor and leads with an **RF model quality row — out-of-bag (OOB) % variance explained** — so the reliability of the Random Forest behind the importance and SHAP results can be judged directly. Low OOB values mean the explainability outputs describe a weak model and should be interpreted cautiously.
+*   The metrics table lists the permutation importance (dropout loss) of each governing factor and leads with an **RF model quality row, out-of-bag (OOB) % variance explained**, so the reliability of the Random Forest behind the importance and SHAP results can be judged directly. Low OOB values mean the explainability outputs describe a weak model and should be interpreted cautiously.
 
 ---
 

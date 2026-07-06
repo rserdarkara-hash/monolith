@@ -242,6 +242,55 @@ test_that("validate_and_project_sf leaves projected data unchanged", {
   expect_equal(sf::st_crs(pts_proj)$epsg, sf::st_crs(pts)$epsg)
 })
 
+# ── dedup_valid_points ─────────────────────────────────────────────────────
+
+test_that("dedup_valid_points drops target NAs and refreshes x/y", {
+  pts <- make_test_points(6)
+  pts$v[c(2, 4)] <- NA
+  out <- dedup_valid_points(pts, "v")
+  expect_equal(nrow(out), 4)
+  expect_false(any(is.na(out$v)))
+  # x/y columns must match the geometry after filtering
+  coords <- sf::st_coordinates(out)
+  expect_equal(out$x, unname(coords[, 1]))
+  expect_equal(out$y, unname(coords[, 2]))
+})
+
+test_that("dedup_valid_points removes points sharing a rounded coordinate", {
+  pts <- make_test_points(5)
+  # Force rows 1 and 2 onto the same location (within 2 dp)
+  geom <- sf::st_geometry(pts)
+  geom[[2]] <- geom[[1]]
+  sf::st_geometry(pts) <- geom
+  out <- dedup_valid_points(pts, "v")
+  expect_equal(nrow(out), 4)
+})
+
+test_that("dedup_valid_points keeps the valid neighbour when the co-located point has an NA target", {
+  # Regression: deduping BEFORE NA-filtering would keep row 1 (NA target) and
+  # then drop it, silently discarding row 2's valid measurement at that spot.
+  pts <- make_test_points(4)
+  geom <- sf::st_geometry(pts)
+  geom[[2]] <- geom[[1]]          # rows 1 & 2 co-located
+  sf::st_geometry(pts) <- geom
+  pts$v[1] <- NA                  # first (surviving) copy has no target
+  keep_val <- pts$v[2]
+  out <- dedup_valid_points(pts, "v")
+  # The co-located location must survive, carrying row 2's value
+  same_loc <- out[round(out$x, 2) == round(sf::st_coordinates(pts)[1, 1], 2) &
+                  round(out$y, 2) == round(sf::st_coordinates(pts)[1, 2], 2), ]
+  expect_equal(nrow(same_loc), 1)
+  expect_equal(same_loc$v, keep_val)
+})
+
+test_that("dedup_valid_points returns 0-row sf when all targets are NA", {
+  pts <- make_test_points(4)
+  pts$v <- NA_real_
+  out <- dedup_valid_points(pts, "v")
+  expect_s3_class(out, "sf")
+  expect_equal(nrow(out), 0)
+})
+
 # ── apply_TPS CV object ───────────────────────────────────────────────────
 
 test_that("apply_TPS returns cv_obj as sf carrying the input CRS", {
@@ -350,6 +399,19 @@ test_that("apply_OK returns variogram, fit, predictions and CV results", {
   expect_length(res$residuals, 20)
 })
 
+test_that("apply_OK honours the Spatial Block CV strategy end-to-end", {
+  pts <- make_test_points(40) # >= CV_BLOCK_MIN_N so blocks are real
+  grid <- make_test_grid_safe(pts, res = 200)
+  lags <- calc_scientific_lags(pts)
+  res <- suppressWarnings(apply_OK(pts, "v", grid, lags, list(cv_strategy = "block")))
+
+  # Block folds (a length-n integer vector) must flow through krige.cv and
+  # still yield finite CV metrics over all 40 held-out points.
+  expect_false(is.na(res$cv_metrics$rmse))
+  expect_length(res$residuals, 40)
+  expect_s3_class(res$res_sf, "sf")
+})
+
 test_that("apply_OK uses a supplied pre_fit variogram instead of refitting", {
   pts <- make_test_points(15)
   grid <- make_test_grid_safe(pts, res = 200)
@@ -411,6 +473,63 @@ test_that("apply_RFK returns rf model with requested ntree and predictions", {
   expect_false(grepl("Falling back to OK", res$log_msg, fixed = TRUE))
   expect_s3_class(res$res_sf, "sf")
   expect_true(all(c("var1.pred", "var1.var") %in% colnames(res$res_sf)))
+})
+
+test_that("rf_infinitesimal_jackknife_var matches the brute-force Wager formula", {
+  set.seed(1)
+  n_train <- 20L; B <- 40L; n_pred <- 7L
+  inbag <- matrix(rpois(n_train * B, lambda = 1), nrow = n_train)
+  M <- matrix(rnorm(n_pred * B), nrow = n_pred)
+
+  # Naive reference: raw IJ minus Monte-Carlo bias, negatives floored at 0.
+  ij_ref <- function(M, N) {
+    Bt <- ncol(M); nt <- nrow(N)
+    Nc <- N - rowMeans(N)
+    Mc <- M - rowMeans(M)
+    v <- vapply(seq_len(nrow(M)), function(j) {
+      cov_i <- as.numeric(Nc %*% Mc[j, ]) / Bt
+      sum(cov_i^2) - (nt / Bt^2) * sum(Mc[j, ]^2)
+    }, numeric(1))
+    v[v < 0] <- 0
+    v
+  }
+
+  ref <- ij_ref(M, inbag)
+  # chunk < n_pred exercises the chunked path
+  got <- rf_infinitesimal_jackknife_var(M, inbag, chunk = 3L)
+  expect_equal(got, ref, tolerance = 1e-10)
+  expect_length(got, n_pred)
+  expect_true(all(got >= 0))
+})
+
+test_that("rf_infinitesimal_jackknife_var is 0 when all trees agree, NA with <2 trees", {
+  const_M <- matrix(rep(2.5, 5 * 10), nrow = 5)   # every tree identical => no spread
+  inbag <- matrix(1L, nrow = 8, ncol = 10)
+  expect_equal(rf_infinitesimal_jackknife_var(const_M, inbag), rep(0, 5))
+  expect_true(all(is.na(rf_infinitesimal_jackknife_var(matrix(1, 3, 1), matrix(1, 4, 1)))))
+})
+
+test_that("RFK jackknife changes only the uncertainty surface, not predictions", {
+  pts <- make_test_points(15)
+  pts$v <- pts$v + 0.5 * pts$aux1
+  grid <- make_test_grid_safe(pts, res = 200)
+  lags <- calc_scientific_lags(pts)
+
+  set.seed(123)
+  res_spread <- suppressWarnings(
+    apply_RFK(pts, "v", grid, lags, list(rf_ntree = 80, rfk_uncertainty = "spread"), c("aux1"))
+  )
+  set.seed(123)
+  res_jack <- suppressWarnings(
+    apply_RFK(pts, "v", grid, lags, list(rf_ntree = 80, rfk_uncertainty = "jackknife"), c("aux1"))
+  )
+
+  # Same seed => identical forest => identical prediction surface.
+  expect_equal(res_spread$res_sf$var1.pred, res_jack$res_sf$var1.pred, tolerance = 1e-8)
+  # Uncertainty surface differs, stays finite and non-negative.
+  expect_false(isTRUE(all.equal(res_spread$res_sf$var1.var, res_jack$res_sf$var1.var)))
+  expect_true(all(res_jack$res_sf$var1.var >= 0, na.rm = TRUE))
+  expect_match(res_jack$log_msg, "infinitesimal jackknife")
 })
 
 # ── apply_CK ──────────────────────────────────────────────────────────────

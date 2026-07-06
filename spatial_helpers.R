@@ -82,23 +82,23 @@ calc_moran <- function(residuals, coords) {
       coords <- coords_matrix
     }
     
-    knn_res <- if(nrow(coords) > 1) {
-      tryCatch({ FNN::get.knn(coords, k = 1) }, error = function(e) {
-        if (nrow(coords) > 2000) return(list(nn.dist = 1))
-        list(nn.dist = mean(dist(coords), na.rm = TRUE))
-      })
-    } else {
-      list(nn.dist = 1)
-    }
-    
-    d_thresh <- mean(knn_res$nn.dist, na.rm = TRUE) * 5 # Wide enough to capture local neighbors
-    
-    nb <- spdep::dnearneigh(as.matrix(coords), 0, d_thresh)
-    
-    if(any(spdep::card(nb) == 0)) {
-       nb <- spdep::knn2nb(spdep::knearneigh(as.matrix(coords), k = min(3, nrow(coords) - 1)))
-    }
-    
+    # Residual Moran's I uses a symmetric k-nearest-neighbour contiguity
+    # (k = 8, a common default), capped at n - 1 for small samples. kNN is
+    # scale-stable and avoids an arbitrary distance-band multiplier (such as
+    # mean-NN x 5), which, being a wide band, dilutes local autocorrelation
+    # toward zero. The reported I is contingent
+    # on this neighbour definition (documented in scientific_guide.md).
+    k_nn <- min(8L, nrow(coords) - 1L)
+    # For small n, k=8 exceeds n/3 and spdep emits an expected informational
+    # warning ("k greater than one-third of the number of data points"); muffle
+    # only that known message, let anything unrecognized propagate.
+    nb <- withCallingHandlers(
+      spdep::knn2nb(spdep::knearneigh(as.matrix(coords), k = k_nn), sym = TRUE),
+      warning = function(w) {
+        if (grepl("greater than one-third", conditionMessage(w))) invokeRestart("muffleWarning")
+      }
+    )
+
     lw <- spdep::nb2listw(nb, style = "W", zero.policy = TRUE)
     
     m_res <- spdep::moran.test(residuals, lw, zero.policy = TRUE, randomisation = FALSE)
@@ -225,96 +225,128 @@ write_warning_file <- function(l, prefix, message) {
   }, error = function(e) NULL)
 }
 
-perform_kriging_loocv <- function(pts, target_var, aux_vars, lags_func, vgm_fit_func, model_type = c("lm", "rf"), l = "region", prefix = "act", rf_ntree = 200) {
+# ── Cross-validation fold planning ──────────────────────────────────────────
+# Single source of truth for the CV strategy so the fold builder
+# (make_cv_folds) and the UI label (cv_type_label) can never drift.
+#   "auto"  : LOOCV for n <= 50, seeded random 10-fold above (historical default)
+#   "loocv" : full leave-one-out regardless of n
+#   "block" : 10 spatially-clustered (k-means) folds; degrades to LOOCV when
+#             n is too small for the blocks to be meaningful.
+CV_BLOCK_MIN_N <- 30L
+
+# Central authority for CV plan selection: maps (strategy, n) to a fold scheme
+# (type, fold count k, human-readable label) so every caller builds folds and
+# labels them identically, including the small-n degradations to LOOCV.
+resolve_cv_plan <- function(strategy = "auto", n) {
+  if (is.null(strategy) || length(strategy) != 1 || !nzchar(strategy)) strategy <- "auto"
+  strategy <- match.arg(strategy, c("auto", "loocv", "block"))
+  if (is.null(n) || length(n) == 0 || is.na(n)) return(list(type = "loocv", k = NA_integer_, label = "CV"))
+  if (strategy == "loocv") return(list(type = "loocv", k = n, label = "Full LOOCV"))
+  if (strategy == "block") {
+    if (n < CV_BLOCK_MIN_N) return(list(type = "loocv", k = n, label = paste0("LOOCV [Spatial Block needs n ≥ ", CV_BLOCK_MIN_N, "]")))
+    return(list(type = "block", k = 10L, label = "Spatial Block CV"))
+  }
+  # auto
+  if (n > 50) return(list(type = "random_kfold", k = 10L, label = "Random 10-fold CV"))
+  list(type = "loocv", k = n, label = "LOOCV")
+}
+
+# Returns an integer fold-id vector of length n. `coords` is an n x 2 matrix of
+# projected (metric) coordinates, used only by Spatial Block (k-means). Seeded
+# (12345) under a two-sided RNG sandbox so folds are reproducible and the
+# caller's .Random.seed is preserved (same convention as calc_moran).
+make_cv_folds <- function(coords, strategy = "auto", n = NULL) {
+  if (is.null(n)) n <- nrow(coords)
+  plan <- resolve_cv_plan(strategy, n)
+
+  if (plan$type == "loocv") return(seq_len(n))
+
+  old_seed <- if (exists(".Random.seed", envir = .GlobalEnv, inherits = FALSE)) get(".Random.seed", envir = .GlobalEnv, inherits = FALSE) else NULL
+  on.exit({
+    if (!is.null(old_seed)) assign(".Random.seed", old_seed, envir = .GlobalEnv)
+    else if (exists(".Random.seed", envir = .GlobalEnv, inherits = FALSE)) rm(".Random.seed", envir = .GlobalEnv)
+  }, add = TRUE)
+  set.seed(12345)
+
+  if (plan$type == "block") {
+    folds <- tryCatch({
+      cm <- as.matrix(coords)[, 1:2, drop = FALSE]
+      km <- stats::kmeans(cm, centers = plan$k, nstart = 5, iter.max = 50)
+      as.integer(km$cluster)
+    }, error = function(e) NULL)
+    # Degenerate geometry (e.g. many duplicate coordinates) can make k-means
+    # fail or collapse; fall back to a seeded random k-fold rather than losing
+    # CV entirely.
+    if (is.null(folds) || length(unique(folds)) < 2) {
+      folds <- sample(rep(seq_len(plan$k), length.out = n))
+    }
+    return(folds)
+  }
+
+  # random_kfold: balanced, seeded
+  sample(rep(seq_len(plan$k), length.out = n))
+}
+
+perform_kriging_loocv <- function(pts, target_var, aux_vars, lags_func, vgm_fit_func, model_type = c("lm", "rf"), l = "region", prefix = "act", rf_ntree = 200, cv_strategy = "auto") {
   model_type <- match.arg(model_type)
   pts <- pts[complete.cases(sf::st_drop_geometry(pts)[, c(target_var, aux_vars), drop=FALSE]), ]
   n <- nrow(pts)
   if (n < 3) return(NULL)
   form_reg <- as.formula(paste0("`", target_var, "` ~ ", paste(paste0("`", aux_vars, "`"), collapse = " + ")))
-  
+
   pts$orig_idx <- seq_len(n)
-  
-  if (n > 50) {
-    k <- 10
-    
-    # Sandbox the seed to prevent global pollution
-    old_seed <- if (exists(".Random.seed", envir = .GlobalEnv, inherits = FALSE)) get(".Random.seed", envir = .GlobalEnv, inherits = FALSE) else NULL
-    on.exit({
-      if (!is.null(old_seed)) assign(".Random.seed", old_seed, envir = .GlobalEnv)
-      else if (exists(".Random.seed", envir = .GlobalEnv, inherits = FALSE)) rm(".Random.seed", envir = .GlobalEnv)
-    }, add = TRUE)
-    
-    set.seed(12345) # for scientific reproducibility
-    folds <- sample(cut(seq_len(n), breaks = k, labels = FALSE))
-    
-    results_list <- lapply(seq_len(k), function(i) {
-      test_idx <- which(folds == i)
-      train <- pts[-test_idx, ]; test <- pts[test_idx, ]
-      
-      if (model_type == "lm") {
-        lm_mod <- lm(form_reg, data = train)
-        train$residuals <- residuals(lm_mod)
-        pred_trend <- predict(lm_mod, newdata = test)
-      } else {
-        rf_mod <- randomForest::randomForest(form_reg, data = train, ntree = rf_ntree)
-        train$residuals <- train[[target_var]] - rf_mod$predicted
-        pred_trend <- predict(rf_mod, test)
-      }
-      
-      lags <- lags_func(train)
-      v_emp <- variogram(residuals ~ 1, train, width = lags$width, cutoff = lags$cutoff)
-      v_fit <- vgm_fit_func(v_emp, train$residuals)
-      tryCatch({
-        res_krig <- krige(residuals ~ 1, train, test, model = v_fit, debug.level = 0)
-        fold_sf <- test[, c("orig_idx", target_var), drop = FALSE]
-        names(fold_sf)[names(fold_sf) == target_var] <- "observed"
-        fold_sf$var1.pred <- as.numeric(pred_trend) + res_krig$var1.pred
-        fold_sf$residual <- fold_sf$observed - fold_sf$var1.pred
-        fold_sf
-      }, error = function(e) {
-        warning(paste("Kriging CV fold failed:", e$message))
-        fold_sf <- test[, c("orig_idx", target_var), drop = FALSE]
-        names(fold_sf)[names(fold_sf) == target_var] <- "observed"
-        fold_sf$var1.pred <- NA
-        fold_sf$residual <- NA
-        fold_sf
-      })
-    })
-  } else {
-    results_list <- lapply(1:n, function(i) {
-      train <- pts[-i, ]; test <- pts[i, ]
-      
-      if (model_type == "lm") {
-        lm_mod <- lm(form_reg, data = train)
-        train$residuals <- residuals(lm_mod)
-        pred_trend <- predict(lm_mod, newdata = test)
-      } else {
-        rf_mod <- randomForest::randomForest(form_reg, data = train, ntree = rf_ntree)
-        train$residuals <- train[[target_var]] - rf_mod$predicted
-        pred_trend <- predict(rf_mod, test)
-      }
-      
-      lags <- lags_func(train)
-      v_emp <- variogram(residuals ~ 1, train, width = lags$width, cutoff = lags$cutoff)
-      v_fit <- vgm_fit_func(v_emp, train$residuals)
-      tryCatch({
-        res_krig <- krige(residuals ~ 1, train, test, model = v_fit, debug.level = 0)
-        fold_sf <- test[, c("orig_idx", target_var), drop = FALSE]
-        names(fold_sf)[names(fold_sf) == target_var] <- "observed"
-        fold_sf$var1.pred <- as.numeric(pred_trend) + res_krig$var1.pred
-        fold_sf$residual <- fold_sf$observed - fold_sf$var1.pred
-        fold_sf
-      }, error = function(e) {
-        warning(paste("Kriging CV fold failed:", e$message))
-        fold_sf <- test[, c("orig_idx", target_var), drop = FALSE]
-        names(fold_sf)[names(fold_sf) == target_var] <- "observed"
-        fold_sf$var1.pred <- NA
-        fold_sf$residual <- NA
-        fold_sf
-      })
+
+  # Fold assignment (make_cv_folds seeds itself); computed here on the
+  # complete-case rows so the fold vector length always matches n.
+  folds <- make_cv_folds(sf::st_coordinates(pts), cv_strategy, n)
+
+  # Sandbox the seed so the per-fold randomForest draws are reproducible
+  # without perturbing the caller's RNG stream. Fold assignment is already
+  # fixed upstream; this covers RFK's in-fold randomForest, so its LOOCV is
+  # seeded consistently across strategies and n.
+  old_seed <- if (exists(".Random.seed", envir = .GlobalEnv, inherits = FALSE)) get(".Random.seed", envir = .GlobalEnv, inherits = FALSE) else NULL
+  on.exit({
+    if (!is.null(old_seed)) assign(".Random.seed", old_seed, envir = .GlobalEnv)
+    else if (exists(".Random.seed", envir = .GlobalEnv, inherits = FALSE)) rm(".Random.seed", envir = .GlobalEnv)
+  }, add = TRUE)
+  set.seed(12345)
+
+  fold_fn <- function(i) {
+    test_idx <- which(folds == i)
+    train <- pts[-test_idx, ]; test <- pts[test_idx, ]
+
+    if (model_type == "lm") {
+      lm_mod <- lm(form_reg, data = train)
+      train$residuals <- residuals(lm_mod)
+      pred_trend <- predict(lm_mod, newdata = test)
+    } else {
+      rf_mod <- randomForest::randomForest(form_reg, data = train, ntree = rf_ntree)
+      train$residuals <- train[[target_var]] - rf_mod$predicted
+      pred_trend <- predict(rf_mod, test)
+    }
+
+    lags <- lags_func(train)
+    v_emp <- variogram(residuals ~ 1, train, width = lags$width, cutoff = lags$cutoff)
+    v_fit <- vgm_fit_func(v_emp, train$residuals)
+    tryCatch({
+      res_krig <- krige(residuals ~ 1, train, test, model = v_fit, debug.level = 0)
+      fold_sf <- test[, c("orig_idx", target_var), drop = FALSE]
+      names(fold_sf)[names(fold_sf) == target_var] <- "observed"
+      fold_sf$var1.pred <- as.numeric(pred_trend) + res_krig$var1.pred
+      fold_sf$residual <- fold_sf$observed - fold_sf$var1.pred
+      fold_sf
+    }, error = function(e) {
+      warning(paste("Kriging CV fold failed:", e$message))
+      fold_sf <- test[, c("orig_idx", target_var), drop = FALSE]
+      names(fold_sf)[names(fold_sf) == target_var] <- "observed"
+      fold_sf$var1.pred <- NA
+      fold_sf$residual <- NA
+      fold_sf
     })
   }
-  
+
+  results_list <- lapply(sort(unique(folds)), fold_fn)
+
   res_combined <- do.call(rbind, results_list)
   
   res_combined <- res_combined[order(res_combined$orig_idx), ]
@@ -458,6 +490,10 @@ check_vif <- function(df, threshold = 10) {
   return(list(kept = res$kept, dropped = res$dropped))
 }
 
+# Interpolate each auxiliary covariate onto the prediction grid so RK can
+# evaluate the regression trend everywhere the target is predicted, not just at
+# sample points. Each covariate is kriged with its own robust variogram fit and
+# falls back to IDW if that fit fails.
 krige_covariates <- function(data, grid_p, aux_vars, lags, method_params) {
   grid_aux <- grid_p
   log_msg <- ""
@@ -524,13 +560,16 @@ safe_run_cv <- function(res, expr, label, n_data) {
     res$residuals <- get_cv_residuals(cv_obj, n_data)
   } else {
     # CV failed: drop any training residuals set earlier (RK/RFK set them
-    # for the variogram step) so model_resid_* never mixes semantics —
-    # res$residuals holds CV residuals or nothing
+    # for the variogram step) so model_resid_* never mixes semantics:
+    # res$residuals holds CV residuals or nothing.
     res$residuals <- NULL
   }
   return(res)
 }
 
+# Scrub non-finite prediction and variance cells (NaN/Inf produced by degenerate
+# fits) to NA, so downstream rasterization, colour scaling, and legends never
+# choke on them.
 sanitize_spatial_predictions <- function(res_sf) {
   if (!is.null(res_sf)) {
     if ("var1.pred" %in% colnames(res_sf)) {
@@ -541,6 +580,42 @@ sanitize_spatial_predictions <- function(res_sf) {
     }
   }
   return(res_sf)
+}
+
+# Infinitesimal-jackknife variance of a random-forest ensemble-MEAN prediction
+# (Wager, Hastie & Efron 2014), with the Monte-Carlo bias correction. This is
+# the random-forest analogue of RK's lm `se.fit^2`: the sampling variance of the
+# estimated mean surface, a better-calibrated trend-uncertainty term than the
+# raw between-tree spread (which understates predictive uncertainty). It changes
+# ONLY the RFK uncertainty (var1.var) surface, never the prediction (var1.pred).
+#   pred_individual : n_pred x B matrix of per-tree predictions (predict.all$individual)
+#   inbag           : n_train x B matrix of in-bag counts (randomForest keep.inbag = TRUE)
+# Returns a length-n_pred variance vector, negatives (from the bias correction)
+# truncated to 0. Chunked over prediction rows to bound the n_train x n_pred
+# intermediate. Returns NA when fewer than two trees (variance undefined).
+rf_infinitesimal_jackknife_var <- function(pred_individual, inbag, chunk = 2000L) {
+  pred_individual <- as.matrix(pred_individual)
+  inbag <- as.matrix(inbag)
+  B <- ncol(pred_individual)
+  n_pred <- nrow(pred_individual)
+  n_train <- nrow(inbag)
+  if (is.null(B) || B < 2 || ncol(inbag) != B) return(rep(NA_real_, n_pred))
+
+  N_c <- inbag - rowMeans(inbag)                         # n_train x B, centred in-bag counts
+  out <- numeric(n_pred)
+  starts <- seq(1L, n_pred, by = chunk)
+  for (s in starts) {
+    e <- min(s + chunk - 1L, n_pred)
+    Mc <- pred_individual[s:e, , drop = FALSE]
+    Mc <- Mc - rowMeans(Mc)                              # m x B, centred per-tree preds
+    # Cov[i, j] = (1/B) sum_b N_c[i,b] * Mc[j,b]  =>  (N_c %*% t(Mc)) / B
+    cov_mat <- tcrossprod(N_c, Mc) / B                   # n_train x m
+    v_ij <- colSums(cov_mat^2)                           # raw IJ per prediction
+    bias <- (n_train / B^2) * rowSums(Mc^2)              # Monte-Carlo bias correction
+    out[s:e] <- v_ij - bias
+  }
+  out[out < 0] <- 0
+  out
 }
 
 apply_kriging_pipeline <- function(engine = c("OK", "RK", "RFK"), data, target_var, grid_p, lags, method_params, aux_vars = NULL, l = "region", prefix = "act", vif_threshold = 10) {
@@ -554,8 +629,8 @@ apply_kriging_pipeline <- function(engine = c("OK", "RK", "RFK"), data, target_v
     res$fit <- if(!is.null(method_params$pre_fit)) method_params$pre_fit else robust_vgm_fit(res$v_emp, data[[target_var]])
     
     update_progress_file(l, prefix, 50, 100)
-    folds_count <- if (nrow(data) > 50) 10 else nrow(data)
-    res <- safe_run_cv(res, krige.cv(form_ok, data, model = res$fit, nfold = folds_count, debug.level = 0), "OK", nrow(data))
+    folds_ok <- make_cv_folds(sf::st_coordinates(data), method_params$cv_strategy, nrow(data))
+    res <- safe_run_cv(res, krige.cv(form_ok, data, model = res$fit, nfold = folds_ok, debug.level = 0), "OK", nrow(data))
     res$res_sf <- krige(form_ok, data, grid_p, model = res$fit, debug.level = 0)
   } else {
     update_progress_file(l, prefix, 10, 100)
@@ -596,10 +671,10 @@ apply_kriging_pipeline <- function(engine = c("OK", "RK", "RFK"), data, target_v
           var1.pred = as.vector(pred_trend$fit + res_krig$var1.pred), 
           var1.var = as.vector(trend_var + res_krig$var1.var)
         )
-        res <- safe_run_cv(res, perform_kriging_loocv(data, target_var, aux_vars, calc_scientific_lags, robust_vgm_fit, model_type = "lm", l, prefix), "RK", nrow(data))
+        res <- safe_run_cv(res, perform_kriging_loocv(data, target_var, aux_vars, calc_scientific_lags, robust_vgm_fit, model_type = "lm", l, prefix, cv_strategy = method_params$cv_strategy), "RK", nrow(data))
       } else if (engine == "RFK") {
         rf_ntree <- if (!is.null(method_params$rf_ntree)) method_params$rf_ntree else 200
-        rf_mod <- randomForest::randomForest(form_reg, data = data, ntree = rf_ntree, importance = TRUE)
+        rf_mod <- randomForest::randomForest(form_reg, data = data, ntree = rf_ntree, importance = TRUE, keep.inbag = TRUE)
         res$rf_model <- rf_mod
         
         residuals_val <- data[[target_var]] - rf_mod$predicted
@@ -612,13 +687,23 @@ apply_kriging_pipeline <- function(engine = c("OK", "RK", "RFK"), data, target_v
         
         pred_trend_all <- predict(rf_mod, grid_aux, predict.all = TRUE)
         M <- pred_trend_all$individual
-        trend_var <- rowSums((M - rowMeans(M))^2) / (ncol(M) - 1)
+        rfk_unc <- if (!is.null(method_params$rfk_uncertainty)) method_params$rfk_uncertainty else "jackknife"
+        if (identical(rfk_unc, "jackknife") && !is.null(rf_mod$inbag)) {
+          # Calibrated trend variance: infinitesimal jackknife of the ensemble
+          # mean (Wager et al. 2014): the RF analogue of RK's lm se.fit^2.
+          trend_var <- rf_infinitesimal_jackknife_var(M, rf_mod$inbag)
+          res$log_msg <- paste0(res$log_msg, " [RFK uncertainty: infinitesimal jackknife]")
+        } else {
+          # Ensemble spread (between-tree variance): fast stability heuristic
+          # that understates predictive uncertainty (scientific_guide 7.3).
+          trend_var <- rowSums((M - rowMeans(M))^2) / (ncol(M) - 1)
+        }
         
         res$res_sf <- grid_p %>% mutate(
           var1.pred = as.vector(pred_trend_all$aggregate + res_krig$var1.pred), 
           var1.var = as.vector(trend_var + res_krig$var1.var)
         )
-        res <- safe_run_cv(res, perform_kriging_loocv(data, target_var, aux_vars, calc_scientific_lags, robust_vgm_fit, model_type = "rf", l, prefix, rf_ntree = rf_ntree), "RFK", nrow(data))
+        res <- safe_run_cv(res, perform_kriging_loocv(data, target_var, aux_vars, calc_scientific_lags, robust_vgm_fit, model_type = "rf", l, prefix, rf_ntree = rf_ntree, cv_strategy = method_params$cv_strategy), "RFK", nrow(data))
       }
       res
     }, error = function(e) {
@@ -634,8 +719,11 @@ apply_kriging_pipeline <- function(engine = c("OK", "RK", "RFK"), data, target_v
       res$v_emp <- variogram(form_ok, data, width = lags$width, cutoff = lags$cutoff)
       res$fit <- robust_vgm_fit(res$v_emp, data[[target_var]])
       res$res_sf <- krige(form_ok, data, grid_p, model = res$fit, debug.level = 0)
-      folds_count <- if (nrow(data) > 50) 10 else nrow(data)
-      res <- safe_run_cv(res, krige.cv(form_ok, data, model = res$fit, nfold = folds_count, debug.level = 0), paste0(engine, " OK Fallback"), nrow(data))
+      # Consistent with every other CV path: an explicit seeded fold vector
+      # (make_cv_folds) instead of a scalar nfold, so gstat never draws its own
+      # unseeded folds here. Also honours the user's CV strategy on this path.
+      folds_okfb <- make_cv_folds(sf::st_coordinates(data), method_params$cv_strategy, nrow(data))
+      res <- safe_run_cv(res, krige.cv(form_ok, data, model = res$fit, nfold = folds_okfb, debug.level = 0), paste0(engine, " OK Fallback"), nrow(data))
     }
   }
   
@@ -656,6 +744,11 @@ apply_RFK <- function(data, target_var, grid_p, lags, method_params, aux_vars, l
   apply_kriging_pipeline("RFK", data, target_var, grid_p, lags, method_params, aux_vars, l, prefix, vif_threshold)
 }
 
+# Co-Kriging: predict the target jointly with its auxiliary variables through a
+# linear model of coregionalization (LMC). Covariates are standardized first so
+# the cross-variograms live on a comparable scale; the LMC is stabilized with
+# correct.diagonal = 1.01 to keep the coregionalization matrices positive
+# definite, and the whole fit falls back to Ordinary Kriging if it fails.
 apply_CK <- function(data, target_var, grid_p, lags, method_params, aux_vars, l = "region", prefix = "act") {
   res <- init_interpolation_res()
   
@@ -698,8 +791,8 @@ apply_CK <- function(data, target_var, grid_p, lags, method_params, aux_vars, l 
     if(!is.null(g)) {
       res$gstat_obj <- g
       res <- safe_run_cv(res, {
-        folds_count <- if (nrow(data) > 50) 10 else nrow(data)
-        cv_val <- gstat.cv(g, nfold = folds_count, debug.level = 0)
+        folds_ck <- make_cv_folds(sf::st_coordinates(data), method_params$cv_strategy, nrow(data))
+        cv_val <- gstat.cv(g, nfold = folds_ck, debug.level = 0)
         if (!is.null(cv_val)) {
           cnames <- names(cv_val)
           pred_col_src <- paste0(target_var, ".pred")
@@ -752,8 +845,8 @@ apply_CK <- function(data, target_var, grid_p, lags, method_params, aux_vars, l 
     res$fit <- fit_ok
     res$res_sf <- krige(form_ok, data, grid_p, model = fit_ok, debug.level = 0)
     res$res_sf$model_type <- "Ordinary Kriging (Fallback)"
-    folds_count <- if (nrow(data) > 50) 10 else nrow(data)
-    res <- safe_run_cv(res, krige.cv(form_ok, data, model = fit_ok, nfold = folds_count, debug.level = 0), "OK Fallback", nrow(data))
+    folds_okfb <- make_cv_folds(sf::st_coordinates(data), method_params$cv_strategy, nrow(data))
+    res <- safe_run_cv(res, krige.cv(form_ok, data, model = fit_ok, nfold = folds_okfb, debug.level = 0), "OK Fallback", nrow(data))
   }
   
   res$res_sf <- sanitize_spatial_predictions(res$res_sf)
@@ -767,8 +860,8 @@ apply_IDW <- function(data, target_var, grid_p, method_params, l = "region", pre
   
   update_progress_file(l, prefix, 20, 100)
   form_ok <- reformulate("1", response = target_var)
-  folds_count <- if (nrow(data) > 50) 10 else nrow(data)
-  res <- safe_run_cv(res, krige.cv(form_ok, data, nmax = method_params$idw_nmax, set = list(idp = method_params$idw_p), nfold = folds_count, debug.level = 0), "IDW", nrow(data))
+  folds_idw <- make_cv_folds(sf::st_coordinates(data), method_params$cv_strategy, nrow(data))
+  res <- safe_run_cv(res, krige.cv(form_ok, data, nmax = method_params$idw_nmax, set = list(idp = method_params$idw_p), nfold = folds_idw, debug.level = 0), "IDW", nrow(data))
   
   res$res_sf <- idw(form_ok, data, grid_p, nmax = method_params$idw_nmax, idp = method_params$idw_p, debug.level = 0)
   res$res_sf <- sanitize_spatial_predictions(res$res_sf)
@@ -800,36 +893,23 @@ apply_TPS <- function(data, target_var, grid_p, method_params, l = "region", pre
     
     n_pts <- nrow(data)
     update_progress_file(l, prefix, 40, 100)
-    if (n_pts > 50) {
-      k <- 10
-      # Sandbox the fold-assignment seed so it does not overwrite the
-      # caller's RNG stream (fold assignment itself is unchanged)
-      old_seed <- if (exists(".Random.seed", envir = .GlobalEnv, inherits = FALSE)) get(".Random.seed", envir = .GlobalEnv, inherits = FALSE) else NULL
-      set.seed(12345)
-      folds <- sample(cut(seq_len(n_pts), breaks = k, labels = FALSE))
-      if (!is.null(old_seed)) assign(".Random.seed", old_seed, envir = .GlobalEnv) else rm(".Random.seed", envir = .GlobalEnv)
-      cv_vals <- numeric(n_pts)
-      for (i in seq_len(k)) {
-        test_idx <- which(folds == i)
-        tmp_mod <- tryCatch({
-          fit_tps(pts_sc[-test_idx, , drop=FALSE], data[[target_var]][-test_idx])
-        }, error = function(e) NULL)
-        
-        if (!is.null(tmp_mod)) {
-          cv_vals[test_idx] <- as.numeric(fields::predict.Krig(tmp_mod, pts_sc[test_idx, , drop=FALSE]))
-        } else {
-          cv_vals[test_idx] <- NA_real_
-        }
+    # make_cv_folds seeds itself and restores the caller's RNG; LOOCV collapses
+    # to one point per fold, so a single loop covers every strategy.
+    tps_folds <- make_cv_folds(raw_pts, method_params$cv_strategy, n_pts)
+    cv_vals <- rep(NA_real_, n_pts)
+    for (i in sort(unique(tps_folds))) {
+      test_idx <- which(tps_folds == i)
+      tmp_mod <- tryCatch({
+        fit_tps(pts_sc[-test_idx, , drop=FALSE], data[[target_var]][-test_idx])
+      }, error = function(e) NULL)
+
+      if (!is.null(tmp_mod)) {
+        cv_vals[test_idx] <- as.numeric(fields::predict.Krig(tmp_mod, pts_sc[test_idx, , drop=FALSE]))
+      } else {
+        cv_vals[test_idx] <- NA_real_
       }
-    } else {
-      cv_vals <- vapply(1:n_pts, function(i) {
-        tryCatch({
-          tmp_mod <- fit_tps(pts_sc[-i, , drop=FALSE], data[[target_var]][-i])
-          as.numeric(fields::predict.Krig(tmp_mod, pts_sc[i, , drop=FALSE]))
-        }, error = function(e) NA_real_)
-      }, numeric(1))
     }
-    
+
     
     cv_res <- sf::st_as_sf(
       data.frame(observed = data[[target_var]], var1.pred = cv_vals, x = raw_pts[,1], y = raw_pts[,2]),
@@ -952,11 +1032,11 @@ compute_governing_factors <- function(df, target_col, predictors, n_permutations
   # escalate only for workloads big enough to amortize worker startup.
   # seed = TRUE gives each observation its own L'Ecuyer RNG stream, making
   # results identical under any plan (sequential or parallel).
-  # T13 (same pattern as the T12 run pipeline): a PSOCK worker reports
-  # availableCores() = 1, so the caller passes the core count in from the
-  # main session (cores_hint); the in-process default keeps direct calls
-  # (tests, scripts) working. The cluster is owned explicitly and torn down
-  # on exit, with mc.cores restored for the reused promise worker.
+  # A PSOCK worker reports availableCores() = 1 (the same constraint the run
+  # pipeline hits), so the caller passes the core count in from the main
+  # session (cores_hint); the in-process default keeps direct calls (tests,
+  # scripts) working. The cluster is owned explicitly and torn down on exit,
+  # with mc.cores restored for the reused promise worker.
   if (is.null(cores_hint)) {
     cores_hint <- tryCatch(as.integer(future::availableCores()), error = function(e) 1L)
   }
@@ -985,8 +1065,8 @@ compute_governing_factors <- function(df, target_col, predictors, n_permutations
     contribution = sapply(sample_idx, function(i) {
       # predict_parts(type = "shap") returns B+1 rows per variable: the
       # aggregated attribution (B == 0) plus one row per permutation.
-      # Summing them inflates the value by a factor of B+1 — take only the
-      # aggregated B == 0 row (T14, fixed 2026-07-05).
+      # Summing them inflates the value by a factor of B+1, so take only the
+      # aggregated B == 0 row.
       sub <- shap_df[shap_df$obs_id == i & shap_df$variable_name == top_var & shap_df$B == 0, ]
       if(nrow(sub) > 0) mean(sub$contribution) else 0
     })
@@ -1038,6 +1118,23 @@ validate_and_project_sf <- function(pts_sf, current_crs = NULL) {
   }
   
   return(pts_sf)
+}
+
+# Build the point set for one interpolation surface: drop rows whose `target`
+# value is NA FIRST, then remove points sharing the same coordinate (rounded to
+# 2 dp). Order matters scientifically: deduping before NA-filtering (as the
+# shared pass upstream does) lets a co-located point with a missing target evict
+# a valid neighbour, silently discarding a real observation and making the run
+# fit a different point set than the auto-fit variogram preview showed (which
+# na.omit()s before deduping). Filtering first keeps the valid measurement and
+# keeps preview and run consistent. Returns an sf with refreshed x/y columns.
+dedup_valid_points <- function(pts_sf, target) {
+  pts_sf <- pts_sf[!is.na(pts_sf[[target]]), ]
+  if (nrow(pts_sf) == 0) return(pts_sf)
+  pts_sf <- pts_sf[!duplicated(round(sf::st_coordinates(pts_sf), 2)), ]
+  dplyr::mutate(pts_sf,
+                x = sf::st_coordinates(pts_sf)[, 1],
+                y = sf::st_coordinates(pts_sf)[, 2])
 }
 
 run_regional_interpolation <- function(item, current_method, current_crs, aux_vars, shp_bound, b_type, buff_mode, b_dist, res_mode, grid_res, crs_sel, comp_mode, val_type, progress_dir_val = tempdir(), session_id_val = "default", cancel_file_val = NULL, vif_threshold = 10) {
@@ -1192,10 +1289,10 @@ run_regional_interpolation <- function(item, current_method, current_crs, aux_va
         cov_log_msg <- krig_cov$log_msg
     }
     
-    pts_a <- pts %>% dplyr::filter(!is.na(v)) %>% dplyr::mutate(x = sf::st_coordinates(.)[,1], y = sf::st_coordinates(.)[,2])
+    pts_a <- dedup_valid_points(pts_projected, "v")
     if(nrow(pts_a) >= 3) {
         lags_a <- calc_scientific_lags(pts_a)
-        mp_a <- list(idw_p = m_params$idw_p_act, idw_nmax = m_params$idw_nmax, tps_lambda = m_params$tps_lambda_act, pre_fit = m_params$pre_fit_act, grid_aux = grid_aux)
+        mp_a <- list(idw_p = m_params$idw_p_act, idw_nmax = m_params$idw_nmax, tps_lambda = m_params$tps_lambda_act, pre_fit = m_params$pre_fit_act, grid_aux = grid_aux, cv_strategy = m_params$cv_strategy, rfk_uncertainty = m_params$rfk_uncertainty)
         if (!is.null(cancel_file_val) && file.exists(cancel_file_val)) stop("Model generation cancelled by user.")
         res_a_list <- apply_interpolation(pts_a, "v", current_method, grid_p, aux_vars, lags_a, mp_a, l, "act")
         res_out$v_emp_act <- res_a_list$v_emp; res_out$v_fit_act <- res_a_list$fit; res_out$cv_act <- res_a_list$cv_metrics; res_out$cv_obj_act <- res_a_list$cv_obj
@@ -1211,10 +1308,10 @@ run_regional_interpolation <- function(item, current_method, current_crs, aux_va
     }
     
     if(comp_mode || val_type != "actual") {
-        pts_p <- pts %>% dplyr::filter(!is.na(pv)) %>% dplyr::mutate(x = sf::st_coordinates(.)[,1], y = sf::st_coordinates(.)[,2])
+        pts_p <- dedup_valid_points(pts_projected, "pv")
         if(nrow(pts_p) >= 3) {
             lags_p <- calc_scientific_lags(pts_p)
-            mp_p <- list(idw_p = m_params$idw_p_pre, idw_nmax = m_params$idw_nmax, tps_lambda = m_params$tps_lambda_pre, pre_fit = m_params$pre_fit_pre, grid_aux = grid_aux)
+            mp_p <- list(idw_p = m_params$idw_p_pre, idw_nmax = m_params$idw_nmax, tps_lambda = m_params$tps_lambda_pre, pre_fit = m_params$pre_fit_pre, grid_aux = grid_aux, cv_strategy = m_params$cv_strategy, rfk_uncertainty = m_params$rfk_uncertainty)
             if (!is.null(cancel_file_val) && file.exists(cancel_file_val)) stop("Model generation cancelled by user.")
             res_p_list <- apply_interpolation(pts_p, "pv", current_method, grid_p, aux_vars, lags_p, mp_p, l, "pre")
             res_out$v_emp_pre <- res_p_list$v_emp; res_out$v_fit_pre <- res_p_list$fit; res_out$cv_pre <- res_p_list$cv_metrics; res_out$cv_obj_pre <- res_p_list$cv_obj

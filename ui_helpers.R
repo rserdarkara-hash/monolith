@@ -753,9 +753,12 @@ process_grouping_vars <- function(df, vars, types) {
 
 
 
-cv_type_label <- function(n_obs) {
-  if (is.null(n_obs) || length(n_obs) == 0 || is.na(n_obs)) return("CV")
-  if (n_obs <= 50) "LOOCV" else "10-fold CV"
+# Human-readable label for the CV actually applied to a locality of n_obs
+# points under the chosen strategy. Delegates to resolve_cv_plan
+# (spatial_helpers.R) so the label can never disagree with the folds that were
+# built, including Spatial Block's small-n degradation to LOOCV.
+cv_type_label <- function(n_obs, strategy = "auto") {
+  resolve_cv_plan(strategy, n_obs)$label
 }
 
 find_subset_column <- function(cols) {
@@ -788,7 +791,7 @@ get_stat_letters <- function(df, var_name, group_col, test_type) {
       return(df_let)
     } else if (test_type == "kruskal" && requireNamespace("agricolae", quietly = TRUE)) {
       # BH-adjusted pairwise comparisons, consistent with the correlation
-      # table's BH policy (T17, decided 2026-07-05)
+      # table's BH policy.
       res <- agricolae::kruskal(df_proc[[var_name]], df_proc[[group_col]], p.adj = "BH", console = FALSE)
       df_let <- data.frame(group = rownames(res$groups), letter = as.character(res$groups$groups))
       colnames(df_let)[1] <- group_col
@@ -847,7 +850,7 @@ add_stat_layer <- function(p, df, var_name, group_col, stat_test, stat_letter_po
               p <- p + geom_text(data = all_letters, aes(x = .data[[group_col]], y = y_pos, label = letter), vjust = -0.5, size = 4, fontface = "bold", inherit.aes = FALSE)
               # vjust = -0.5 draws the glyph above y_pos; the default 5% scale
               # expansion is not always enough headroom, cutting letters in
-              # half at the panel top — widen the upper expansion
+              # half at the panel top, so widen the upper expansion
               p <- p + scale_y_continuous(expand = expansion(mult = c(0.05, 0.15)))
            }
        }
@@ -883,7 +886,7 @@ add_stat_layer <- function(p, df, var_name, group_col, stat_test, stat_letter_po
 
 # Categorical group axes (boxplot/violin/sina): when many groups or long
 # interaction labels ("A | B | C") would crowd the x axis, drop the axis
-# text entirely — group identity is already colour-coded in the legend
+# text entirely, since group identity is already colour-coded in the legend
 hide_x_labels_if_crowded <- function(p, df, group_col) {
   if (is.null(group_col) || !group_col %in% colnames(df)) return(p)
   lv <- unique(as.character(df[[group_col]]))

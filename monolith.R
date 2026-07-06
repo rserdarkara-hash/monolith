@@ -409,17 +409,28 @@ ui <- fluidPage(
         br(),
         div(style="background-color: #e7f5ff; padding: 10px; border: 1px solid #a5d8ff;",
             h4("2. Spatial Engine"),
-            selectInput("method", HTML(paste0("Interpolation", info_tooltip("method_info", "Models use Leave-One-Out CV (LOOCV) for n <= 50, and 10-fold CV for n > 50. Cross-validation folds use a fixed random seed (12345) for reproducibility. See Scientific Guide Section 9 to change these hardcoded parameters."))), 
-                        choices = c("Ordinary Kriging" = "OK", 
+            selectInput("method", HTML(paste0("Interpolation", info_tooltip("method_info", "Cross-validation strategy is selectable below. It governs the reported Model Performance metrics only, never the prediction surface. Folds use a fixed seed (12345) for reproducibility. See Scientific Guide Section 9 for details."))),
+                        choices = c("Ordinary Kriging" = "OK",
                                     "Regression Kriging" = "RK",
                                     "Random Forest Kriging" = "RFK",
                                     "Co-Kriging" = "CK",
-                                    "IDW" = "IDW", 
+                                    "IDW" = "IDW",
                                     "Thin Plate Spline (TPS)" = "TPS")),
             conditionalPanel(condition = "input.method == 'CK'",
               helpText(HTML("<em style='color: inherit; font-size: 0.9em;'>Note: CK uses nmax=15 by default to ensure optimal speed. See Scientific Guide to change it.</em>"))
             ),
-            
+            radioButtons("cv_strategy",
+              HTML(paste0("Cross-Validation Strategy", info_tooltip("cv_strategy_info", "How held-out folds are formed for the reported performance metrics; it does NOT change the interpolated map. Auto (Default): LOOCV for n ≤ 50, seeded random 10-fold above. Standard LOOCV: full leave-one-out, the most rigorous, but noticeably slow beyond ~2000 samples (especially RK/RFK, which refit the variogram every fold). Spatial Block CV: 10 spatially-clustered (k-means) folds that hold out contiguous regions to curb the optimistic bias random folds suffer under spatial autocorrelation; recommended for DSM-style validation. Below n=30 it degrades to LOOCV."))),
+              choices = c("Auto (Default)" = "auto", "Standard LOOCV" = "loocv", "Spatial Block CV" = "block"),
+              selected = "auto"),
+
+            conditionalPanel(condition = "input.method == 'RFK'",
+              radioButtons("rfk_uncertainty",
+                HTML(paste0("RFK Uncertainty Method", info_tooltip("rfk_unc_info", "Controls ONLY the RFK uncertainty (variance) map, never the prediction surface, and never the reported metrics. Ensemble spread (default, fast): the between-tree variance of the forest; a stability heuristic that understates true predictive uncertainty. Infinitesimal Jackknife (calibrated, Wager et al. 2014): the random-forest analogue of the regression standard error, a better-calibrated variance of the ensemble mean, slightly slower to compute. See Scientific Guide Section 7.3."))),
+                choices = c("Infinitesimal Jackknife (calibrated)" = "jackknife", "Ensemble spread (fast)" = "spread"),
+                selected = "jackknife")
+            ),
+
                        conditionalPanel(condition = "['RK', 'RFK', 'CK'].includes(input.method)",
                          div(style = "background-color: #f3f0ff; padding: 10px; border: 1px solid #d0bfff; border-radius: 4px; margin-bottom: 10px;",
                            h5(HTML(paste0("Auxiliary Variables", info_tooltip("aux_info", "Select secondary variables to assist interpolation (e.g. Elevation). Ensure they are strongly correlated with the target. If VIF > 10, they are dropped to avoid multicollinearity.")))),
@@ -444,7 +455,7 @@ ui <- fluidPage(
                          )
                        ),          
             conditionalPanel(condition = "['OK', 'RK', 'RFK', 'CK'].includes(input.method)",
-              radioButtons("vgm_mode", "Fitting Mode", choices = c("Auto-Fit" = "auto", "Manual" = "manual"), inline = TRUE),
+              radioButtons("vgm_mode", HTML(paste0("Fitting Mode", info_tooltip("vgm_mode_info", "Optional convenience. Click OPTIMIZE ALL VARIOGRAMS to pre-compute and inspect the auto-fitted variogram curves, then (if you wish) switch to Manual to hand-tune the already-fitted Nugget / Partial Sill / Range. If you don't need manual tuning you can skip the button entirely: Run Analysis performs the identical auto-fit internally, so pressing it first does not change the map or metrics; it only lets you preview the fit and avoids a redundant wait."))), choices = c("Auto-Fit" = "auto", "Manual" = "manual"), inline = TRUE),
               conditionalPanel(condition = "input.vgm_mode == 'auto'",
                 actionButton("auto_fit", "OPTIMIZE ALL VARIOGRAMS", class = "btn-info btn-block", style="margin-bottom:10px;")
               ),
@@ -526,7 +537,7 @@ ui <- fluidPage(
               checkboxInput("show_uncertainty", "Map Uncertainty Instead of Interpolation", FALSE),
               conditionalPanel(condition = "input.show_uncertainty",
                 radioButtons("uncertainty_type", "Metric", choices = c("Variance" = "var", "Standard Error" = "se"), selected = "se", inline = TRUE),
-                p(style="font-size: 0.8em; opacity: 0.8; margin-bottom: 0;", "Variance is in squared units of the variable; SE shares the variable's unit. Uncertainty layers always use a continuous palette — Agronomic/Binned class breaks apply to concentration maps only.")
+                p(style="font-size: 0.8em; opacity: 0.8; margin-bottom: 0;", "Variance is in squared units of the variable; SE shares the variable's unit. Uncertainty layers always use a continuous palette; Agronomic/Binned class breaks apply to concentration maps only.")
               )
             ),
             conditionalPanel(condition = "!['OK', 'RK', 'RFK', 'CK'].includes(input.method)",
@@ -619,7 +630,7 @@ ui <- fluidPage(
                              ),
                              div(style="margin-bottom:10px; display: flex; align-items: center; gap: 10px; flex-wrap: wrap; background-color: #f8f9fa; padding: 10px; border-radius: 5px; border: 1px solid #ddd;",
                              div(style="display: flex; align-items: center; gap: 10px; margin-right: 15px;",
-                                 checkboxInput("show_points_viewer", HTML(paste0("Show Points", info_tooltip("show_points_info", "Rendering the sampling points on the map can take a while — up to ~30 seconds depending on the number of samples and the size of the dataset. The map stays responsive while the points are being drawn."))), FALSE, width = "auto"),
+                                 checkboxInput("show_points_viewer", HTML(paste0("Show Points", info_tooltip("show_points_info", "Rendering the sampling points on the map can take a while, up to ~30 seconds depending on the number of samples and the size of the dataset. The map stays responsive while the points are being drawn."))), FALSE, width = "auto"),
                                  checkboxInput("show_res_overlay", "Show Res", FALSE, width = "auto"),
                                  checkboxInput("show_north", "North Arrow", FALSE, width = "auto"),
                                  checkboxInput("show_borders", "Borders", FALSE, width = "auto"),
@@ -766,7 +777,7 @@ ui <- fluidPage(
                                 h5("Regional Parameters"), div(class="table-container", tableOutput("regional_params_table")),
                                 hr(style="opacity: 0.3;")
                               ),
-                              h5("Model Performance"), div(class="table-container", tableOutput("metrics_table"))
+                              h5("Model Performance"), uiOutput("cv_strategy_badge"), div(class="table-container", tableOutput("metrics_table"))
                             ),
                             div(id = "prediction_performance_ui",
                               style = "background-color: #f3e8ff; padding: 15px; border: 2px solid #9b59b6; border-radius: 8px; margin-bottom: 20px;",
@@ -775,13 +786,13 @@ ui <- fluidPage(
                               h5("Prediction Performance (Uploaded Data)"),
                               div(class="table-container", tableOutput("uploaded_metrics_table")),
                               hr(style="opacity: 0.3;"),
-                              h5("Classification Performance (Uploaded Predictions)"),
+                              h5("Classification Performance (Uploaded Predictions) - Map in Agro or Binned styling to see the stats"),
                               selectInput("kappa_bin_method", "Binning Method:", choices = c("Agronomical Classes" = "agro", "Quartiles" = "quartile")),
                               div(class="table-container", tableOutput("kappa_table"))
                             ),
                             div(style = "background-color: #e7f5ff; padding: 15px; border: 2px solid #339af0; border-radius: 8px;",
                               h4("Data Summary Statistics"),
-                              tags$p(style="font-size: 0.85em; opacity: 0.8; font-style: italic;", "Aggregated descriptive statistics and area coverage for the data."),
+                              tags$p(style="font-size: 0.85em; opacity: 0.8; font-style: italic;", "Aggregated descriptive statistics and area coverage for the data - Map in Agro or Binned styling to see the stats"),
                               h5("Area Coverage"),
                               conditionalPanel(condition = "input.locality && (typeof input.locality === 'string' ? input.locality === 'ALL' : (input.locality.length > 1 || input.locality.indexOf('ALL') > -1))",
                                 fluidRow(
@@ -854,7 +865,7 @@ server <- function(input, output, session) {
   area_calc_cache <- new.env(parent = emptyenv())
 
   # Cache keys embed rv$run_counter, so entries from previous runs are
-  # unreachable — cleared at each run start to stop unbounded memory growth.
+  # unreachable; cleared at each run start to stop unbounded memory growth.
   clear_raster_caches <- function() {
     rm(list = ls(envir = leaflet_proj_cache), envir = leaflet_proj_cache)
     rm(list = ls(envir = area_calc_cache), envir = area_calc_cache)
@@ -975,7 +986,7 @@ server <- function(input, output, session) {
        cv_l <- rv$cv_metrics_act[[l]]
        n_obs_l <- if(!is.null(rv$cv_data_act[[l]])) nrow(rv$cv_data_act[[l]]) else NA
        cv_table <- data.frame(Metric = names(cv_l), Value = as.character(round(as.numeric(cv_l), 4)))
-       cv_table <- rbind(data.frame(Metric = "CV Type", Value = cv_type_label(n_obs_l)), cv_table)
+       cv_table <- rbind(data.frame(Metric = "CV Type", Value = cv_type_label(n_obs_l, rv$cv_strategy_sel)), cv_table)
        register_export_item(paste0("table_cv_loc_", l), paste(meta$label, "-", l, "- Model CV Metrics (Actual)"), "table", cv_table, meta$category)
      }
 
@@ -983,7 +994,7 @@ server <- function(input, output, session) {
        cv_l_p <- rv$cv_metrics_pre[[l]]
        n_obs_l_p <- if(!is.null(rv$cv_data_pre[[l]])) nrow(rv$cv_data_pre[[l]]) else NA
        cv_table_p <- data.frame(Metric = names(cv_l_p), Value = as.character(round(as.numeric(cv_l_p), 4)))
-       cv_table_p <- rbind(data.frame(Metric = "CV Type", Value = cv_type_label(n_obs_l_p)), cv_table_p)
+       cv_table_p <- rbind(data.frame(Metric = "CV Type", Value = cv_type_label(n_obs_l_p, rv$cv_strategy_sel)), cv_table_p)
        register_export_item(paste0("table_cv_pre_loc_", l), paste(meta$label, "-", l, "- Model CV Metrics (Predicted)"), "table", cv_table_p, meta$category)
      }
      
@@ -1174,7 +1185,7 @@ server <- function(input, output, session) {
   session_state$comp_maps_rendered <- FALSE
   session_state$minimap_rendered <- FALSE
 
-  # T10: bumped by every map renderLeaflet. Overlay observers depend on it so
+  # Bumped by every map renderLeaflet. Overlay observers depend on it so
   # proxy-managed layers (points, borders, controls) are re-applied after each
   # full re-render; leafletProxy defers until after the flush, so the calls
   # land on the freshly rendered widget.
@@ -1197,6 +1208,7 @@ server <- function(input, output, session) {
     desc_vars_state = list(x = "", y = "", z = "", multi = character(0)),
     cv_metrics_act = list(), cv_metrics_pre = list(),
     cv_data_act = list(), cv_data_pre = list(),
+    cv_strategy_sel = "auto", # CV strategy applied in the last run (for labels)
     loc_resolutions = list(), # Track spatial resolutions per locality
     idw_factors = list(), tps_lambdas = list(), # Regional Parameters
     tps_gcv_data = list(), # GCV Diagnostic Data
@@ -1209,10 +1221,10 @@ server <- function(input, output, session) {
     gstat_objs = list(), # gstat objects for CK
     loc_names = NULL, metrics = NULL, log = "Ready.",
     drawn_feature = NULL, # Temporarily store drawn shape for grouping
-    run_config_summary = NULL, # B3: Plain text summary of latest run configuration
-    run_counter = 0L, # B4: Incremental run counter
-    run_history = list(), # B4: Archive of previous run results and configs
-    proceed_run = NULL, # B4: Trigger for model generation after archive decision
+    run_config_summary = NULL, # Plain text summary of latest run configuration
+    run_counter = 0L, # Incremental run counter
+    run_history = list(), # Archive of previous run results and configs
+    proceed_run = NULL, # Trigger for model generation after archive decision
     pt_style_colors = NULL, # F2: Named vector group_value -> hex_color
     pt_style_palette = "Set1", # F2: Current qualitative palette name
     auto_archive_choice = "none", # "none", "archive", or "discard"
@@ -1770,7 +1782,7 @@ server <- function(input, output, session) {
 
   # One handler set per map: a newly drawn shape opens the assign-locality
   # modal, and polygons are also kept in rv$drawn_polygons for map exports.
-  # Keys are prefixed with the map id — leaflet ids are only unique per map.
+  # Keys are prefixed with the map id; leaflet ids are only unique per map.
   for (.map_id in c("main_map", "comp_map_left", "comp_map_right")) local({
     map_id <- .map_id
     poly_key <- function(feat) paste0(map_id, "_", feat$properties$`_leaflet_id`)
@@ -1901,7 +1913,7 @@ server <- function(input, output, session) {
     )
   })
 
-  # T8: resolve each popup variable to its data column once per point set, so
+  # Resolve each popup variable to its data column once per point set, so
   # generate_popup does a plain lookup per point instead of up to four regex
   # searches per variable per point. Returns a popup_fn(data_row) closure.
   make_popup_fn <- function(cnames) {
@@ -2182,8 +2194,8 @@ server <- function(input, output, session) {
     rv$pop_up_vars <- num_cols[!grepl("\\bx\\b|\\by\\b|lon|lat|latitude|longitude", num_cols, ignore.case=TRUE)]
     
     curr_locs <- isolate(input$locality)
-    # T21: input$map_loc is still the pre-updateSelectInput value here — use
-    # the freshly guessed column instead of the stale input
+    # input$map_loc is still the pre-updateSelectInput value here, so use
+    # the freshly guessed column instead of the stale input.
     new_choices <- c("ALL", unique(df[[loc_guess]]))
     selected_locs <- intersect(curr_locs, new_choices)
     updateSelectInput(session, "locality", choices = new_choices, selected = selected_locs)
@@ -2266,9 +2278,9 @@ server <- function(input, output, session) {
   observeEvent(input$crs_selection, {
     req(input$crs_selection)
 
-    # In fixed mode the user chose the value deliberately — only refresh the
+    # In fixed mode the user chose the value deliberately, so only refresh the
     # slider frame; in auto modes the suggestion observer overwrites the value
-    # right after anyway
+    # right after anyway.
     if (isTRUE(input$res_mode == "fixed")) {
       updateSliderInput(session, "grid_res", label = "Resolution (m)",
                         min = 1, max = 500, step = 1)
@@ -2431,7 +2443,7 @@ server <- function(input, output, session) {
         actionButton("confirm_mapping", "CONFIRM VARIABLE MAPPING", class = "btn-primary btn-block")
       )
     }, error = function(e) {
-      print(paste("Error in var_mapping_ui:", e$message))
+      warning(paste("Error in var_mapping_ui:", e$message))
       h4(paste("Error rendering UI:", e$message), style="color:red;")
     })
   })
@@ -2642,7 +2654,7 @@ server <- function(input, output, session) {
     filename = function() { paste0("monolith_session_info_", format(Sys.time(), "%Y%m%d_%H%M%S"), ".txt") },
     content = function(file) {
       writeLines(c(
-        paste0("Monolith session info — generated ", format(Sys.time(), "%Y-%m-%d %H:%M:%S")),
+        paste0("Monolith session info: generated ", format(Sys.time(), "%Y-%m-%d %H:%M:%S")),
         "",
         utils::capture.output(utils::sessionInfo())
       ), file)
@@ -2873,6 +2885,9 @@ server <- function(input, output, session) {
 
   output$palette_ui <- renderUI({
     req(input$var_id, rv$mapping$vars)
+    # Agronomical styling supplies its own class palette, so the manual
+    # colour-palette picker is irrelevant there — hide it.
+    if (isTruthy(input$color_style) && input$color_style == "agro") return(NULL)
     idx <- which(sapply(rv$mapping$vars, function(x) x$actual == input$var_id))
     if (length(idx) == 0) return(NULL)
     m <- rv$mapping$vars[[idx]]
@@ -2903,7 +2918,7 @@ server <- function(input, output, session) {
         y_col <- rv$mapping$y
         if (!is.null(x_col) && !is.null(y_col) && x_col %in% colnames(rv$user_data) && y_col %in% colnames(rv$user_data)) {
           # The range slider parameterizes a variogram fitted in the analysis
-          # CRS (metric), so its scale must be measured there — the raw x/y
+          # CRS (metric), so its scale must be measured there; the raw x/y
           # columns may be in degrees.
           coords_df <- rv$user_data[, c(x_col, y_col)]
           coords_df <- coords_df[complete.cases(coords_df), , drop = FALSE]
@@ -3447,7 +3462,7 @@ server <- function(input, output, session) {
     if (n_locs == 0) n_locs <- 1
     
     comp_mode <- isTruthy(input$comp_mode) || isTruthy(input$value_type != "actual")
-    # mirror the nested-worker topology the run pipeline actually uses (T12)
+    # mirror the nested-worker topology the run pipeline actually uses
     cores <- tryCatch(as.integer(future::availableCores()), error = function(e) 1L)
     if (is.null(cores) || is.na(cores) || cores < 1) cores <- 1L
     cores <- if (n_locs > 1) max(1L, min(cores - 1L, n_locs)) else 1L
@@ -3473,15 +3488,15 @@ server <- function(input, output, session) {
     ))
   }
 
-  # T7: archived registries hold wrapped rasters, so an unbounded archive
-  # grows RAM run after run — keep only the most recent few
+  # Archived registries hold wrapped rasters, so an unbounded archive
+  # grows RAM run after run; keep only the most recent few.
   MAX_RUN_HISTORY <- 5L
   push_run_history <- function(entry, base = NULL) {
     hist <- c(list(entry), if (is.null(base)) rv$run_history else base)
     if (length(hist) > MAX_RUN_HISTORY) {
       n_drop <- length(hist) - MAX_RUN_HISTORY
       hist <- hist[seq_len(MAX_RUN_HISTORY)]
-      showNotification(paste0("Run archive limit (", MAX_RUN_HISTORY, ") reached — ", n_drop,
+      showNotification(paste0("Run archive limit (", MAX_RUN_HISTORY, ") reached: ", n_drop,
                               " oldest archived run(s) discarded to free memory."),
                        type = "warning", duration = 8)
     }
@@ -3666,6 +3681,11 @@ server <- function(input, output, session) {
     showNotification("Auto-archive/discard setting has been reset. You will be prompted for future runs.", type = "message")
   })
 
+  # Where a model run actually executes. input$run first passes through the
+  # archive-confirmation gate and then flips rv$proceed_run; this observer picks
+  # it up, validates the coordinate mapping, builds the per-locality point sets,
+  # and dispatches the interpolation to the future_promise pipeline so the UI
+  # stays responsive while localities are processed.
   observeEvent(rv$proceed_run, {
     if (isTRUE(rv$model_running)) {
       showNotification("A model run is already in progress.", type = "warning")
@@ -3806,6 +3826,7 @@ server <- function(input, output, session) {
     rv$model_summaries <- list(); rv$rf_models <- list(); rv$gstat_objs <- list()
     rv$cv_metrics_act <- list(); rv$cv_metrics_pre <- list() # Reset CV metrics
     rv$cv_data_act <- list(); rv$cv_data_pre <- list()
+    rv$cv_strategy_sel <- input$cv_strategy %||% "auto"
     
     update_premium_progress(15, "Validating and Cleaning Spatial Input Data...")
     
@@ -3861,9 +3882,11 @@ server <- function(input, output, session) {
         tps_lambda_act = get_regional_param("TPS", l, "act", default = tps_lambda_val),
         tps_lambda_pre = get_regional_param("TPS", l, "pre", default = tps_lambda_val),
         pre_fit_act = clean_gstat_env(rv$v_fit_list[[paste0(l, "_act")]]),
-        pre_fit_pre = clean_gstat_env(if(sep_fit) rv$v_fit_list[[paste0(l, "_pre")]] else rv$v_fit_list[[paste0(l, "_act")]])
+        pre_fit_pre = clean_gstat_env(if(sep_fit) rv$v_fit_list[[paste0(l, "_pre")]] else rv$v_fit_list[[paste0(l, "_act")]]),
+        cv_strategy = input$cv_strategy %||% "auto",
+        rfk_uncertainty = input$rfk_uncertainty %||% "jackknife"
       )
-      
+
       list(l = l, pts_data = pts_data, m_params = m_params)
     })
 
@@ -3887,7 +3910,7 @@ server <- function(input, output, session) {
     
     vif_thresh_local <- rv$active_vif_thresh
 
-    # T6: single source of truth for every helper the interpolation worker
+    # Single source of truth for every helper the interpolation worker
     # needs. future_promise ships them into the worker's global env via
     # `globals` (robust_vgm_fit / clean_gstat_env live in monolith.R and
     # get_buffer_multiplier in ui_helpers.R, so the worker's
@@ -3897,19 +3920,19 @@ server <- function(input, output, session) {
       "run_regional_interpolation", "calc_scientific_lags", "robust_vgm_fit",
       "apply_interpolation", "apply_OK", "apply_RK", "apply_RFK", "apply_CK",
       "apply_IDW", "apply_TPS", "perform_kriging_loocv", "safe_run_cv",
-      "optimize_idw_p", "clean_gstat_env",
+      "optimize_idw_p", "clean_gstat_env", "make_cv_folds", "resolve_cv_plan",
       "apply_kriging_pipeline", "check_vif", "krige_covariates", "get_buffer_multiplier",
-      "sanitize_spatial_predictions", "validate_and_project_sf", "suggest_lmc_model",
-      ".cv_to_df", "detect_cv_columns"
+      "sanitize_spatial_predictions", "validate_and_project_sf", "dedup_valid_points",
+      "suggest_lmc_model", ".cv_to_df", "detect_cv_columns"
     )
     # Materialize the helpers ONCE here in the main session. A plain named
     # list referenced by symbol is shipped reliably by automatic globals
     # detection; future_promise does NOT honor future's structure(TRUE, add=)
-    # globals idiom (verified 2026-07-05 — the add= names silently never
-    # reached the worker). mget() also fails fast if a helper is missing.
+    # globals idiom: the add= names silently never reach the worker. mget()
+    # also fails fast if a helper is missing.
     interp_helper_values <- mget(interp_globals, inherits = TRUE)
 
-    # T12: nested futures default to a sequential plan, so without an explicit
+    # Nested futures default to a sequential plan, so without an explicit
     # escalation all localities run one after another inside the single
     # future_promise worker. The nested worker count is decided HERE in the
     # main session (availableCores() introspection inside a PSOCK worker is
@@ -3964,7 +3987,7 @@ server <- function(input, output, session) {
           # same way the promise worker does. The globals list above only
           # ships the entry points plus the helpers living outside
           # spatial_helpers.R (robust_vgm_fit, clean_gstat_env,
-          # get_buffer_multiplier) — not every internal spatial_helpers
+          # get_buffer_multiplier), not every internal spatial_helpers
           # function they call.
           source(file.path(main_wd, "spatial_helpers.R"), local = FALSE)
           run_regional_interpolation(
@@ -4226,7 +4249,7 @@ server <- function(input, output, session) {
               round(yardstick::mcc_vec(df_k$act_bin, df_k$pred_bin), 4)
             )
           )
-          register_export_item("table_kappa_total", paste(meta$label, "- Total Classification Performance"), "table", kappa_total, meta$category)
+          register_export_item("table_kappa_total", paste(meta$label, "- Total Classification Performance - Map in Agro or Binned styling to see the stats"), "table", kappa_total, meta$category)
         }
       }
     }
@@ -4512,11 +4535,11 @@ server <- function(input, output, session) {
     df
   }, striped = TRUE, hover = TRUE, bordered = TRUE, width = "100%")
 
-  # T10: draw_map only builds what requires re-encoding raster layers (run
+  # draw_map only builds what requires re-encoding raster layers (run
   # results, value type, classification/palette/uncertainty). Cheap overlays
   # (styled points, borders, north arrow, scale, resolution box, base tiles)
   # are applied by leafletProxy observers keyed on map_overlay_rev, so
-  # toggling them no longer re-renders the whole widget.
+  # toggling them does not re-render the whole widget.
   draw_map <- function(r_obj, lab) {
     current_tiles <- isolate(input$base_map_layer) %||% "Esri.WorldImagery"
     
@@ -4659,7 +4682,7 @@ server <- function(input, output, session) {
     m
   }
 
-  # --- T10: proxy-managed overlays (no raster re-encode on toggle) ---
+  # --- proxy-managed overlays (no raster re-encode on toggle) ---
 
   # Styled sampling points + labels + their legend
   observe({
@@ -5086,7 +5109,7 @@ server <- function(input, output, session) {
         df_filtered <- rv$sf[!is.na(rv$sf[[col_resid]]), ]
         # Unlike the per-locality plots (internal trend-residual variogram of
         # the fitted model), the combined view pools CV residuals across
-        # localities — label it as such.
+        # localities, so label it as such.
         p_res <- plot(variogram(formula_obj, df_filtered), main = list(label = paste("Pooled CV Residual Variogram", title_suffix), cex = 0.85), scales = list(cex = 0.75))
         print(p_res)
       } else {
@@ -5370,6 +5393,21 @@ server <- function(input, output, session) {
     if(loc == "Total (Combined)") return(NULL) else calc_area_df(rv$rast_list_pre[[loc]], paste0("loc_pre_", loc))
   })
 
+  output$cv_strategy_badge <- renderUI({
+    req(length(rv$cv_metrics_act) > 0)
+    strat <- rv$cv_strategy_sel %||% "auto"
+    label <- switch(strat,
+      "loocv" = "Standard LOOCV (full leave-one-out)",
+      "block" = "Spatial Block CV (10 k-means folds; LOOCV below n=30)",
+      "Auto (LOOCV for n ≤ 50, random 10-fold above)")
+    tags$div(
+      style = "font-size: 0.82em; color: #495057; margin: -4px 0 8px 0;",
+      tags$span(style = "font-weight: 600;", "Cross-validation: "),
+      tags$span(label),
+      tags$span(style = "color: #868e96;", " (applies to these metrics only, not the map).")
+    )
+  })
+
   output$metrics_table <- renderTable({
     req(input$sel_loc_stats)
     loc <- input$sel_loc_stats
@@ -5414,7 +5452,7 @@ server <- function(input, output, session) {
         res <- cv_list[[loc]]
         n_obs <- if(!is.null(data_list[[loc]])) nrow(data_list[[loc]]) else NA
         src_label <- if(!is.null(res)) {
-          paste0(label, " (", cv_type_label(n_obs), ", n=", res$n, ")")
+          paste0(label, " (", cv_type_label(n_obs, rv$cv_strategy_sel), ", n=", res$n, ")")
         } else {
           paste0(label, " (CV)")
         }

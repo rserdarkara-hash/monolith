@@ -252,17 +252,71 @@ test_that("get_cv_residuals extracts residual column when pred/obs missing", {
 })
 
 
-# ── cv_type_label ─────────────────────────────────────────────────────────
+# ── cv_type_label / resolve_cv_plan / make_cv_folds ────────────────────────
 
-test_that("cv_type_label reports LOOCV for n <= 50 and 10-fold above", {
+test_that("cv_type_label (Auto) reports LOOCV for n <= 50 and random 10-fold above", {
   expect_equal(cv_type_label(3), "LOOCV")
   expect_equal(cv_type_label(50), "LOOCV")
-  expect_equal(cv_type_label(51), "10-fold CV")
-  expect_equal(cv_type_label(500), "10-fold CV")
+  expect_equal(cv_type_label(51), "Random 10-fold CV")
+  expect_equal(cv_type_label(500), "Random 10-fold CV")
 })
 
 test_that("cv_type_label falls back to generic CV for unknown n", {
   expect_equal(cv_type_label(NA), "CV")
   expect_equal(cv_type_label(NULL), "CV")
   expect_equal(cv_type_label(integer(0)), "CV")
+})
+
+test_that("cv_type_label reflects the chosen strategy", {
+  expect_equal(cv_type_label(500, "loocv"), "Full LOOCV")
+  expect_equal(cv_type_label(20, "loocv"), "Full LOOCV")
+  expect_match(cv_type_label(500, "block"), "^Spatial Block CV")
+  # Spatial Block degrades to LOOCV below the minimum block size
+  expect_match(cv_type_label(20, "block"), "^LOOCV")
+  # NULL / empty strategy is treated as Auto
+  expect_equal(cv_type_label(51, NULL), "Random 10-fold CV")
+})
+
+test_that("resolve_cv_plan encodes fold type and count per strategy", {
+  expect_equal(resolve_cv_plan("loocv", 200)$type, "loocv")
+  expect_equal(resolve_cv_plan("auto", 30)$type, "loocv")
+  expect_equal(resolve_cv_plan("auto", 100)$type, "random_kfold")
+  expect_equal(resolve_cv_plan("auto", 100)$k, 10L)
+  expect_equal(resolve_cv_plan("block", 100)$type, "block")
+  expect_equal(resolve_cv_plan("block", 100)$k, 10L)
+  expect_equal(resolve_cv_plan("block", 25)$type, "loocv") # small-n degrade
+})
+
+test_that("make_cv_folds returns valid, reproducible, strategy-appropriate folds", {
+  set.seed(1)
+  coords <- cbind(runif(100, 0, 1000), runif(100, 0, 1000))
+
+  # LOOCV: one point per fold
+  loo <- make_cv_folds(coords, "loocv", 100)
+  expect_equal(loo, seq_len(100))
+
+  # Auto n > 50: balanced random 10-fold, reproducible
+  a1 <- make_cv_folds(coords, "auto", 100)
+  a2 <- make_cv_folds(coords, "auto", 100)
+  expect_identical(a1, a2)
+  expect_equal(length(a1), 100)
+  expect_equal(sort(unique(a1)), 1:10)
+  expect_true(all(table(a1) == 10)) # balanced
+
+  # Auto n <= 50: LOOCV
+  expect_equal(make_cv_folds(coords[1:40, ], "auto", 40), seq_len(40))
+
+  # Spatial Block: 10 contiguous k-means folds, reproducible
+  b1 <- make_cv_folds(coords, "block", 100)
+  b2 <- make_cv_folds(coords, "block", 100)
+  expect_identical(b1, b2)
+  expect_equal(length(b1), 100)
+  expect_equal(length(unique(b1)), 10)
+})
+
+test_that("make_cv_folds preserves the caller's RNG stream", {
+  coords <- cbind(runif(60, 0, 1000), runif(60, 0, 1000))
+  set.seed(123); expected <- runif(1)
+  set.seed(123); invisible(make_cv_folds(coords, "block", 60)); actual <- runif(1)
+  expect_equal(actual, expected)
 })

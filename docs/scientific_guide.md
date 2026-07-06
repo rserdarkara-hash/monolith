@@ -167,10 +167,13 @@ The dashboard employs an automated least-squares fitting algorithm to establish 
 
 ## 5. Validation Diagnostics
 
-The dashboard automatically runs cross-validation for the selected spatial model. Depending on the sample size:
-- If the dataset has 50 or fewer observations, the engine executes a full **Leave-One-Out Cross-Validation (LOOCV)**.
-- If the dataset has more than 50 observations, the engine automatically switches to a **10-Fold Cross-Validation (CV)** to ensure computational efficiency.
-By dropping points according to this partition, we generate a dataset of predicted vs. actual values (<i>P<sub>i</sub></i> vs <i>O<sub>i</sub></i>). The cross-validation engine utilizes a centralized metric abstraction (`perform_cv`) to process an expanded suite of metrics natively.
+The dashboard runs cross-validation for the selected spatial model to produce the predicted-versus-observed pairs behind every performance metric. The **Cross-Validation Strategy** control (directly beneath the Interpolation dropdown in the Spatial Engine panel) governs how the held-out folds are formed. It affects the reported metrics only, **never the interpolated surface**, and never the IDW power search (Section 4.2), which keeps its own dedicated fold scheme:
+
+- **Auto (Default):** **Leave-One-Out Cross-Validation (LOOCV)** for datasets of 50 or fewer observations; a seeded, balanced **random 10-Fold Cross-Validation** above 50 for computational efficiency.
+- **Standard LOOCV:** Full Leave-One-Out regardless of sample size, the most rigorous option, but computationally heavy beyond ~2000 points (the kriging engines re-fit the variogram on every fold).
+- **Spatial Block CV:** Ten spatially contiguous folds formed by k-means clustering of the sample coordinates. Random folds place a test point's near-neighbours into the training set, so under spatial autocorrelation the model effectively interpolates from almost-collocated data and cross-validation over-states its skill. Holding out whole spatial blocks removes that leakage, giving a more honest estimate of prediction at genuinely unsampled locations (recommended for digital-soil-mapping validation, e.g. Roberts et al. 2017; Ploton et al. 2020). Below 30 observations the blocks become degenerate, so the engine automatically falls back to LOOCV.
+
+All fold assignments use a fixed seed (`12345`) for reproducibility. By dropping points according to the chosen partition, we generate a dataset of predicted vs. actual values (<i>P<sub>i</sub></i> vs <i>O<sub>i</sub></i>). The cross-validation engine utilizes a centralized metric abstraction (`perform_cv`) to process an expanded suite of metrics natively.
 
 - **RMSE (Root Mean Square Error):**
   <div style="text-align:center;"><i>RMSE = &radic;( &sum; (P<sub>i</sub> - O<sub>i</sub>)<sup>2</sup> / n )</i></div>
@@ -197,11 +200,11 @@ By dropping points according to this partition, we generate a dataset of predict
 - **SMAPE (Symmetric Mean Absolute Percentage Error):** Standardizes absolute errors as percentages, preventing extreme inflation when actual values are near zero.
 
 - **Moran's I (Spatial Autocorrelation of Residuals):**
-  Evaluates whether the LOOCV errors are randomly distributed across the field. If Moran's I is significantly positive, errors are clustered (e.g., the model consistently underestimates in the north and overestimates in the south). This indicates the model failed to capture a macroscopic spatial trend, and an RK or RFK approach might be required. The system uses FNN (k=1) and `spdep` for rapid spatial weights matrix construction when calculating the spatial autocorrelation of residuals. Datasets containing duplicated coordinates are handled by separating the duplicates with a negligible jitter (±10⁻⁸ map units) applied under a fixed internal seed, so Moran's I is exactly reproducible between runs and the global RNG state is left untouched. **Note:** The spatial distance threshold for defining neighbors uses a hardcoded multiplier. See Section 9 for details on adjusting this.
+  Evaluates whether the cross-validation errors are randomly distributed across the field. If Moran's I is significantly positive, errors are clustered (e.g., the model consistently underestimates in the north and overestimates in the south). This indicates the model failed to capture a macroscopic spatial trend, and an RK or RFK approach might be required. The neighbour structure is a **symmetric k-nearest-neighbour contiguity** (`k = 8`, a common default, capped at n − 1 for small samples), row-standardised (`spdep::nb2listw(style = "W")`). A kNN definition is scale-stable and avoids an arbitrary distance-band cutoff; because Moran's I is inherently sensitive to the neighbour definition, the reported value should be read as *the residual autocorrelation under this fixed 8-NN weighting*. Datasets containing duplicated coordinates are handled by separating the duplicates with a negligible jitter (±10⁻⁸ map units) applied under a fixed internal seed, so Moran's I is exactly reproducible between runs and the global RNG state is left untouched. **Note:** The neighbour count `k` is hardcoded; see Section 9 for details on adjusting it.
 
-- **Classification Performance (Accuracy, Cohen's Kappa, Weighted Kappa, MCC):** Observed and predicted values are binned into classes and compared as a confusion problem. For **agronomical classes**, the bin intervals are left-closed `[low, high)` — identical to the map classification (`terra::classify(..., right = FALSE)`) — so a value lying exactly on a class boundary receives the same class in the performance tables and on the classified map. **Quartile** binning uses the conventional right-closed intervals on the observed quartiles.
+- **Classification Performance (Accuracy, Cohen's Kappa, Weighted Kappa, MCC):** Observed and predicted values are binned into classes and compared as a confusion problem. For **agronomical classes**, the bin intervals are left-closed `[low, high)`, identical to the map classification (`terra::classify(..., right = FALSE)`), so a value lying exactly on a class boundary receives the same class in the performance tables and on the classified map. **Quartile** binning uses the conventional right-closed intervals on the observed quartiles.
 
-**Residual semantics on CV failure:** All residual-based diagnostics (validation metrics, pooled CV residual variograms, Moran's I) are computed strictly from cross-validation residuals. If cross-validation fails for a locality, its residuals are left empty rather than silently substituted with model training residuals — CV and training residuals are never mixed.
+**Residual semantics on CV failure:** All residual-based diagnostics (validation metrics, pooled CV residual variograms, Moran's I) are computed strictly from cross-validation residuals. If cross-validation fails for a locality, its residuals are left empty rather than silently substituted with model training residuals; CV and training residuals are never mixed.
 
 ---
 
@@ -234,7 +237,7 @@ In Kriging, the uncertainty is a function of the **Spatial Configuration** of yo
 
 ### 7.2 Uncertainty Metrics
 The application allows you to toggle between two primary metrics for visualizing spatial risk:
-* **Kriging Variance**: Represents the theoretical mean squared error of the prediction, expressed in the *squared* units of the variable (e.g., (mg/kg)² for potassium). Because of the squaring, its legend values are much larger than the variable's typical range — an SE of 130 mg/kg corresponds to a variance of ~17,000 (mg/kg)². It is particularly useful for comparing the relative stability and fit of different variogram models.
+* **Kriging Variance**: Represents the theoretical mean squared error of the prediction, expressed in the *squared* units of the variable (e.g., (mg/kg)² for potassium). Because of the squaring, its legend values are much larger than the variable's typical range; an SE of 130 mg/kg corresponds to a variance of ~17,000 (mg/kg)². It is particularly useful for comparing the relative stability and fit of different variogram models.
 * **Standard Error**: The square root of the variance, expressed in the same units as your primary soil parameter (e.g., %TN or pH units).
 * **Use Case**: This is the most practical metric for agronomists. For example, if a point predicts **2.0% Nitrogen** with a **Standard Error of 0.2**, you can be approximately 95% confident the true value lies between 1.6% and 2.4%.
 * **Display note**: Uncertainty layers are always rendered with a continuous color scale, and the map legend states the metric and its unit (e.g., "Variance: K (mg/kg)²"). Agronomic and Binned classification breaks are defined for concentrations and are therefore not applied to uncertainty surfaces.
@@ -245,7 +248,15 @@ For advanced models (Regression Kriging and Random Forest Kriging), the uncertai
 * **Residual Uncertainty**: Captures the Kriging error of the remaining unexplained variation.
 * **Total Map**: The final uncertainty map for RK/RFK is the mathematical sum of both the trend variance and the residual kriging variance, providing a comprehensive "Full-Model" error surface.
 
-**Important — the trend-uncertainty term differs between RK and RFK.** For RK, the trend component is the parametric standard error of the linear-model prediction (`se.fit²`), i.e. the variance of the estimated mean surface. For RFK, no closed-form standard error exists, so the trend component is a widely used heuristic: the **between-tree variance** of the Random Forest ensemble (the spread of the individual trees' predictions around the ensemble mean). This between-tree spread reflects model instability rather than a formal predictive variance, and it typically **understates** the true predictive uncertainty of the forest. The RK and RFK uncertainty maps are therefore not directly comparable in magnitude, and RFK uncertainty should be interpreted as a relative (where is the model least stable?) rather than an absolute (what is the 95% interval?) error measure. Both maps remain labeled "Variance"/"SE" for UI consistency. Formal alternatives (e.g., the infinitesimal jackknife of Wager et al., 2014, or quantile regression forests) would change the numeric surfaces and are deliberately not applied.
+**Approximation: the "Total" is an additive sum (zero trend–residual covariance).** For both RK and RFK the combined variance is `Var(trend) + Var(residual kriging)`, which assumes the trend-estimation error and the kriged-residual error are independent (zero cross-covariance). This is the conventional two-step regression-kriging approximation: because the trend is fitted first and its residuals are kriged separately, the two error terms are treated as additive. The exact joint treatment, in which the covariance between the mean-surface estimate and the residual prediction is carried explicitly, is Kriging with External Drift (KED) / Universal Kriging, which is not what the two-step engine does. In practice the additive form is standard and slightly **conservative-to-approximate** rather than exact; interpret the Total surface accordingly.
+
+**The trend-uncertainty term differs between RK and RFK.** For RK, the trend component is the parametric standard error of the linear-model prediction (`se.fit²`), i.e. the variance of the estimated mean surface. For RFK, no closed-form standard error exists, so the trend component is user-selectable via the **RFK Uncertainty Method** control:
+* **Infinitesimal Jackknife (default, calibrated)**, the estimator of Wager, Hastie & Efron (2014), with the Monte-Carlo bias correction. It is the random-forest analogue of RK's `se.fit²`: the sampling variance of the *ensemble-mean* prediction, and a better-calibrated trend-uncertainty term than the raw between-tree spread. This is the default.
+* **Ensemble spread (fast)**, the **between-tree variance** of the Random Forest (the spread of the individual trees' predictions around the ensemble mean). This reflects model *instability* rather than a formal predictive variance and typically **understates** the true predictive uncertainty; treat it as a relative "where is the model least stable?" measure, not an absolute 95%-interval measure.
+
+Switching methods changes **only** the RFK uncertainty surface; the RFK prediction map (`var1.pred`) and the reported cross-validation metrics are identical either way.
+
+Both maps remain labeled "Variance"/"SE" for UI consistency, and RK vs RFK magnitudes are still not directly comparable. Quantile Regression Forests are deliberately **not** offered here: a QRF predictive interval already contains the irreducible residual scatter that this engine models separately via residual kriging, so summing the two under the additive trend + residual decomposition would double-count that variance.
 
 ---
 
@@ -256,6 +267,7 @@ For advanced models (Regression Kriging and Random Forest Kriging), the uncertai
 The system actively guards against severe multicollinearity which can destabilize multivariate mathematical models. 
 * **PCA Module:** Before executing standard PCA, it scans the numerical matrix for pairwise correlations > 0.95. If detected, it actively halts the execution and alerts the user, requiring a manual override or parameter drop. This is a critical statistical guardrail that prevents severe distortion of the loading vectors.
 * **Geostatistical Engine (RK, RFK, CK):** Before launching multivariate spatial interpolations (Regression Kriging, Random Forest Kriging, or Co-Kriging), the system performs a Variance Inflation Factor (VIF) check on the selected auxiliary variables. If variables with a VIF > 10 are detected, an interactive modal halts the process, advising the user to "Auto-Drop and Continue" or force execution. If auto-dropped, the variables are strictly purged from both the interpolation algorithms and downstream diagnostic reports (e.g., Variable Importance plots).
+  * *Note on cross-validation:* the VIF/collinearity prune is run **once on the full auxiliary set before cross-validation**, not re-derived inside each CV fold. This is deliberate and does not inflate the reported CV skill: the filter is **unsupervised**: it inspects only the covariate–covariate correlation matrix and never sees the target variable, so, unlike supervised feature selection, it introduces no leakage or optimistic bias when performed outside the resampling loop. Keeping the retained variable set fixed across folds also makes the model definition and its diagnostics stable and interpretable.
 
 ---
 
@@ -264,16 +276,16 @@ The system actively guards against severe multicollinearity which can destabiliz
 Certain statistical parameters are hardcoded to ensure smooth automated execution but can be modified directly in the source code by advanced users:
 
 ### 9.1 Cross-Validation Random Seed
-To ensure "scientific reproducibility" across identical runs, the cross-validation fold generation uses a fixed seed (`12345`). 
-* **Where to change:** `perform_kriging_loocv` and `apply_TPS` functions inside `spatial_helpers.R`.
+To ensure "scientific reproducibility" across identical runs, every cross-validation fold assignment, both the random k-fold partition and the Spatial Block k-means clustering, uses a fixed seed (`12345`).
+* **Where to change:** `make_cv_folds` inside `spatial_helpers.R` is the single source of fold assignments for all engines; `perform_kriging_loocv` additionally seeds its per-fold Random Forest draws (RFK).
 * **How to change:** Locate `set.seed(12345)` and either change the integer or comment out the line to allow fully randomized folds on every execution.
 
-### 9.2 Moran's I Distance Threshold Multiplier
-The spatial distance threshold for defining neighbors in the Moran's I test is calculated dynamically, but relies on a hardcoded multiplier of `5` (`mean(knn_res$nn.dist, na.rm = TRUE) * 5`).
+### 9.2 Moran's I Neighbour Count (k)
+The Moran's I residual-autocorrelation test defines neighbours via a symmetric k-nearest-neighbour contiguity with a hardcoded `k = 8` (capped at n − 1 for small samples). This replaces the earlier arbitrary distance-band heuristic (`mean-NN × 5`), which, being a wide band, diluted local autocorrelation toward zero.
 * **Where to change:** `calc_moran` function inside `spatial_helpers.R`.
-* **How to change:** Locate the `d_thresh` variable and adjust the multiplier (e.g., from `* 5` to `* 3`) if you are working with data where the range of spatial autocorrelation is expected to be much narrower or broader.
+* **How to change:** Locate `k_nn <- min(8L, nrow(coords) - 1L)` and adjust the `8L` if you expect the range of residual spatial autocorrelation to be captured by a smaller (more local) or larger neighbourhood.
 
-### 9.3 LOOCV vs k-Fold CV Threshold
-By default, the engine uses Leave-One-Out Cross-Validation (LOOCV) when the number of observations is 50 or fewer, and switches to 10-Fold Cross-Validation when n > 50.
-* **Where to change:** `perform_kriging_loocv` function inside `spatial_helpers.R`.
-* **How to change:** Locate `if (nrow(pts) <= 50)` inside `perform_kriging_loocv` and change `50` to your preferred threshold.
+### 9.3 Cross-Validation Strategy and Thresholds
+The **Cross-Validation Strategy** (Auto / Standard LOOCV / Spatial Block CV) is selectable directly in the UI; no code edit is required to switch strategies (see Section 5). The associated thresholds are hardcoded in one place:
+* **Where to change:** `resolve_cv_plan` inside `spatial_helpers.R`.
+* **How to change:** Under **Auto**, the engine uses LOOCV when the number of observations is 50 or fewer and switches to random 10-Fold above 50; edit the `n > 50` test to move that boundary. **Spatial Block** degrades to LOOCV below the `CV_BLOCK_MIN_N` constant (default `30`). The number of spatial blocks / random folds is the `k = 10L` value; change it to use a different fold count.

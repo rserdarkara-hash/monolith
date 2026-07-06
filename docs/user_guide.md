@@ -69,15 +69,15 @@ This determines the mathematical "lens" through which you see the field:
 
 **1.5 Drawing on the Map: Custom Groups & Exports**
 
-The interactive maps (Map Viewer and both comparison maps) carry a **drawing toolbar** on the left edge of the map. It lets you sketch polygons, rectangles, and point markers directly on the map — and this is the basis for two workflows:
+The interactive maps (Map Viewer and both comparison maps) carry a **drawing toolbar** on the left edge of the map. It lets you sketch polygons, rectangles, and point markers directly on the map, and this is the basis for two workflows:
 
 * **Assigning a custom locality / analysis group:**
     1. Draw a shape around the points you want to group (polygon or rectangle tools).
     2. When you finish the shape, an **"Assign Locality / Analysis Group"** dialog opens automatically. Enter a group name (e.g., "Zone A") and click **Save Group**.
     3. All sample points falling inside the shape are written to an `Assigned_Locality` column in your dataset (the app reports how many points were captured). You can then select this column as the Locality/Grouping column in the Data Setup tab to run analyses on your custom zones.
-* **Exporting your work** — two buttons sit at the right end of the Map Viewer toolbar (hover over them in the app for a reminder of when they apply):
+* **Exporting your work:** two buttons sit at the right end of the Map Viewer toolbar (hover over them in the app for a reminder of when they apply):
     * **Export Manually Drawn Polygon:** Available once you have drawn at least one polygon on the map. Downloads *all* drawn polygons in the format chosen in the adjacent dropdown (Shapefile ZIP, GeoJSON, KML, or GPKG), so you can reuse the boundaries in a GIS.
-    * **Export Updated Dataset:** Use after you have modified the dataset inside the app — most commonly after saving one or more drawn groups as described above. Downloads the current dataset as `.xlsx`, including the `Assigned_Locality` column, so the group assignments survive beyond the session.
+    * **Export Updated Dataset:** Use after you have modified the dataset inside the app, most commonly after saving one or more drawn groups as described above. Downloads the current dataset as `.xlsx`, including the `Assigned_Locality` column, so the group assignments survive beyond the session.
 * Shapes can be edited or deleted with the toolbar's edit/delete tools; the polygon export always reflects the current set of shapes. Note that deleting a shape does **not** undo a group assignment already saved from it.
 
 ## Mapping: 2. Spatial Engine Selection & Tuning
@@ -90,7 +90,14 @@ Once selections are made, the main interface transitions to the analytical modul
      - **Geostatistical (Standard):** **Ordinary Kriging (OK)** uses a Variogram to model spatial autocorrelation, providing the Best Linear Unbiased Predictor (BLUE).
      - **Multivariate (Co-Kriging)**: **Co-Kriging (CK)** exploits the cross-correlation between your primary target and a densely sampled auxiliary variable (e.g., using Sensor-based Conductivity to improve a Clay map).
      - **Hybrid/ML:** **Regression Kriging (RK)** and **Random Forest Kriging (RFK)** combine environmental trends (topography, satellite data) with Kriging of the residuals to capture complex soil patterns.
-     
+
+**1.b. Choose the Cross-Validation Strategy:**
+   - Directly beneath the Spatial Engine dropdown, a **Cross-Validation Strategy** selector controls how the model's performance metrics are validated. It changes the reported diagnostics only, **never the interpolated map itself**.
+     - **Auto (Default):** Leave-One-Out CV for 50 or fewer points, switching to a seeded random 10-fold CV above 50.
+     - **Standard LOOCV:** Full Leave-One-Out for every dataset, the most rigorous choice, but slow beyond a few thousand points (especially RK/RFK).
+     - **Spatial Block CV:** Holds out ten spatially contiguous k-means clusters, curbing the optimistic bias that random folds show when data are spatially autocorrelated. Recommended for spatial validation; below 30 points it reverts to LOOCV.
+   - The strategy actually applied to a completed run is shown next to the **Model Performance** table (and in each locality's *CV Type* row), so you always know which validation produced the reported metrics.
+
 **2.a. Variogram Optimization (Geostatistical Engines Only):**
    - If a Kriging method is selected, the Variogram Panel will appear.
    - **Auto-Fit Button:** Click this first. The system will attempt to fit four different models using least-squares optimization and will choose the best fit. Review the plotted curve against the scatter points.
@@ -113,7 +120,7 @@ Once selections are made, the main interface transitions to the analytical modul
      - Manual override is available if you deem it necessary. Note that setting `Lambda = 0` forces exact interpolation (no smoothing).
      
 **3. Define the Grid Resolution:**
-  The resolution determines the size of each pixel in your final map. Resolutions and their automatic suggestions are always in **metres** — even if you selected a geographic (degree-based) mapping CRS, the app measures point spacing in metres behind the scenes, because interpolation always runs in a projected CRS.
+  The resolution determines the size of each pixel in your final map. Resolutions and their automatic suggestions are always in **metres**, even if you selected a geographic (degree-based) mapping CRS, the app measures point spacing in metres behind the scenes, because interpolation always runs in a projected CRS.
 * **Auto (Per Locality):** The app calculates the average distance between nearest-neighbor samples for *each specific field* and sets the pixel size to 50% of that distance. This tries to enable high-density plots to get high-detail maps, while sparse regions stay computationally efficient.
 * **Auto (Global):** Uses the average point density of the *entire dataset* to set a uniform resolution across all maps.
 * **Fixed:** Provides manual control. 
@@ -133,7 +140,7 @@ Once selections are made, the main interface transitions to the analytical modul
      - **History-Aware Logic:** If sufficient prior runs exist in the `.csv` log for the chosen method, the engine uses a linear model to predict runtime based on sample counts.
      - **Cold-Start Method Multipliers:** If no history exists, it uses base multipliers: RFK (1.0x), RK (1.0x), and CK (1.3x) which are calibrated from real measurements. OK (0.5x), IDW (0.5x), and TPS (0.3x) are currently unverified estimates based on theoretical complexity.
    - Click **Run Interpolation** and proceed to **Map Viewer** tab. The system will perform cross-validation (Leave-One-Out CV for 50 or fewer observations, or 10-fold CV for larger datasets) *(Note: cross-validation utilizes a fixed random seed by default; see the Scientific Guide Section 9 for customization)*, generate the surface, and populate the Validation Diagnostics table with RMSE, R², and Moran's I metrics *(Note: Moran's I uses a hardcoded distance threshold multiplier; see the Scientific Guide Section 9 for customization)*.
-   - **Automatic Fallbacks:** If an engine cannot be fitted for a locality (e.g., TPS on a degenerate point layout, or CK/RK/RFK model failures), the app automatically falls back to a simpler engine and reports this in the run log and as a warning notification — check the log if a map looks different from the method you selected.
+   - **Automatic Fallbacks:** If an engine cannot be fitted for a locality (e.g., TPS on a degenerate point layout, or CK/RK/RFK model failures), the app automatically falls back to a simpler engine and reports this in the run log and as a warning notification; check the log if a map looks different from the method you selected.
    - **Responsive Diagnostic Views:** The UI employs `shinyjs` to dynamically toggle the visibility of complex validation diagnostics (like the RF Variable Importance Plot, Internal Residual Variogram, or TPS GCV Diagnostic Plot) based on the active Spatial Engine and whether the user is viewing `Actual` or `Predicted` data. This prevents empty plots from rendering and provides visual cleanliness.
 
 ---

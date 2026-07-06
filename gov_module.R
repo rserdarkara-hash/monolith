@@ -142,9 +142,8 @@ gov_factors_server <- function(id, data_reactive, vars_metadata_reactive) {
       n_perms <- input$gov_permutations
       ntree_val <- input$gov_ntree
       shap_size_val <- input$gov_shap_size
-      # T13: computed HERE in the main session — inside the promise worker
-      # availableCores() reports 1, which is why the SHAP escalation never
-      # fired before
+      # Read the core count here in the main session: inside the promise worker
+      # availableCores() reports 1, which would suppress the SHAP escalation.
       cores_hint_val <- tryCatch(as.integer(future::availableCores()), error = function(e) 1L)
 
       promises::future_promise({
@@ -195,7 +194,7 @@ gov_factors_server <- function(id, data_reactive, vars_metadata_reactive) {
         vip_df <- vip_df[order(vip_df$dropout_loss, decreasing = FALSE), ]
         vip_df$variable_label <- sapply(as.character(vip_df$variable), function(v) get_var_label(v, vars_metadata_reactive()))
         # make.unique: two predictors sharing a metadata label would otherwise
-        # crash factor() with duplicated levels (T20)
+        # crash factor() with duplicated levels.
         vip_df$variable_label <- make.unique(unname(vip_df$variable_label))
         vip_df$variable_label <- factor(vip_df$variable_label, levels = vip_df$variable_label)
         
@@ -286,8 +285,8 @@ gov_factors_server <- function(id, data_reactive, vars_metadata_reactive) {
       
       vip_df$variable <- sapply(as.character(vip_df$variable), function(v) get_var_label(v, vars_metadata_reactive()))
 
-      # T18: report the quality of the RF model behind the SHAP/importance
-      # results — OOB % variance explained (pseudo-R² on out-of-bag data)
+      # Report the quality of the RF model behind the SHAP/importance results:
+      # OOB % variance explained (pseudo-R² on out-of-bag data).
       oob_rsq <- tryCatch(utils::tail(gov_rv$res$model$rsq, 1), error = function(e) NULL)
       if (!is.null(oob_rsq) && length(oob_rsq) == 1 && is.finite(oob_rsq)) {
         vip_df <- rbind(

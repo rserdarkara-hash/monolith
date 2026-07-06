@@ -1,4 +1,4 @@
-![Monolith — Spatial Analysis Dashboard](assets/banner.png)
+![Monolith: Spatial Analysis Dashboard](assets/banner.png)
 
 # Monolith Spatial Analysis Dashboard v1.0.0
 
@@ -55,7 +55,7 @@ Whether you are mapping soil physicochemistry, analyzing topographical interacti
   ![Interactive variogram fitting panel with manual tuning controls](assets/3.png)
 
 
-* **Comprehensive Diagnostics**: Evaluate models through LOOCV. Generate advanced metrics including Nash-Sutcliffe Efficiency (NSE), CCC, RPD, RPIQ, and Moran's I for spatial autocorrelation.
+* **Comprehensive Diagnostics**: Evaluate models with a selectable cross-validation strategy: Auto (LOOCV for n ≤ 50, seeded random 10-fold above), full Leave-One-Out, or Spatial Block CV (k-means folds, recommended under spatial autocorrelation). Generate advanced metrics including Nash-Sutcliffe Efficiency (NSE), CCC, RPD, RPIQ, and Moran's I for spatial autocorrelation.
 
   ![Cross-validation diagnostics with NSE, CCC, RPD, RPIQ and Moran's I metrics](assets/4.png)
 
@@ -105,7 +105,7 @@ Before installing the application, ensure you have the following software instal
 *   **R:** Version **4.5.0 or higher** is required; Monolith is developed and tested on **R 4.5.2**. You can download it from [CRAN](https://cran.r-project.org/).
 *   **RStudio (Optional but recommended):** The easiest way to run and interact with Shiny applications. Download from [Posit](https://posit.co/download/rstudio-desktop/).
 *   **System Dependencies for Spatial Packages:** The spatial stack (`sf`, `terra`) links against GDAL, GEOS and PROJ. Monolith is tested against **GDAL 3.11.4, GEOS 3.13.1 and PROJ 9.7.0**; any reasonably recent releases of these libraries will work.
-    *   **Windows:** Nothing to do — CRAN ships the spatial packages as self-contained binaries. Installing [RTools](https://cran.r-project.org/bin/windows/Rtools/) (matching your R version) is only needed if a package must be compiled from source.
+    *   **Windows:** Nothing to do; CRAN ships the spatial packages as self-contained binaries. Installing [RTools](https://cran.r-project.org/bin/windows/Rtools/) (matching your R version) is only needed if a package must be compiled from source.
     *   **macOS:** You may need to install `gdal` and `proj` via Homebrew (`brew install gdal proj`).
     *   **Linux (Ubuntu/Debian):** Install spatial libraries using your package manager:
         ```bash
@@ -144,7 +144,7 @@ The full dependency suite, grouped by function:
 | **Parallelization / Async** | `future`, `furrr`, `promises` |
 
 <details>
-<summary><strong>Tested version matrix</strong> — the exact package versions Monolith 1.0.0 is developed and validated against (click to expand)</summary>
+<summary><strong>Tested version matrix</strong>: the exact package versions Monolith 1.0.0 is developed and validated against (click to expand)</summary>
 
 <br>
 
@@ -183,7 +183,7 @@ install.packages("renv")   # once
 renv::restore()             # reads renv.lock; confirm the prompt to activate the project
 ```
 
-This installs the pinned versions into a project-local library without touching your global R library. It is entirely optional — the Auto-Installation Hook described above remains the default path and installs current CRAN releases instead.
+This installs the pinned versions into a project-local library without touching your global R library. It is entirely optional; the Auto-Installation Hook described above remains the default path and installs current CRAN releases instead.
 
 ## 4. Application Structure
 
@@ -250,11 +250,11 @@ Monolith ships with a `testthat` suite covering the interpolation pipeline, cros
 Rscript tests/testthat.R
 ```
 
-The first run is slow because the harness sources the full application (all 49 packages); this is expected. Scientific accuracy is treated as the project's primary invariant — changes that alter numeric results are gated on these tests.
+The first run is slow because the harness sources the full application (all 49 packages); this is expected. Scientific accuracy is treated as the project's primary invariant; changes that alter numeric results are gated on these tests.
 
 # Development & AI Assistance
 
-Monolith was built with AI-assisted development tools and is disclosed here in the interest of scientific transparency: the codebase was written with **Antigravity CLI**, then systematically audited and refined with **Claude Code (Fable 5)** — covering debugging, performance optimization, and line-by-line verification of the mathematical implementations (interpolation engines, variogram fitting, cross-validation metrics).
+Monolith was built with AI-assisted development tools and is disclosed here in the interest of scientific transparency: the codebase was written with **Antigravity CLI**, then systematically audited and refined with **Claude Code (Fable 5)**, covering debugging, performance optimization, and line-by-line verification of the mathematical implementations (interpolation engines, variogram fitting, cross-validation metrics).
 
 Human oversight remained central throughout: all methodological choices, model formulations, and scientific decisions were specified, reviewed, and validated by the author. Numeric behavior is guarded by the `testthat` suite described [above](#testing--reproducibility), and any change that alters numeric results is treated as a scientific decision requiring explicit justification. Responsibility for the correctness of the software rests with the author, not the tools.
 
@@ -288,6 +288,6 @@ This project features a dual-licensing structure to protect both open-source con
 
 # Disclaimer
 
-Monolith is provided **"as is"**, without warranty of any kind — express or implied — including, but not limited to, warranties of merchantability, fitness for a particular purpose, and non-infringement, as set out in Sections 15 and 16 of the [GPL-3.0 license](LICENSE). In no event shall the author be liable for any claim, damages, or other liability arising from the use of this software.
+Monolith is provided **"as is"**, without warranty of any kind, express or implied, including, but not limited to, warranties of merchantability, fitness for a particular purpose, and non-infringement, as set out in Sections 15 and 16 of the [GPL-3.0 license](LICENSE). In no event shall the author be liable for any claim, damages, or other liability arising from the use of this software.
 
-In particular, for scientific and applied use: the quality of any interpolation, classification, or statistical output depends on the input data, sampling design, and model assumptions you choose. **You are responsible for validating the results for your own application** — including any agronomic, environmental, or management decision informed by them. The diagnostic tools built into Monolith (cross-validation metrics, residual maps, variogram inspection) exist precisely to support that validation; please use them.
+In particular, for scientific and applied use: the quality of any interpolation, classification, or statistical output depends on the input data, sampling design, and model assumptions you choose. **You are responsible for validating the results for your own application**, including any agronomic, environmental, or management decision informed by them. The diagnostic tools built into Monolith (cross-validation metrics, residual maps, variogram inspection) exist precisely to support that validation; please use them.
