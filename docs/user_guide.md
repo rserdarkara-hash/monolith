@@ -6,10 +6,9 @@ The application requires cleanly structured, georeferenced tabular data.
 **Step 1. Upload Dataset:**
    - Click `Browse...` to upload your file. 
    - The system accepts `.csv` and `.xlsx` files. Your file must contain distinct columns for X coordinates, Y coordinates and at least one variable of interest.
-   - Sample data sets are available in the app directory: 
+   - A sample dataset is available in the app directory: 
       - `samp_data_1.xlsx` (paired with the variable list `samp_var_list.xlsx`) is a demonstration subset containing three localities (Kale, Yorga, Altinova) drawn from the soil dataset of Kara et al. (2026). It is provided only to exercise the app; the complete dataset is published openly under CC BY 4.0 on Mendeley Data (https://doi.org/10.17632/8548bmgxh9.1; inactive until publication), while the demo files' own usage terms are given in `sample_data/DATA_LICENSE`.
-        - *Kara, R. S., Ongun, A. R., Almaz, C., Çiçek, G., Tepecik, M., & Yilgan, F. (2026). Diagnostic modeling of nutrients to support agroecosystem transitioning in tobacco soils: A stratified evaluation framework based on clay-organic matter-lime interactions [Manuscript submitted for publication]. Department of Soil Science and Soil Protection, Czech University of Life Sciences Prague*); 
-      - the small data set is in `samp_data_2.xlsx` (dummy soil phsysicochemistry and hydrology data for Pardubice/Czech Republic - dummy data for a sunflower field under controlled drainage)
+        - *Kara, R. S., Ongun, A. R., Almaz, C., Çiçek, G., Tepecik, M., & Yilgan, F. (2026). Diagnostic modeling of nutrients to support agroecosystem transitioning in tobacco soils: A stratified evaluation framework based on clay-organic matter-lime interactions [Manuscript submitted for publication]. Department of Soil Science and Soil Protection, Czech University of Life Sciences Prague*).
 
 **Step 2. Assign Variables:**
    - **X/Y Coordinates:** Select the columns representing longitude/latitude or easting/northing. App searches for exact matches of `x`, `y`, or headers starting with `lon` or `longitude`, `lat` or `latitude`.

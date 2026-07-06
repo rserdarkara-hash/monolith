@@ -1,24 +1,36 @@
-# DATA LICENSE & RESTRICTIONS
+# DATA LICENSE
 
-Copyright (c) 2026 Recep Serdar Kara. All rights reserved.
+Copyright (c) 2026 Recep Serdar Kara.
 
-The files and datasets contained within this `sample_data/` directory (including but not limited to `samp_data_1.xlsx`, `samp_data_2.xlsx`, `samp_var_list.xlsx`, and `samp_var_list_2.xlsx`) are provided strictly for demonstration, evaluation, and testing purposes of the Monolith application.
+The data files in this `sample_data/` directory — `samp_data_1.xlsx` and its
+paired variable list `samp_var_list.xlsx` — are a demonstration subset of the
+study dataset of Kara et al. (2026). They are released under the
+**Creative Commons Attribution 4.0 International (CC BY 4.0)** license
+(https://creativecommons.org/licenses/by/4.0/).
 
-By using, cloning, or downloading this repository, you agree to the following terms regarding the sample datasets:
+You are free to use, share, and adapt these files for any purpose, including
+research and commercial use, provided you give appropriate credit as required
+by CC BY 4.0.
 
-1. **Restricted Use**: The sample data is provided solely to demonstrate the functionality and interface of the Monolith application. Any other use, including but not limited to spatial analyses for external projects, commercial use, or academic/scientific research and publication, is strictly prohibited.
-2. **No Publication**: You may not publish, reprint, upload, or present any research, maps, figures, reports, or analytical results generated using this sample data in any journal article, conference proceeding, website, thesis, presentation, or other public or private forum.
-3. **No Redistribution**: You may not copy, share, redistribute, sublicense, or sell the sample datasets, either in their original form or in any modified or derived format, without the prior written consent of the copyright owner, Recep Serdar Kara.
-4. **No Ownership Transfer**: No ownership rights, intellectual property rights, or research exploitation rights to this data are transferred to any user of this repository.
+## Required attribution
 
-## Relationship to the Published Dataset
+If you use these data, cite the dataset version of record:
 
-The files in this directory are a small **demonstration subset**, curated solely to let users try the Monolith application. They are not the authoritative dataset and are not intended for analysis or reuse.
+> Kara, R. S., Ongun, A. R., Almaz, C., Çiçek, G., & Tepecik, M. (2026).
+> Physicochemical and Nutritional Soil Properties, Geolocation, and
+> Environmental Covariates for Nutrient Prediction in Transitioning Tobacco
+> Agroecosystems (Denizli, Turkey). Mendeley Data, V1.
+> https://doi.org/10.17632/8548bmgxh9.1
 
-The complete study dataset is published separately as the **version of record** on Mendeley Data under a **CC BY 4.0** license:
+The dataset DOI above is currently inactive and will resolve once the associated
+publication is released.
 
-> Kara, R. S., Ongun, A. R., Almaz, C., Çiçek, G., Tepecik, M., & Yilgan, F. (2026). Physicochemical and Nutritional Soil Properties, Geolocation, and Environmental Covariates for Nutrient Prediction in Transitioning Tobacco Agroecosystems (Denizli, Turkey). Mendeley Data, V1. https://doi.org/10.17632/8548bmgxh9.1
+If you use the Monolith software, please also cite it via its Zenodo DOI
+(see the "How to Cite" section of the project README).
 
-If you wish to use these data for research, analysis, or publication, obtain the complete dataset from Mendeley Data under its CC BY 4.0 terms — not from this repository. The restrictions above apply only to the demonstration files bundled here.
+## Note
 
-For inquiries regarding the authorized use, licensing, or collaborations involving these datasets, please contact the author: Recep Serdar Kara.
+These files are a small demonstration subset curated to let users try Monolith.
+The complete dataset — the authoritative version of record — is deposited on
+Mendeley Data under the same CC BY 4.0 terms and becomes publicly available with
+the associated publication.

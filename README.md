@@ -7,8 +7,12 @@
 [![Shiny](https://img.shields.io/badge/built%20with-Shiny-1f77b4)](https://shiny.posit.co/)
 [![License: GPL v3](https://img.shields.io/badge/license-GPL--3.0-blue)](LICENSE)
 [![Platform](https://img.shields.io/badge/platform-Windows%20%7C%20macOS%20%7C%20Linux-lightgrey)](#1-system-prerequisites)
+[![DOI](https://img.shields.io/badge/DOI-pending%20Zenodo%20release-lightgrey)](#how-to-cite)
+<!-- DOI PLACEHOLDER: after the first Zenodo release mints the concept DOI, replace the badge line above with:
+[![DOI](https://zenodo.org/badge/DOI/10.5281/zenodo.XXXXXXX.svg)](https://doi.org/10.5281/zenodo.XXXXXXX) -->
 
-*Monolith* is an R Shiny application designed for proper (or a standardized, at least) spatial statistical analysis, geostatistical modeling, and mapping. It provides a comprehensive toolkit for exploring spatial variability, and you may find it well-suited for research in soil science, life sciences, and agronomy.
+
+*Monolith* is an R Shiny application designed for proper spatial statistical analysis, geostatistical modeling, and mapping. It provides a comprehensive toolkit for exploring spatial variability, and you may find it well-suited for research in soil science, life sciences, and agronomy.
 
 Whether you are mapping soil physicochemistry, analyzing topographical interactions, or generating publication-ready **spatial, descriptive and multi-criteria explorative metrics**, Monolith provides a seamless, parallel-processed environment to ingest, interpolate, interpret and export the data for continuous and classified maps.
 
@@ -32,7 +36,7 @@ Whether you are mapping soil physicochemistry, analyzing topographical interacti
 
 # Key Features
 
-* **Diverse Spatial Engine**: Deterministic and geostatistical interpolation models for continuous and classified maps of your small fields or vast plains you study on. Monolith's classification engine automatically translates continuous predictions (e.g., Nitrogen levels) into standard agronomical zones. It outputs exact area coverages (in hectares).
+* **Diverse Spatial Engine**: Deterministic and geostatistical interpolation models for continuous and classified maps, at any scale from single fields to regional landscapes. Monolith's classification engine automatically translates continuous predictions (e.g., Nitrogen levels) into standard agronomical zones. It outputs exact area coverages (in hectares).
 
   - Inverse Distance Weighting (IDW),
 
@@ -60,7 +64,7 @@ Whether you are mapping soil physicochemistry, analyzing topographical interacti
   ![Cross-validation diagnostics with NSE, CCC, RPD, RPIQ and Moran's I metrics](assets/4.png)
 
 
-* **Descriptive & Exploratory Suite**: Understand your dataset with simultaneous descriptive, correlation, and principal component analyses with results that can be instantly generated and observed by simultaneous categorization and data popularization of choice. An additional Governing Factors module computes variable importance and effects via Random Forest models with ALE and PDP analyses, decoupled as of v0.9.6 for advanced performance and modularity.
+* **Descriptive & Exploratory Suite**: Understand your dataset with simultaneous descriptive, correlation, and principal component analyses with results that can be instantly generated and observed by simultaneous categorization and data popularization of choice. An additional Governing Factors module computes variable importance and effects via Random Forest models with ALE and PDP analyses, implemented as a decoupled module for performance and modularity.
 
   ![Descriptive and exploratory suite with correlation and PCA outputs](assets/5.png)
 
@@ -205,7 +209,7 @@ monolith/
 ├── sample_data/                      # Demo datasets (restricted license)
 ├── tests/                            # testthat unit & regression test suite
 │
-├── README.MD                         # This document
+├── README.md                         # This document
 ├── LICENSE                           # GPL-3.0 license
 └── .gitignore
 ```
@@ -254,9 +258,9 @@ The first run is slow because the harness sources the full application (all 49 p
 
 # Development & AI Assistance
 
-Monolith was built with AI-assisted development tools and is disclosed here in the interest of scientific transparency: the codebase was written with **Antigravity CLI**, then systematically audited and refined with **Claude Code (Fable 5)**, covering debugging, performance optimization, and line-by-line verification of the mathematical implementations (interpolation engines, variogram fitting, cross-validation metrics).
+Monolith was built with AI-assisted development tools and is disclosed here in the interest of scientific transparency: the codebase was written with **Antigravity CLI** (Google DeepMind), then systematically audited and refined with **Claude Code (Fable 5; Anthropic)**, covering debugging, performance optimization, and line-by-line verification of the mathematical implementations (interpolation engines, variogram fitting, cross-validation metrics).
 
-Human oversight remained central throughout: all methodological choices, model formulations, and scientific decisions were specified, reviewed, and validated by the author. Numeric behavior is guarded by the `testthat` suite described [above](#testing--reproducibility), and any change that alters numeric results is treated as a scientific decision requiring explicit justification. Responsibility for the correctness of the software rests with the author, not the tools.
+Human oversight remained central throughout: all methodological choices, model formulations, and scientific decisions were specified, reviewed, and validated by the author. Numeric behavior is guarded by the `testthat` suite described [above](#testing--reproducibility), and any change that alters numeric results is treated as a scientific decision requiring explicit justification. Responsibility for the correctness of the software rests with the author, not the tools. This disclosure mirrors the statement in the associated publication (Kara et al., 2026).
 
 # How to Cite
 
@@ -271,7 +275,11 @@ Human oversight remained central throughout: all methodological choices, model f
 }
 ```
 
-This section will be updated with the full journal reference upon publication.
+**Associated publication:** Kara, R.S., Ongun, A.R., Almaz, C., Çiçek, G., Tepecik, M., Yilgan, F., 2026. Diagnostic modeling of nutrients to support agroecosystem transitioning in tobacco soils: a stratified evaluation framework based on clay-organic matter-lime interactions. Manuscript submitted for publication.
+
+*This section will be updated with the full journal reference and DOI upon acceptance.*
+
+**Using the sample data?** The bundled demonstration files are released under CC BY 4.0; if you use them, please also cite the Mendeley dataset (see [sample_data/DATA_LICENSE](sample_data/DATA_LICENSE)).
 
 # Contributing & Support
 
@@ -281,10 +289,10 @@ This section will be updated with the full journal reference upon publication.
 
 # License
 
-This project features a dual-licensing structure to protect both open-source contributions and private research datasets:
+This project uses a dual-licensing structure — one license for the software, a separate one for the bundled sample data:
 
 *   **Software & Source Code**: The core codebase of **Monolith** is licensed under the **GNU General Public License v3.0 (GPL-3.0)**. You are free to run, study, share, and modify the software, provided all derivative works remain open-source under the same terms. See the [LICENSE](LICENSE) file for the full legal text.
-*   **Sample Datasets**: The files within the [sample_data/](sample_data/) directory are **not** open-source. They are provided solely for demonstrating and testing the application. You are strictly prohibited from publishing, redistributing, or using these datasets in any scientific publications or external projects. See the `sample_data/DATA_LICENSE` file for the full terms and restrictions.
+*   **Sample Datasets**: The files in the [sample_data/](sample_data/) directory (`samp_data_1.xlsx`, `samp_var_list.xlsx`) are a demonstration subset of the study dataset of Kara et al. (2026), released under the **Creative Commons Attribution 4.0 International (CC BY 4.0)** license. You may use, share, and adapt them for any purpose provided you cite the dataset version of record on Mendeley Data ([10.17632/8548bmgxh9.1](https://doi.org/10.17632/8548bmgxh9.1)). See the [sample_data/DATA_LICENSE](sample_data/DATA_LICENSE) file for the full terms.
 
 # Disclaimer
 

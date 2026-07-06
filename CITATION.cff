@@ -1,15 +1,37 @@
 cff-version: 1.2.0
 message: "If you use Monolith, please cite it as below."
 title: "Monolith: A Spatial Analysis Dashboard for Geostatistical Modeling and Mapping"
+abstract: >-
+  Monolith is an open-source R/Shiny application for reproducible spatial
+  statistical analysis, geostatistical interpolation, and mapping of
+  point-referenced environmental data. It provides deterministic and
+  geostatistical prediction engines (inverse distance weighting, thin plate
+  splines, and ordinary, co-, regression, and random-forest kriging) with
+  automated and manual variogram fitting and selectable cross-validation
+  strategies (leave-one-out, k-fold, and spatial block), reporting RMSE, MAE,
+  R-squared, NSE, CCC, RPD, RPIQ, and Moran's I. Continuous predictions can be
+  classified into user-defined zones with per-class area statistics, while
+  surface-delta and point-error maps expose the spatial structure of prediction
+  error. Complementary descriptive, correlation, PCA, and Random-Forest
+  governing-factor (ALE/PDP) modules, together with a unified export registry,
+  support publication-ready output. Monolith targets soil science, agronomy,
+  and related environmental disciplines.
 type: software
 authors:
   - family-names: Kara
     given-names: R. Serdar
     email: r.serdarkara@gmail.com
+    orcid: "https://orcid.org/0000-0003-1297-2328"
 version: 1.0.0
 date-released: "2026-07-05"
 license: GPL-3.0
 repository-code: "https://github.com/rserdarkara-hash/monolith"
+# Add after the first Zenodo release mints the DOI:
+# doi: "10.5281/zenodo.XXXXXXX"          # concept DOI (all versions)
+# identifiers:
+#   - type: doi
+#     value: "10.5281/zenodo.XXXXXXX"
+#     description: "Concept DOI resolving to the latest Monolith release"
 keywords:
   - geostatistics
   - kriging
