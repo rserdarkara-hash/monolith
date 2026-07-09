@@ -218,9 +218,9 @@ This function interpolates the Actual measured data and the Predicted data (from
 
 **Use Case:** This maps the net difference between the two geostatistical surfaces. It reveals broader regional zones where your pre-calculated machine learning predictions consistently over-predict or under-predict the true spatial distribution of the target variable in the soil.
 
-### 6.2 Interpolated Point Errors
+### 6.2 Point Errors and Interpolated Point Errors
 
-This calculates the discrete error at each exact sampling location (<i>O<sub>i</sub> - P<sub>i</sub></i>, or Actual - Predicted) and runs an Inverse Distance Weighting (IDW) interpolation purely on those error values.
+The discrete error at each exact sampling location (<i>O<sub>i</sub> - P<sub>i</sub></i>, or Actual - Predicted) is displayed directly as coloured point markers (the Map Viewer's Point Residuals panel; exported as the Point Error Map). Additionally, an Inverse Distance Weighting (IDW) interpolation is run purely on those error values, producing the Interpolated Point Errors Map available in the Export Panel.
 
 **Use Case:** This creates a map showing the spatial structure of local model failure (the model produced the uploaded parameter predictions, not the spatial interpolation model). Hotspots on this map indicate distinct zones in the field where the current prediction model cannot capture the true soil variability.
 

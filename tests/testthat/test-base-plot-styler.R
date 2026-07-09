@@ -56,6 +56,170 @@ test_that("generate_base_plot handles NULL agro_params for non-map", {
   expect_s3_class(result, "ggplot")
 })
 
+# ── generate_base_plot: map kinds vs agro/bin classification ───────────────
+# Agronomic/binned class limits are defined on the variable's concentration
+# units, so only "value" maps may be classified; "residual" maps must keep a
+# diverging continuous scale and "uncertainty" maps a sequential continuous
+# scale, regardless of the active styling.
+
+make_test_wrapped_raster <- function(seed = 7) {
+  set.seed(seed)
+  r <- terra::rast(nrows = 10, ncols = 10,
+                   xmin = 450000, xmax = 451000,
+                   ymin = 5800000, ymax = 5801000,
+                   crs = "EPSG:32633")
+  terra::values(r) <- rnorm(100, mean = 50, sd = 15)
+  terra::wrap(r)
+}
+
+make_test_agro_params <- function() {
+  brks <- c(-Inf, 40, 60, Inf)
+  list(
+    brks = brks,
+    rcl_mat = matrix(c(brks[1:3], brks[2:4], 1:3), ncol = 3),
+    colors = c("#d73027", "#fee08b", "#1a9850"),
+    labels = c("Low", "Med", "High"),
+    leg_labels = c("< 40", "40 - 60", "> 60"),
+    n_c = 3
+  )
+}
+
+fill_scale_of <- function(p) {
+  scales <- p$scales$scales
+  fills <- Filter(function(s) "fill" %in% s$aesthetics, scales)
+  expect_true(length(fills) >= 1)
+  fills[[1]]
+}
+
+test_that("value maps ARE classified under agro styling", {
+  input_agro <- mock_input_full
+  input_agro$color_style <- "agro"
+  item <- list(type = "map", obj = make_test_wrapped_raster(),
+               label = "pH - Actual Map", kind = "value")
+  p <- generate_base_plot(item, input_agro, agro_params = make_test_agro_params())
+  expect_s3_class(fill_scale_of(p), "ScaleDiscrete")
+})
+
+test_that("point error maps are NOT classified under agro styling", {
+  input_agro <- mock_input_full
+  input_agro$color_style <- "agro"
+  item <- list(type = "map", obj = make_test_wrapped_raster(),
+               label = "pH - ML Predictions Point Error Map", kind = "residual")
+  p <- generate_base_plot(item, input_agro, agro_params = make_test_agro_params())
+  expect_s3_class(fill_scale_of(p), "ScaleContinuous")
+})
+
+test_that("residual maps keep a symmetric diverging domain under agro styling", {
+  input_agro <- mock_input_full
+  input_agro$color_style <- "agro"
+  item <- list(type = "map", obj = make_test_wrapped_raster(),
+               label = "pH - ML Predictions Residual Map (Delta)", kind = "residual")
+  p <- generate_base_plot(item, input_agro, agro_params = make_test_agro_params())
+  sc <- fill_scale_of(p)
+  expect_s3_class(sc, "ScaleContinuous")
+  lims <- sc$limits
+  expect_equal(lims[1], -lims[2])
+})
+
+test_that("uncertainty maps are NOT classified under agro or bin styling", {
+  for (style in c("agro", "bin")) {
+    input_s <- mock_input_full
+    input_s$color_style <- style
+    item <- list(type = "map", obj = make_test_wrapped_raster(),
+                 label = "pH - Uncertainty Map (SE - Actual)", kind = "uncertainty")
+    p <- generate_base_plot(item, input_s, agro_params = if (style == "agro") make_test_agro_params() else NULL)
+    sc <- fill_scale_of(p)
+    expect_s3_class(sc, "ScaleContinuous")
+    # scale_fill_fermenter/viridis_b (binned) would be a ScaleBinned
+    expect_false(inherits(sc, "ScaleBinned"))
+  }
+})
+
+test_that("legacy archived items without kind fall back to label matching", {
+  input_agro <- mock_input_full
+  input_agro$color_style <- "agro"
+  # Simulates a registry item archived before the kind field existed
+  item <- list(type = "map", obj = make_test_wrapped_raster(),
+               label = "pH - ML Predictions Point Error Map")
+  p <- generate_base_plot(item, input_agro, agro_params = make_test_agro_params())
+  expect_s3_class(fill_scale_of(p), "ScaleContinuous")
+})
+
+# ── point error maps (sf points, mirroring the viewer's Point Residuals) ────
+
+make_test_resid_points <- function(n = 12, seed = 11) {
+  pts <- make_test_points(n = n, seed = seed)
+  pts$resid <- pts$v - pts$pv
+  pts$loc <- "LocA"
+  pts[, c("resid", "loc")]
+}
+
+test_that("point error map items render as sf point layers, not rasters", {
+  item <- list(type = "map",
+               obj = list(pts = make_test_resid_points(), bound = NULL),
+               label = "pH - ML Predictions Point Error Map", kind = "residual")
+  p <- generate_base_plot(item, mock_input_full)
+  expect_s3_class(p, "ggplot")
+  expect_true(any(vapply(p$layers, function(l) inherits(l$geom, "GeomSf"), logical(1))))
+  sc <- fill_scale_of(p)
+  expect_s3_class(sc, "ScaleContinuous")
+  # diverging scale must stay centered on zero
+  lims <- sc$limits
+  expect_equal(lims[1], -lims[2])
+})
+
+test_that("point error map adds the boundary outline when supplied", {
+  pts <- make_test_resid_points()
+  bound <- sf::st_as_sfc(sf::st_bbox(pts))
+  item <- list(type = "map", obj = list(pts = pts, bound = bound),
+               label = "pH - ML Predictions Point Error Map", kind = "residual")
+  p <- generate_base_plot(item, mock_input_full)
+  n_sf_layers <- sum(vapply(p$layers, function(l) inherits(l$geom, "GeomSf"), logical(1)))
+  expect_equal(n_sf_layers, 2)
+})
+
+test_that("point error maps ignore agro classification", {
+  input_agro <- mock_input_full
+  input_agro$color_style <- "agro"
+  item <- list(type = "map", obj = list(pts = make_test_resid_points(), bound = NULL),
+               label = "pH - ML Predictions Point Error Map", kind = "residual")
+  p <- generate_base_plot(item, input_agro, agro_params = make_test_agro_params())
+  expect_s3_class(fill_scale_of(p), "ScaleContinuous")
+})
+
+# ── resolve_resid_palette ───────────────────────────────────────────────────
+
+test_that("resolve_resid_palette defaults to RdBu and honors an explicit choice", {
+  expect_equal(resolve_resid_palette(list()), "RdBu")
+  expect_equal(resolve_resid_palette(list(styler_resid_palette = "BrBG")), "BrBG")
+})
+
+test_that("resolve_resid_palette forces colorblind safety only when needed", {
+  expect_equal(resolve_resid_palette(
+    list(styler_resid_palette = "Spectral", styler_high_contrast = TRUE)), "PuOr")
+  expect_equal(resolve_resid_palette(
+    list(styler_resid_palette = "RdYlGn", styler_high_contrast = TRUE)), "PuOr")
+  # already colorblind-safe choices are respected under high contrast
+  expect_equal(resolve_resid_palette(
+    list(styler_resid_palette = "RdBu", styler_high_contrast = TRUE)), "RdBu")
+  expect_equal(resolve_resid_palette(
+    list(styler_resid_palette = "PiYG", styler_high_contrast = TRUE)), "PiYG")
+})
+
+test_that("point error map honors the selected diverging palette", {
+  input_pal <- mock_input_full
+  input_pal$styler_resid_palette <- "PuOr"
+  item <- list(type = "map",
+               obj = list(pts = make_test_resid_points(), bound = NULL),
+               label = "pH - ML Predictions Point Error Map", kind = "residual")
+  p <- generate_base_plot(item, input_pal)
+  built <- ggplot2::ggplot_build(p)
+  fills <- built$data[[1]]$fill
+  # PuOr endpoints are orange/purple: no pure RdBu red should appear
+  expect_false(any(grepl("^#67001F$", toupper(fills))))
+  expect_true(all(!is.na(fills)))
+})
+
 # ── apply_styler_theme ─────────────────────────────────────────────────────
 
 test_that("apply_styler_theme returns a ggplot with full input", {

@@ -61,6 +61,7 @@ This determines the mathematical "lens" through which you see the field:
 * **Residuals (v - pv) of ML Predictions:** Calculates the localized difference between what you measured (v) and what your uploaded machine learning model predicted (pv). These residuals diagnose the ML model, not the interpolation performed by the dashboard.
 * The ML prediction and residual views are only offered when the selected variable actually has the corresponding prediction column in your uploaded data (`_cve` for Best ML Predictions and Residuals, `_ss` for Single Split ML Predictions). If a variable has no prediction columns, the Primary View is limited to **Actual Values**.
 * **Comparison Mode:** When enabled for predictions, the dashboard splits into a synchronized dual-map view. This allows for a side-by-side "visual audit" of the Actual data vs. the Model's predictions to identify spatial bias.
+* **Sidebar selections configure the NEXT run.** Once a map has been generated, changing the Variable, Primary View, Interpolation method, or Comparison Mode does not alter the displayed map or its Scientific Analysis results; they update only when you press **Run Interpolation** again. Styling controls (Continuous/Binned/Agronomical, class limits, palette) remain live and restyle the displayed map immediately. To switch between the surfaces the last run already computed (Actual, ML Predicted, side-by-side comparison, Residuals), use the **View** dropdown in the Map Viewer toolbar - switching there is instant and requires no re-run.
 
 **1.4 Data Subset (Single Split view only)**
 * When the Primary View is set to **Single Split ML Predictions (_ss)**, a **Data Subset** dropdown appears directly beneath it. It restricts the mapped data to one modeling partition (e.g., "Train", "Test", or "Validation") before interpolation.
@@ -81,7 +82,7 @@ The interactive maps (Map Viewer and both comparison maps) carry a **drawing too
 * Shapes can be edited or deleted with the toolbar's edit/delete tools; the polygon export always reflects the current set of shapes. Note that deleting a shape does **not** undo a group assignment already saved from it.
 
 ## Mapping: 2. Spatial Engine Selection & Tuning
-Once selections are made, the main interface transitions to the analytical module. If you wish to generate uncertainity maps instead of running spatial interpolation of the parameters, tick the relevant mark at the bottom of the spatial engine.
+Once selections are made, the main interface transitions to the analytical module. If you wish to view uncertainty maps instead of the interpolated parameter surface, tick the relevant mark at the bottom of the spatial engine; the option becomes available once a Kriging-based map (OK, RK, RFK, CK) has been generated, and it restyles the displayed map instantly without a re-run.
 
 **1. Select the Interpolation Method:**
    - Locate the **Spatial Engine** dropdown.
@@ -166,6 +167,8 @@ The Export Registry standardizes outputs for reports and presentations.
 
 **1. Accessibility and Themes:**
    - In the bottom left corner of the export style (within advanced settings) use the toggle **High-Contrast Mode** if required for colorblind compliance.
+   - Residual and error maps use a zero-centered diverging palette selectable under **Residual / Error Maps** in the Basic tab (default Red-Blue). If High-Contrast Mode is on and the chosen palette is not colorblind-safe, a safe palette (Purple-Orange) is substituted automatically.
+   - Two error-map assets are registered per run with uploaded predictions: the **Point Error Map** (discrete errors drawn at the exact sample locations, matching the Map Viewer's Point Residuals panel) and the **Interpolated Point Errors Map** (the IDW surface of those errors).
    
 **2. Typographical Scaling and Advanced Options:**
 

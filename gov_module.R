@@ -20,19 +20,24 @@ gov_factors_ui <- function(id) {
           shiny::radioButtons(ns("gov_effect_type"), "Functional Effect Plot:", choices = c("ALE" = "ale", "PDP" = "pdp"), inline = TRUE)
         ),
         shiny::column(9,
-          shiny::conditionalPanel(
-            condition = sprintf("output['%s'] == 'running'", ns("gov_ready")),
-            shiny::div(style = "text-align: center; padding: 100px 50px; background-color: rgba(255,255,255,0.02); border-radius: 8px; border: 2px dashed #007bff; margin-bottom: 20px; transition: all 0.3s ease;",
+          # Driven by shinyjs::show/hide (immediate custom messages), not a
+          # conditionalPanel on output$gov_ready: output values only flush
+          # after the run observer finishes, and that observer blocks for
+          # seconds while future_promise serializes data to the worker - the
+          # spinner would otherwise appear ~10s after the button press.
+          shinyjs::hidden(
+            shiny::div(id = ns("gov_running_panel"),
+              style = "text-align: center; padding: 100px 50px; background-color: rgba(255,255,255,0.02); border-radius: 8px; border: 2px dashed #007bff; margin-bottom: 20px; transition: all 0.3s ease;",
               shiny::icon("circle-notch", class = "fa-spin fa-4x", style = "color: #007bff; margin-bottom: 20px;"),
               shiny::h3("Executing Machine Learning Analytics...", style = "color: #007bff; font-weight: bold; margin-bottom: 10px;"),
               shiny::p("Fitting high-dimensional Random Forest models and extracting explanatory SHAP, PDP, and ALE profiles in the background.", style = "color: #666; font-size: 1.1em;"),
               shiny::p("The dashboard remains fully responsive. You can view other tabs or start other operations.", style = "color: #888; font-style: italic; font-size: 0.9em; margin-top: 15px;")
             )
           ),
-          
+
           shiny::conditionalPanel(
             condition = sprintf("output['%s'] == 'no'", ns("gov_ready")),
-            shiny::div(style = "text-align: center; padding: 120px 50px; color: #888;",
+            shiny::div(id = ns("gov_idle_content"), style = "text-align: center; padding: 120px 50px; color: #888;",
               shiny::icon("brain", class = "fa-4x", style = "margin-bottom: 20px; color: #ccc;"),
               shiny::h3("Awaiting Machine Learning Analysis", style = "font-weight: 300; margin-bottom: 10px;"),
               shiny::p("Configure target and predictors on the left pane and click 'Run Analysis' to discover governing agronomical factors.")
@@ -134,14 +139,26 @@ gov_factors_server <- function(id, data_reactive, vars_metadata_reactive) {
       }
       
       shinyjs::disable("gov_run_btn")
+      # Must be updateActionButton, not shinyjs::html: Shiny 1.13 updates the
+      # label inside a .action-label child span, which raw innerHTML replacement
+      # destroys (later restores would append instead of replace).
       shiny::updateActionButton(session, "gov_run_btn", label = "Running...", icon = shiny::icon("spinner", class = "fa-spin"))
-      
+      # Immediate (custom-message) feedback: the future_promise dispatch below
+      # blocks this observer for seconds, so queued output/input updates would
+      # only reach the browser after that.
+      shinyjs::hide("gov_idle_content")
+      shinyjs::show("gov_running_panel")
+
       gov_rv$ready <- "running"
-      
+
       target_col <- input$gov_target
       n_perms <- input$gov_permutations
       ntree_val <- input$gov_ntree
       shap_size_val <- input$gov_shap_size
+      # Ship only the columns the worker uses: compute_governing_factors
+      # subsets to c(target, predictors) before complete.cases anyway, so this
+      # is numerically identical but much cheaper to serialize to the worker.
+      df <- df[, unique(c(target_col, preds)), drop = FALSE]
       # Read the core count here in the main session: inside the promise worker
       # availableCores() reports 1, which would suppress the SHAP escalation.
       cores_hint_val <- tryCatch(as.integer(future::availableCores()), error = function(e) 1L)
@@ -161,6 +178,8 @@ gov_factors_server <- function(id, data_reactive, vars_metadata_reactive) {
       }) %...>% (function(res) {
         shinyjs::enable("gov_run_btn")
         shiny::updateActionButton(session, "gov_run_btn", label = "Run Analysis", icon = character(0))
+        shinyjs::hide("gov_running_panel")
+        shinyjs::show("gov_idle_content")
         if (!is.null(res)) {
           gov_rv$res <- res
           gov_rv$ready <- "yes"
@@ -172,6 +191,8 @@ gov_factors_server <- function(id, data_reactive, vars_metadata_reactive) {
       }) %...!% (function(err) {
         shinyjs::enable("gov_run_btn")
         shiny::updateActionButton(session, "gov_run_btn", label = "Run Analysis", icon = character(0))
+        shinyjs::hide("gov_running_panel")
+        shinyjs::show("gov_idle_content")
         gov_rv$ready <- "no"
         shiny::showNotification(paste("Error running ML analysis:", err$message), type = "error")
       })

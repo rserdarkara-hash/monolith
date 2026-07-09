@@ -161,6 +161,7 @@ styler_fields <- list(
   margin_l = list(fn = updateNumericInput, name = "styler_margin_l"),
   show_grid = list(fn = updateCheckboxInput, name = "styler_show_grid"),
   high_contrast = list(fn = updateCheckboxInput, name = "styler_high_contrast"),
+  resid_palette = list(fn = updateSelectInput, name = "styler_resid_palette", val_param = "selected"),
   aspect_ratio = list(fn = updateNumericInput, name = "styler_aspect_ratio"),
   width = list(fn = updateNumericInput, name = "styler_width"),
   height = list(fn = updateNumericInput, name = "styler_height"),
@@ -417,7 +418,7 @@ ui <- fluidPage(
                                     "IDW" = "IDW",
                                     "Thin Plate Spline (TPS)" = "TPS")),
             conditionalPanel(condition = "input.method == 'CK'",
-              helpText(HTML("<em style='color: inherit; font-size: 0.9em;'>Note: CK uses nmax=15 by default to ensure optimal speed. See Scientific Guide to change it.</em>"))
+              helpText(HTML("<em style='color: #ffffff; font-size: 0.9em;'>Note: CK uses nmax=15 by default to ensure optimal speed. See Scientific Guide to change it.</em>"))
             ),
             radioButtons("cv_strategy",
               HTML(paste0("Cross-Validation Strategy", info_tooltip("cv_strategy_info", "How held-out folds are formed for the reported performance metrics; it does NOT change the interpolated map. Auto (Default): LOOCV for n ≤ 50, seeded random 10-fold above. Standard LOOCV: full leave-one-out, the most rigorous, but noticeably slow beyond ~2000 samples (especially RK/RFK, which refit the variogram every fold). Spatial Block CV: 10 spatially-clustered (k-means) folds that hold out contiguous regions to curb the optimistic bias random folds suffer under spatial autocorrelation; recommended for DSM-style validation. Below n=30 it degrades to LOOCV."))),
@@ -451,7 +452,8 @@ ui <- fluidPage(
                            ),
                            tags$p(style="font-size: 0.85em; margin: 5px 0;", tags$em("Residuals = observed values minus the ML-predicted values uploaded in your dataset. They diagnose your external ML model, not the interpolation itself.")),
                            tags$p(style="font-size: 0.85em; margin-bottom: 5px;", tags$b("Interpolated Delta:"), " Difference between two full surfaces (actual - prediction). Reveals regional zones of consistent over/under-prediction."),
-                           tags$p(style="font-size: 0.85em; margin-bottom: 0;", tags$b("Interpolated Point Errors:"), " Kriged map of local prediction errors. Acts as an 'Uncertainty Map' highlighting exact points of model failure.")
+                           tags$p(style="font-size: 0.85em; margin-bottom: 5px;", tags$b("Point Errors:"), " Local prediction errors [Observed - Predicted] shown at the exact sample locations, highlighting individual points of model failure."),
+                           tags$p(style="font-size: 0.85em; margin-bottom: 0;", tags$b("Interpolated Point Errors:"), " IDW surface of those local errors (Export Panel only). Acts as an 'Uncertainty Map' of the spatial structure of model failure.")
                          )
                        ),          
             conditionalPanel(condition = "['OK', 'RK', 'RFK', 'CK'].includes(input.method)",
@@ -498,7 +500,21 @@ ui <- fluidPage(
                     optimize_btn_label = "OPTIMIZE TPS LAMBDA",
                     manual_btn_label = "Apply Manual Lambda",
                     outer_style = "background-color: #fff4e6; padding: 10px; border: 1px solid #ffd8a8; border-radius: 4px; margin-bottom: 10px;",
-                    extra_ui = p(style="font-size: 0.8em; opacity: 0.8;", "Lambda < 0: Auto (GCV Optimization); Lambda = 0: Exact interpolation; Lambda > 0: Manual Smoothing.")
+                    extra_ui = tagList(
+                        conditionalPanel(condition = "input.tps_mode == 'auto'",
+                            div(style = "display: flex; gap: 6px; margin-bottom: 6px;",
+                                actionButton("tps_preset_auto", "Set Auto (GCV)", class = "btn-default btn-xs", style = "flex: 1;"),
+                                actionButton("tps_preset_exact", "Set Exact (0)", class = "btn-default btn-xs", style = "flex: 1;")
+                            )
+                        ),
+                        conditionalPanel(condition = "input.tps_mode == 'manual'",
+                            div(style = "display: flex; gap: 6px; margin-bottom: 6px;",
+                                actionButton("tps_m_preset_auto", "Set Auto (GCV)", class = "btn-default btn-xs", style = "flex: 1;"),
+                                actionButton("tps_m_preset_exact", "Set Exact (0)", class = "btn-default btn-xs", style = "flex: 1;")
+                            )
+                        ),
+                        p(style="font-size: 0.8em; opacity: 0.8;", "Lambda < 0: Auto (GCV Optimization); Lambda = 0: Exact interpolation; Lambda > 0: Manual Smoothing.")
+                    )
                 )
             ),
             
@@ -533,15 +549,18 @@ ui <- fluidPage(
             
             hr(),
             h5("Uncertainty Mapping"),
-            conditionalPanel(condition = "['OK', 'RK', 'RFK', 'CK'].includes(input.method)",
+            # Keyed to the method of the DISPLAYED run (disp_method): this
+            # toggles a view of the map on screen, so picking a non-kriging
+            # method for the next run must not remove it (and vice versa).
+            conditionalPanel(condition = "['OK', 'RK', 'RFK', 'CK'].includes(output.disp_method)",
               checkboxInput("show_uncertainty", "Map Uncertainty Instead of Interpolation", FALSE),
               conditionalPanel(condition = "input.show_uncertainty",
                 radioButtons("uncertainty_type", "Metric", choices = c("Variance" = "var", "Standard Error" = "se"), selected = "se", inline = TRUE),
                 p(style="font-size: 0.8em; opacity: 0.8; margin-bottom: 0;", "Variance is in squared units of the variable; SE shares the variable's unit. Uncertainty layers always use a continuous palette; Agronomic/Binned class breaks apply to concentration maps only.")
               )
             ),
-            conditionalPanel(condition = "!['OK', 'RK', 'RFK', 'CK'].includes(input.method)",
-              p(style="font-size: 0.8em; opacity: 0.8;", "Uncertainty mapping requires a Kriging-based method.")
+            conditionalPanel(condition = "!['OK', 'RK', 'RFK', 'CK'].includes(output.disp_method)",
+              p(style="font-size: 0.8em; opacity: 0.8;", "Uncertainty mapping becomes available once a Kriging-based map has been generated.")
             )
         ),
         br(),
@@ -642,7 +661,9 @@ ui <- fluidPage(
                                                          "Dark Matter" = "CartoDB.DarkMatter",
                                                          "Light (Positron)" = "CartoDB.Positron"),
                                              selected = "Esri.WorldImagery", width = "160px", selectize = FALSE),
-                                 uiOutput("locality_pan_ui")
+                                 uiOutput("locality_pan_ui"),
+                                 div(title = "Switch between the surfaces computed by the last interpolation run. Rerun to change variable or method.",
+                                     uiOutput("map_view_ui"))
                                  ),
                              actionButton("refresh_map_area", "Refresh Map Area", icon = icon("sync"), class = "btn-info btn-sm", style = "margin-left: auto;"),
                              actionButton("show_popup_settings", "Pop-up Settings", icon = icon("cog"), class = "btn-info btn-sm"),
@@ -682,10 +703,10 @@ ui <- fluidPage(
                            )
                          ),
                          uiOutput("run_config_display_map"),
-                         conditionalPanel(condition = "(!input.comp_mode && input.value_type != 'resid') || input.value_type == 'actual'",
+                         conditionalPanel(condition = "!input.map_view || ['view_act', 'view_pred'].includes(input.map_view)",
                                           h4(textOutput("main_map_title")),
                                           leafletOutput("main_map", height = "700px")),
-                         conditionalPanel(condition = "(input.comp_mode && input.value_type != 'actual') || input.value_type == 'resid'",
+                         conditionalPanel(condition = "['view_comp', 'view_resid'].includes(input.map_view)",
                                           fluidRow(column(6, h4(textOutput("comp_left_title")), leafletOutput("comp_map_left", height = "600px")),
                                                    column(6, h4(textOutput("comp_right_title")), leafletOutput("comp_map_right", height = "600px")))),
                          div(id = "distance_scale_container", style = "margin-top: 15px; display: flex; justify-content: center; min-height: 30px;"),
@@ -713,35 +734,35 @@ ui <- fluidPage(
                    uiOutput("locality_selector_ui"),
                    fluidRow(
                      column(8,
-                            conditionalPanel(condition = "input.method == 'OK'",
+                            conditionalPanel(condition = "output.disp_method == 'OK'",
                               h4("Actual Data Structure"), plotOutput("vgm_plot_main", height = "350px"),
                               div(id = "predicted_data_structure_ui",
                                 h4("Predicted Data Structure"), plotOutput("vgm_plot_pred", height = "350px")
                               )
                             ),
-                            conditionalPanel(condition = "input.method == 'RK'",
+                            conditionalPanel(condition = "output.disp_method == 'RK'",
                                h4("Linear Trend Performance (Actual)"), uiOutput("model_summary_ui_act"),
                                div(id = "rk_pred_ui", h4("Linear Trend Performance (Predicted)"), uiOutput("model_summary_ui_pre")),
                                hr(),
                                h4("Internal Residual Variogram (Actual)"), plotOutput("rk_internal_vgm_act", height = "350px"),
                                div(id = "rk_internal_vgm_pre_ui", h4("Internal Residual Variogram (Predicted)"), plotOutput("rk_internal_vgm_pre", height = "350px"))
                              ),
-                            conditionalPanel(condition = "input.method == 'RFK'",
+                            conditionalPanel(condition = "output.disp_method == 'RFK'",
                                h4("RF Variable Importance (Actual)"), plotOutput("rf_importance_plot_act", height = "350px"),
                                div(id = "rfk_pred_ui", h4("RF Variable Importance (Predicted)"), plotOutput("rf_importance_plot_pre", height = "350px")),
                                hr(),
                                h4("Internal Residual Variogram (Actual)"), plotOutput("rfk_internal_vgm_act", height = "350px"),
                                div(id = "rfk_internal_vgm_pre_ui", h4("Internal Residual Variogram (Predicted)"), plotOutput("rfk_internal_vgm_pre", height = "350px"))
                              ),
-                            conditionalPanel(condition = "input.method == 'CK'",
+                            conditionalPanel(condition = "output.disp_method == 'CK'",
                                h4("Cross-Variogram (Actual)"), plotOutput("ck_variogram_plot_act", height = "350px"),
                                div(id = "ck_pred_ui", h4("Cross-Variogram (Predicted)"), plotOutput("ck_variogram_plot_pred", height = "350px"))
                              ),
-                            conditionalPanel(condition = "input.method == 'TPS'",
+                            conditionalPanel(condition = "output.disp_method == 'TPS'",
                                h4("TPS GCV Diagnostics (Actual)"), plotOutput("tps_gcv_plot_act", height = "350px"),
                                div(id = "tps_pred_ui", h4("TPS GCV Diagnostics (Predicted)"), plotOutput("tps_gcv_plot_pre", height = "350px"))
                              ),
-                            conditionalPanel(condition = "!['OK', 'RK', 'RFK', 'CK', 'TPS'].includes(input.method)",
+                            conditionalPanel(condition = "!['OK', 'RK', 'RFK', 'CK', 'TPS'].includes(output.disp_method)",
                               div(style="padding: 20px; text-align: center; color: #666;",
                                   h4("Diagnostic Mode Active"),
                                   p("Detailed spatial diagnostics are currently optimized for Kriging and TPS."))
@@ -754,7 +775,7 @@ ui <- fluidPage(
                                  column(6, plotOutput("resid_vgm_plot_act", height = "300px"))
                                )
                             ),
-                            conditionalPanel(condition = "input.comp_mode || input.value_type != 'actual'",
+                            conditionalPanel(condition = "output.disp_has_pred == 'yes'",
                               div(id = "validation_diagnostics_pre_ui",
                                 hr(),
                                 h4("Validation Diagnostics (Predicted)"),
@@ -769,12 +790,12 @@ ui <- fluidPage(
                             div(style = "background-color: #fff9db; padding: 15px; border: 2px solid #fab005; border-radius: 8px; margin-bottom: 20px;",
                               h4("Spatial Interpolation Statistics"),
                               tags$p(style="font-size: 0.85em; opacity: 0.8; font-style: italic;", "Model-specific diagnostics and performance metrics (RMSE, R2)."),
-                              conditionalPanel(condition = "input.method == 'OK'",
-                                h5("Variogram Parameters"), div(class="table-container", tableOutput("vgm_params_table")),
+                              conditionalPanel(condition = "output.disp_method == 'OK'",
+                                h5("Variogram Parameters (per locality)"), div(class="table-container", tableOutput("vgm_params_table")),
                                 hr(style="opacity: 0.3;")
                               ),
-                              conditionalPanel(condition = "['IDW', 'TPS'].includes(input.method)",
-                                h5("Regional Parameters"), div(class="table-container", tableOutput("regional_params_table")),
+                              conditionalPanel(condition = "['IDW', 'TPS'].includes(output.disp_method)",
+                                h5("Regional Parameters (per locality)"), div(class="table-container", tableOutput("regional_params_table")),
                                 hr(style="opacity: 0.3;")
                               ),
                               h5("Model Performance"), uiOutput("cv_strategy_badge"), div(class="table-container", tableOutput("metrics_table"))
@@ -786,30 +807,40 @@ ui <- fluidPage(
                               h5("Prediction Performance (Uploaded Data)"),
                               div(class="table-container", tableOutput("uploaded_metrics_table")),
                               hr(style="opacity: 0.3;"),
-                              h5("Classification Performance (Uploaded Predictions) - Map in Agro or Binned styling to see the stats"),
+                              h5("Classification Performance (Uploaded Predictions)"),
                               selectInput("kappa_bin_method", "Binning Method:", choices = c("Agronomical Classes" = "agro", "Quartiles" = "quartile")),
                               div(class="table-container", tableOutput("kappa_table"))
                             ),
                             div(style = "background-color: #e7f5ff; padding: 15px; border: 2px solid #339af0; border-radius: 8px;",
                               h4("Data Summary Statistics"),
-                              tags$p(style="font-size: 0.85em; opacity: 0.8; font-style: italic;", "Aggregated descriptive statistics and area coverage for the data - Map in Agro or Binned styling to see the stats"),
-                              h5("Area Coverage"),
-                              conditionalPanel(condition = "input.locality && (typeof input.locality === 'string' ? input.locality === 'ALL' : (input.locality.length > 1 || input.locality.indexOf('ALL') > -1))",
+                              tags$p(style="font-size: 0.85em; opacity: 0.8; font-style: italic;", "Aggregated descriptive statistics and area coverage for the data."),
+                              conditionalPanel(condition = "!['agro', 'bin'].includes(input.color_style)",
+                                tags$p(style="font-size: 0.85em; color: #666; font-style: italic;",
+                                       "Area coverage by class appears here when the map Styling is set to Agronomical or Binned.")
+                              ),
+                              # Keyed to the DISPLAYED run (disp_method is '' before the first
+                              # run, so no bare titles pre-run): the Total tables describe the
+                              # run's combined coverage - a single-locality run included - and
+                              # the Locality rows appear when the analysis filter picks one.
+                              conditionalPanel(condition = "['agro', 'bin'].includes(input.color_style) && output.disp_method && output.disp_method != ''",
+                                h5("Area Coverage"),
                                 fluidRow(
                                   column(6, h6("Total - Actual"), tableOutput("area_table_total_act")),
                                   column(6, div(id = "area_total_pred_col", h6("Total - Predicted"), tableOutput("area_table_total_pre")))
-                                )
+                                ),
+                                conditionalPanel(condition = "input.sel_loc_stats && input.sel_loc_stats != 'Total (Combined)'",
+                                  fluidRow(
+                                    column(6, h6("Locality - Actual"), tableOutput("area_table_loc_act")),
+                                    column(6, div(id = "loc_pred_col", h6("Locality - Predicted"), tableOutput("area_table_loc_pre")))
+                                  )
+                                ),
+                                hr(style="border-top: 1px solid #339af0;")
                               ),
-                              fluidRow(
-                                column(6, h6("Locality - Actual"), tableOutput("area_table_loc_act")),
-                                column(6, div(id = "loc_pred_col", h6("Locality - Predicted"), tableOutput("area_table_loc_pre")))
-                              ),
-                              hr(style="border-top: 1px solid #339af0;"),
-                              h5("Descriptive Statistics"),
-                              conditionalPanel(condition = "input.locality && (typeof input.locality === 'string' ? input.locality === 'ALL' : (input.locality.length > 1 || input.locality.indexOf('ALL') > -1))",
-                                tableOutput("stats_table_total")
-                              ),
-                              tableOutput("stats_table_loc")
+                              conditionalPanel(condition = "output.disp_method && output.disp_method != ''",
+                                h5("Descriptive Statistics"),
+                                tableOutput("stats_table_total"),
+                                tableOutput("stats_table_loc")
+                              )
                             )
                      )
                    )
@@ -945,7 +976,10 @@ server <- function(input, output, session) {
     })
   }
 
-  register_locality_assets <- function(l, meta, comp_mode, val_type) {
+  # method is passed in from the run that produced the assets: reading
+  # input$method here would mis-register diagnostics if the user changed the
+  # sidebar while the run was still executing.
+  register_locality_assets <- function(l, meta, comp_mode, val_type, method) {
      if(!is.null(rv$sf)) {
        df_l_act <- rv$sf %>% st_drop_geometry() %>% filter(loc == !!l, !is.na(v))
        if(nrow(df_l_act) > 0) {
@@ -1039,14 +1073,14 @@ server <- function(input, output, session) {
        }
      }
      
-     if(input$method == "TPS" && !is.null(rv$tps_gcv_data[[paste0(l, "_act")]])) {
+     if(method == "TPS" && !is.null(rv$tps_gcv_data[[paste0(l, "_act")]])) {
        df_gcv <- rv$tps_gcv_data[[paste0(l, "_act")]]
        p_gcv <- ggplot(df_gcv, aes(x = lambda, y = gcv)) + 
          geom_line(color = "steelblue") + geom_point() + scale_x_log10() +
          labs(title = paste("TPS GCV Diagnostics (Actual):", l)) + theme_minimal()
        register_export_item(paste0("plot_tps_gcv_", l), paste(meta$label, "-", l, "- TPS GCV Curve (Actual)"), "plot", p_gcv, meta$category)
      }
-     if(input$method == "TPS" && (comp_mode || val_type != "actual") && !is.null(rv$tps_gcv_data[[paste0(l, "_pre")]])) {
+     if(method == "TPS" && (comp_mode || val_type != "actual") && !is.null(rv$tps_gcv_data[[paste0(l, "_pre")]])) {
        df_gcv_p <- rv$tps_gcv_data[[paste0(l, "_pre")]]
        p_gcv_p <- ggplot(df_gcv_p, aes(x = lambda, y = gcv)) + 
          geom_line(color = "firebrick") + geom_point() + scale_x_log10() +
@@ -1054,7 +1088,7 @@ server <- function(input, output, session) {
        register_export_item(paste0("plot_tps_gcv_pre_", l), paste(meta$label, "-", l, "- TPS GCV Curve (Predicted)"), "plot", p_gcv_p, meta$category)
      }
      
-     if(input$method == "RFK" && !is.null(rv$rf_models[[paste0(l, "_act")]])) {
+     if(method == "RFK" && !is.null(rv$rf_models[[paste0(l, "_act")]])) {
        rf_mod <- rv$rf_models[[paste0(l, "_act")]]
        imp_mat <- randomForest::importance(rf_mod)
        imp_col <- colnames(imp_mat)[1]
@@ -1066,7 +1100,7 @@ server <- function(input, output, session) {
        register_export_item(paste0("plot_rf_imp_act_", l), paste(meta$label, "-", l, "- RF Variable Importance (Actual)"), "plot", p_imp, meta$category)
        register_export_item(paste0("table_rf_imp_act_", l), paste(meta$label, "-", l, "- RF Variable Importance Data (Actual)"), "table", df_imp, meta$category)
      }
-     if(input$method == "RFK" && (comp_mode || val_type != "actual") && !is.null(rv$rf_models[[paste0(l, "_pre")]])) {
+     if(method == "RFK" && (comp_mode || val_type != "actual") && !is.null(rv$rf_models[[paste0(l, "_pre")]])) {
        rf_mod_p <- rv$rf_models[[paste0(l, "_pre")]]
        imp_mat_p <- randomForest::importance(rf_mod_p)
        imp_col_p <- colnames(imp_mat_p)[1]
@@ -1079,14 +1113,14 @@ server <- function(input, output, session) {
        register_export_item(paste0("table_rf_imp_pre_", l), paste(meta$label, "-", l, "- RF Variable Importance Data (Predicted)"), "table", df_imp_p, meta$category)
      }
 
-     if(input$method == "RK" && !is.null(rv$model_summaries[[paste0(l, "_act")]])) {
+     if(method == "RK" && !is.null(rv$model_summaries[[paste0(l, "_act")]])) {
        lm_sum <- rv$model_summaries[[paste0(l, "_act")]]
        coef_df <- as.data.frame(lm_sum$coefficients)
        coef_df$Variable <- rownames(coef_df)
        coef_df <- coef_df[, c("Variable", "Estimate", "Std. Error", "t value", "Pr(>|t|)" )]
        register_export_item(paste0("table_rk_coef_act_", l), paste(meta$label, "-", l, "- RK Regression Coefficients (Actual)"), "table", coef_df, meta$category)
      }
-     if(input$method == "RK" && (comp_mode || val_type != "actual") && !is.null(rv$model_summaries[[paste0(l, "_pre")]])) {
+     if(method == "RK" && (comp_mode || val_type != "actual") && !is.null(rv$model_summaries[[paste0(l, "_pre")]])) {
        lm_sum_p <- rv$model_summaries[[paste0(l, "_pre")]]
        coef_df_p <- as.data.frame(lm_sum_p$coefficients)
        coef_df_p$Variable <- rownames(coef_df_p)
@@ -1094,26 +1128,25 @@ server <- function(input, output, session) {
        register_export_item(paste0("table_rk_coef_pre_", l), paste(meta$label, "-", l, "- RK Regression Coefficients (Predicted)"), "table", coef_df_p, meta$category)
      }
 
-     if(input$method == "CK" && !is.null(rv$gstat_objs[[paste0(l, "_act")]])) {
+     if(method == "CK" && !is.null(rv$gstat_objs[[paste0(l, "_act")]])) {
        g <- rv$gstat_objs[[paste0(l, "_act")]]
        vm <- variogram(g)
        p_ck <- plot(vm, model = g$model, main = paste("Cross-Variogram (Actual):", l))
        register_export_item(paste0("plot_ck_vgm_act_", l), paste(meta$label, "-", l, "- CK Cross-Variogram (Actual)"), "plot", p_ck, meta$category)
      }
-     if(input$method == "CK" && (comp_mode || val_type != "actual") && !is.null(rv$gstat_objs[[paste0(l, "_pre")]])) {
+     if(method == "CK" && (comp_mode || val_type != "actual") && !is.null(rv$gstat_objs[[paste0(l, "_pre")]])) {
        g_p <- rv$gstat_objs[[paste0(l, "_pre")]]
        vm_p <- variogram(g_p)
        p_ck_p <- plot(vm_p, model = g_p$model, main = paste("Cross-Variogram (Predicted):", l))
        register_export_item(paste0("plot_ck_vgm_pred_", l), paste(meta$label, "-", l, "- CK Cross-Variogram (Predicted)"), "plot", p_ck_p, meta$category)
      }
      
-     if(input$method %in% c("IDW", "TPS")) {
-       param_df <- data.frame(
-         Param = if(input$method == "IDW") "Power (p)" else "Lambda",
-         Actual = format_param_val(input$method, get_regional_param(input$method, l, "act")),
-         Predicted = if(comp_mode || val_type != "actual") format_param_val(input$method, get_regional_param(input$method, l, "pre")) else "NA"
-       )
-       register_export_item(paste0("table_params_loc_", l), paste(meta$label, "-", l, "- Model Parameters"), "table", param_df, meta$category)
+     if(method %in% c("IDW", "TPS")) {
+       param_df <- build_regional_params_df(method, l, rv$disp$regional_params,
+                                            has_pre = comp_mode || val_type != "actual")
+       if(!is.null(param_df)) {
+         register_export_item(paste0("table_params_loc_", l), paste(meta$label, "-", l, "- Model Parameters"), "table", param_df, meta$category)
+       }
      }
   }
 
@@ -1127,7 +1160,10 @@ server <- function(input, output, session) {
   })
 
   observe({
-    prediction_active <- isTRUE(input$comp_mode) || (isTruthy(input$value_type) && input$value_type != "actual")
+    # Committed run context (not the live sidebar): the predicted-side panels
+    # describe the run on screen and must survive sidebar reconfiguration.
+    d <- rv$disp
+    prediction_active <- !is.null(d) && (isTRUE(d$comp_mode) || !identical(d$value_type, "actual"))
     has_interp <- prediction_active || rv$has_predictions
     shinyjs::toggle(id = "predicted_data_structure_ui", condition = has_interp)
     shinyjs::toggle(id = "rk_pred_ui", condition = has_interp)
@@ -1141,13 +1177,10 @@ server <- function(input, output, session) {
     shinyjs::toggle(id = "loc_pred_col", condition = has_interp)
     shinyjs::toggle(id = "area_total_pred_col", condition = has_interp)
     
-    has_upl_pred <- FALSE
-    if(!is.null(rv$mapping$vars) && !is.null(input$var_id)) {
-       meta <- Filter(function(x) x$actual == input$var_id, rv$mapping$vars)
-       if(length(meta) > 0) {
-         if(!is.null(meta[[1]]$pred) || !is.null(meta[[1]]$pred_ss)) has_upl_pred <- TRUE
-       }
-    }
+    # Only show the uploaded-prediction statistics when the DISPLAYED run's
+    # variable actually has an uploaded prediction column (detect_pred_column
+    # stores NA - not NULL - when none exists, hence is_valid_col_ref).
+    has_upl_pred <- !is.null(d) && (is_valid_col_ref(d$pred) || is_valid_col_ref(d$pred_ss))
     shinyjs::toggle(id = "prediction_performance_ui", condition = has_upl_pred)
   })
 
@@ -1215,13 +1248,13 @@ server <- function(input, output, session) {
     full_cor_matrix = NULL, # Correlation Matrix for all numeric variables
     show_corr_panel = FALSE, # Toggle for sidebar correlation panel
     pop_up_vars = NULL, # Selected variables for pop-ups
-    run_method = list(), # Tracking method used per variable
     model_summaries = list(), # summaries for UK/RK
     rf_models = list(), # trained random forests
     gstat_objs = list(), # gstat objects for CK
     loc_names = NULL, metrics = NULL, log = "Ready.",
     drawn_feature = NULL, # Temporarily store drawn shape for grouping
     run_config_summary = NULL, # Plain text summary of latest run configuration
+    disp = NULL, # Display context committed at run dispatch (see get_display_meta)
     run_counter = 0L, # Incremental run counter
     run_history = list(), # Archive of previous run results and configs
     proceed_run = NULL, # Trigger for model generation after archive decision
@@ -1232,16 +1265,22 @@ server <- function(input, output, session) {
     run_token = 0L # Incremental run token for async cancellation
   )
   
-  register_export_item <- function(id, label, type, obj, category = "General") {
+  register_export_item <- function(id, label, type, obj, category = "General", kind = "value") {
     req(obj)
     clean_id <- gsub("[^a-zA-Z0-9_]", "_", id)
-    
+
     new_item <- list(
       id = clean_id,
       label = label,
       type = type, # "plot", "table", "map"
       obj = obj,
       category = category,
+      # For maps: "value" (concentration surface, may be agro/bin classified),
+      # "residual" (diverging scale, never classified), "uncertainty"
+      # (sequential continuous, never classified). Agronomic class limits are
+      # defined on the variable's units, so classifying errors or variances
+      # with them is scientifically meaningless.
+      kind = kind,
       timestamp = Sys.time()
     )
     
@@ -1455,18 +1494,29 @@ server <- function(input, output, session) {
   })
   
   observeEvent(input$quick_export_map, {
-    meta <- get_current_meta(); req(meta)
-    target <- if(input$value_type == "actual") rv$rast 
-              else if(input$value_type == "resid") rv$rast_res
-              else rv$rast_pred
+    # Export exactly what the viewer shows: the committed run's surface for
+    # the currently selected view.
+    meta <- get_display_meta(); req(meta)
+    view <- input$map_view %||% "view_act"
+    target <- switch(view,
+      "view_pred"  = rv$rast_pred,
+      "view_resid" = rv$rast_res,
+      "view_comp"  = if (!is.null(rv$rast) && !is.null(rv$rast_pred)) list(act = rv$rast, pre = rv$rast_pred) else NULL,
+      rv$rast)
     req(target)
-    
-    id <- paste0("quick_", input$value_type, "_", input$var_id)
-    label <- paste("Quick Export:", meta$label, "(", input$value_type, ")")
-    
-    register_export_item(id, label, "map", target, meta$category)
+
+    type <- if (view == "view_comp") "map_combined" else "map"
+    kind <- if (view == "view_resid") "residual" else "value"
+    view_lab <- switch(view,
+      "view_pred" = "Predicted", "view_resid" = "Residuals",
+      "view_comp" = "Actual vs Predicted", "Actual")
+
+    id <- paste0("quick_", view, "_", meta$actual)
+    label <- paste("Quick Export:", meta$label, "(", view_lab, ")")
+
+    register_export_item(id, label, type, target, meta$category, kind = kind)
     active_styler_item(id)
-    
+
     shinyjs::click("open_styler")
   })
   
@@ -1504,8 +1554,19 @@ server <- function(input, output, session) {
                             hr(),
                             h4("2. Output Quality"),
                             numericInput("styler_dpi", "Export DPI", value = 300, min = 72, max = 600),
-                            selectInput("styler_format", "File Format", 
-                                        choices = c("PNG" = "png", "TIFF" = "tiff", "PDF" = "pdf", "JPEG" = "jpg"))
+                            selectInput("styler_format", "File Format",
+                                        choices = c("PNG" = "png", "TIFF" = "tiff", "PDF" = "pdf", "JPEG" = "jpg")),
+                            hr(),
+                            h4("3. Residual / Error Maps"),
+                            selectInput("styler_resid_palette", "Diverging Palette",
+                                        choices = c("Red-Blue" = "RdBu", "Red-Yellow-Blue" = "RdYlBu",
+                                                    "Purple-Orange" = "PuOr", "Brown-Teal" = "BrBG",
+                                                    "Pink-Green" = "PiYG", "Purple-Green" = "PRGn",
+                                                    "Spectral" = "Spectral", "Red-Yellow-Green" = "RdYlGn",
+                                                    "Red-Grey" = "RdGy"),
+                                        selected = "RdBu"),
+                            tags$p(style = "font-size: 0.8em; color: #666; margin-top: -8px;",
+                                   "Applies to residual and point error maps only. Zero is always centered.")
                           )
                  ),
                  tabPanel("Advanced",
@@ -1861,11 +1922,6 @@ server <- function(input, output, session) {
     return(val)
   }
   
-  format_param_val <- function(type, val) {
-    if(type == "TPS" && !is.na(val) && val < 0) return("Auto (GCV)")
-    as.character(round(val, 6))
-  }
-  
   set_regional_param <- function(type, loc, target, value) {
     field <- if(type == "IDW") "idw_factors" else "tps_lambdas"
     if(is.null(rv[[field]][[loc]])) {
@@ -2133,6 +2189,18 @@ server <- function(input, output, session) {
   
   output$model_ready <- reactive({ if(!is.null(rv$rast) || length(rv$v_emp_list) > 0) "yes" else "no" })
   outputOptions(output, "model_ready", suspendWhenHidden = FALSE)
+
+  # Committed run context for JS conditionalPanels (same pattern as
+  # model_ready): the Scientific Analysis sections must describe the run on
+  # screen, not the live sidebar method/value-type selections.
+  output$disp_method <- reactive({ rv$disp$method %||% "" })
+  outputOptions(output, "disp_method", suspendWhenHidden = FALSE)
+  output$disp_has_pred <- reactive({
+    d <- rv$disp
+    active <- !is.null(d) && (isTRUE(d$comp_mode) || !identical(d$value_type, "actual"))
+    if (active || isTRUE(rv$has_predictions)) "yes" else "no"
+  })
+  outputOptions(output, "disp_has_pred", suspendWhenHidden = FALSE)
   
   output$export_updated_data <- downloadHandler(
     filename = function() {
@@ -2555,8 +2623,8 @@ server <- function(input, output, session) {
       pal <- m$palette
     }
     
-    pred_col <- if(!is.null(m$pred) && length(m$pred) == 1 && !is.na(m$pred) && nzchar(m$pred)) as.character(m$pred) else NULL
-    pred_ss_col <- if(!is.null(m$pred_ss) && length(m$pred_ss) == 1 && !is.na(m$pred_ss) && nzchar(m$pred_ss)) as.character(m$pred_ss) else NULL
+    pred_col <- if(is_valid_col_ref(m$pred)) as.character(m$pred) else NULL
+    pred_ss_col <- if(is_valid_col_ref(m$pred_ss)) as.character(m$pred_ss) else NULL
 
     view_col <- switch(input$value_type,
       "actual" = as.character(m$actual),
@@ -2575,7 +2643,20 @@ server <- function(input, output, session) {
       unit = as.character(m$unit %||% "")
     )
   }
-  
+
+  # Display-side twin of get_current_meta(): returns the context committed at
+  # run dispatch (rv$disp) instead of reading the live sidebar inputs, so the
+  # Map Viewer and Scientific Analysis tabs keep describing the run that is
+  # actually on screen while the sidebar is reconfigured for the next run.
+  # Only the colour palette stays live - styling may be changed on the
+  # displayed map at any time. Returns NULL before the first run.
+  get_display_meta <- function() {
+    d <- rv$disp
+    if (is.null(d)) return(NULL)
+    if (isTruthy(input$palette_select)) d$palette <- as.character(input$palette_select)
+    d
+  }
+
   observe({
     req(rv$mapping$vars)
     vars <- rv$mapping$vars
@@ -2599,7 +2680,7 @@ server <- function(input, output, session) {
     if (length(idx) == 0) return(NULL)
     m <- rv$mapping$vars[[idx[1]]]
 
-    has_col <- function(x) !is.null(x) && length(x) == 1 && !is.na(x) && nzchar(x)
+    has_col <- is_valid_col_ref
     choices <- c("Actual Values" = "actual")
     if (has_col(m$pred)) choices <- c(choices, "Best ML Predictions (_cve)" = "pred")
     if (has_col(m$pred_ss)) choices <- c(choices, "Single Split ML Predictions (_ss)" = "pred_ss")
@@ -2638,7 +2719,7 @@ server <- function(input, output, session) {
           p("Supported with the Descriptive and Exploratory Suite with dynamic visualizations and statistics."),
           hr(),
           p(strong("A vibe-coded product of `that` couple of months following the loss of institutional e-mail address.")),
-          p(style = "color: #666; font-size: 0.9em;", "  by Recep Serdar Kara in cooperation with Gemini CLI - 2026"),
+          p(style = "color: #666; font-size: 0.9em;", "  by Recep Serdar Kara in cooperation with Antigravity CLI and Claude Code - 2026 (v1.0.1)"),
           hr(),
           tags$details(
             tags$summary(style = "cursor: pointer; color: #007bff;", "Session Info (reproducibility)"),
@@ -2674,14 +2755,17 @@ server <- function(input, output, session) {
   })
   
   joint_vv <- reactive({
-    is_uncertainty <- isTruthy(input$show_uncertainty) && isTruthy(input$method %in% c("OK", "RK", "RFK", "CK"))
+    is_uncertainty <- isTruthy(input$show_uncertainty) && isTruthy((rv$disp$method %||% "") %in% c("OK", "RK", "RFK", "CK"))
     get_joint_scale_values(rv$rast, rv$rast_pred, input$match_scales, is_uncertainty)
   })
 
   classification_params <- reactive({
     req(input$color_style %in% c("agro", "bin"))
-    req(input$var_id)
-    meta <- get_current_meta()
+    # Displayed run's variable when one exists (class breaks must describe the
+    # map on screen); live selection as pre-run fallback so the styling
+    # controls stay usable before the first interpolation.
+    meta <- get_display_meta()
+    if (is.null(meta)) meta <- get_current_meta()
     req(meta)
     
     if (input$color_style == "agro") {
@@ -2697,7 +2781,7 @@ server <- function(input, output, session) {
         if(!is.null(vv_joint)) {
           vv <- vv_joint
         } else {
-          target <- if(input$value_type == "actual") rv$rast else rv$rast_pred
+          target <- if(identical(input$map_view, "view_pred") || identical(input$map_view, "view_comp")) rv$rast_pred else rv$rast
           if(is.null(target)) {
             df <- rv$user_data
             v_data <- df[[meta$actual]]
@@ -2744,7 +2828,7 @@ server <- function(input, output, session) {
       if(!is.null(vv_joint)) {
         vv <- vv_joint
       } else {
-        target <- if(input$value_type == "actual") rv$rast else rv$rast_pred
+        target <- if(identical(input$map_view, "view_pred") || identical(input$map_view, "view_comp")) rv$rast_pred else rv$rast
         if(is.null(target)) {
           df <- rv$user_data
           v_data <- df[[meta$actual]]
@@ -2884,11 +2968,15 @@ server <- function(input, output, session) {
   })
 
   output$palette_ui <- renderUI({
-    req(input$var_id, rv$mapping$vars)
+    # Follow the displayed run's variable once one exists so a context change
+    # cannot silently reset the palette of the map on screen (input$var_id is
+    # only a reactive dependency before the first run).
+    vid <- if (!is.null(rv$disp)) rv$disp$var_id else input$var_id
+    req(vid, rv$mapping$vars)
     # Agronomical styling supplies its own class palette, so the manual
     # colour-palette picker is irrelevant there — hide it.
     if (isTruthy(input$color_style) && input$color_style == "agro") return(NULL)
-    idx <- which(sapply(rv$mapping$vars, function(x) x$actual == input$var_id))
+    idx <- which(sapply(rv$mapping$vars, function(x) x$actual == vid))
     if (length(idx) == 0) return(NULL)
     m <- rv$mapping$vars[[idx]]
     choices <- palette_choices_precomputed
@@ -2945,8 +3033,13 @@ server <- function(input, output, session) {
   })
 
   output$agro_options <- renderUI({
-    req(input$color_style == "agro", input$agro_method == "limits", input$var_id)
-    nut <- get_nut_key(input$var_id)
+    req(input$color_style == "agro", input$agro_method == "limits")
+    # input$var_id is only a reactive dependency before the first run;
+    # afterwards the limits follow the displayed variable and are not reset
+    # by sidebar context changes.
+    vid <- if (!is.null(rv$disp)) rv$disp$var_id else input$var_id
+    req(vid)
+    nut <- get_nut_key(vid)
     def_limits <- if(!is.null(nut) && nut %in% names(nutrient_limits)) nutrient_limits[[nut]] else NULL
     
     lapply(1:(input$agro_n_classes - 1), function(i) {
@@ -3083,6 +3176,13 @@ server <- function(input, output, session) {
       })
     
   # --- TPS Optimization ---
+  # Lambda presets: the 0.001-step slider makes the special values -1 (Auto)
+  # and 0 (exact interpolation) hard to hit by dragging.
+  observeEvent(input$tps_preset_auto,    updateSliderInput(session, "tps_lambda",   value = -1))
+  observeEvent(input$tps_preset_exact,   updateSliderInput(session, "tps_lambda",   value = 0))
+  observeEvent(input$tps_m_preset_auto,  updateSliderInput(session, "tps_m_lambda", value = -1))
+  observeEvent(input$tps_m_preset_exact, updateSliderInput(session, "tps_m_lambda", value = 0))
+
   tps_opt_vals <- reactiveVal(NULL)
   observeEvent(input$opt_tps, {
     req(rv$user_data, input$var_id, input$method == "TPS")
@@ -3768,9 +3868,18 @@ server <- function(input, output, session) {
       rv$v_fit_list <- list()
     }
 
-    updateTabsetPanel(session, "main_tabs", selected = "tab_map")
+    # Switch tabs client-side: shinyjs messages reach the browser immediately,
+    # whereas updateTabsetPanel queues an input message that is only flushed
+    # after this whole observer (validation + data prep + future dispatch)
+    # finishes - the pan would lag several seconds and yank the user back if
+    # they had already navigated elsewhere in the meantime.
+    shinyjs::runjs("$('#main_tabs a[data-value=\"tab_map\"]').tab('show');")
 
     shinyjs::disable("run")
+    # Label swap must go through updateActionButton: Shiny 1.13 renders the
+    # label into a .action-label child span, and raw shinyjs::html() here
+    # destroys that span, so later updateActionButton restores (cancel/finish)
+    # would APPEND their label next to the stale text instead of replacing it.
     updateActionButton(session, "run", label = "Interpolating...", icon = icon("spinner", class = "fa-spin"))
 
     shinyjs::show("map_processing_overlay")
@@ -3817,12 +3926,24 @@ server <- function(input, output, session) {
       method_params = method_params_str
     )
 
+    # Committed display context: everything the Map Viewer and Scientific
+    # Analysis tabs render is keyed to this snapshot (via get_display_meta or
+    # rv$disp directly), never to the live sidebar inputs, so reconfiguring
+    # the sidebar for the next run cannot alter the displayed results.
+    # Superset of get_current_meta()'s fields so it is a drop-in replacement.
+    rv$disp <- c(meta, list(
+      var_id = meta$actual,
+      method = input$method,
+      value_type = input$value_type,
+      comp_mode = isTRUE(input$comp_mode),
+      localities = locs
+    ))
+
     tryCatch({
       rv$export_registry <- list()
       rv$rast_list_act <- list(); rv$rast_list_pre <- list(); sf_list <- list(); b_list <- list()
       rv$rast <- NULL; rv$rast_pred <- NULL; rv$rast_res <- NULL; rv$has_predictions <- FALSE
     rv$v_emp_list <- list(); rv$log <- paste0("[Run #", rv$run_counter, "] Starting spatial interpolation using method: ", input$method, "...")
-    rv$run_method[[input$var_id]] <- input$method
     rv$model_summaries <- list(); rv$rf_models <- list(); rv$gstat_objs <- list()
     rv$cv_metrics_act <- list(); rv$cv_metrics_pre <- list() # Reset CV metrics
     rv$cv_data_act <- list(); rv$cv_data_pre <- list()
@@ -3889,6 +4010,14 @@ server <- function(input, output, session) {
 
       list(l = l, pts_data = pts_data, m_params = m_params)
     })
+
+    # Snapshot the per-locality method params this run actually consumes so
+    # display/export tables report them; the live tuning store holds no entry
+    # for localities that fell back to the global slider value.
+    rv$disp$regional_params <- setNames(
+      lapply(df_list, function(item) item$m_params[c("idw_p_act", "idw_p_pre", "tps_lambda_act", "tps_lambda_pre")]),
+      vapply(df_list, function(item) item$l, character(1))
+    )
 
     update_premium_progress(50, "Executing Parallel Interpolation Algorithms...")
 
@@ -4112,8 +4241,8 @@ server <- function(input, output, session) {
       temp_rast_a <- terra::unwrap(rv$rast)
       if ("var1.var" %in% names(temp_rast_a)) {
         uncert_var_a <- temp_rast_a[["var1.var"]]
-        register_export_item("map_uncert_var_act", paste(meta$label, "- Uncertainty Map (Variance - Actual)"), "map", terra::wrap(uncert_var_a), meta$category)
-        register_export_item("map_uncert_se_act", paste(meta$label, "- Uncertainty Map (SE - Actual)"), "map", terra::wrap(sqrt(uncert_var_a)), meta$category)
+        register_export_item("map_uncert_var_act", paste(meta$label, "- Uncertainty Map (Variance - Actual)"), "map", terra::wrap(uncert_var_a), meta$category, kind = "uncertainty")
+        register_export_item("map_uncert_se_act", paste(meta$label, "- Uncertainty Map (SE - Actual)"), "map", terra::wrap(sqrt(uncert_var_a)), meta$category, kind = "uncertainty")
       }
     }
     if(length(valid_p) > 0) {
@@ -4124,17 +4253,17 @@ server <- function(input, output, session) {
       temp_rast_p <- terra::unwrap(rv$rast_pred)
       if ("var1.var" %in% names(temp_rast_p)) {
         uncert_var_p <- temp_rast_p[["var1.var"]]
-        register_export_item("map_uncert_var_pre", paste(meta$label, "- Uncertainty Map (Variance - Predicted)"), "map", terra::wrap(uncert_var_p), meta$category)
-        register_export_item("map_uncert_se_pre", paste(meta$label, "- Uncertainty Map (SE - Predicted)"), "map", terra::wrap(sqrt(uncert_var_p)), meta$category)
+        register_export_item("map_uncert_var_pre", paste(meta$label, "- Uncertainty Map (Variance - Predicted)"), "map", terra::wrap(uncert_var_p), meta$category, kind = "uncertainty")
+        register_export_item("map_uncert_se_pre", paste(meta$label, "- Uncertainty Map (SE - Predicted)"), "map", terra::wrap(sqrt(uncert_var_p)), meta$category, kind = "uncertainty")
       }
     }
     if(length(valid_r) > 0) {
       rv$rast_res <- merge_wrapped_rasters(valid_r)
-      register_export_item("map_residuals", paste(meta$label, "- ML Predictions Residual Map (Delta)"), "map", rv$rast_res, meta$category)
+      register_export_item("map_residuals", paste(meta$label, "- ML Predictions Residual Map (Delta)"), "map", rv$rast_res, meta$category, kind = "residual")
     }
     if(length(valid_pr) > 0) {
       rv$rast_point_res <- merge_wrapped_rasters(valid_pr)
-      register_export_item("map_point_residuals", paste(meta$label, "- ML Predictions Point Error Map"), "map", rv$rast_point_res, meta$category)
+      register_export_item("map_interp_point_errors", paste(meta$label, "- ML Predictions Interpolated Point Errors Map"), "map", rv$rast_point_res, meta$category, kind = "residual")
     }
     
     if(!is.null(rv$rast) && !is.null(rv$rast_pred)) {
@@ -4165,18 +4294,27 @@ server <- function(input, output, session) {
       rv$bound <- do.call(rbind, unname(b_list_aligned)) %>% sf::st_union()
     }
     rv$loc_names <- names(valid_a)
+
+    # Point error map: the discrete sample-location errors the Map Viewer's
+    # Point Residuals panel shows, exported as points (not the IDW surface,
+    # which is registered separately above as Interpolated Point Errors).
+    if (!is.null(rv$sf) && "resid" %in% colnames(rv$sf) && any(!is.na(rv$sf$resid))) {
+      pts_err <- rv$sf[!is.na(rv$sf$resid), c("resid", "loc")]
+      register_export_item("map_point_residuals", paste(meta$label, "- ML Predictions Point Error Map"),
+                           "map", list(pts = pts_err, bound = rv$bound), meta$category, kind = "residual")
+    }
     
     if (!is.null(rv$bound)) {
       tryCatch({
         bbox <- sf::st_bbox(sf::st_transform(sf::st_as_sf(rv$bound), 4326))
         leafletProxy("main_map") %>% fitBounds(as.numeric(bbox$xmin), as.numeric(bbox$ymin), as.numeric(bbox$xmax), as.numeric(bbox$ymax))
-        if (isTRUE(input$comp_mode)) {
+        if (comp_mode || val_type != "actual") {
           leafletProxy("comp_map_left") %>% fitBounds(as.numeric(bbox$xmin), as.numeric(bbox$ymin), as.numeric(bbox$xmax), as.numeric(bbox$ymax))
           leafletProxy("comp_map_right") %>% fitBounds(as.numeric(bbox$xmin), as.numeric(bbox$ymin), as.numeric(bbox$xmax), as.numeric(bbox$ymax))
         }
       }, error = function(e) NULL)
     }
-    
+
     if(!is.null(rv$sf)) {
       df_met <- rv$sf %>% st_drop_geometry() %>% filter(!is.na(v), !is.na(pv))
       if(nrow(df_met) > 0) {
@@ -4195,8 +4333,10 @@ server <- function(input, output, session) {
         rv$metrics <- data.frame(Metric = c("RMSE (Avg Error)", "R2 (Correlation)", "R2 (Traditional)", "MBE (Bias)"), Value = c(NA, NA, NA, NA))
       }
     }
-    meta <- get_current_meta()
-    
+    # NOTE: intentionally no get_current_meta() re-read here - the export
+    # labels below must use the meta captured at dispatch, not whatever the
+    # sidebar points at when the run finishes.
+
     if(!is.null(rv$sf)) {
       df_perf <- rv$sf %>% st_drop_geometry() %>% filter(!is.na(v), !is.na(pv))
       if(nrow(df_perf) >= 3) {
@@ -4260,7 +4400,7 @@ server <- function(input, output, session) {
     }
 
     for(l in locs) {
-       register_locality_assets(l, meta, comp_mode, val_type)
+       register_locality_assets(l, meta, comp_mode, val_type, current_method)
     }
     
     rv$log <- paste0(rv$log, "\n\n--- Run #", rv$run_counter, " Complete ---",
@@ -4287,7 +4427,7 @@ server <- function(input, output, session) {
       shinyjs::hide("reveal_maps_btn")
       
       shinyjs::enable("run")
-      updateActionButton(session, "run", label = "Run Interpolation", icon = NULL)
+      updateActionButton(session, "run", label = "Run Interpolation", icon = character(0))
       shinyjs::runjs("$('#run i').remove();")
       
       if (grepl("cancelled", tolower(err$message))) {
@@ -4326,7 +4466,7 @@ server <- function(input, output, session) {
       rv$model_running <- FALSE
       
       shinyjs::enable("run")
-      updateActionButton(session, "run", label = "Run Interpolation", icon = NULL)
+      updateActionButton(session, "run", label = "Run Interpolation", icon = character(0))
       shinyjs::runjs("$('#run i').remove();")
     })
     
@@ -4354,7 +4494,10 @@ server <- function(input, output, session) {
     }
     n_locs_calc <- length(selected_locs)
     if (n_locs_calc == 0) n_locs_calc <- 1
-    comp_mode <- isTruthy(input$comp_mode) || isTruthy(input$value_type != "actual")
+    # expected model count belongs to the run in progress (committed context),
+    # not to whatever the sidebar was changed to while it runs
+    d <- rv$disp
+    comp_mode <- !is.null(d) && (isTRUE(d$comp_mode) || !identical(d$value_type, "actual"))
     expected_models <- n_locs_calc * (if(comp_mode) 2 else 1)
     
     files <- list.files(path = session_progress_dir, pattern = paste0("^progress_", session_id, "_.*_.*\\.txt$"), full.names = TRUE)
@@ -4446,7 +4589,7 @@ server <- function(input, output, session) {
     if(length(old_files) > 0) tryCatch(file.remove(old_files), error = function(e) NULL)
     
     shinyjs::enable("run")
-    updateActionButton(session, "run", label = "Run Interpolation", icon = NULL)
+    updateActionButton(session, "run", label = "Run Interpolation", icon = character(0))
     shinyjs::runjs("$('#run i').remove();")
   })
 
@@ -4454,7 +4597,7 @@ server <- function(input, output, session) {
     shinyjs::hide("map_processing_overlay")
     showNotification("Maps and scientific analysis metrics are now available.", type = "message")
     
-    updateActionButton(session, "run", label = "Run Interpolation", icon = NULL)
+    updateActionButton(session, "run", label = "Run Interpolation", icon = character(0))
     shinyjs::runjs("$('#run i').remove();")
   })
 
@@ -4471,7 +4614,8 @@ server <- function(input, output, session) {
         h4("Available Residual Types"),
         tags$ul(
           tags$li(tags$b("Interpolated Delta (Surface Diff):"), " Calculated by subtracting the entire Predicted surface from the Actual surface [interpolate(Actual) - interpolate(Predicted)]. This shows the net difference between the two mapped geostatistical surfaces."),
-          tags$li(tags$b("Interpolated Point Errors (Model Error):"), " Calculated by first finding the error at each individual sample point location [Observed - Predicted] and THEN interpolating those local errors into a continuous surface. This specifically maps the spatial structure of the model's inability to capture local variation.")
+          tags$li(tags$b("Point Errors:"), " The discrete error at each individual sample point location [Observed - Predicted], displayed as coloured markers at the exact sampling positions (right map of the Residuals view, and the 'Point Error Map' in the Export Panel)."),
+          tags$li(tags$b("Interpolated Point Errors (Model Error):"), " The same local errors interpolated (IDW) into a continuous surface, available in the Export Panel as the 'Interpolated Point Errors Map'. This specifically maps the spatial structure of the model's inability to capture local variation.")
         ),
         hr(),
         h4("Interpretation Guide"),
@@ -4556,9 +4700,9 @@ server <- function(input, output, session) {
         circleMarkerOptions = FALSE,
         editOptions = editToolbarOptions(selectedPathOptions = selectedPathOptions())
       )
-    meta <- get_current_meta()
+    meta <- get_display_meta()
     req(meta)
-    
+
     if(!is.null(r_obj) && !(is.list(r_obj) && length(r_obj) == 0)) {
       r_list <- if(inherits(r_obj, "SpatRaster") || inherits(r_obj, "PackedSpatRaster")) list(r_obj) else r_obj
       r_list <- Filter(Negate(is.null), r_list)
@@ -4577,7 +4721,7 @@ server <- function(input, output, session) {
           paste0(rv$run_counter, "_", lab, "_", r_name)
         }
         select_active_layer <- function(r_w) {
-          is_uncertainty <- isTruthy(input$show_uncertainty) && input$method %in% c("OK", "RK", "RFK", "CK") && "var1.var" %in% names(r_w)
+          is_uncertainty <- isTruthy(input$show_uncertainty) && meta$method %in% c("OK", "RK", "RFK", "CK") && "var1.var" %in% names(r_w)
           if (is_uncertainty) {
             al <- r_w[["var1.var"]]
             if (input$uncertainty_type == "se") sqrt(al) else al
@@ -4594,7 +4738,7 @@ server <- function(input, output, session) {
         vv_scale <- joint_vv() %||% vv
         
         is_viridis <- meta$palette == "viridis"
-        is_uncert_view <- isTruthy(input$show_uncertainty) && input$method %in% c("OK", "RK", "RFK", "CK")
+        is_uncert_view <- isTruthy(input$show_uncertainty) && meta$method %in% c("OK", "RK", "RFK", "CK")
         legend_title <- if (is_uncert_view) {
           if (input$uncertainty_type == "se") {
             paste0("SE: ", meta$label, if (nzchar(meta$unit)) paste0(" ", meta$unit) else "")
@@ -4602,7 +4746,7 @@ server <- function(input, output, session) {
             paste0("Variance: ", meta$label, if (nzchar(meta$unit)) paste0(" (", meta$unit, ")^2") else " (squared units)")
           }
         } else paste(meta$label, meta$unit)
-        if(input$value_type == "resid" || lab == "resid_raster") {
+        if(lab == "resid_raster") {
           # The residual view always displays the var1.pred difference, so the
           # palette domain must come from that layer too (vv would hold the
           # var1.var difference when show_uncertainty is on)
@@ -4688,7 +4832,7 @@ server <- function(input, output, session) {
   observe({
     map_overlay_rev()
     show <- isTRUE(input$show_points_viewer)
-    is_resid <- isTruthy(input$value_type) && input$value_type == "resid"
+    is_resid <- identical(input$map_view, "view_resid")
     pts <- rv$sf
 
     pts_view <- NULL
@@ -4785,56 +4929,61 @@ server <- function(input, output, session) {
     ", if (show) "true" else "false"))
   })
 
+  # View switcher for the Map Viewer: offers only the surfaces the committed
+  # run actually computed, so switching views is instant (no recompute) and a
+  # context change in the sidebar can never blank the displayed map.
+  # Re-renders only when a run is dispatched/completed, defaulting to the view
+  # implied by the committed run configuration.
+  output$map_view_ui <- renderUI({
+    req(rv$disp)
+    choices <- c("View: Actual" = "view_act")
+    if (length(rv$rast_list_pre) > 0) {
+      choices <- c(choices,
+                   "View: ML Predicted" = "view_pred",
+                   "View: Actual vs Predicted" = "view_comp")
+    }
+    if (length(rv$rast_list_res) > 0) choices <- c(choices, "View: ML Residuals" = "view_resid")
+
+    d <- isolate(rv$disp)
+    default_view <- if (identical(d$value_type, "resid")) "view_resid"
+      else if (isTRUE(d$comp_mode) && d$value_type %in% c("pred", "pred_ss")) "view_comp"
+      else if (d$value_type %in% c("pred", "pred_ss")) "view_pred"
+      else "view_act"
+    if (!default_view %in% choices) default_view <- "view_act"
+
+    selectInput("map_view", NULL, choices = choices, selected = default_view, width = "210px", selectize = FALSE)
+  })
+  # keep the view choices in sync even while the Map Viewer tab is hidden -
+  # the layout conditionalPanels depend on input$map_view being current
+  outputOptions(output, "map_view_ui", suspendWhenHidden = FALSE)
+
+  disp_method_label <- function(d) {
+    if (is.null(d$method)) "" else paste0(" (", get_method_label(d$method), ")")
+  }
+  disp_pred_label <- function(d, long = FALSE) {
+    if (identical(d$value_type, "pred_ss")) {
+      if (long) "Single Split ML Predictions View (_ss)" else "Single Split ML Predictions (_ss)"
+    } else {
+      if (long) "Best ML Predictions View (_cve)" else "Best ML Predictions (_cve)"
+    }
+  }
+
   output$main_map_title <- renderText({
-    req(input$value_type); meta <- get_current_meta(); req(meta)
-    model_done <- !is.null(rv$rast_list_act) && length(rv$rast_list_act) > 0
-    
-    type_lab <- switch(input$value_type,
-           "actual" = "Actual Data View",
-           "pred" = "Best ML Predictions View (_cve)",
-           "pred_ss" = "Single Split ML Predictions View (_ss)",
-           "resid" = "ML Residuals View (Actual - ML Predicted)")
-    
-    current_method <- rv$run_method[[input$var_id]]
-    method_lab <- if(!is.null(current_method)) {
-      m_name <- get_method_label(current_method)
-      paste0(" (", m_name, ")")
-    } else ""
-    
-    prefix <- meta$label
-    paste0(prefix, " - ", type_lab, method_lab)
+    d <- rv$disp; req(d)
+    type_lab <- if (identical(input$map_view, "view_pred")) disp_pred_label(d, long = TRUE) else "Actual Data View"
+    paste0(d$label, " - ", type_lab, disp_method_label(d))
   })
 
   output$comp_left_title <- renderText({
-    req(input$var_id, rv$mapping$vars); meta <- get_current_meta(); req(meta)
-    
-    current_method <- rv$run_method[[input$var_id]]
-    method_lab <- if(!is.null(current_method)) {
-      m_name <- get_method_label(current_method)
-      paste0(" (", m_name, ")")
-    } else ""
-    
-    prefix <- meta$label
-    if(input$value_type == "resid") return(paste0(prefix, " - Interpolated Residuals", method_lab))
-    paste0(prefix, " - Actual Data", method_lab)
+    d <- rv$disp; req(d)
+    if (identical(input$map_view, "view_resid")) return(paste0(d$label, " - Interpolated Residuals", disp_method_label(d)))
+    paste0(d$label, " - Actual Data", disp_method_label(d))
   })
-  
+
   output$comp_right_title <- renderText({
-    req(input$var_id, rv$mapping$vars); meta <- get_current_meta(); req(meta)
-    
-    current_method <- rv$run_method[[input$var_id]]
-    method_lab <- if(!is.null(current_method)) {
-      m_name <- get_method_label(current_method)
-      paste0(" (", m_name, ")")
-    } else ""
-    
-    prefix <- meta$label
-    if(input$value_type == "resid") return(paste0(prefix, " - Point Residuals", method_lab))
-    
-    type_lab <- switch(input$value_type,
-           "pred" = "Best ML Predictions (_cve)",
-           "pred_ss" = "Single Split ML Predictions (_ss)")
-    paste0(prefix, " - ", type_lab, method_lab)
+    d <- rv$disp; req(d)
+    if (identical(input$map_view, "view_resid")) return(paste0(d$label, " - Point Residuals", disp_method_label(d)))
+    paste0(d$label, " - ", disp_pred_label(d), disp_method_label(d))
   })
 
   observeEvent(input$base_map_layer, {
@@ -4865,7 +5014,7 @@ server <- function(input, output, session) {
       tryCatch({
         bbox <- sf::st_bbox(sf::st_transform(sf::st_as_sf(rv$bound), 4326))
         leafletProxy("main_map") %>% fitBounds(as.numeric(bbox$xmin), as.numeric(bbox$ymin), as.numeric(bbox$xmax), as.numeric(bbox$ymax))
-        if (isTRUE(input$comp_mode)) {
+        if (isTRUE(input$map_view %in% c("view_comp", "view_resid"))) {
           leafletProxy("comp_map_left") %>% fitBounds(as.numeric(bbox$xmin), as.numeric(bbox$ymin), as.numeric(bbox$xmax), as.numeric(bbox$ymax))
           leafletProxy("comp_map_right") %>% fitBounds(as.numeric(bbox$xmin), as.numeric(bbox$ymin), as.numeric(bbox$xmax), as.numeric(bbox$ymax))
         }
@@ -4878,7 +5027,7 @@ server <- function(input, output, session) {
         pts <- st_as_sf(df_map, coords = c("x", "y"), crs = rv$mapping$crs) %>% st_transform(4326)
         bbox <- st_bbox(pts)
         leafletProxy("main_map") %>% fitBounds(as.numeric(bbox$xmin), as.numeric(bbox$ymin), as.numeric(bbox$xmax), as.numeric(bbox$ymax))
-        if (isTRUE(input$comp_mode)) {
+        if (isTRUE(input$map_view %in% c("view_comp", "view_resid"))) {
           leafletProxy("comp_map_left") %>% fitBounds(as.numeric(bbox$xmin), as.numeric(bbox$ymin), as.numeric(bbox$xmax), as.numeric(bbox$ymax))
           leafletProxy("comp_map_right") %>% fitBounds(as.numeric(bbox$xmin), as.numeric(bbox$ymin), as.numeric(bbox$xmax), as.numeric(bbox$ymax))
         }
@@ -4889,19 +5038,22 @@ server <- function(input, output, session) {
   })
 
   output$main_map <- renderLeaflet({
-    req(input$value_type); req(rv$run_method[[input$var_id]])
-    target <- if(input$value_type == "actual") rv$rast_list_act
-              else if(input$value_type == "resid") rv$rast_list_res
-              else rv$rast_list_pre
-    m <- draw_map(target, input$value_type)
+    d <- rv$disp; req(d)
+    view <- input$map_view %||% "view_act"
+    req(view %in% c("view_act", "view_pred"))
+    target <- if (view == "view_pred") rv$rast_list_pre else rv$rast_list_act
+    view_lab <- if (view == "view_pred") {
+      if (identical(d$value_type, "pred_ss")) "pred_ss" else "pred"
+    } else "actual"
+    m <- draw_map(target, view_lab)
     session_state$main_map_rendered <- TRUE
     map_overlay_rev(isolate(map_overlay_rev()) + 1L)
     m
   })
 
   output$comp_map_left <- renderLeaflet({
-    req(rv$run_method[[input$var_id]])
-    m <- if(input$value_type == "resid") {
+    req(rv$disp, input$map_view %in% c("view_comp", "view_resid"))
+    m <- if(input$map_view == "view_resid") {
       draw_map(rv$rast_list_res, "resid_raster")
     } else {
       draw_map(rv$rast_list_act, "Actual")
@@ -4912,8 +5064,8 @@ server <- function(input, output, session) {
   })
 
   output$comp_map_right <- renderLeaflet({
-    req(rv$run_method[[input$var_id]])
-    m <- if(input$value_type == "resid") {
+    req(rv$disp, input$map_view %in% c("view_comp", "view_resid"))
+    m <- if(input$map_view == "view_resid") {
       draw_map(NULL, "resid_points")
     } else {
       draw_map(rv$rast_list_pre, "Predicted")
@@ -4948,14 +5100,14 @@ server <- function(input, output, session) {
 
       leafletProxy("main_map") %>% fitBounds(as.numeric(bbox$xmin), as.numeric(bbox$ymin), as.numeric(bbox$xmax), as.numeric(bbox$ymax))
 
-      if (isTRUE(input$comp_mode)) {
+      if (isTRUE(input$map_view %in% c("view_comp", "view_resid"))) {
         leafletProxy("comp_map_left") %>% fitBounds(as.numeric(bbox$xmin), as.numeric(bbox$ymin), as.numeric(bbox$xmax), as.numeric(bbox$ymax))
         leafletProxy("comp_map_right") %>% fitBounds(as.numeric(bbox$xmin), as.numeric(bbox$ymin), as.numeric(bbox$xmax), as.numeric(bbox$ymax))
       }
    })
 
    output$vgm_plot_main <- renderPlot({
-     loc <- input$sel_loc_stats; meta <- get_current_meta()
+     loc <- input$sel_loc_stats; meta <- get_display_meta()
      req(loc, meta)
      if(loc == "Total (Combined)") {
        pts_sf <- if(!is.null(rv$sf)) {
@@ -4997,10 +5149,10 @@ server <- function(input, output, session) {
      }
    })
    output$vgm_plot_pred <- renderPlot({
-     loc <- input$sel_loc_stats; meta <- get_current_meta()
+     loc <- input$sel_loc_stats; meta <- get_display_meta()
      req(loc, meta)
      if(loc == "Total (Combined)") {
-       pred_col <- if(input$value_type == "pred_ss") meta$pred_ss else meta$pred
+       pred_col <- if(identical(meta$value_type, "pred_ss")) meta$pred_ss else meta$pred
        
        pts_sf <- if(!is.null(rv$sf) && "pv" %in% colnames(rv$sf)) {
          rv$sf
@@ -5148,9 +5300,7 @@ server <- function(input, output, session) {
   output$ck_variogram_plot_pred <- render_ck_variogram_plot("pre")
 
   output$vgm_params_table <- renderTable({
-    loc <- input$sel_loc_stats; req(loc); if(loc == "Total (Combined)") return(NULL)
-    f_a <- rv$v_fit_list[[paste0(loc, "_act")]]; f_p <- rv$v_fit_list[[paste0(loc, "_pre")]]
-    if(is.null(f_a) && is.null(f_p)) return(NULL)
+    loc <- input$sel_loc_stats; req(loc)
 
     get_vgm_params <- function(f) {
       if(is.null(f)) return(rep("NA", 5))
@@ -5162,23 +5312,40 @@ server <- function(input, output, session) {
       c(mod, round(nug, 4), round(sill, 4), round(rng, 1), paste0(round(str_dep, 1), "%"))
     }
 
-    data.frame(Param = c("Model", "Nugget", "Sill", "Range", "Structural Dep."), 
+    if(loc == "Total (Combined)") {
+      # Variograms are fitted per locality; the combined view lists every
+      # fitted locality (one row per fitted target) instead of showing nothing
+      fits <- rv$v_fit_list
+      locs <- unique(sub("_(act|pre)$", "", names(fits)))
+      rows <- list()
+      for (l in locs) {
+        for (tgt in c("act", "pre")) {
+          f <- fits[[paste0(l, "_", tgt)]]
+          if(is.null(f)) next
+          pr <- get_vgm_params(f)
+          rows[[length(rows) + 1]] <- data.frame(
+            Locality = l, Target = if(tgt == "act") "Actual" else "Predicted",
+            Model = pr[1], Nugget = pr[2], Sill = pr[3], Range = pr[4],
+            Structural.Dep. = pr[5], check.names = FALSE)
+        }
+      }
+      if(length(rows) == 0) return(NULL)
+      res <- do.call(rbind, rows)
+      names(res)[7] <- "Structural Dep."
+      return(res)
+    }
+
+    f_a <- rv$v_fit_list[[paste0(loc, "_act")]]; f_p <- rv$v_fit_list[[paste0(loc, "_pre")]]
+    if(is.null(f_a) && is.null(f_p)) return(NULL)
+
+    data.frame(Param = c("Model", "Nugget", "Sill", "Range", "Structural Dep."),
                Actual = get_vgm_params(f_a),
                Predicted = get_vgm_params(f_p))
   })
   output$tps_gcv_plot_act <- renderPlot({
-    loc <- input$sel_loc_stats; req(loc, input$method == "TPS")
-    if(loc == "Total (Combined)") {
-      return(ggplot() + annotate("text", x = 4, y = 4, label = "TPS GCV diagnostics are generated per locality.\nPlease select a specific locality from the dropdown.", size = 5, color = "grey40") + theme_void())
-    }
-    df <- rv$tps_gcv_data[[paste0(loc, "_act")]]
-    req(df, nrow(df) > 0)
+    loc <- input$sel_loc_stats; req(loc, identical(rv$disp$method, "TPS"))
     tryCatch({
-      ggplot(df, aes(x = lambda, y = gcv)) + 
-        geom_line(color = "steelblue", size = 1) + 
-        geom_point(color = "darkblue") +
-        scale_x_log10() + theme_minimal() + 
-        labs(title = paste("GCV Curve (Actual):", loc), x = "Lambda (Log Scale)", y = "GCV Score")
+      build_tps_gcv_plot(rv$tps_gcv_data, loc, "act")
     }, error = function(e) {
       plot(1, 1, type="n", main=paste("GCV Plot Error:", e$message), axes=F, xlab="", ylab="")
     })
@@ -5244,45 +5411,38 @@ server <- function(input, output, session) {
   output$resid_vgm_plot_pre <- render_resid_plot(reactive(rv$cv_data_pre), "(Predicted Map)")
 
   output$tps_gcv_plot_pre <- renderPlot({
-    loc <- input$sel_loc_stats; req(loc, input$method == "TPS")
-    if(loc == "Total (Combined)") {
-      return(ggplot() + annotate("text", x = 4, y = 4, label = "TPS GCV diagnostics are generated per locality.\nPlease select a specific locality from the dropdown.", size = 5, color = "grey40") + theme_void())
-    }
-    df <- rv$tps_gcv_data[[paste0(loc, "_pre")]]
-    req(df, nrow(df) > 0)
+    loc <- input$sel_loc_stats; req(loc, identical(rv$disp$method, "TPS"))
     tryCatch({
-      ggplot(df, aes(x = lambda, y = gcv)) + 
-        geom_line(color = "firebrick", size = 1) + 
-        geom_point(color = "darkred") +
-        scale_x_log10() + theme_minimal() + 
-        labs(title = paste("GCV Curve (Predicted):", loc), x = "Lambda (Log Scale)", y = "GCV Score")
+      build_tps_gcv_plot(rv$tps_gcv_data, loc, "pre")
     }, error = function(e) {
       plot(1, 1, type="n", main=paste("GCV Plot Error:", e$message), axes=F, xlab="", ylab="")
     })
   })
 
   output$regional_params_table <- renderTable({
-    loc <- input$sel_loc_stats; req(loc, input$method %in% c("IDW", "TPS"))
-    if(loc == "Total (Combined)") return(NULL)
-    type <- input$method
-    data.frame(
-      Param = if(type == "IDW") "Power (p)" else "Lambda",
-      Actual = format_param_val(type, get_regional_param(type, loc, "act")),
-      Predicted = format_param_val(type, get_regional_param(type, loc, "pre"))
-    )
+    loc <- input$sel_loc_stats; req(loc, (rv$disp$method %||% "") %in% c("IDW", "TPS"))
+    has_pre <- isTRUE(rv$disp$comp_mode) || !identical(rv$disp$value_type, "actual")
+    build_regional_params_df(rv$disp$method, loc, rv$disp$regional_params, has_pre)
   })
 
   output$stats_table_total <- renderTable({
-    req(rv$user_data, input$var_id)
-    meta <- get_current_meta()
+    req(rv$user_data)
+    meta <- get_display_meta()
     req(meta)
     
     df <- rv$user_data
+    # "Total (Combined)" means the localities covered by the DISPLAYED run,
+    # so a partial-locality run summarises only the data it interpolated
+    # (matching the run-scoped area and CV tables in this panel)
+    loc_col <- rv$mapping$loc
+    if (!is.null(meta$localities) && !is.null(loc_col) && loc_col %in% colnames(df)) {
+      df <- df %>% filter(!!sym(loc_col) %in% meta$localities)
+    }
     v_act <- if(!is.null(meta$actual) && !is.na(meta$actual) && meta$actual %in% colnames(df)) df[[meta$actual]] else NULL
     if (is.null(v_act)) return(NULL)
-    
+
     v_pre <- if(!is.null(meta$pred) && !is.na(meta$pred) && meta$pred %in% colnames(df)) df[[meta$pred]] else if(!is.null(meta$pred_ss) && !is.na(meta$pred_ss) && meta$pred_ss %in% colnames(df)) df[[meta$pred_ss]] else NULL
-    
+
     s_a <- summary(v_act)
     res <- data.frame(Metric = names(s_a), Total_Actual = as.character(round(as.numeric(s_a), 3)))
     
@@ -5294,9 +5454,9 @@ server <- function(input, output, session) {
   })
   
   output$stats_table_loc <- renderTable({
-    req(rv$user_data, input$var_id, input$sel_loc_stats)
+    req(rv$user_data, input$sel_loc_stats)
     if(input$sel_loc_stats == "Total (Combined)") return(NULL)
-    meta <- get_current_meta()
+    meta <- get_display_meta()
     req(meta)
     
     df <- rv$user_data %>% filter(!!sym(rv$mapping$loc) == input$sel_loc_stats)
@@ -5576,6 +5736,23 @@ server <- function(input, output, session) {
   })
 
   output$log_output <- renderText({ rv$log })
+
+  # Keep the Scientific Analysis tables computing while the tab is hidden:
+  # a run auto-pans the user to the Map Viewer, and with the default
+  # suspend-when-hidden these outputs would only start rendering when the
+  # tab is opened - the user then stares at the PREVIOUS run's tables behind
+  # Shiny's pale-grey recalculating overlay until the whole burst (pooled CV,
+  # area expanse, kappa, ...) finishes. Rendering them in the run-completion
+  # flush makes the tab current the moment it is opened. Plots stay
+  # suspended: hidden plots re-render on reveal anyway (client sizing).
+  for (out_id in c("vgm_params_table", "regional_params_table", "metrics_table",
+                   "cv_strategy_badge", "stats_table_total", "stats_table_loc",
+                   "area_table_total_act", "area_table_total_pre",
+                   "area_table_loc_act", "area_table_loc_pre",
+                   "uploaded_metrics_table", "kappa_table",
+                   "run_config_display", "log_output")) {
+    outputOptions(output, out_id, suspendWhenHidden = FALSE)
+  }
 
   last_notified_warnings <- reactiveVal(character(0))
   observe({

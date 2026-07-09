@@ -153,3 +153,25 @@ test_that("detect_pred_column handles missing type gracefully", {
   result <- detect_pred_column("pH", candidates, type = "cve")
   expect_equal(result, "pH_cve")
 })
+
+# ── is_valid_col_ref ──────────────────────────────────────────────────────
+# Guards the "uploaded predictions" panels: detect_pred_column returns NA
+# (not NULL) when no prediction column exists, and a bare is.null() check
+# used to treat that NA as "predictions present".
+
+test_that("is_valid_col_ref accepts a real column name", {
+  expect_true(is_valid_col_ref("pH_cve"))
+})
+
+test_that("is_valid_col_ref rejects NULL, NA, empty and multi-length inputs", {
+  expect_false(is_valid_col_ref(NULL))
+  expect_false(is_valid_col_ref(NA))
+  expect_false(is_valid_col_ref(NA_character_))
+  expect_false(is_valid_col_ref(""))
+  expect_false(is_valid_col_ref(c("a", "b")))
+})
+
+test_that("is_valid_col_ref is FALSE for detect_pred_column's no-match result", {
+  no_match <- detect_pred_column("pH", c("foo", "bar"), type = "cve")
+  expect_false(is_valid_col_ref(no_match))
+})

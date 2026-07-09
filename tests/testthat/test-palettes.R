@@ -204,3 +204,63 @@ test_that("generate_group_palette handles duplicate group names", {
   # Should deduplicate or assign same color
   expect_true(length(pal) >= 2)
 })
+
+# ── desc_palette_colors (Descriptive Suite palettes) ──────────────────────
+
+test_that("desc_palette_colors returns exactly n colors for every option", {
+  pals <- unname(unlist(desc_palette_choices))
+  pals <- pals[pals != "default"]
+  for (pal in pals) {
+    expect_length(desc_palette_colors(pal, 3), 3)
+    expect_length(desc_palette_colors(pal, 15), 15)
+  }
+})
+
+test_that("desc_palette_colors ramps Brewer palettes past their native max", {
+  cols <- desc_palette_colors("Set2", 12)  # Set2 native max = 8
+  expect_length(cols, 12)
+  expect_false(any(is.na(cols)))
+  expect_length(unique(cols), 12)
+})
+
+test_that("desc_palette_colors uses the Okabe-Ito palette", {
+  expect_equal(desc_palette_colors("okabe", 4),
+               unname(grDevices::palette.colors(4, palette = "Okabe-Ito")))
+})
+
+# ── apply_desc_palette ────────────────────────────────────────────────────
+
+test_that("apply_desc_palette leaves the plot untouched for default/NULL", {
+  p <- ggplot2::ggplot(make_test_df(), ggplot2::aes(cat1, a, fill = cat1)) +
+    ggplot2::geom_boxplot()
+  expect_identical(apply_desc_palette(p, "default"), p)
+  expect_identical(apply_desc_palette(p, NULL), p)
+})
+
+test_that("apply_desc_palette colours discrete groups beyond a Brewer max", {
+  set.seed(1)
+  df <- data.frame(g = factor(rep(paste0("G", 1:12), each = 5)), y = rnorm(60))
+  p <- ggplot2::ggplot(df, ggplot2::aes(g, y, fill = g)) + ggplot2::geom_boxplot()
+  built <- ggplot2::ggplot_build(apply_desc_palette(p, "Set1"))  # Set1 max = 9
+  fills <- unique(built$data[[1]]$fill)
+  expect_false(any(is.na(fills)))
+  expect_length(fills, 12)
+})
+
+test_that("apply_desc_palette works on the 2D density heatmap's discrete fill", {
+  df <- make_test_df(n = 200)
+  p <- generate_advanced_plot(df, vars = c("a", "b"), plot_type = "density_heatmap")
+  # regression: the old code added scale_fill_viridis_c/_distiller here, which
+  # errors on geom_density_2d_filled's ordered-factor fill
+  p2 <- apply_desc_palette(p, "viridis")
+  expect_no_error(ggplot2::ggplot_build(p2))
+  p3 <- apply_desc_palette(p, "Set1")
+  expect_no_error(ggplot2::ggplot_build(p3))
+})
+
+test_that("apply_desc_palette applies a continuous gradient for XYZ surface", {
+  df <- make_test_df(n = 60)
+  p <- generate_advanced_plot(df, vars = c("a", "b", "c"), plot_type = "xyz_surface")
+  p2 <- apply_desc_palette(p, "plasma", continuous = TRUE)
+  expect_no_error(ggplot2::ggplot_build(p2))
+})

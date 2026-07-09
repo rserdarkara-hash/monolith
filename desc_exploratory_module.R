@@ -101,8 +101,8 @@ desc_exploratory_ui <- function(id) {
                                 "Radar Chart" = "radar",
                                 "XYZ Surface" = "xyz_surface")),
                   shiny::checkboxInput(ns("desc_ghosting"), "Enable Ghosting (Selected vs. Total)", value = FALSE),
-                  shiny::selectInput(ns("desc_palette"), "Color Palette", 
-                    choices = c("Default" = "default", "Viridis (Colorblind)" = "viridis", "Set1" = "Set1", "Set2" = "Set2", "Dark2" = "Dark2", "Pastel1" = "Pastel1")),
+                  shiny::selectInput(ns("desc_palette"), "Color Palette",
+                    choices = desc_palette_choices),
                   shiny::uiOutput(ns("desc_plot_vars_ui"))
                 ),
                 shiny::column(9,
@@ -510,23 +510,11 @@ desc_exploratory_server <- function(id, data_reactive, vars_metadata_reactive) {
         p <- generate_advanced_plot(df_local, vars = vars, group_col = "group_id", plot_type = p_type, xyz_fit = input$desc_xyz_fit, stat_test = input$desc_stat_tests, stat_letter_pos = input$desc_stat_letter_pos)
       }
       
-      pal <- input$desc_palette %||% "default"
-      if (pal != "default") {
-         if (p_type %in% c("density_heatmap", "xyz_surface")) {
-            if (pal == "viridis") {
-               p <- p + scale_fill_viridis_c() + scale_color_viridis_c()
-            } else {
-               p <- p + scale_fill_distiller(palette = pal) + scale_color_distiller(palette = pal)
-            }
-         } else {
-            if (pal == "viridis") {
-               p <- p + scale_fill_viridis_d() + scale_color_viridis_d()
-            } else {
-               p <- p + scale_fill_brewer(palette = pal) + scale_color_brewer(palette = pal)
-            }
-         }
-      }
-      
+      # Only the XYZ surface has a continuous fill; the 2D density heatmap's
+      # fill (geom_density_2d_filled) is an ordered factor, i.e. discrete
+      p <- apply_desc_palette(p, input$desc_palette %||% "default",
+                              continuous = identical(p_type, "xyz_surface"))
+
         p
       })
     })
