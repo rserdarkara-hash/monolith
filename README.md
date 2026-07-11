@@ -286,15 +286,15 @@ Human oversight remained central throughout: all methodological choices, model f
 }
 ```
 
-**Associated publication:** Kara, R.S., Ongun, A.R., Almaz, C., Çiçek, G., Tepecik, M., Yilgan, F., 2026. Diagnostic modeling of nutrients to support agroecosystem transitioning in tobacco soils: a stratified evaluation framework based on clay-organic matter-lime interactions. Manuscript submitted for publication.
+**Associated publication:** Kara, R.S., Ongun, A.R., Almaz, C., Çiçek, G., Tepecik, M., Yilgan, F., 2026. Diagnostic modeling of nutrients to support agroecosystem transitioning in tobacco soils: a stratified evaluation framework based on clay-organic matter-lime interactions. Manuscript submitted for review.
 
 *This section will be updated with the full journal reference and DOI upon acceptance.*
 
 **Using the sample data?** The bundled demonstration files are released under CC BY 4.0 and include modeled predictions from the associated study. If you use them, please cite **both** the paper the predictions derive from and the dataset version of record:
 
-> Kara, R. S., Ongun, A. R., Almaz, C., Çiçek, G., Tepecik, M., & Yilgan, F. (2026a). Diagnostic modeling of nutrients to support agroecosystem transitioning in tobacco soils: A stratified evaluation framework based on clay-organic matter-lime interactions [Manuscript submitted for publication]. Department of Soil Science and Soil Protection, Czech University of Life Sciences Prague.
+> Kara, R. S., Ongun, A. R., Almaz, C., Çiçek, G., Tepecik, M., & Yilgan, F. (2026a). Diagnostic modeling of nutrients to support agroecosystem transitioning in tobacco soils: A stratified evaluation framework based on clay-organic matter-lime interactions [Manuscript submitted for review]. Department of Soil Science and Soil Protection, Czech University of Life Sciences Prague.
 >
-> Kara, R. S., Ongun, A. R., Almaz, C., Çiçek, G., & Tepecik, M. (2026b). Physicochemical and Nutritional Soil Properties, Geolocation, and Environmental Covariates for Nutrient Prediction in Transitioning Tobacco Agroecosystems (Denizli, Turkey). *Mendeley Data*, V1. https://doi.org/10.17632/8548bmgxh9.1 *(DOI currently inactive; resolves once the associated publication is released.)*
+> Kara, R. S., Ongun, A. R., Almaz, C., Çiçek, G., & Tepecik, M. (2026b). Physicochemical and Nutritional Soil Properties, Geolocation, and Environmental Covariates for Nutrient Prediction in Transitioning Tobacco Agroecosystems (Denizli, Turkey). *Mendeley Data*, V1. https://doi.org/10.17632/8548bmgxh9.1 *(DOI currently inactive; resolves once the associated data repository is released.)*
 
 See [sample_data/DATA_LICENSE](sample_data/DATA_LICENSE) for the full terms.
 
