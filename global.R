@@ -7,6 +7,8 @@ required_packages <- c(
   "ggplot2", "ggpubr", "plotly", "RColorBrewer", "viridis", "latticeExtra",
   "patchwork", "fresh", "showtext", "scales", "commonmark", "glue",
   "randomForest", "DALEX", "yardstick", "agricolae", "mgcv",
+  "parsnip", "recipes", "workflows", "tune", "rsample", "dials",
+  "spatialsample", "hardhat", "ranger", "xgboost", "nnet",
   "future", "furrr", "promises", "nortest", "data.table", "fs"
 )
 
@@ -64,6 +66,18 @@ library(agricolae)
 library(mgcv)
 library(nortest)
 
+# Classification suite backbone (tidymodels). Engine packages (ranger, xgboost,
+# nnet) are installed via required_packages and loaded on demand by parsnip at
+# fit time, so they are not attached here.
+library(parsnip)
+library(recipes)
+library(workflows)
+library(tune)
+library(rsample)
+library(dials)
+library(spatialsample)
+library(hardhat)
+
 library(future)
 library(furrr)
 library(promises)
@@ -78,7 +92,9 @@ if (!inherits(future::plan(), "multisession")) {
 
 source("ui_helpers.R")
 source("spatial_helpers.R")
+source("classif_helpers.R")
 source("theme_helpers.R")
 source("gov_module.R")
 source("desc_exploratory_module.R")
+source("classif_module.R")
 

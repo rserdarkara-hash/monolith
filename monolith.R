@@ -406,7 +406,7 @@ ui <- fluidPage(
                            checkboxInput("match_scales", HTML(paste0("Match Scales", info_tooltip("match_info", "Forces the map legends for Actual and Predicted data to use the same color range."))), FALSE))
       ),
       conditionalPanel(
-        condition = "input.main_tabs !== '5. Descriptive and Exploratory Suite'",
+        condition = "input.main_tabs !== 'Descriptive and Exploratory Suite'",
         br(),
         div(style="background-color: #e7f5ff; padding: 10px; border: 1px solid #a5d8ff;",
             h4("2. Spatial Engine"),
@@ -581,7 +581,7 @@ ui <- fluidPage(
       ),
       
       conditionalPanel(
-        condition = "input.main_tabs === '5. Descriptive and Exploratory Suite'",
+        condition = "input.main_tabs === 'Descriptive and Exploratory Suite'",
         div(style="background-color: rgba(255, 255, 255, 0.08); padding: 12px; border: 1px solid rgba(255, 255, 255, 0.15); border-radius: 6px; margin-top: 10px;",
             h4("Exploratory Suite Active", style="margin-top: 0; color: #ffffff; font-weight: bold;"),
             p(style="font-size:0.85em; color:#cbd5e1; line-height:1.45; margin-bottom: 0;", 
@@ -878,8 +878,11 @@ ui <- fluidPage(
                          uiOutput("reset_archive_choice_ui")
                      )
                                   )),
-        tabPanel("5. Descriptive and Exploratory Suite",
+        tabPanel("Descriptive and Exploratory Suite",
                  desc_exploratory_ui("exploratory")
+        ),
+        tabPanel("Classification Suite",
+                 classif_ui("classification")
         )      )
     )
   )
@@ -1188,6 +1191,32 @@ server <- function(input, output, session) {
     id = "exploratory",
     data_reactive = reactive(rv$user_data),
     vars_metadata_reactive = reactive(rv$mapping$vars)
+  )
+
+  classif_server(
+    id = "classification",
+    data_reactive = reactive(rv$user_data),
+    vars_metadata_reactive = reactive(rv$mapping$vars),
+    spatial_reactive = reactive(list(
+      x = rv$mapping$x, y = rv$mapping$y,
+      src_crs = rv$mapping$crs, proj_crs = input$crs_selection,
+      loc = rv$mapping$loc
+    )),
+    # Context-panel locality selection feeds the module's scope default;
+    # polygons (map-drawn + uploaded shapefile) enable its polygon scope.
+    # get_drawn_sf is defined later in this server function - reactives only
+    # look the binding up at evaluation time, after server setup completes.
+    context_localities_reactive = reactive(input$locality),
+    polygons_reactive = reactive(list(drawn = get_drawn_sf(), shp = rv$shp_bound)),
+    # Sidebar Spatial Engine settings (Boundary Type / Buffer Logic /
+    # Resolution Logic) shared with the interpolation runs, so the
+    # classification maps use the same boundary, buffer, and grid resolution
+    # the user configured once - no duplicate controls inside the module.
+    boundary_settings_reactive = reactive(list(
+      type = input$boundary_type, buff_mode = input$buff_mode,
+      buff_dist = input$buff_dist, res_mode = input$res_mode,
+      res = input$grid_res
+    ))
   )
 
      active_theme_name <- theme_switcher_server("theme_mod")  
@@ -3076,9 +3105,23 @@ server <- function(input, output, session) {
 
       observeEvent(input$calc_corr, {
         req(rv$user_data, input$var_id)
-        df <- rv$user_data[sapply(rv$user_data, is.numeric)]
+        # Scope the correlations to the Context panel's locality selection:
+        # ranks computed across ALL samples can be driven by between-locality
+        # contrasts and mislead covariate choice for a single-locality run.
+        df_base <- rv$user_data
+        scope_lbl <- "all localities"
+        if (!is.null(rv$mapping$loc) && rv$mapping$loc %in% colnames(df_base) &&
+            length(input$locality) > 0 && !("ALL" %in% input$locality)) {
+          df_base <- df_base[as.character(df_base[[rv$mapping$loc]]) %in% input$locality, , drop = FALSE]
+          scope_lbl <- paste(input$locality, collapse = ", ")
+        }
+        if (nrow(df_base) < 3) {
+          showNotification("Fewer than 3 samples in the selected localities - cannot rank predictors.", type = "error")
+          return()
+        }
+        df <- df_base[sapply(df_base, is.numeric)]
         df <- df[, !(colnames(df) %in% c(rv$mapping$x, rv$mapping$y))]
-        
+
         target <- input$var_id
         if(!(target %in% colnames(df))) {
           showNotification("Target variable not in numeric data.", type = "error")
@@ -3101,6 +3144,7 @@ server <- function(input, output, session) {
         }
         
         rv$full_cor_matrix <- res_df # Re-using variable name but storing dataframe instead of matrix
+        rv$cor_scope_label <- sprintf("%s, n = %d", scope_lbl, nrow(df_base))
         rv$show_corr_panel <- TRUE
       })
     
@@ -3165,10 +3209,16 @@ server <- function(input, output, session) {
           )
         })
         
-        tabs <- c(list(tabs[[1]]), cat_tabs)        
+        tabs <- c(list(tabs[[1]]), cat_tabs)
         tagList(
           hr(),
           tags$h6("Predictor Ranks (Correlation):"),
+          # Scope stamp: ranks are frozen at Calculate time, so make the data
+          # subset they refer to explicit even if the locality selection has
+          # changed since (press Calculate again to refresh).
+          if (!is.null(rv$cor_scope_label))
+            tags$p(style = "font-size: 0.78em; color: #888; margin: 0 0 4px 0;",
+                   paste0("Scope: ", rv$cor_scope_label)),
           tags$div(style = "overflow-x: auto; white-space: nowrap; border-bottom: 1px solid #ddd; margin-bottom: 5px;",
             do.call(tabsetPanel, c(list(id = "cor_tabs", type = "pills"), tabs))
           )
@@ -3649,7 +3699,10 @@ server <- function(input, output, session) {
     rv$proceed_vif <- runif(1)
   })
 
-  observeEvent(list(input$method, input$aux_vars), {
+  # Locality is part of the reset list because the VIF screen below runs on
+  # the SELECTED localities' data: a drop/keep decision made for one spatial
+  # context must not silently carry over to another.
+  observeEvent(list(input$method, input$aux_vars, input$locality), {
     rv$vif_choice_made <- NULL
   })
 
@@ -3666,13 +3719,21 @@ server <- function(input, output, session) {
     }
 
     if (input$method %in% c("RK", "RFK", "CK") && length(input$aux_vars) > 1 && is.null(rv$vif_choice_made)) {
-       df_aux <- sf::st_drop_geometry(rv$user_data)[, input$aux_vars, drop = FALSE]
+       # Screen multicollinearity on the data the run will actually fit (the
+       # selected localities), not the full table: covariates can be collinear
+       # within one locality but not across all of them, and vice versa.
+       df_vif <- sf::st_drop_geometry(rv$user_data)
+       if (!is.null(rv$mapping$loc) && rv$mapping$loc %in% colnames(df_vif) &&
+           length(input$locality) > 0 && !("ALL" %in% input$locality)) {
+         df_vif <- df_vif[as.character(df_vif[[rv$mapping$loc]]) %in% input$locality, , drop = FALSE]
+       }
+       df_aux <- df_vif[, input$aux_vars, drop = FALSE]
        vif_res <- check_vif(df_aux, threshold = 10)
-       
+
        if (length(vif_res$dropped) > 0) {
           showModal(modalDialog(
             title = tags$div(style = "color: #d9534f; font-weight: bold;", icon("exclamation-triangle"), "High Multicollinearity Detected"),
-            tags$p("High correlation / multicollinearity detected among the selected variables. This may destabilize the spatial estimation model."),
+            tags$p("High correlation / multicollinearity detected among the selected variables within the selected localities. This may destabilize the spatial estimation model."),
             tags$p(tags$b("Variables recommended to be dropped:"), paste(vif_res$dropped, collapse=", ")),
             tags$p("What would you like to do?"),
             footer = tagList(

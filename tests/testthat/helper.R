@@ -69,6 +69,52 @@ make_test_points <- function(n = 20, target_mean = 50, seed = 42) {
   sf::st_as_sf(pts, coords = c("x", "y"), crs = 32633)
 }
 
+#' Create a spatially-structured sf POINT dataframe for classification tests:
+#' a 3-class target (`soil`) driven by a smooth gradient, two numeric covariates
+#' (`elev`, `slope`) and one categorical covariate (`parent`).
+#'
+#' @param n Number of points.
+#' @param seed RNG seed.
+#' @return sf object (EPSG:32633) with columns soil, elev, slope, parent.
+make_classif_points <- function(n = 60, seed = 42) {
+  set.seed(seed)
+  x <- runif(n, 450000, 452000)
+  y <- runif(n, 5800000, 5802000)
+  score <- (x - 450000) / 2000 + (y - 5800000) / 2000 + rnorm(n, 0, 0.3)
+  cls <- cut(score, breaks = stats::quantile(score, c(0, .34, .67, 1)),
+             labels = c("Low", "Med", "High"), include.lowest = TRUE)
+  df <- data.frame(
+    x = x, y = y,
+    soil   = factor(cls),
+    elev   = score * 10 + rnorm(n, 0, 2),
+    slope  = runif(n, 0, 15),
+    parent = factor(sample(c("Granite", "Shale"), n, replace = TRUE))
+  )
+  sf::st_as_sf(df, coords = c("x", "y"), crs = 32633)
+}
+
+#' Plain data.frame (projected coords as columns, EPSG:32633) with TWO spatially
+#' separated localities ("A" around x = 450500, "B" around x = 458500, ~7 km
+#' apart) for classification scope tests. Coordinates are already metric so
+#' tests can pass 32633 as both source and projected CRS.
+#'
+#' @return data.frame with columns x, y, loc, soil, elev, slope.
+make_classif_scope_df <- function(nA = 40, nB = 30, seed = 7) {
+  set.seed(seed)
+  n <- nA + nB
+  x <- c(runif(nA, 450000, 451000), runif(nB, 458000, 459000))
+  y <- runif(n, 5800000, 5801000)
+  score <- (y - 5800000) / 1000 + rnorm(n, 0, 0.3)
+  data.frame(
+    x = x, y = y,
+    loc = c(rep("A", nA), rep("B", nB)),
+    soil = factor(cut(score, breaks = stats::quantile(score, c(0, .5, 1)),
+                      labels = c("Low", "High"), include.lowest = TRUE)),
+    elev = score * 10 + rnorm(n, 0, 2),
+    slope = runif(n, 0, 15)
+  )
+}
+
 #' Create a small regular prediction grid.
 #'
 #' @param pts_sf sf point object used to derive the bounding box.

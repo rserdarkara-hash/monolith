@@ -268,6 +268,8 @@ The system actively guards against severe multicollinearity which can destabiliz
 * **PCA Module:** Before executing standard PCA, it scans the numerical matrix for pairwise correlations > 0.95. If detected, it actively halts the execution and alerts the user, requiring a manual override or parameter drop. This is a critical statistical guardrail that prevents severe distortion of the loading vectors.
 * **Geostatistical Engine (RK, RFK, CK):** Before launching multivariate spatial interpolations (Regression Kriging, Random Forest Kriging, or Co-Kriging), the system performs a Variance Inflation Factor (VIF) check on the selected auxiliary variables. If variables with a VIF > 10 are detected, an interactive modal halts the process, advising the user to "Auto-Drop and Continue" or force execution. If auto-dropped, the variables are strictly purged from both the interpolation algorithms and downstream diagnostic reports (e.g., Variable Importance plots).
   * *Note on cross-validation:* the VIF/collinearity prune is run **once on the full auxiliary set before cross-validation**, not re-derived inside each CV fold. This is deliberate and does not inflate the reported CV skill: the filter is **unsupervised**: it inspects only the covariate–covariate correlation matrix and never sees the target variable, so, unlike supervised feature selection, it introduces no leakage or optimistic bias when performed outside the resampling loop. Keeping the retained variable set fixed across folds also makes the model definition and its diagnostics stable and interpretable.
+* **Classification Suite:** the same iterative-VIF engine screens the selected numeric covariates before a classification run, with a live warning under the covariate picker and the same Drop/Keep modal at run time. The threshold is method-aware: 10 for most learners, tightening to 5 when Random Forest is selected (Section 10.8 explains why moderate collinearity already dilutes permutation importance).
+* **Context sensitivity (both gates and the Predictor Ranks):** correlation structure is scope-dependent — two covariates can be nearly collinear across the whole dataset yet independent within one locality (or vice versa, a Simpson's-paradox-type reversal). All three screens therefore run on the data the model will actually fit: the interpolation gate and the sidebar **Predictor Ranks (Correlation)** list use the localities selected in the Context panel (the ranks are stamped with their scope and sample count), and the classification gate uses the module's resolved spatial scope (localities and/or polygons). A recorded Drop/Keep decision is reset whenever the method, the covariate set, or the locality selection changes.
 
 ---
 
@@ -289,3 +291,121 @@ The Moran's I residual-autocorrelation test defines neighbours via a symmetric k
 The **Cross-Validation Strategy** (Auto / Standard LOOCV / Spatial Block CV) is selectable directly in the UI; no code edit is required to switch strategies (see Section 5). The associated thresholds are hardcoded in one place:
 * **Where to change:** `resolve_cv_plan` inside `spatial_helpers.R`.
 * **How to change:** Under **Auto**, the engine uses LOOCV when the number of observations is 50 or fewer and switches to random 10-Fold above 50; edit the `n > 50` test to move that boundary. **Spatial Block** degrades to LOOCV below the `CV_BLOCK_MIN_N` constant (default `30`). The number of spatial blocks / random folds is the `k = 10L` value; change it to use a different fold count.
+
+---
+
+## 10. Supervised Classification Suite
+
+The Classification Suite (Tab 6) is a separate modelling paradigm from the interpolation engines: instead of predicting a continuous surface and thresholding it into agronomic zones (Section 5), it trains a **predictive multiclass classifier** directly on a categorical target using co-sampled covariates, in the tradition of categorical Digital Soil Mapping. The engine lives in `classif_helpers.R` and is fully decoupled from the Shiny UI.
+
+### 10.1 Targets and Learners
+
+The target is either an existing categorical column (soil class, land-use label) or a continuous variable discretised into ordered classes with `classInt` break styles (quantile, equal-interval, or Jenks), using left-closed `[low, high)` intervals for consistency with the app's agronomic-class convention. **Numeric columns are never auto-detected as categorical**: coarse-resolution environmental covariates (e.g. climate-raster precipitation metrics) legitimately carry very few distinct values, and treating an ordered quantity as nominal both dummy-encodes it in the preprocessing recipe and switches its grid transfer from kriging to nearest-neighbour assignment. Numeric class codes should be recoded to text or run through the binned-target mode.
+
+Three learners are offered behind a common tidymodels (`parsnip`/`workflows`) backbone:
+* **Multinomial logistic regression** (`nnet`), the standard parametric baseline. For **two-class targets** the engine substitutes binomial logistic regression (`glm`): the multinomial model with K = 2 reduces exactly to it, and parsnip's `multinom_reg`/`nnet` wrapper produces malformed probability output in the binary case. The substitution is statistically equivalent at the default `penalty = 0`; penalty tuning is skipped for binary targets.
+* **Random Forest** (`ranger`, probability forest), the de-facto standard in categorical DSM;
+* **Extreme Gradient Boosting** (`xgboost`).
+
+All three share one preprocessing recipe: novel-level absorption, median/mode imputation, dummy encoding of categorical covariates, zero-variance removal, and standardisation of numeric predictors (monotonic, so it aids multinomial convergence without affecting the tree learners). Hyperparameter tuning is optional (None / Light / Full); when enabled, a space-filling grid is evaluated over the same cross-validation folds and the best set (by accuracy) is refitted. Because the tuned parameters are then evaluated on the same folds (not nested CV), tuned-depth metrics are mildly optimistic; the default depth **None** fits fixed defaults and carries no such optimism.
+
+### 10.2 Spatial Cross-Validation and Pooled Metrics
+
+The default validation is **spatial blocked CV** (`spatialsample::spatial_clustering_cv`, k-means on the projected coordinates), for the same reason Spatial Block CV exists in Section 5: random folds place a test point's near-neighbours in the training set, so under spatial autocorrelation they over-state skill (Roberts et al. 2017; Ploton et al. 2020). Standard class-stratified random k-fold remains available for in-domain estimates. Fold assignment uses the app-wide fixed seed (`12345`) under the two-sided RNG sandbox.
+
+Predictions are collected **out-of-fold and pooled** before any metric is computed: each fold's model predicts hard classes *and* full class-probability vectors on its held-out points, and the metrics are evaluated once on the pooled set. Pooling avoids the undefined per-fold macro-metrics that arise when a spatially contiguous fold happens to contain a single class, and guarantees the probability metrics always have every class present.
+
+Reported metrics: overall accuracy, Cohen's kappa, balanced accuracy, macro-averaged precision/recall/F1 (so minority classes are not masked), multiclass ROC AUC (Hand & Till 2001), multiclass log-loss, and the Brier score. The confusion matrix is accompanied by per-class **producer accuracy** (recall; omission-error complement) and **user accuracy** (precision; commission-error complement), the standard per-class report in soil and land-cover classification.
+
+### 10.3 Prediction Uncertainty: Normalised Shannon Entropy
+
+The classifier analogue of the kriging-variance map is the normalised Shannon entropy of the predicted class probabilities at each grid cell:
+
+<div style="text-align:center;"><i>H* = - &sum;<sub>k</sub> p<sub>k</sub> ln p<sub>k</sub> / ln K</i></div>
+
+where *K* is the number of classes. *H\** = 0 means the model is certain of a single class; *H\** = 1 means the probabilities are uniform (maximal confusion). Entropy is a property of the model's probability output, not a formal error model: read it as a relative "where is the classifier least decided?" surface.
+
+### 10.4 Covariate-Surface Approximations
+
+The classifier is trained at sample locations, but map prediction requires covariate values at every grid cell. Monolith derives these from the samples themselves ("classify from co-sampled covariates"), not from exhaustive rasters:
+* **Numeric covariates** are interpolated to the grid with the same ordinary-kriging covariate builder used by RK/RFK (`krige_covariates`, IDW fallback).
+* **Categorical covariates** cannot be kriged; each grid cell inherits the class of its nearest training point (first-nearest-neighbour).
+
+Both transfers are documented approximations whose smoothing/blocking error propagates into the classified map, the probability surfaces, and the entropy surface. Where wall-to-wall covariate rasters exist (DEM derivatives, satellite bands), sampling them at grid nodes outside the app remains the more rigorous DSM design; the cross-validated performance metrics, computed strictly at sample locations, are unaffected by this approximation.
+
+### 10.5 Spatial Scope and the Prediction Domain
+
+A classification run can be restricted to a **spatial scope** before anything is fitted:
+* **Localities** — any subset of the mapped locality/grouping column (defaulting to the sidebar Context panel selection);
+* **Polygons** — shapes drawn on the map and/or an uploaded shapefile, either intersected with the selected localities or used alone.
+
+Scoping is applied *before* target construction, so binned-target break points (quantiles, Jenks) are derived from the scoped data only, and all cross-validation folds, metrics, and hyperparameter searches see exclusively in-scope points.
+
+The prediction domain is built from the same scope resolution as a union of **per-locality boundaries** of the scoped points, intersected with or replaced by the polygon union when a polygon scope is active. Using per-locality boundaries rather than one hull around everything keeps the classifier from predicting into unsampled corridors between localities — regions where the covariate-surface approximations of Section 10.4 would be pure extrapolation.
+
+The boundary construction itself is **shared with the interpolation engines** (Section 3): the sidebar's Boundary Type (Concave Hull / Convex Hull / Wrapped / Strict Point Buffer), Buffer Logic, and Resolution Logic apply to classification runs exactly as they do to interpolation runs, per locality in scope. Wrapped mode buffers each locality's concave hull — with the fixed distance, or dynamically from that locality's mean nearest-neighbour spacing (× 0.5 × the generic 2.0 multiplier, clamped to [5, 2000] m; the *method-specific* multipliers of Section 3.2 are an interpolation-variance concept and do not apply to a classifier). Strict mode unions fixed-radius buffers around the sample points. Grid resolution follows the sidebar Resolution Logic: **Fixed** uses the manual value; the Auto modes let the suite derive a resolution targeting ≈50 000 cells inside the domain (clamped to [5, 1000] m, with an additional ≈4 M-cell bounding-box cap for far-apart localities). Covariate kriging (Section 10.4) fills the whole buffered domain, so buffered boundaries entail modest covariate extrapolation beyond the outermost samples — the same trade-off as the interpolation engines' buffered modes.
+
+### 10.6 Hyperparameter Tuning
+
+The **Hyperparameter tuning** selector (Tab 6, next to the learner) sets how hard Monolith searches each learner's hyperparameter space before the metrics of Section 10.2 are computed. Three depths ship:
+
+* **None (fixed defaults)** — the default. Nothing is tuned; each learner is fit at the hardcoded defaults (multinomial: `penalty = 0`; Random Forest: 500 trees with `ranger`'s built-in `mtry`/`min_n`; XGBoost: 500 trees, `tree_depth = 6`, `learn_rate = 0.05`, `min_n = 2`). Fast, deterministic, and free of the optimism noted below.
+* **Light** — a 10-point space-filling grid over a small set of high-leverage parameters: `penalty` (multinomial), `mtry` + `min_n` (Random Forest), `tree_depth` + `learn_rate` (XGBoost).
+* **Full** — a 30-point grid over a wider set: the same parameters for the multinomial and Random Forest learners, and for XGBoost additionally `mtry`, `min_n`, `loss_reduction`, and `sample_size`.
+
+When a depth other than None is chosen, the grid is by default evaluated over the *same* cross-validation folds and the best combination (by accuracy) is refitted; because tuning and evaluation share those folds (not nested CV), Light/Full metrics are mildly optimistic relative to None.
+
+**Nested cross-validation** (the *Use nested CV (slower)* checkbox, visible only when a tuning depth is active) removes that optimism. Instead of one global selection, each **outer** fold re-runs the full grid search on **5 inner folds** built exclusively from that fold's analysis rows — fold construction, grid evaluation, and winner selection never see the outer held-out data — and the finalized workflow then predicts the held-out fold. The pooled metrics therefore estimate the generalisation error of the *entire procedure including the hyperparameter search* (Varma & Simon 2006; Cawley & Talbot 2010). Inner folds reuse the outer resampling strategy (spatial clustering inside spatial CV), so the inner selection faces the same leakage regime as the outer estimate — the spatial analogue of the recommendation in Schratz et al. (2019) for tuning under spatial autocorrelation. Consequences worth knowing:
+
+* No single "best" hyperparameter set exists under nesting; the per-outer-fold winners are collected (`nested_params`, one row per fold) and their fold-to-fold agreement is itself a stability diagnostic.
+* The **deployed/exported model** is still tuned once on all training data (standard practice: nested CV estimates the procedure's skill; the final model uses everything), and the model bundle records *that* model's own hyperparameters.
+* Cost multiplies by roughly the number of inner folds (~5x the tuning work). Depth None is unaffected by the checkbox.
+
+The depth/parameter/grid-size mapping lives in `.classif_tuning_registry()` in `classif_helpers.R` and is the single place to change tuning behaviour: adjust a grid size, add or drop a tuned parameter for a learner, or register a new depth key. The change is purely additive and flows automatically into both the UI selector and the fitting path.
+
+### 10.7 Per-Area Performance
+
+When the scope contains more than one locality (or polygon, in polygons-only mode), the **Performance by Area** table splits the pooled out-of-fold predictions by area and reports n, overall accuracy, Cohen's kappa, balanced accuracy, and macro F1 per area, plus a Total row that reproduces the pooled headline metrics. Two caveats apply:
+* The fold structure is global: spatial clusters need not respect locality borders, so a per-area subset is an *evaluation* slice of one jointly trained model, not an independently validated per-area model (unlike the interpolation engines, which fit one model per locality).
+* Small areas yield unstable estimates, and any metric undefined for an area (e.g. a class that never occurs there) is reported as NA rather than silently imputed. Probability metrics are deliberately omitted from the per-area table for the same instability reason.
+
+### 10.8 Permutation Feature Importance
+
+Every run reports **model-agnostic permutation importance** (Breiman 2001; Fisher, Rudin & Dominici 2019): one covariate at a time is randomly shuffled — severing its association with the target while preserving its marginal distribution — the final model re-predicts, and the increase in **multiclass log-loss** over the unpermuted baseline is recorded (mean of 5 shuffles under the fixed seed). Log-loss is used rather than accuracy because it consumes the full probability vector, so it registers importance even when a permutation rarely flips the arg-max class. Because the measure is computed on the raw covariates through the entire fitted workflow, it is directly comparable across all three learners, unlike engine-native measures (ranger impurity, xgboost gain, multinomial coefficients), which live on different scales.
+
+Two documented caveats:
+* Values are computed on the **training data with the final model** (the standard default, cf. `vip::vi_permute`): rankings are informative, but absolute magnitudes lean optimistic for flexible learners that partially memorise their training set. Negative values indicate pure noise covariates.
+* **Correlated covariates split their importance** between them (either can substitute for the other; Strobl et al. 2008), which is exactly why the multicollinearity gate of Section 8.1 runs first: on a VIF-cleaned covariate set, the reported shares are far more interpretable. The displayed *share (%)* renormalises the positive importances to 100. Because this dilution sets in well below the classical VIF > 10 collinearity cutoff, the classification module's screen is **method-aware**: when Random Forest is selected the advisory threshold tightens to **VIF > 5** (the conventional "moderate collinearity" bound, e.g. James et al. 2013; O'Brien 2007 discusses why such rules are advisory, not absolute). The gate remains a user decision — predictions are largely insensitive to keeping the covariates; only the importance interpretation suffers.
+
+### 10.9 No-Covariate Baselines and Covariate Lift
+
+To answer "did the covariates actually buy anything?", every run scores two reference models on the **same cross-validation folds** as the covariate model:
+* **Majority-class baseline** — always predict the most frequent class; its accuracy is the no-information rate, and its kappa is 0 by construction.
+* **Spatial 1-NN baseline** — each held-out point receives the class of its nearest analysis-set point (Euclidean distance, projected coordinates): the categorical analogue of nearest-neighbour/Thiessen interpolation, i.e. what pure spatial proximity achieves with no covariate information. Under spatial blocked CV this is a demanding, honest baseline: it must transfer across fold boundaries exactly like the model.
+
+**Covariate lift** is the accuracy difference between the covariate model and the spatial baseline (reported in accuracy points on identical folds). Statistical significance of the paired improvement is assessed with **McNemar's test** (continuity-corrected) on the discordant pairs — the standard test for comparing two classifiers evaluated on the same samples (Dietterich 1998). A non-significant lift is a substantive scientific finding: the covariates add little beyond spatial position, and a simpler spatial model (or better covariates) should be considered. The test is reported as NA when no discordant pairs exist.
+
+### 10.10 Confidence Thresholding (Abstention)
+
+The predicted-class map supports a **confidence threshold** implementing the classical reject option (Chow 1970): grid cells whose maximum class probability falls below the threshold are assigned an explicit **Unclassified** category (rendered grey, with its own row in the area table) instead of a weak arg-max guess — e.g. a 34/33/33% cell is a statement of ignorance, not a prediction. Abstained regions are the natural candidates for additional field sampling.
+
+The threshold is applied at rasterisation time in the main session: it re-classifies the existing probability surface without re-fitting anything, so it can be explored interactively, and the exported class GeoTIFF honours the current setting (probability and entropy rasters are never masked). Thresholds at or below 1/K cannot fire, since the maximum of a K-class probability vector is at least 1/K. Alongside the map, a CV-based readout reports the **coverage/selective-accuracy trade-off** at the chosen threshold — the fraction of pooled out-of-fold points that would be retained and the accuracy among them (selective risk; retained accuracy should sit at or above the overall accuracy). CV metrics themselves are always computed on all points, without abstention.
+
+### 10.11 Class-Imbalance Weighting
+
+The optional **Balance classes** switch applies inverse-frequency ("balanced") case weights, *w<sub>c</sub> = n / (K · n<sub>c</sub>)*, so each class contributes equally to the training loss regardless of its sample count (King & Zeng 2001; the `class_weight="balanced"` convention) — countering the tendency of accuracy-driven learners to ignore rare but important classes. Design decisions:
+* Weights affect **fitting only**; all reported metrics remain unweighted (balanced accuracy and the macro averages already expose minority-class performance). Expect weighted runs to trade some overall accuracy for better minority-class recall.
+* In the out-of-fold loop, weights are **recomputed from each fold's analysis rows**, so no held-out class-prevalence information enters a fold's fit; the hyperparameter-tuning pass (whose folds `tune_grid` controls) uses whole-training-set weights, a negligible deviation for a K-number summary.
+* Weights apply to Random Forest and XGBoost. The multinomial learner's engine does not accept case weights; the run badge then reports "weights unsupported (unweighted)" instead of silently pretending.
+* **SMOTE-style synthetic oversampling is deliberately not offered**: synthetic minority samples carry no valid spatial position, so they fabricate autocorrelation structure and break the leakage guarantees of spatial blocked CV (any resampling would also have to happen strictly inside each fold). Field-collecting more minority-class samples remains the only real remedy; weighting is the honest statistical stopgap.
+
+### 10.12 Trained-Model Export
+
+The **Download Model (.rds)** button saves the final fitted tidymodels workflow with its training metadata (method, covariates, class levels, weight usage, tuning depth and selected hyperparameters, projected CRS, n, timestamp, and the R/parsnip/engine package versions). The bundle can be loaded in any R session with compatible package versions and applied to new covariate data without retraining:
+
+```r
+b <- readRDS("classification_model_rf_20260710.rds")
+predict(b$workflow, new_data, type = "prob")   # or type = "class"
+```
+
+`new_data` must contain the covariate columns listed in `b$predictors`; the preprocessing recipe (imputation, dummy encoding, normalisation) is embedded in the workflow and replays automatically. Predictions for the exported model are identical to the in-app surface predictions (same fitted object). Note that .rds serialisation is version-sensitive for the xgboost engine: reuse the bundle under the package versions recorded in `b$versions`.

@@ -2,6 +2,27 @@
 
 All notable changes to Monolith are documented in this file.
 
+## [1.0.2] - 2026-07-11
+
+### Added
+- **Classification Suite** (new Tab 6, `classif_helpers.R` + `classif_module.R`): true predictive multiclass classification from co-sampled covariates, distinct from the existing continuous-to-agro-zone binning. Built on a tidymodels backbone (`parsnip`, `recipes`, `workflows`, `tune`, `rsample`, `dials`, `spatialsample`, `hardhat`, `yardstick`) with three learners — multinomial (nnet), random forest (ranger, probability forest), and XGBoost.
+  - Shared preprocessing recipe (novel level -> impute -> dummy -> zero-variance filter -> normalize) and an expandable tuning-depth registry (none / light / full).
+  - Hand-rolled out-of-fold CV loop with spatial CV (k-means clustering via `spatialsample`) as the default strategy, matching the interpolation engines' spatial-autocorrelation-aware philosophy.
+  - Optional **nested CV** (5 inner folds of the same strategy) for honest hyperparameter-selection performance estimates, alongside the plain (non-nested) path.
+  - Per-class producer/user accuracy, macro metrics, probability metrics (ROC AUC, log-loss, Brier score), and a normalized Shannon-entropy uncertainty surface.
+  - Raster prediction reuses the interpolation engine's covariate kriging for numeric covariates plus nearest-point assignment for categorical ones.
+  - Spatial scope controls shared with the sidebar's Boundary Type/Buffer/Resolution, with live "in scope" point counts and a thin-scope adequacy warning that names every class below the minimum sample count with concrete remedies.
+  - Per-area ("Performance by Area") metrics when multiple localities are in scope, method-aware VIF collinearity guardrails (threshold 5 for Random Forest, 10 otherwise), inverse-frequency class weighting, and an optional abstention (reject-option) threshold at rasterization.
+  - Results panel: 2x2 map grid (variable importance, class map, entropy, class probability) with a click-to-expand modal (scale bar, north arrow, and sample-point overlay options), and a single results table behind a dropdown (metrics, per-class, per-area, as applicable).
+  - Dedicated model bundle (.rds) export and publication-ready PNG export (projected axes, 300 dpi), separate from the interpolation module's Export Registry.
+
+### Changed
+- 11 tidymodels-ecosystem packages added to the dependency suite (60 total); `timechange` bumped to >= 0.4.0 (required by `recipes`). See README §3 for the full table.
+
+### Testing
+- Added `test-classification.R` covering the classification engine, spatial scope resolution, scope adequacy warnings, nested CV, and method-aware VIF.
+- Full suite: 1095 passing, 0 failing.
+
 ## [1.0.1] - 2026-07-09
 
 ### Added

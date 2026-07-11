@@ -1,10 +1,16 @@
 Package: monolith
 Title: Spatial Analysis Dashboard
-Version: 1.0.1
+Version: 1.0.2
 Description: A Shiny application for spatial statistical analysis, geostatistical
     modeling, and mapping. Provides deterministic and geostatistical interpolation
     (IDW, TPS, OK, CK, RK, RFK), cross-validation diagnostics, descriptive
     analytics, PCA, and governing factors analysis via Random Forest + DALEX.
+    Predictive multiclass classification of categorical field states (e.g.,
+    soil/management zones) from co-sampled covariates, distinct from the
+    spatial engine's continuous-to-zone binning. Multinomial, Random Forest,
+    and XGBoost learners with spatially-aware cross-validation, with
+    per-class accuracy, entropy-based uncertainty mapping, and learner-aware
+    collinearity diagnostics.
 Authors@R: c(
     person(given = "R. Serdar", family = "Kara",
            email = "r.serdarkara@gmail.com", role = c("aut", "cre"))

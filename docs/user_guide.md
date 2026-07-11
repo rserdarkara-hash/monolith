@@ -48,6 +48,7 @@ The application requires cleanly structured, georeferenced tabular data.
 
 **1.1 Locality (Spatial Grouping)**
 * **Locality Selection:** The app uses your designated "Grouping" column to partition the dataset (Step 2). You can select a single field (e.g., "Zone A") or "ALL" to run a batch-parallelized interpolation across multiple separate spatial domains simultaneously.
+* This selection also seeds the **Spatial Scope** of the Classification Suite (Tab 6): the module's locality picker follows it by default and can then be adjusted independently there.
 
 **1.2 Variable Selection & Category**
 * **Variable Category:** To keep the interface clean, variables are organized into folders (e.g., "Soil Physicochemistry", "Environmental Data", "Terrain", "Satellite Indices") based on your metadata file or automated detection.
@@ -99,6 +100,10 @@ Once selections are made, the main interface transitions to the analytical modul
      - **Spatial Block CV:** Holds out ten spatially contiguous k-means clusters, curbing the optimistic bias that random folds show when data are spatially autocorrelated. Recommended for spatial validation; below 30 points it reverts to LOOCV.
    - The strategy actually applied to a completed run is shown next to the **Model Performance** table (and in each locality's *CV Type* row), so you always know which validation produced the reported metrics.
 
+**1.c. Covariate Helpers (RK / RFK / CK):**
+   - **Predictor Ranks (Correlation):** the *Calculate Correlations* button ranks candidate covariates by their correlation with the target — computed **within the localities selected in the Context panel**, and stamped with that scope and sample count above the list. Correlations across all samples can be driven by between-locality contrasts that do not hold inside a single locality (and can hide ones that do), so re-press the button after changing the locality selection. *Tip: if a covariate ranks high for "ALL" but drops when you select your target locality, the relationship is regional, not local — do not rely on it for a single-locality model.*
+   - **Multicollinearity gate:** launching RK/RFK/CK with several covariates triggers an iterative VIF screen (threshold 10) **on the same selected-locality data**, with an Auto-Drop / Keep All choice. Your answer is remembered until the method, the covariate set, or the locality selection changes — each new spatial context is re-screened.
+
 **2.a. Variogram Optimization (Geostatistical Engines Only):**
    - If a Kriging method is selected, the Variogram Panel will appear.
    - **Auto-Fit Button:** Click this first. The system will attempt to fit four different models using least-squares optimization and will choose the best fit. Review the plotted curve against the scatter points.
@@ -135,6 +140,8 @@ Once selections are made, the main interface transitions to the analytical modul
 * **Wrapped (Buffered):** Creates a smoothed buffer around the concave hull to ensure the map covers the field edges.
 * **Strict Measured (Point Buffer):** Creates individual buffers around every point.
 * **Buffer Distance (m):** Defines how far the map extends beyond the outermost sample points.
+
+*Note: the Boundary Type, Buffer Logic, and Resolution Logic configured here are shared with the **Classification Suite** (Tab 6): its predicted maps are clipped, buffered, and gridded with the same settings, applied per locality in scope. Configure them once here.*
 
 **5. Execution & Run Estimation:**
    - **Run Estimate:** Before execution, the UI displays a dynamic "Run Estimate" indicator (e.g., "~1 locality model(s), ~1.5 minutes estimated").
@@ -184,3 +191,42 @@ The Export Registry standardizes outputs for reports and presentations.
 **4. Download:**
    - Select your desired format (`.TIFF`, `.PNG`, `.JPEG`, `.PDF`).
    - Click **Finalize and Download**.
+
+## Classification Suite
+
+Tab "6. Classification Suite" trains a supervised multiclass classifier from co-sampled covariates: either on an existing categorical column, or on a continuous variable binned into ordered classes (quantile, equal-interval, or Jenks breaks).
+
+**Setup**
+- Choose the target, one or more covariates, and a method (Multinomial logistic, Random Forest, or XGBoost). For two-class targets the multinomial option automatically fits the statistically equivalent binomial logistic regression.
+- Only text/factor columns are offered as categorical targets. Numeric columns are always treated as continuous, even when they carry few distinct values (coarse climate-raster covariates such as precipitation metrics often do); if your classes are stored as numeric codes, either recode them to text or use the binned-target mode.
+- **Collinearity guardrail**: an amber note under the covariate picker warns when the selected covariates are highly redundant *within the current spatial scope*; at run time the same Auto-Drop / Keep All / Cancel dialog appears that the kriging engines use. The screen is method-aware: iterative VIF > 10 for most learners, but a stricter VIF > 5 when **Random Forest** is selected — moderate collinearity that barely hurts RF predictions still splits the permutation feature importance between the correlated covariates, making the true drivers look weak. *Tip: five flavours of the same elevation layer add no information — they only smear the feature-importance chart across near-duplicates. Prefer dropping.*
+- **Balance classes (inverse-frequency weights)**: when rare classes matter (e.g. 100 "healthy" vs 5 "diseased" samples), tick this so each class contributes equally to the fit instead of the model defaulting to the majority class. Metrics stay unweighted; expect slightly lower overall accuracy in exchange for better rare-class recall. Not supported by the multinomial learner (it then fits unweighted and the run badge says so). *Tip: weighting is a stopgap, not new information — the real fix for a 5-sample class is more field samples.*
+- **Cross-validation**: Spatial (blocked) clusters nearby points into folds so reported accuracy reflects prediction into unsampled areas; Standard (random k-fold) is usually optimistic under spatial autocorrelation.
+- **Hyperparameter tuning**: None fits fixed defaults (fast, deterministic); Light/Full search a grid over the folds.
+- **Use nested CV (slower)**: appears once tuning is enabled. By default the same folds both choose the hyperparameters and score them, which is mildly optimistic; nested CV instead re-runs the grid search inside every fold (on 5 inner folds built from that fold's training rows only), so the reported metrics honestly include the tuning step. Expect roughly 5x the tuning runtime — the badge then shows "(nested CV)". *Tip: use it for the run you intend to report or publish; the quick non-nested estimate is fine while exploring.*
+- If the scoped data are thin, the run warns — naming exactly which classes have fewer than 3 samples and their counts — but still proceeds; results for those classes will be unreliable. Widen the scope, merge/exclude rare classes, or (for binned targets) use fewer classes.
+- **Predict maps** additionally predicts class, per-class probability, and uncertainty (entropy) surfaces on a grid. The boundary, buffer, and grid resolution are the **sidebar Spatial Engine settings** (Boundary Type / Buffer Logic / Resolution Logic), mirrored in the small note under the checkbox — there is no separate resolution box here, so interpolation and classification maps always align.
+
+**Spatial Scope**
+- The **Localities** picker restricts the run (training, cross-validation, binning breaks, and the predicted maps) to the chosen localities. It follows the sidebar Context panel selection by default and re-syncs whenever that selection changes; adjusting it inside the module scopes classification only. Leaving it empty means all localities.
+- Once at least one polygon exists (drawn with the map toolbar or uploaded as a shapefile), a **Polygon scope** control appears: *Ignore polygons*, *Within localities* (points must lie inside both the selected localities and a polygon), or *Polygons only* (the locality filter is ignored).
+- The live "In scope: x of y georeferenced points" note shows exactly what the run will use; it turns red below 20 points.
+- The predicted maps cover the union of per-locality boundaries (or the polygons), so the classifier no longer predicts across unsampled gaps between distant localities.
+
+**Results**
+- The results panel is a 2 x 2 plot grid — Feature Importance and the Predicted Class Map on top, the Prediction Uncertainty (entropy) and Class Probability maps below — followed by a **Results table** dropdown that switches between the tables (Model performance metrics first, then Confusion matrix, Per-class accuracy, Covariate lift, Performance by area, and Class area coverage). Options that don't apply to the run (no multiple areas, no predicted surface) are simply absent from the dropdown; the CSV export always contains the full metric set regardless of what is displayed.
+- **Click any map** (or its expand icon) to open it full-size in a dialog at higher display resolution. Two default-off **map display options** sit under the maps: *Scale bar & north arrow* (bottom-right scale bar, top-left north arrow) and *Show sample points* (the scoped training samples as white circles — useful for judging where the map is supported by data and where it extrapolates). Both apply to the on-screen maps, the expanded views, and the styled PNG exports; they never alter the exported data rasters.
+- **Model Performance** reports pooled cross-validated metrics with plain-language names: Overall accuracy, Cohen's kappa, Balanced accuracy, Precision / Recall / F1 score (macro averages), ROC AUC (multiclass, Hand-Till), Log loss, and Brier score. The Estimator column states how each metric extends to the multiclass case. The blue badge states the CV design, the scope, whether tuning was nested, and whether class weights were applied.
+- **Per-class Accuracy** lists producer accuracy (recall) and user accuracy (precision) per class; the confusion matrix and class area coverage (hectares) are their own entries in the dropdown.
+- **Feature Importance** shows which covariates actually drove the map: permutation importance (how much the model's log-loss worsens when one covariate is shuffled), with each bar's share of the total in percent — e.g. "elevation contributed 45%". *Tip: read it together with the collinearity note; correlated covariates split their importance between them. A bar near zero (or negative) is a covariate the model ignores — consider removing it.*
+- **Covariate Lift** benchmarks the model against two no-covariate baselines on the same CV folds: always-predict-the-majority-class (the "no-information rate" — hover its info icon for the interpretation), and a spatial-only nearest-neighbour classifier. It states the accuracy gain in points and whether the paired improvement is statistically significant (McNemar test). *Tip: if the lift is not significant, your covariates add little beyond spatial position — the map may look plausible while the covariates do no real work.*
+- **Performance by Area** (shown when the scope spans multiple localities, or polygons in polygons-only mode) splits the same out-of-fold predictions per area: n, Overall accuracy, Cohen's kappa, Balanced accuracy, and macro F1, plus a Total row matching the headline metrics. NA appears where a metric is undefined for an area (e.g. a class absent there); treat small-n areas with caution.
+- **Confidence threshold (abstain below)**: a slider under the maps. Cells whose best class probability falls below the threshold turn grey ("Unclassified") instead of receiving a weak guess — a 34/33/33 % cell is ignorance, not a prediction. The map, area table, and class GeoTIFF update instantly (no re-run), and a note reports how many validation points would survive the threshold and how accurate the survivors are. *Tips: values at or below 1/(number of classes) can never trigger; 0.5 is a sensible starting point for 3+ classes; treat the grey cells as your next field-sampling plan.*
+- Maps render once per run and are cached; they redraw only when a new run completes, another probability class is selected, the confidence threshold changes, or a map display option is toggled.
+
+**Exports**
+- **Class GeoTIFF**: the predicted-class raster with the map's color palette embedded in the file, so it opens colored in QGIS/ArcGIS and most image viewers. Honours the current confidence threshold (abstained cells carry the "Unclassified" category).
+- **Probabilities / Entropy GeoTIFF**: full-precision floating-point *data* rasters (values 0-1), never masked by the threshold. Generic image viewers show single-band float data in grayscale; load them in GIS software and apply a color ramp, or use the styled export below.
+- **Styled Maps (PNG)**: a zip with publication-style renders (300 DPI, enlarged text) of the class, entropy, and currently selected probability maps, with projected coordinate axes (Easting/Northing grid numbers in metres). The scale bar / north arrow and sample-point options are honoured as currently toggled.
+- **Metrics CSV**: the performance table with both the display name and the yardstick metric id per row, plus the baseline-comparison rows (spatial baseline, majority class, covariate lift, McNemar p) and the permutation feature importances. A `scope` column separates the sections.
+- **Download Model (.rds)**: saves the trained workflow with its metadata so an hour of tuning is not lost when the app closes. Reuse it on new data in any R session with the same package versions: `b <- readRDS(file); predict(b$workflow, new_data, type = "prob")` — `new_data` needs the covariate columns listed in `b$predictors`; all preprocessing replays automatically. *Tip: keep the bundle next to a note of your app version; .rds files from different xgboost versions may not interchange.*

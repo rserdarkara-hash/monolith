@@ -1,8 +1,8 @@
 ![Monolith: Spatial Analysis Dashboard](assets/banner.png)
 
-# Monolith Spatial Analysis Dashboard v1.0.1
+# Monolith Spatial Analysis Dashboard — v1.0.2
 
-[![Version](https://img.shields.io/badge/version-1.0.1-6f42c1)](#)
+[![Version](https://img.shields.io/badge/version-1.0.2-6f42c1)](#)
 [![R](https://img.shields.io/badge/R-%E2%89%A5%204.5.0-276DC3?logo=r&logoColor=white)](https://cran.r-project.org/)
 [![Shiny](https://img.shields.io/badge/built%20with-Shiny-1f77b4)](https://shiny.posit.co/)
 [![License: GPL v3](https://img.shields.io/badge/license-GPL--3.0-blue)](LICENSE)
@@ -62,21 +62,25 @@ Whether you are mapping soil physicochemistry, analyzing topographical interacti
   ![Cross-validation diagnostics with NSE, CCC, RPD, RPIQ and Moran's I metrics](assets/4.png)
 
 
+* **Interpolation Export Registry**: Compile session assets into a centralized registry. Use the integrated WYSIWYG Styler to customize typography, DPI, and layout for publication-ready outputs (.PNG, .TIFF, .PDF) or batch-export everything with statistical tabular data merged into an Excel file.
+
+  ![Interpolation export registry with WYSIWYG figure styler](assets/6.png)
+
+
 * **Descriptive & Exploratory Suite**: Understand your dataset with simultaneous descriptive, correlation, and principal component analyses with results that can be instantly generated and observed by simultaneous categorization and data popularization of choice. An additional Governing Factors module computes variable importance and effects via Random Forest models with ALE and PDP analyses, implemented as a decoupled module for performance and modularity.
 
   ![Descriptive and exploratory suite with correlation and PCA outputs](assets/5.png)
 
-* **Unified Export Registry**: Compile session assets into a centralized registry. Use the integrated WYSIWYG Styler to customize typography, DPI, and layout for publication-ready outputs (.PNG, .TIFF, .PDF) or batch-export everything with statistical tabular data merged into an Excel file.
+* **Classification Suite**: Predictive multiclass classification of categorical field states (e.g., soil/management zones) from co-sampled covariates, distinct from the spatial engine's continuous-to-zone binning. Multinomial, Random Forest, and XGBoost learners share a common preprocessing recipe and spatially-aware cross-validation, with per-class accuracy, entropy-based uncertainty mapping, and learner-aware collinearity diagnostics.
 
-  ![Unified export registry with WYSIWYG figure styler](assets/6.png)
-
+  ![Classification suite results panel with class map, entropy and probability surfaces](assets/10.png)
 
 * **Dynamic UI & Theming**: Fully responsive interface with customizable themes and figures, accessible data details on maps/graphs for visual audits of hot-points.
 
   ![Theming options and interactive map data details](assets/7.png)
 
 
-## Mapping Predictions and Interpreting Spatial Resonance of Prediction Errors
+## Mapping Machine Learning Predictions of Variables and Interpreting Spatial Resonance of Prediction Errors
 
 > **Note:** How well machine-learning predictions agree with the true (measured) values is only half of the story: the deviations that emerge once those predictions are mapped are just as important. A model with acceptable global accuracy can still produce spatially clustered errors, and these only become visible when the predictions and their residuals are examined as surfaces.
 
@@ -127,7 +131,7 @@ Two equally valid ways to obtain Monolith:
 
 ## 3. Package Dependencies
 
-The Monolith dashboard relies on a comprehensive suite of **49 R packages** for its spatial engine, statistical analytics, and user interface.
+The Monolith dashboard relies on a comprehensive suite of **60 R packages** for its spatial engine, statistical analytics, and user interface.
 
 > [!IMPORTANT]
 > **Automated Package Setup:**
@@ -143,10 +147,11 @@ The full dependency suite, grouped by function:
 | **Data Wrangling & I/O** | `dplyr`, `tidyr`, `data.table`, `jsonlite`, `readxl`, `openxlsx`, `officer`, `zip`, `fs` |
 | **Visualization & Theming** | `ggplot2`, `ggpubr`, `plotly`, `RColorBrewer`, `viridis`, `latticeExtra`, `patchwork`, `fresh`, `showtext`, `scales`, `commonmark`, `glue` |
 | **Statistics & Machine Learning** | `randomForest`, `DALEX`, `yardstick`, `agricolae`, `mgcv`, `nortest` |
+| **Classification (tidymodels)** | `parsnip`, `recipes`, `workflows`, `tune`, `rsample`, `dials`, `spatialsample`, `hardhat`, `ranger`, `xgboost`, `nnet` |
 | **Parallelization / Async** | `future`, `furrr`, `promises` |
 
 <details>
-<summary><strong>Tested version matrix</strong>: the exact package versions Monolith 1.0.1 is developed and validated against (click to expand)</summary>
+<summary><strong>Tested version matrix</strong>: the exact package versions Monolith 1.0.2 is developed and validated against (click to expand)</summary>
 
 <br>
 
@@ -170,7 +175,10 @@ Newer CRAN releases are expected to work; if you encounter an inconsistency, mat
 | `classInt` | 0.4-11 | `viridis` | 0.6.5 | `commonmark` | 2.0.0 |
 | `gstat` | 2.1-5 | `latticeExtra` | 0.6-31 | `glue` | 1.8.0 |
 | `automap` | 1.1-20 | `concaveman` | 1.2.0 | `spdep` | 1.4-2 |
-| `FNN` | 1.1.4 | | | | |
+| `FNN` | 1.1.4 | `parsnip` | 1.4.1 | `recipes` | 1.3.1 |
+| `workflows` | 1.3.0 | `tune` | 2.0.1 | `rsample` | 1.3.2 |
+| `dials` | 1.4.2 | `spatialsample` | 0.6.1 | `hardhat` | 1.4.2 |
+| `ranger` | 0.18.0 | `xgboost` | 3.2.0.1 | `nnet` | 7.3.20 |
 
 **Runtime environment:** R 4.5.2 (ucrt) · GDAL 3.11.4 · GEOS 3.13.1 · PROJ 9.7.0 · Windows 11 (also runs on macOS and Linux).
 
@@ -178,7 +186,7 @@ Newer CRAN releases are expected to work; if you encounter an inconsistency, mat
 
 ### Reproducible installation with `renv` (optional)
 
-For an exact, one-command reproduction of the validated environment, the repository ships a [`renv`](https://rstudio.github.io/renv/) lockfile (`renv.lock`) pinning all 220 packages of the dependency tree (including transitive dependencies) to the versions in the matrix above. From the project root:
+For an exact, one-command reproduction of the validated environment, the repository ships a [`renv`](https://rstudio.github.io/renv/) lockfile (`renv.lock`) pinning the dependency tree (including transitive dependencies) to the versions in the matrix above. The Classification Suite's tidymodels stack (`parsnip`, `recipes`, `workflows`, `tune`, `rsample`, `dials`, `spatialsample`, `ranger`, `xgboost`, and their dependencies) was added after the current lockfile snapshot; run `renv::snapshot()` once to pin those as well. From the project root:
 
 ```r
 install.packages("renv")   # once
@@ -201,6 +209,8 @@ monolith/
 ├── theme_helpers.R                   # Theming & export configurations
 ├── gov_module.R                      # Governing Factors UI & Server Modules
 ├── desc_exploratory_module.R         # Descriptive & Exploratory Suite (Tab 5 Module)
+├── classif_helpers.R                 # Supervised classification engine (tidymodels)
+├── classif_module.R                  # Classification Suite UI & Server Module (Tab 6)
 │
 ├── assets/                           # Screenshots & static assets
 ├── docs/                             # User, scientific & module guides
@@ -240,7 +250,7 @@ Detailed guides live in the [docs/](docs/) directory:
 | Guide | Contents |
 |---|---|
 | [User Guide](docs/user_guide.md) | End-to-end walkthrough: data ingestion, interpolation workflow, export registry |
-| [Scientific Guide](docs/scientific_guide.md) | Mathematical formulation of the interpolation engines, variogram fitting and cross-validation metrics |
+| [Scientific Guide](docs/scientific_guide.md) | Mathematical formulation of the interpolation engines, variogram fitting, cross-validation metrics and the supervised classification methodology |
 | [Descriptive & Exploratory Guide](docs/desc_exploratory_guide.md) | Descriptive statistics, correlation, PCA and the Governing Factors module |
 
 Sample datasets in [sample_data/](sample_data/) let you exercise every module without your own data (see [License](#license) for their usage restrictions).
@@ -253,7 +263,7 @@ Monolith ships with a `testthat` suite covering the interpolation pipeline, cros
 Rscript tests/testthat.R
 ```
 
-The first run is slow because the harness sources the full application (all 49 packages); this is expected. Scientific accuracy is treated as the project's primary invariant; changes that alter numeric results are gated on these tests.
+The first run is slow because the harness sources the full application (all 60 packages); this is expected. Scientific accuracy is treated as the project's primary invariant; changes that alter numeric results are gated on these tests.
 
 # Development & AI Assistance
 
@@ -268,7 +278,7 @@ Human oversight remained central throughout: all methodological choices, model f
   title     = {Monolith: A Spatial Analysis Dashboard for Geostatistical Modeling and Mapping},
   author    = {Kara, R. Serdar},
   year      = {2026},
-  version   = {1.0.1},
+  version   = {1.0.2},
   doi       = {10.5281/zenodo.21130951},
   publisher = {Zenodo},
   url       = {https://github.com/rserdarkara-hash/monolith},
