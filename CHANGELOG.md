@@ -2,6 +2,13 @@
 
 All notable changes to Monolith are documented in this file.
 
+
+### Changed
+- **Scientific Analysis summary tables modernized** (Tab 3, right column): variogram/regional parameters, model performance, prediction and classification metrics, area coverage, and descriptive statistics now render as interactive `DT` tables (sortable columns, horizontal scroll), matching the Classification and Exploratory Suites. Paging is disabled so variable-length tables (e.g. per-locality variogram parameters) always show every row. Values, metrics, and compute-while-hidden behavior are unchanged.
+- **Data Setup tab redesigned** as a card-based wizard: each step (Upload, Spatial Mapping, Mini-Map Validation, Variable Mapping) sits in its own shadowed card with a numbered step badge; later steps fade in once a dataset is loaded. Replaces the single grey panel, `hr()` separators, and ad-hoc inline font/negative-margin styles; hint typography is now consistent. Cards keep a fixed light surface for readability under every theme, while step badges follow the active theme's accent color.
+- The variable-mapping confirm button is restyled (pill shape, check icon, "Confirm Variable Mapping" label); behavior unchanged.
+
+
 ## [1.0.2] - 2026-07-11
 
 ### Added

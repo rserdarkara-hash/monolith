@@ -266,6 +266,81 @@ create_app_theme <- function(light_blue, dark_bg, content_bg, font_family, map_t
       font-weight: bold !important;
       opacity: 1;
     }
+
+    /* Data Setup Step Cards (wizard-style). Cards keep a fixed light surface
+       with dark text so they stay readable under every theme (mirroring the
+       always-light panel this tab used before); only the accents follow the
+       theme palette. */
+    .setup-card {
+      background-color: #ffffff !important;
+      color: #333333 !important;
+      border: 1px solid rgba(0,0,0,0.07);
+      border-radius: 12px;
+      padding: 22px 24px;
+      margin-bottom: 18px;
+      box-shadow: 0 2px 10px rgba(0,0,0,0.07);
+      animation: setup-fade-in 0.45s ease;
+    }
+    @keyframes setup-fade-in {
+      from { opacity: 0; transform: translateY(10px); }
+      to   { opacity: 1; transform: none; }
+    }
+    .setup-card-header {
+      display: flex;
+      align-items: center;
+      gap: 12px;
+      margin: 0 0 4px 0;
+    }
+    .setup-step-badge {
+      flex: 0 0 auto;
+      width: 30px;
+      height: 30px;
+      border-radius: 50%;
+      background-color: {{light_blue}};
+      color: {{header_text_color}};
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      font-weight: 700;
+      font-size: 15px;
+    }
+    .setup-card-title {
+      font-size: 1.25em;
+      font-weight: 600;
+      margin: 0;
+      color: #333333 !important;
+    }
+    .setup-card-sub {
+      font-size: 0.85em;
+      opacity: 0.75;
+      margin: 0 0 16px 42px;
+    }
+    .setup-grid {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(240px, 1fr));
+      gap: 0 1rem;
+      align-items: start;
+    }
+    .setup-grid .shiny-input-container { width: 100% !important; }
+    .setup-hint {
+      font-size: 0.8em;
+      font-style: italic;
+      opacity: 0.72;
+      line-height: 1.45;
+      margin: 2px 0 10px 0;
+    }
+    .btn-pill {
+      border-radius: 50px !important;
+      font-weight: 600;
+      letter-spacing: 0.4px;
+      padding: 10px 24px;
+      transition: all 0.25s ease;
+      border: none !important;
+    }
+    .btn-pill:hover, .btn-pill:focus {
+      box-shadow: 0 4px 16px rgba(0,0,0,0.25);
+      transform: translateY(-1px);
+    }
     ",
     .open = "{{",
     .close = "}}"

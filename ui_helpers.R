@@ -693,6 +693,17 @@ info_tooltip <- function(id, text) {
 }
 
 
+# Shared DT wrapper for the compact summary tables on the Scientific Analysis
+# tab, matching the Classification Suite look (dom = 't', scrollX). Paging is
+# disabled because dom = 't' hides the paging controls: with the default
+# pageLength, rows beyond the first page would be silently unreachable in
+# variable-length tables (e.g. per-locality variogram parameters).
+sci_dt <- function(df, escape = TRUE) {
+  if (is.null(df)) return(NULL)
+  DT::datatable(df, options = list(dom = 't', paging = FALSE, scrollX = TRUE),
+                rownames = FALSE, escape = escape)
+}
+
 get_var_label <- function(v, vars_metadata) {
   if (is.null(v) || is.na(v) || v == "") return(v)
   if (!is.null(vars_metadata)) {

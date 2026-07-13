@@ -311,6 +311,8 @@ ui <- fluidPage(
       .table-container { width: 100%; overflow-x: auto; font-size: 0.95em; margin-bottom: 10px; }
       .table-container table { width: 100% !important; margin-bottom: 0; background-color: #ffffff !important; color: #000000 !important; }
       .table-container th { background-color: #f8f9fa !important; color: #000000 !important; }
+      .table-container .dataTables_wrapper { background-color: #ffffff !important; border-radius: 4px; padding: 2px; }
+      .table-container table.dataTable td, .table-container table.dataTable th { color: #000000 !important; }
       .popover { color: #333 !important; background-color: #fff !important; max-width: 400px; }
       .popover-header { color: #333 !important; background-color: #f8f9fa !important; border-bottom: 1px solid #ebebeb; }
       .popover-body { color: #333 !important; }
@@ -319,7 +321,11 @@ ui <- fluidPage(
       .map-toolbar-export-container .form-group { margin-bottom: 0 !important; }
     ")),
     uiOutput("dynamic_manual_style"),
-    tags$script(HTML("$(function () { $('[data-toggle=\"popover\"]').popover({html: true}); });"))
+    tags$script(HTML("$(function () { $('[data-toggle=\"popover\"]').popover({html: true}); });")),
+    # DT tables in this app pre-render while their tab is hidden
+    # (suspendWhenHidden = FALSE); with scrollX the cloned header is then
+    # sized against a zero-width container, so realign columns on tab reveal.
+    tags$script(HTML("$(document).on('shown.bs.tab', 'a[data-toggle=\"tab\"]', function () { setTimeout(function () { if ($.fn.dataTable) { $.fn.dataTable.tables({ visible: true, api: true }).columns.adjust(); } }, 60); });"))
   ),
   
   div(class = "header-panel", style = "display: flex; justify-content: space-between; align-items: center; padding: 5px 20px;",
@@ -593,39 +599,59 @@ ui <- fluidPage(
     mainPanel(width = 9,
       tabsetPanel(id = "main_tabs",
         tabPanel("1. Data Setup", value = "tab_data",
-                 div(style = "padding: 20px; background-color: #f1f3f5; border-radius: 8px; border: 1px solid #dee2e6;",
-                     h3("Step 1: Upload Your Dataset"),
-                     fluidRow(
-                       column(6, fileInput("user_file", "Choose CSV or Excel File", accept = c(".csv", ".xlsx", ".xls"))),
-                        column(6, 
+                 div(style = "padding: 8px 2px;",
+                     div(class = "setup-card",
+                         div(class = "setup-card-header",
+                             span(class = "setup-step-badge", "1"),
+                             span(class = "setup-card-title", "Upload Your Dataset")
+                         ),
+                         p(class = "setup-card-sub", "Load the georeferenced sampling data to analyze. An optional shapefile can define a custom interpolation boundary."),
+                         div(class = "setup-grid",
+                             fileInput("user_file", "Choose CSV or Excel File", accept = c(".csv", ".xlsx", ".xls")),
+                             div(
                                fileInput("user_shp", "Shapefile - Optional (.shp, .shx, .dbf, .prj)", multiple = TRUE, accept = c(".shp", ".shx", ".dbf", ".prj")),
-                               tags$p(style="margin-top: -22px; font-size: 10px; color: #777; font-style: italic; line-height: 1.3;", 
-                                      tags$b("Tip:"), "You do not need to upload custom shapefiles! Standard boundary types (Convex, Concave, Strict, or Wrapped Hulls) can be selected and configured dynamically in the Sidebar panel once your dataset is loaded.")
-                        )
+                               p(class = "setup-hint",
+                                 tags$b("Tip:"), "You do not need to upload custom shapefiles! Standard boundary types (Convex, Concave, Strict, or Wrapped Hulls) can be selected and configured dynamically in the Sidebar panel once your dataset is loaded.")
+                             )
+                         )
                      ),
-                     hr(),
                      conditionalPanel(condition = "output.file_uploaded",
-                        h3("Step 2: Spatial Mapping"),
-                        fluidRow(
-                          column(4, selectInput("map_x", "X Coordinate (Longitude/Easting)", choices = NULL)),
-                          column(4, selectInput("map_y", "Y Coordinate (Latitude/Northing)", choices = NULL)),
-                          column(4, selectInput("map_loc", "Locality/Grouping Column", choices = NULL))
+                        div(class = "setup-card",
+                            div(class = "setup-card-header",
+                                span(class = "setup-step-badge", "2"),
+                                span(class = "setup-card-title", "Spatial Mapping")
+                            ),
+                            p(class = "setup-card-sub", "Select the columns holding the coordinates and set how they are projected."),
+                            div(class = "setup-grid",
+                                selectInput("map_x", "X Coordinate (Longitude/Easting)", choices = NULL),
+                                selectInput("map_y", "Y Coordinate (Latitude/Northing)", choices = NULL),
+                                selectInput("map_loc", "Locality/Grouping Column", choices = NULL)
+                            ),
+                            div(class = "setup-grid",
+                                selectizeInput("map_crs", "Input Data CRS", choices = common_crs, selected = "EPSG:32635", options = list(create = TRUE)),
+                                selectizeInput("crs_selection", "Target Mapping CRS", choices = common_crs, selected = "EPSG:32635", options = list(create = TRUE)),
+                                p(class = "setup-hint", style = "align-self: center;",
+                                  tags$b("Instructions:"), "Please wait for the sampling coordinates to render and verify their accuracy on the mini-map below. Optionally, upload a variable list to enable automated data categorization.")
+                            )
                         ),
-                        fluidRow(
-                          column(4, selectizeInput("map_crs", "Input Data CRS", choices = common_crs, selected = "EPSG:32635", options = list(create = TRUE))),
-                          column(4, selectizeInput("crs_selection", "Target Mapping CRS", choices = common_crs, selected = "EPSG:32635", options = list(create = TRUE))),
-                          column(4, style="margin-top: 25px;", tags$p(tags$b("Instructions:"), "Please wait for the sampling coordinates to render and verify their accuracy on the mini-map below. Optionally, upload a variable list to enable automated data categorization."))
+                        div(class = "setup-card",
+                            div(class = "setup-card-header",
+                                span(class = "setup-step-badge", "3"),
+                                span(class = "setup-card-title", "Mini-Map Validation")
+                            ),
+                            p(class = "setup-card-sub", "Verify that the sampling points land where you expect them before fitting any model."),
+                            div(style = "border-radius: 8px; overflow: hidden;", leafletOutput("setup_minimap", height = "400px"))
                         ),
-                        hr(),
-                        h3("Step 3: Mini-Map Validation"),
-                        leafletOutput("setup_minimap", height = "400px"),
-                        hr(),
-                        h3("Step 4: Variable Mapping & Verification"),
-                        fileInput("meta_file", "Upload Variable List (Optional)", accept = c(".xlsx", ".xls", ".csv")),
-                        tags$p("Pair your Target (Actual) variables with their Predictions. You can map them manually below."),
-                        tags$p(style="margin-top: -8px; font-size: 13px; color: #777; font-style: italic; margin-bottom: 12px;", 
-                               "(If you modify the auto-detected pairs, please click 'CONFIRM VARIABLE MAPPING' at the bottom)"),
-                        shinycssloaders::withSpinner(uiOutput("var_mapping_ui"), type = 6, color = "#2ecc71")
+                        div(class = "setup-card",
+                            div(class = "setup-card-header",
+                                span(class = "setup-step-badge", "4"),
+                                span(class = "setup-card-title", "Variable Mapping & Verification")
+                            ),
+                            p(class = "setup-card-sub", "Pair your Target (Actual) variables with their Predictions. You can map them manually below."),
+                            fileInput("meta_file", "Upload Variable List (Optional)", accept = c(".xlsx", ".xls", ".csv")),
+                            p(class = "setup-hint", "If you modify the auto-detected pairs, please click 'Confirm Variable Mapping' at the bottom."),
+                            shinycssloaders::withSpinner(uiOutput("var_mapping_ui"), type = 6, color = "#2ecc71")
+                        )
                      )
                  )
         ),
@@ -791,25 +817,25 @@ ui <- fluidPage(
                               h4("Spatial Interpolation Statistics"),
                               tags$p(style="font-size: 0.85em; opacity: 0.8; font-style: italic;", "Model-specific diagnostics and performance metrics (RMSE, R2)."),
                               conditionalPanel(condition = "output.disp_method == 'OK'",
-                                h5("Variogram Parameters (per locality)"), div(class="table-container", tableOutput("vgm_params_table")),
+                                h5("Variogram Parameters (per locality)"), div(class="table-container", DT::dataTableOutput("vgm_params_table")),
                                 hr(style="opacity: 0.3;")
                               ),
                               conditionalPanel(condition = "['IDW', 'TPS'].includes(output.disp_method)",
-                                h5("Regional Parameters (per locality)"), div(class="table-container", tableOutput("regional_params_table")),
+                                h5("Regional Parameters (per locality)"), div(class="table-container", DT::dataTableOutput("regional_params_table")),
                                 hr(style="opacity: 0.3;")
                               ),
-                              h5("Model Performance"), uiOutput("cv_strategy_badge"), div(class="table-container", tableOutput("metrics_table"))
+                              h5("Model Performance"), uiOutput("cv_strategy_badge"), div(class="table-container", DT::dataTableOutput("metrics_table"))
                             ),
                             div(id = "prediction_performance_ui",
                               style = "background-color: #f3e8ff; padding: 15px; border: 2px solid #9b59b6; border-radius: 8px; margin-bottom: 20px;",
                               h4("Variable Prediction Statistics"),
                               tags$p(style="font-size: 0.85em; opacity: 0.8; font-style: italic;", "Prediction accuracy and classification agreement metrics for uploaded data."),
                               h5("Prediction Performance (Uploaded Data)"),
-                              div(class="table-container", tableOutput("uploaded_metrics_table")),
+                              div(class="table-container", DT::dataTableOutput("uploaded_metrics_table")),
                               hr(style="opacity: 0.3;"),
                               h5("Classification Performance (Uploaded Predictions)"),
                               selectInput("kappa_bin_method", "Binning Method:", choices = c("Agronomical Classes" = "agro", "Quartiles" = "quartile")),
-                              div(class="table-container", tableOutput("kappa_table"))
+                              div(class="table-container", DT::dataTableOutput("kappa_table"))
                             ),
                             div(style = "background-color: #e7f5ff; padding: 15px; border: 2px solid #339af0; border-radius: 8px;",
                               h4("Data Summary Statistics"),
@@ -825,21 +851,21 @@ ui <- fluidPage(
                               conditionalPanel(condition = "['agro', 'bin'].includes(input.color_style) && output.disp_method && output.disp_method != ''",
                                 h5("Area Coverage"),
                                 fluidRow(
-                                  column(6, h6("Total - Actual"), tableOutput("area_table_total_act")),
-                                  column(6, div(id = "area_total_pred_col", h6("Total - Predicted"), tableOutput("area_table_total_pre")))
+                                  column(6, h6("Total - Actual"), div(class="table-container", DT::dataTableOutput("area_table_total_act"))),
+                                  column(6, div(id = "area_total_pred_col", h6("Total - Predicted"), div(class="table-container", DT::dataTableOutput("area_table_total_pre"))))
                                 ),
                                 conditionalPanel(condition = "input.sel_loc_stats && input.sel_loc_stats != 'Total (Combined)'",
                                   fluidRow(
-                                    column(6, h6("Locality - Actual"), tableOutput("area_table_loc_act")),
-                                    column(6, div(id = "loc_pred_col", h6("Locality - Predicted"), tableOutput("area_table_loc_pre")))
+                                    column(6, h6("Locality - Actual"), div(class="table-container", DT::dataTableOutput("area_table_loc_act"))),
+                                    column(6, div(id = "loc_pred_col", h6("Locality - Predicted"), div(class="table-container", DT::dataTableOutput("area_table_loc_pre"))))
                                   )
                                 ),
                                 hr(style="border-top: 1px solid #339af0;")
                               ),
                               conditionalPanel(condition = "output.disp_method && output.disp_method != ''",
                                 h5("Descriptive Statistics"),
-                                tableOutput("stats_table_total"),
-                                tableOutput("stats_table_loc")
+                                div(class="table-container", DT::dataTableOutput("stats_table_total")),
+                                div(class="table-container", DT::dataTableOutput("stats_table_loc"))
                               )
                             )
                      )
@@ -2527,7 +2553,7 @@ server <- function(input, output, session) {
           if(is.na(def_l)) def_l <- t
           if(is.na(def_c)) def_c <- "Uploaded Data"
           
-          div(style="border-bottom: 1px solid #eee; padding: 10px 0; margin-bottom: 10px;",
+          div(style="border-bottom: 1px solid rgba(0,0,0,0.08); padding: 10px 0; margin-bottom: 10px;",
             fluidRow(
               column(2, tags$b(t)),
               column(3, selectInput(paste0("pair_pred_cve_", i), "Best Pred (_cve)", choices = c("None", num_cols), selected = def_p_cve)),
@@ -2537,7 +2563,7 @@ server <- function(input, output, session) {
             )
           )
         }),
-        actionButton("confirm_mapping", "CONFIRM VARIABLE MAPPING", class = "btn-primary btn-block")
+        actionButton("confirm_mapping", "Confirm Variable Mapping", icon = icon("check-circle"), class = "btn-primary btn-block btn-pill")
       )
     }, error = function(e) {
       warning(paste("Error in var_mapping_ui:", e$message))
@@ -2747,8 +2773,8 @@ server <- function(input, output, session) {
           p("Designed for high-performance parallel processing and spatial diagnostics, multi-scale interpolation via kriging, inverse distance weighting, and thin plate splines with practical multi-criteria optimization."),
           p("Supported with the Descriptive and Exploratory Suite with dynamic visualizations and statistics."),
           hr(),
-          p(strong("A vibe-coded product of `that` couple of months following the loss of institutional e-mail address.")),
-          p(style = "color: #666; font-size: 0.9em;", "  by Recep Serdar Kara in cooperation with Antigravity CLI and Claude Code - 2026 (v1.0.1)"),
+          p(strong("A product of `that` couple of months following the loss of institutional e-mail address.")),
+          p(style = "color: #666; font-size: 0.9em;", "  by Recep Serdar Kara in cooperation with Antigravity CLI and Claude Code - 2026 (v1.0.2)"),
           hr(),
           tags$details(
             tags$summary(style = "cursor: pointer; color: #007bff;", "Session Info (reproducibility)"),
@@ -5360,7 +5386,7 @@ server <- function(input, output, session) {
   output$ck_variogram_plot_act <- render_ck_variogram_plot("act")
   output$ck_variogram_plot_pred <- render_ck_variogram_plot("pre")
 
-  output$vgm_params_table <- renderTable({
+  output$vgm_params_table <- DT::renderDataTable({
     loc <- input$sel_loc_stats; req(loc)
 
     get_vgm_params <- function(f) {
@@ -5393,15 +5419,15 @@ server <- function(input, output, session) {
       if(length(rows) == 0) return(NULL)
       res <- do.call(rbind, rows)
       names(res)[7] <- "Structural Dep."
-      return(res)
+      return(sci_dt(res))
     }
 
     f_a <- rv$v_fit_list[[paste0(loc, "_act")]]; f_p <- rv$v_fit_list[[paste0(loc, "_pre")]]
     if(is.null(f_a) && is.null(f_p)) return(NULL)
 
-    data.frame(Param = c("Model", "Nugget", "Sill", "Range", "Structural Dep."),
-               Actual = get_vgm_params(f_a),
-               Predicted = get_vgm_params(f_p))
+    sci_dt(data.frame(Param = c("Model", "Nugget", "Sill", "Range", "Structural Dep."),
+                      Actual = get_vgm_params(f_a),
+                      Predicted = get_vgm_params(f_p)))
   })
   output$tps_gcv_plot_act <- renderPlot({
     loc <- input$sel_loc_stats; req(loc, identical(rv$disp$method, "TPS"))
@@ -5480,13 +5506,13 @@ server <- function(input, output, session) {
     })
   })
 
-  output$regional_params_table <- renderTable({
+  output$regional_params_table <- DT::renderDataTable({
     loc <- input$sel_loc_stats; req(loc, (rv$disp$method %||% "") %in% c("IDW", "TPS"))
     has_pre <- isTRUE(rv$disp$comp_mode) || !identical(rv$disp$value_type, "actual")
-    build_regional_params_df(rv$disp$method, loc, rv$disp$regional_params, has_pre)
+    sci_dt(build_regional_params_df(rv$disp$method, loc, rv$disp$regional_params, has_pre))
   })
 
-  output$stats_table_total <- renderTable({
+  output$stats_table_total <- DT::renderDataTable({
     req(rv$user_data)
     meta <- get_display_meta()
     req(meta)
@@ -5511,10 +5537,10 @@ server <- function(input, output, session) {
       s_p <- summary(v_pre)
       res$Total_Predicted <- as.character(round(as.numeric(s_p), 3))
     }
-    res
+    sci_dt(res)
   })
-  
-  output$stats_table_loc <- renderTable({
+
+  output$stats_table_loc <- DT::renderDataTable({
     req(rv$user_data, input$sel_loc_stats)
     if(input$sel_loc_stats == "Total (Combined)") return(NULL)
     meta <- get_display_meta()
@@ -5533,7 +5559,7 @@ server <- function(input, output, session) {
       s_p <- summary(v_pre)
       res$Selected_Predicted <- as.character(round(as.numeric(s_p), 3))
     }
-    res
+    sci_dt(res)
   })
 
   calc_area_df <- function(r_obj, r_id = NULL) {
@@ -5602,16 +5628,16 @@ server <- function(input, output, session) {
     calc_area_df(rv$rast_pred, "total_pre")
   })
 
-  output$area_table_total_act <- renderTable({ req(input$color_style %in% c("agro", "bin")); area_df_total_act() })
-  output$area_table_total_pre <- renderTable({ req(input$color_style %in% c("agro", "bin")); area_df_total_pre() })
-  
-  output$area_table_loc_act <- renderTable({
+  output$area_table_total_act <- DT::renderDataTable({ req(input$color_style %in% c("agro", "bin")); sci_dt(area_df_total_act()) })
+  output$area_table_total_pre <- DT::renderDataTable({ req(input$color_style %in% c("agro", "bin")); sci_dt(area_df_total_pre()) })
+
+  output$area_table_loc_act <- DT::renderDataTable({
     req(rv$rast_list_act, input$color_style %in% c("agro", "bin")); loc <- input$sel_loc_stats
-    if(loc == "Total (Combined)") return(NULL) else calc_area_df(rv$rast_list_act[[loc]], paste0("loc_act_", loc))
+    if(loc == "Total (Combined)") return(NULL) else sci_dt(calc_area_df(rv$rast_list_act[[loc]], paste0("loc_act_", loc)))
   })
-  output$area_table_loc_pre <- renderTable({
+  output$area_table_loc_pre <- DT::renderDataTable({
     req(rv$rast_list_pre, input$color_style %in% c("agro", "bin")); loc <- input$sel_loc_stats
-    if(loc == "Total (Combined)") return(NULL) else calc_area_df(rv$rast_list_pre[[loc]], paste0("loc_pre_", loc))
+    if(loc == "Total (Combined)") return(NULL) else sci_dt(calc_area_df(rv$rast_list_pre[[loc]], paste0("loc_pre_", loc)))
   })
 
   output$cv_strategy_badge <- renderUI({
@@ -5629,7 +5655,7 @@ server <- function(input, output, session) {
     )
   })
 
-  output$metrics_table <- renderTable({
+  output$metrics_table <- DT::renderDataTable({
     req(input$sel_loc_stats)
     loc <- input$sel_loc_stats
     
@@ -5699,14 +5725,17 @@ server <- function(input, output, session) {
                     res_df
                     }
 
-                    m_act <- get_metrics_df(rv$cv_metrics_act, rv$cv_data_act, "Actual Model")
-                    if(rv$has_predictions) {
-                    m_pre <- get_metrics_df(rv$cv_metrics_pre, rv$cv_data_pre, "Predicted Model")
-                    return(rbind(m_act, m_pre))
-                    } else {
-                    return(m_act)
-                    }        }, sanitize.text.function = function(x) x)      
-        output$uploaded_metrics_table <- renderTable({
+    m_act <- get_metrics_df(rv$cv_metrics_act, rv$cv_data_act, "Actual Model")
+    if(rv$has_predictions) {
+      m_pre <- get_metrics_df(rv$cv_metrics_pre, rv$cv_data_pre, "Predicted Model")
+      # escape = FALSE keeps the tooltip-bearing NA* span in the Moran's I column
+      sci_dt(rbind(m_act, m_pre), escape = FALSE)
+    } else {
+      sci_dt(m_act, escape = FALSE)
+    }
+  })
+
+  output$uploaded_metrics_table <- DT::renderDataTable({
           req(rv$sf, input$sel_loc_stats)
           loc <- input$sel_loc_stats
           
@@ -5715,7 +5744,7 @@ server <- function(input, output, session) {
             df <- df %>% filter(loc == !!loc)
           }
           
-          if(nrow(df) < 3) return(data.frame(Status = "Not enough data points for numeric metrics."))
+          if(nrow(df) < 3) return(sci_dt(data.frame(Status = "Not enough data points for numeric metrics.")))
           
           rmse_val <- tryCatch(yardstick::rmse_vec(df$v, df$pv), error = function(e) NA)
           rsq_val <- tryCatch(yardstick::rsq_vec(df$v, df$pv), error = function(e) NA)
@@ -5731,11 +5760,11 @@ server <- function(input, output, session) {
           nrmse_val <- if(!is.na(rmse_val) && mean_v != 0) (rmse_val / mean_v) * 100 else NA
           nmae_val <- if(!is.na(mae_val) && mean_v != 0) (mae_val / mean_v) * 100 else NA
           
-              data.frame(
+              sci_dt(data.frame(
                 Metric = c("R2 (NSE/Traditional)", "R2 (Correlation)", "RMSE", "NRMSE (%)", "MAE", "NMAE (%)", "MBE (Bias)", "Lin's CCC (Agree)", "RPD (Precision)", "RPIQ", "SMAPE (%)"),
                 Value = c(round(rsq_trad, 4), round(rsq_val, 4), round(rmse_val, 4), round(nrmse_val, 4), round(mae_val, 4), round(nmae_val, 4), round(mbe_val, 4), round(ccc_val, 4), round(rpd_val, 4), round(rpiq_val, 4), round(smape_val, 4))
-              )        })
-  output$kappa_table <- renderTable({
+              ))        })
+  output$kappa_table <- DT::renderDataTable({
     req(rv$sf, input$sel_loc_stats, input$kappa_bin_method)
     
     loc <- input$sel_loc_stats
@@ -5745,11 +5774,11 @@ server <- function(input, output, session) {
       df <- df %>% filter(loc == !!loc)
     }
     
-    if(nrow(df) < 3) return(data.frame(Status = "Not enough data points for Kappa."))
-    
+    if(nrow(df) < 3) return(sci_dt(data.frame(Status = "Not enough data points for Kappa.")))
+
     if (input$kappa_bin_method == "agro") {
       params <- tryCatch(agro_params(), condition = function(c) NULL)
-      if(is.null(params) || input$color_style != "agro") return(data.frame(Status = "Please select Agronomical Classes style for this method."))
+      if(is.null(params) || input$color_style != "agro") return(sci_dt(data.frame(Status = "Please select Agronomical Classes style for this method.")))
       
       breaks <- c(-Inf, params$rcl_mat[-1, 1], Inf)
       labels <- params$labels
@@ -5765,7 +5794,7 @@ server <- function(input, output, session) {
       
     } else {
       brks <- unique(quantile(df$v, probs = seq(0, 1, 0.25), na.rm = TRUE))
-      if(length(brks) < 2) return(data.frame(Status = "Not enough variance for quartiles."))
+      if(length(brks) < 2) return(sci_dt(data.frame(Status = "Not enough variance for quartiles.")))
       
       brks_ext <- brks
       brks_ext[1] <- -Inf
@@ -5780,7 +5809,7 @@ server <- function(input, output, session) {
       df$pred_bin <- factor(df$pred_bin, levels = lvl)
     }
     
-    if(nrow(df) < 3) return(data.frame(Status = "Not enough data after binning."))
+    if(nrow(df) < 3) return(sci_dt(data.frame(Status = "Not enough data after binning.")))
     
     k_unw <- tryCatch(yardstick::kap_vec(df$act_bin, df$pred_bin), error = function(e) NA)
     k_lin <- tryCatch(yardstick::kap_vec(df$act_bin, df$pred_bin, weighting = "linear"), error = function(e) NA)
@@ -5790,10 +5819,10 @@ server <- function(input, output, session) {
     
     off_by_one_acc <- tryCatch(sum(abs(as.integer(df$act_bin) - as.integer(df$pred_bin)) <= 1, na.rm = TRUE) / sum(!is.na(df$act_bin) & !is.na(df$pred_bin)), error = function(e) NA)
     
-    data.frame(
+    sci_dt(data.frame(
       Metric = c("Overall Accuracy", "Balanced Accuracy", "Off-by-one Accuracy", "Matthews Corr. Coef. (MCC)", "Kappa (Unweighted)", "Weighted Kappa (Linear)"),
       Value = c(round(acc, 4), round(b_acc, 4), round(off_by_one_acc, 4), round(mcc, 4), round(k_unw, 4), round(k_lin, 4))
-    )
+    ))
   })
 
   output$log_output <- renderText({ rv$log })

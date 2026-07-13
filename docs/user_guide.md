@@ -1,5 +1,7 @@
 ## Data Ingestion & Configuration
 
+The Data Setup tab presents the configuration as sequential step cards; the later steps appear automatically once a dataset is loaded.
+
 The application requires cleanly structured, georeferenced tabular data.
   - Column headings (the first row) need to be reserved for parameter titles  (e.g., `tn`, `p`, `k`, `ph`, `som`, `clay`), categorical/grouping factors if available (e.g., `subset`, `texture_class`, `locality` ), and coordinate labels (e.g., `x`, `y`, `lat`, `long`); rows are required to be the related data, numbering, coordinate values, locality names or category labels etc.
 
@@ -40,7 +42,7 @@ The application requires cleanly structured, georeferenced tabular data.
   **C. Final Validation**
 
   - Review Mapping: Check the generated table at the bottom of the configuration panel to verify that labels, units, and prediction pairs are correctly assigned.
-  - Confirm: Once the variable mapping is verified, confirm it at the end of the page, and proceed to the Spatial Engine to begin interpolation.
+  - Confirm: Once the variable mapping is verified, confirm it with the **Confirm Variable Mapping** button at the end of the page, and proceed to the Spatial Engine to begin interpolation.
 
 ---
 
@@ -99,6 +101,7 @@ Once selections are made, the main interface transitions to the analytical modul
      - **Standard LOOCV:** Full Leave-One-Out for every dataset, the most rigorous choice, but slow beyond a few thousand points (especially RK/RFK).
      - **Spatial Block CV:** Holds out ten spatially contiguous k-means clusters, curbing the optimistic bias that random folds show when data are spatially autocorrelated. Recommended for spatial validation; below 30 points it reverts to LOOCV.
    - The strategy actually applied to a completed run is shown next to the **Model Performance** table (and in each locality's *CV Type* row), so you always know which validation produced the reported metrics.
+   - The summary tables on the Scientific Analysis tab (variogram parameters, model performance, prediction/classification metrics, area coverage, and descriptive statistics) are interactive: click a column header to sort.
 
 **1.c. Covariate Helpers (RK / RFK / CK):**
    - **Predictor Ranks (Correlation):** the *Calculate Correlations* button ranks candidate covariates by their correlation with the target — computed **within the localities selected in the Context panel**, and stamped with that scope and sample count above the list. Correlations across all samples can be driven by between-locality contrasts that do not hold inside a single locality (and can hide ones that do), so re-press the button after changing the locality selection. *Tip: if a covariate ranks high for "ALL" but drops when you select your target locality, the relationship is regional, not local — do not rely on it for a single-locality model.*

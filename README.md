@@ -16,8 +16,16 @@ Whether you are mapping soil physicochemistry, analyzing topographical interacti
 
 ## Contents
 
-- [Key Features](#key-features)
-- [Mapping Predictions and Interpreting Spatial Resonance of Prediction Errors](#mapping-predictions-and-interpreting-spatial-resonance-of-prediction-errors)
+- [Features](#features)
+  - [Diverse Spatial Engine](#diverse-spatial-engine)
+  - [Automated & Manual Optimization of Model Fittings](#automated--manual-optimization-of-model-fittings)
+  - [Comprehensive Diagnostics](#comprehensive-diagnostics)
+  - [Unified Interpolation Export Registry](#unified-interpolation-export-registry)
+  - [Descriptive & Exploratory Suite](#descriptive--exploratory-suite)
+  - [Classification Suite](#classification-suite)
+  - [Dynamic UI & Theming](#dynamic-ui--theming)
+  - [Mapping Machine Learning Predictions of Variables and Interpreting Spatial Resonance of Prediction Errors](#mapping-machine-learning-predictions-of-variables-and-interpreting-spatial-resonance-of-prediction-errors)
+  - [Guardrails](#guardrails)
 - [Installation & Setup Guide](#installation--setup-guide)
   - [1. System Prerequisites](#1-system-prerequisites)
   - [2. Getting the Code](#2-getting-the-code)
@@ -32,52 +40,57 @@ Whether you are mapping soil physicochemistry, analyzing topographical interacti
 - [License](#license)
 - [Disclaimer](#disclaimer)
 
-# Key Features
+# Features
 
-* **Diverse Spatial Engine**: Deterministic and geostatistical interpolation models for continuous and classified maps, at any scale from single fields to regional landscapes. Monolith's classification engine automatically translates continuous predictions (e.g., Nitrogen levels) into standard agronomical zones. It outputs exact area coverages (in hectares).
+## Diverse Spatial Engine
 
-  - Inverse Distance Weighting (IDW),
+Deterministic and geostatistical interpolation models for continuous and classified maps, at any scale from single fields to regional landscapes. Monolith's classification engine automatically translates continuous predictions (e.g., Nitrogen levels) into standard agronomical zones. It outputs exact area coverages (in hectares).
 
-  - Thin Plate Splines (TPS),
+- Inverse Distance Weighting (IDW),
+- Thin Plate Splines (TPS),
+- Ordinary Kriging (OK),
+- Co-Kriging (CK),
+- Regression Kriging (RK),
+- Random Forest Kriging (RFK).
 
-  - Ordinary Kriging (OK),
+![Continuous interpolation surface produced by the spatial engine](assets/1.png)
+![Classified agronomic zone map with area coverage per class](assets/2.png)
 
-  - Co-Kriging (CK),
+## Automated & Manual Optimization of Model Fittings
 
-  - Regression Kriging (RK),
+Automated least-squares fitting for variograms for four different models, Generalized Cross-Validation (GCV) for TPS, and Leave-One-Out Cross-Validation (LOOCV) based power optimization for IDW. Interactive variogram fitting and manual tuning overrides are available for expert calibration. Once an interpolation run completes, each result is instantly available for batch export.
 
-  - Random Forest Kriging (RFK).
+![Interactive variogram fitting panel with manual tuning controls](assets/3.png)
 
-  ![Continuous interpolation surface produced by the spatial engine](assets/1.png)
-  ![Classified agronomic zone map with area coverage per class](assets/2.png)
+## Comprehensive Diagnostics
 
+Evaluate models with a selectable cross-validation strategy: Auto (LOOCV for n ≤ 50, seeded random 10-fold above), full Leave-One-Out, or Spatial Block CV (k-means folds, recommended under spatial autocorrelation). Generate advanced metrics including Nash-Sutcliffe Efficiency (NSE), CCC, RPD, RPIQ, and Moran's I for spatial autocorrelation.
 
-* **Automated & Manual Optimization of Model Fittings**: Automated least-squares fitting for variograms for four different models, Generalized Cross-Validation (GCV) for TPS, and Leave-One-Out Cross-Validation (LOOCV) based power optimization for IDW. Interactive variogram fitting and manual tuning overrides are available for expert calibration. Once an interpolation run completes, each result is instantly available for batch export.
+![Cross-validation diagnostics with NSE, CCC, RPD, RPIQ and Moran's I metrics](assets/4.png)
 
-  ![Interactive variogram fitting panel with manual tuning controls](assets/3.png)
+## Unified Interpolation Export Registry
 
+Compile session assets into a centralized registry. Use the integrated WYSIWYG Styler to customize typography, DPI, and layout for publication-ready outputs (.PNG, .TIFF, .PDF) or batch-export everything with statistical tabular data merged into an Excel file.
 
-* **Comprehensive Diagnostics**: Evaluate models with a selectable cross-validation strategy: Auto (LOOCV for n ≤ 50, seeded random 10-fold above), full Leave-One-Out, or Spatial Block CV (k-means folds, recommended under spatial autocorrelation). Generate advanced metrics including Nash-Sutcliffe Efficiency (NSE), CCC, RPD, RPIQ, and Moran's I for spatial autocorrelation.
+![Interpolation export registry with WYSIWYG figure styler](assets/6.png)
 
-  ![Cross-validation diagnostics with NSE, CCC, RPD, RPIQ and Moran's I metrics](assets/4.png)
+## Descriptive & Exploratory Suite
 
+Understand your dataset with simultaneous descriptive, correlation, and principal component analyses with results that can be instantly generated and observed by simultaneous categorization and data popularization of choice. An additional Governing Factors module computes variable importance and effects via Random Forest models with ALE and PDP analyses, implemented as a decoupled module for performance and modularity.
 
-* **Interpolation Export Registry**: Compile session assets into a centralized registry. Use the integrated WYSIWYG Styler to customize typography, DPI, and layout for publication-ready outputs (.PNG, .TIFF, .PDF) or batch-export everything with statistical tabular data merged into an Excel file.
+![Descriptive and exploratory suite with correlation and PCA outputs](assets/5.png)
 
-  ![Interpolation export registry with WYSIWYG figure styler](assets/6.png)
+## Classification Suite
 
+Predictive multiclass classification of categorical field states (e.g., soil/management zones) from co-sampled covariates, distinct from the spatial engine's continuous-to-zone binning. Multinomial, Random Forest, and XGBoost learners share a common preprocessing recipe and spatially-aware cross-validation, with per-class accuracy, entropy-based uncertainty mapping, and learner-aware collinearity diagnostics.
 
-* **Descriptive & Exploratory Suite**: Understand your dataset with simultaneous descriptive, correlation, and principal component analyses with results that can be instantly generated and observed by simultaneous categorization and data popularization of choice. An additional Governing Factors module computes variable importance and effects via Random Forest models with ALE and PDP analyses, implemented as a decoupled module for performance and modularity.
+![Classification suite results panel with class map, entropy and probability surfaces](assets/10.png)
 
-  ![Descriptive and exploratory suite with correlation and PCA outputs](assets/5.png)
+## Dynamic UI & Theming
 
-* **Classification Suite**: Predictive multiclass classification of categorical field states (e.g., soil/management zones) from co-sampled covariates, distinct from the spatial engine's continuous-to-zone binning. Multinomial, Random Forest, and XGBoost learners share a common preprocessing recipe and spatially-aware cross-validation, with per-class accuracy, entropy-based uncertainty mapping, and learner-aware collinearity diagnostics.
+Fully responsive interface with customizable themes and figures, accessible data details on maps/graphs for visual audits of hot-points.
 
-  ![Classification suite results panel with class map, entropy and probability surfaces](assets/10.png)
-
-* **Dynamic UI & Theming**: Fully responsive interface with customizable themes and figures, accessible data details on maps/graphs for visual audits of hot-points.
-
-  ![Theming options and interactive map data details](assets/7.png)
+![Theming options and interactive map data details](assets/7.png)
 
 
 ## Mapping Machine Learning Predictions of Variables and Interpreting Spatial Resonance of Prediction Errors
@@ -100,6 +113,27 @@ To understand the spatial structure of model errors, Monolith provides two diagn
 *Point Errors (Predictive Model Uncertainty)*: Interpolates prediction errors at exact sampling points to map zones where the model fails to capture local variation.
 
   ![Surface delta and point error diagnostic maps](assets/9.png)
+
+
+## Guardrails
+
+> **Note:** Scientific correctness is treated as Monolith's primary invariant. Rather than leaving every methodological pitfall to the user, the app builds in guardrails that block, correct, or warn against the most common ways a spatial analysis goes silently wrong. The most important ones:
+
+* **Projected-CRS enforcement:** All interpolation runs in a projected (metric) CRS, and every grid-resolution recommendation is expressed in metres even when the analysis CRS is geographic (degree-based). For degree CRSs, nearest-neighbor distances and extents are measured via a Web Mercator projection corrected by cos(latitude), so degrees are never silently treated as metres. CRS strings are validated before any projection is attempted.
+
+* **Resolution tied to sample support:** The suggested grid spacing is derived from your physical sampling spacing, so the mapped surface cannot fabricate fine, unmeasured detail below the resolution your sampling actually supports.
+
+* **Extrapolation control:** A dynamic buffering engine scales boundary padding to the selected method and resolution, and a **Strict Measured** boundary type disables buffering entirely so coverage is not over-claimed far beyond sample support. In the Classification Suite, predictions are confined to per-locality boundaries and never extend into unsampled corridors between localities.
+
+* **Kriging numerical stability (epsilon-nugget):** For near-zero-variance variables, a tiny nugget is enforced when the empirical nugget is exactly zero, preventing the singular-matrix inversion failures that would otherwise crash Kriging.
+
+* **Variogram fitting:** Automated least-squares fitting sequentially attempts multiple theoretical models (Stein's Matern, Spherical, Exponential, Gaussian, Matern) and falls back to constrained range estimates when standard fitting fails, so a difficult dataset yields a stable curve instead of a crash or a nonsensical fit.
+
+* **Multicollinearity gate (shared across modules):** A single VIF plus pairwise-correlation engine guards every covariate-driven method. Regression Kriging and Random Forest Kriging auto-drop covariates with VIF > 10 before fitting; the pre-run auxiliary-variable screen (covariate-assisted runs) and the Classification Suite flag collinear covariates (method-aware: VIF > 5 for Random Forest, VIF > 10 otherwise) and prompt you to drop or keep them; and the PCA module halts outright when any pair exceeds r > 0.95, requiring an explicit override, to protect the loading vectors from distortion.
+
+* **Spatial cross-validation:** Spatial Block CV (k-means folds) is offered and recommended under spatial autocorrelation so error estimates are not optimistically biased by autocorrelated train/test leakage; it falls back to LOOCV below the minimum fold size. Classification uses spatially-aware resampling, and synthetic oversampling (SMOTE) is deliberately not offered because fabricated points would break the spatial-CV leakage guarantee and invent autocorrelation structure.
+
+* **Classification scope adequacy:** Before a classification run, the scoped data are checked for sufficient sample size and per-class counts. Under-powered scopes (too few rows, or classes below the per-class minimum) raise a named warning identifying the offending classes and their counts, so unreliable rare-class results are surfaced rather than presented as trustworthy.
 
 
 # Installation & Setup Guide
