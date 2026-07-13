@@ -1,45 +1,14 @@
-# DATA LICENSE
+# DATA LICENSE & RESTRICTIONS
 
-Copyright (c) 2026 Recep Serdar Kara.
+Copyright (c) 2026 Recep Serdar Kara, on behalf of the data rights holders. All rights reserved.
 
-The data files in this `sample_data/` directory — `samp_data_1.xlsx` and its
-paired variable list `samp_var_list.xlsx` — are a demonstration subset of the
-data from the studies of Kara et al. (2026a, 2026b). They are released under the
-**Creative Commons Attribution 4.0 International (CC BY 4.0)** license
-(https://creativecommons.org/licenses/by/4.0/).
+The files and datasets within this sample_data/ directory are provided strictly for demonstration, evaluation, and testing of the Monolith application, until the associated manuscript (currently under peer review) is formally published. Upon publication, these datasets will be released under the Creative Commons Attribution 4.0 International (CC BY 4.0) license (https://creativecommons.org/licenses/by/4.0/). Until then, all rights are reserved and the terms below apply to all third parties.
 
-You are free to use, share, and adapt these files for any purpose, including
-research and commercial use, provided you give appropriate credit as required
-by CC BY 4.0.
+By using, cloning, or downloading this repository, you agree to the following terms regarding the sample datasets:
 
-## Required attribution
+1. **Restricted Use**: The sample data is provided solely to demonstrate the functionality and interface of the Monolith application. Any other use, including but not limited to spatial analyses for external projects, commercial use, or academic/scientific research and publication, is strictly prohibited.
+2. **No Publication**: You may not publish, reprint, upload, or present any research, maps, figures, reports, or analytical results generated using this sample data in any journal article, conference proceeding, website, thesis, presentation, or other public or private forum.
+3. **No Redistribution**: You may not copy, share, redistribute, sublicense, or sell the sample datasets, either in their original form or in any modified or derived format, without the prior written consent of the copyright owner, Recep Serdar Kara.
+4. **No Ownership Transfer**: No ownership rights, intellectual property rights, or research exploitation rights to this data are transferred to any user of this repository.
 
-These files include modeled predictions from the associated study. If you use
-them, cite **both** the paper the predictions derive from and the dataset
-version of record:
-
-> Kara, R. S., Ongun, A. R., Almaz, C., Çiçek, G., Tepecik, M., & Yilgan, F.
-> (2026a). Diagnostic modeling of nutrients to support agroecosystem
-> transitioning in tobacco soils: A stratified evaluation framework based on
-> clay-organic matter-lime interactions [Manuscript submitted for publication].
-> Department of Soil Science and Soil Protection, Czech University of Life
-> Sciences Prague.
->
-> Kara, R. S., Ongun, A. R., Almaz, C., Çiçek, G., & Tepecik, M. (2026b).
-> Physicochemical and Nutritional Soil Properties, Geolocation, and
-> Environmental Covariates for Nutrient Prediction in Transitioning Tobacco
-> Agroecosystems (Denizli, Turkey). Mendeley Data, V1.
-> https://doi.org/10.17632/8548bmgxh9.1
-
-The dataset DOI above is currently inactive and will resolve once the associated
-publication is released.
-
-If you use the Monolith software, please also cite it via its Zenodo DOI
-(see the "How to Cite" section of the project README).
-
-## Note
-
-These files are a small demonstration subset curated to let users try Monolith.
-The complete dataset — the authoritative version of record — is deposited on
-Mendeley Data under the same CC BY 4.0 terms and becomes publicly available with
-the associated publication.
+For inquiries regarding the authorized use, licensing, or collaborations involving these datasets, please contact the author: Recep Serdar Kara.
