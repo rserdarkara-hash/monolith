@@ -3,6 +3,29 @@
 All notable changes to Monolith are documented in this file.
 
 
+### Added
+- **Structured RK trend panel** (Tab 3, Regression Kriging runs): the per-locality linear trend model is now presented as compact fit-statistic chips (R², adjusted R², residual SE with df, F statistic and its p-value, n) followed by a sortable coefficient table with estimates, standard errors, 95% confidence intervals (t-based), t values, p-values, and significance codes; covariate names use their display labels. The classic R console summary remains available under a collapsible "Raw R model summary" link, and the exported RK coefficient table keeps full-precision numeric values. Display-only: no numeric results changed.
+- **Documentation drawer navigation**: the in-app documentation drawer now closes when clicking anywhere outside it, and a floating button column (bottom-right of the open drawer) jumps to the top or end of the open guide or steps to the previous/next section heading. All client-side, no server round-trips.
+
+### Removed
+- Dead code: the never-displayed `res_reasoning` resolution-suggestion text output and the write-only `pt_style_palette` state. No behavior change.
+- Dead code: the write-only `rv$metrics` staging value and its never-read all-NA fallback frame (the Global Performance Metrics export table is now registered from a local variable). The duplicated TPS/IDW optimization summary panels were merged into one parameterized builder. No behavior change.
+
+### Fixed
+- **Export Styler config could be silently overwritten on reopen**: the modal re-creates its inputs with default values, and Shiny deduplicated the identical restore message from browser storage, so a second open could persist the defaults over the saved configuration. The restore is now forced on every open, and persistence is debounced (750 ms) instead of firing on every keystroke in every styler field.
+- **Locality selector churn**: adding a drawn polygon group or a discretized variable (any data mutation that keeps the same localities) no longer re-issues the Context panel's locality selector; it is rebuilt only when the actual set of localities changes, always preserving the current selection.
+- **Empty locality selection**: deselecting every locality previously behaved inconsistently (some paths treated it as "all localities", the run dispatch produced an empty run). A single resolver now backs every path (run dispatch, IDW/TPS optimizers, variogram auto-fit, resolution suggestions, run-time estimator, progress tracking): "ALL", an empty selection, and no selection all mean every locality, and NA locality values are excluded everywhere.
+- **Silent failures now surface**: unreadable metadata files show an error notification; raster display-projection failures notify once instead of leaving the map empty; skipped observed-vs-predicted export plots are logged as warnings; and when an uploaded boundary shapefile cannot be applied to a locality (projection or overlap issue) the run reports it in the progress warnings instead of silently substituting the point-derived boundary.
+- **Progress bar during runs** now derives its expected model count from the committed run context instead of the live sidebar (changing the locality selection mid-run no longer skews it), with a defensive denominator when an engine fails before its progress file appears.
+
+### Performance
+- **Scientific Analysis plots are now cached per run and locality** (`renderCachedPlot`, session cache): variogram, internal residual variogram, cross-variogram, RF importance, TPS GCV, observed-vs-predicted, and CV residual-variogram panels no longer recompute (including `robust_vgm_fit` refits on the residual variograms) when switching the analysis locality filter back and forth. Cache keys embed the run revision and the underlying fit objects, so manual variogram edits and re-runs still refresh immediately.
+- **Observer hygiene**: the Export Styler persist, mapping sync, variable-category cascade, point-styling choice rebuild, run-history rebuild, panel toggles, and log notifier are now event-driven (`observeEvent`) with explicit dependency sets; the variogram slider bounds and the Map Viewer sampling-point overlay reuse cached projections (`projected_max_dist`, `pts_view_4326`) instead of re-transforming all coordinates on every styling tick or run completion.
+- **Map Viewer distance scale** no longer polls the DOM every 500 ms for the whole session; the control is moved into its container once, when it is created.
+
+### Testing
+- Added `test-locality-resolution.R` (13 assertions) pinning the locality resolver's ALL / empty / NULL / NA / missing-column edge cases.
+
 ### Changed
 - **Scientific Analysis summary tables modernized** (Tab 3, right column): variogram/regional parameters, model performance, prediction and classification metrics, area coverage, and descriptive statistics now render as interactive `DT` tables (sortable columns, horizontal scroll), matching the Classification and Exploratory Suites. Paging is disabled so variable-length tables (e.g. per-locality variogram parameters) always show every row. Values, metrics, and compute-while-hidden behavior are unchanged.
 - **Data Setup tab redesigned** as a card-based wizard: each step (Upload, Spatial Mapping, Mini-Map Validation, Variable Mapping) sits in its own shadowed card with a numbered step badge; later steps fade in once a dataset is loaded. Replaces the single grey panel, `hr()` separators, and ad-hoc inline font/negative-margin styles; hint typography is now consistent. Cards keep a fixed light surface for readability under every theme, while step badges follow the active theme's accent color.

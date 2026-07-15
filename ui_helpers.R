@@ -1,4 +1,20 @@
 
+# Single source of truth for turning the sidebar locality selection into the
+# locality set an analysis should run on. "ALL", an empty selection, and NULL
+# all resolve to every non-NA locality in the data; anything else is taken
+# verbatim. Returns character(0) when the data or locality column is missing,
+# so callers can length()-guard without NULL checks.
+resolve_selected_localities <- function(sel, user_data, loc_col) {
+  all_locs <- if (!is.null(user_data) && !is.null(loc_col) &&
+                  loc_col %in% colnames(user_data)) {
+    unique(user_data[[loc_col]][!is.na(user_data[[loc_col]])])
+  } else {
+    character(0)
+  }
+  if (is.null(sel) || length(sel) == 0 || "ALL" %in% sel) return(all_locs)
+  sel
+}
+
 melt_cormat <- function(cormat, value_name = "Corr") {
   rn <- rownames(cormat)
   cn <- colnames(cormat)
@@ -346,6 +362,112 @@ build_regional_params_df <- function(type, loc, regional_params, has_pre) {
   )
 }
 
+# --- RK linear-trend presentation --------------------------------------------
+# Structured replacement for the raw print(summary.lm) dump on the Scientific
+# Analysis tab: compact fit-statistic chips + a publication-style coefficient
+# table. Display-only: exports keep the raw numeric coefficient table.
+
+format_p_value <- function(p) {
+  if (is.null(p) || length(p) == 0 || is.na(p)) return("NA")
+  if (p < 0.001) return("< 0.001")
+  sprintf("%.3f", p)
+}
+
+signif_stars <- function(p) {
+  if (is.null(p) || length(p) == 0 || is.na(p)) return("")
+  if (p <= 0.001) return("***")
+  if (p <= 0.01) return("**")
+  if (p <= 0.05) return("*")
+  if (p <= 0.1) return(".")
+  ""
+}
+
+# Fit statistics from a summary.lm object; NULL when the object does not look
+# like one (rv$model_summaries entries are only ever summary.lm today, but the
+# UI degrades to the raw print if that ever changes).
+rk_fit_stats <- function(lm_sum) {
+  if (is.null(lm_sum) || is.null(lm_sum$coefficients) || is.null(lm_sum$df)) return(NULL)
+  f <- lm_sum$fstatistic
+  f_p <- if (!is.null(f) && length(f) == 3) {
+    stats::pf(f[[1]], f[[2]], f[[3]], lower.tail = FALSE)
+  } else NA_real_
+  list(
+    r2      = lm_sum$r.squared,
+    adj_r2  = lm_sum$adj.r.squared,
+    sigma   = lm_sum$sigma,
+    df_res  = lm_sum$df[2],
+    f_value = if (!is.null(f)) unname(f[[1]]) else NA_real_,
+    f_df1   = if (!is.null(f)) unname(f[[2]]) else NA_real_,
+    f_df2   = if (!is.null(f)) unname(f[[3]]) else NA_real_,
+    f_p     = unname(f_p),
+    n       = sum(lm_sum$df[1:2])
+  )
+}
+
+# Coefficient table (estimate, SE, 95% CI, t, p, significance) from a
+# summary.lm object. Term names map to display labels when variable metadata
+# is supplied; the CI uses the t quantile on the residual df.
+rk_coef_table <- function(lm_sum, vars_metadata = NULL, conf_level = 0.95) {
+  if (is.null(lm_sum) || is.null(lm_sum$coefficients)) return(NULL)
+  cf <- as.data.frame(lm_sum$coefficients)
+  need <- c("Estimate", "Std. Error", "t value", "Pr(>|t|)")
+  if (!all(need %in% colnames(cf))) return(NULL)
+  df_res <- lm_sum$df[2]
+  est <- cf[["Estimate"]]; se <- cf[["Std. Error"]]; p <- cf[["Pr(>|t|)"]]
+  ci <- if (is.finite(df_res) && df_res >= 1) {
+    tq <- stats::qt(1 - (1 - conf_level) / 2, df_res)
+    sprintf("[%.4g, %.4g]", est - tq * se, est + tq * se)
+  } else rep("NA", length(est))
+  terms <- rownames(cf)
+  labels <- vapply(terms, function(tm) {
+    if (tm == "(Intercept)") "(Intercept)" else get_var_label(tm, vars_metadata)
+  }, character(1))
+  data.frame(
+    Term = unname(labels),
+    Estimate = signif(est, 4),
+    `Std. Error` = signif(se, 4),
+    `95% CI` = ci,
+    `t value` = round(cf[["t value"]], 2),
+    `p value` = vapply(p, format_p_value, character(1)),
+    `Sig.` = vapply(p, signif_stars, character(1)),
+    check.names = FALSE
+  )
+}
+
+# Chip row + coefficient-table container + collapsible raw summary for one RK
+# trend model. dt_id/raw_id are output ids rendered in monolith.R. Returns
+# NULL when lm_sum is not a summary.lm, letting the caller fall back to the
+# verbatim print.
+build_rk_trend_ui <- function(lm_sum, dt_id, raw_id) {
+  stats <- rk_fit_stats(lm_sum)
+  if (is.null(stats)) return(NULL)
+  chip <- function(lab, val) {
+    div(style = "background-color: #f1f3f5; border: 1px solid #dee2e6; border-radius: 6px; padding: 6px 12px; text-align: center; color: #343a40;",
+        div(lab, style = "font-size: 0.7em; text-transform: uppercase; letter-spacing: 0.4px; opacity: 0.7;"),
+        div(val, style = "font-weight: 600; font-size: 0.95em;"))
+  }
+  f_lab <- if (is.na(stats$f_value)) "NA" else {
+    sprintf("%.2f (%d, %d)", stats$f_value, round(stats$f_df1), round(stats$f_df2))
+  }
+  tagList(
+    div(style = "display: flex; flex-wrap: wrap; gap: 8px; margin-bottom: 12px;",
+        chip("R²", sprintf("%.3f", stats$r2)),
+        chip("Adj. R²", sprintf("%.3f", stats$adj_r2)),
+        chip("Residual SE", sprintf("%.4g (df = %d)", stats$sigma, stats$df_res)),
+        chip("F statistic", f_lab),
+        chip("Model p", format_p_value(stats$f_p)),
+        chip("n", as.character(stats$n))
+    ),
+    div(class = "table-container", DT::dataTableOutput(dt_id)),
+    tags$p(style = "font-size: 0.72em; opacity: 0.65; margin-top: 6px;",
+           "Signif. codes: *** p ≤ 0.001, ** p ≤ 0.01, * p ≤ 0.05, . p ≤ 0.1. CI = 95% confidence interval (t-based)."),
+    tags$details(style = "margin-top: 4px;",
+      tags$summary("Raw R model summary", style = "cursor: pointer; font-size: 0.8em; opacity: 0.7;"),
+      verbatimTextOutput(raw_id)
+    )
+  )
+}
+
 generate_base_plot <- function(item, input, agro_params = NULL) {
   req(item)
   
@@ -656,16 +778,77 @@ render_docs_drawer <- function() {
     ),
     tabsetPanel(
       id = "docs_tabs",
-      tabPanel("User Guide", 
+      tabPanel("User Guide",
                uiOutput("render_user_guide")
       ),
-      tabPanel("Scientific Guide", 
+      tabPanel("Scientific Guide",
                uiOutput("render_scientific_guide")
       ),
-      tabPanel("Descriptive & Exploratory Suite", 
+      tabPanel("Descriptive & Exploratory Suite",
                uiOutput("render_desc_exploratory_guide")
       )
-    )
+    ),
+    # Floating navigation over the open drawer: jump to top/end or step
+    # between sections (headings of the active guide tab). Plain buttons on
+    # purpose - all behaviour is client-side, no server round-trip.
+    div(class = "docs-nav-fab",
+        tags$button(type = "button", id = "docs_nav_top", class = "btn",
+                    title = "Back to top", icon("angle-double-up")),
+        tags$button(type = "button", id = "docs_nav_prev", class = "btn",
+                    title = "Previous section", icon("angle-up")),
+        tags$button(type = "button", id = "docs_nav_next", class = "btn",
+                    title = "Next section", icon("angle-down")),
+        tags$button(type = "button", id = "docs_nav_bottom", class = "btn",
+                    title = "Jump to end", icon("angle-double-down"))
+    ),
+    tags$script(HTML("
+      (function() {
+        var drawer = document.getElementById('docs_drawer');
+        if (!drawer) return;
+        // Click outside the open drawer closes it. The opener button is
+        // excluded (it manages its own state), as are Bootstrap layers that
+        // legitimately sit on top of the drawer (modals, popovers).
+        document.addEventListener('click', function(e) {
+          if (!drawer.classList.contains('open')) return;
+          var t = e.target;
+          if (!t || !t.closest) return;
+          if (drawer.contains(t)) return;
+          if (t.closest('#info_btn')) return;
+          if (t.closest('.modal, .modal-backdrop, .popover')) return;
+          drawer.classList.remove('open');
+        });
+        function headings() {
+          var pane = drawer.querySelector('.tab-pane.active');
+          return pane ? Array.prototype.slice.call(pane.querySelectorAll('h1, h2, h3')) : [];
+        }
+        function offsetIn(el) {
+          return el.getBoundingClientRect().top - drawer.getBoundingClientRect().top + drawer.scrollTop;
+        }
+        function go(y) { drawer.scrollTo({ top: y, behavior: 'smooth' }); }
+        function bind(id, fn) {
+          var el = document.getElementById(id);
+          if (el) el.addEventListener('click', fn);
+        }
+        bind('docs_nav_top', function() { go(0); });
+        bind('docs_nav_bottom', function() { go(drawer.scrollHeight); });
+        bind('docs_nav_next', function() {
+          var hs = headings(), cur = drawer.scrollTop;
+          for (var i = 0; i < hs.length; i++) {
+            var y = offsetIn(hs[i]) - 12;
+            if (y > cur + 5) { go(y); return; }
+          }
+          go(drawer.scrollHeight);
+        });
+        bind('docs_nav_prev', function() {
+          var hs = headings(), cur = drawer.scrollTop, target = 0;
+          for (var i = 0; i < hs.length; i++) {
+            var y = offsetIn(hs[i]) - 12;
+            if (y < cur - 5) { target = y; } else { break; }
+          }
+          go(target);
+        });
+      })();
+    "))
   )
 }
 

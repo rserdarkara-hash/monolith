@@ -735,16 +735,10 @@ ui <- fluidPage(
                          conditionalPanel(condition = "['view_comp', 'view_resid'].includes(input.map_view)",
                                           fluidRow(column(6, h4(textOutput("comp_left_title")), leafletOutput("comp_map_left", height = "600px")),
                                                    column(6, h4(textOutput("comp_right_title")), leafletOutput("comp_map_right", height = "600px")))),
-                         div(id = "distance_scale_container", style = "margin-top: 15px; display: flex; justify-content: center; min-height: 30px;"),
-                         tags$script(HTML("
-                           setInterval(function() {
-                             var scales = $('.leaflet-control-scale');
-                             if(scales.length > 0) {
-                               scales.appendTo('#distance_scale_container');
-                               scales.css({'background': 'white', 'padding': '5px', 'border': '1px solid #ccc', 'border-radius': '4px', 'margin': '0 auto'});
-                             }
-                           }, 500);
-                         "))
+                         # Scale controls are moved here directly by the
+                         # show_scale overlay observer when it creates them -
+                         # no DOM polling.
+                         div(id = "distance_scale_container", style = "margin-top: 15px; display: flex; justify-content: center; min-height: 30px;")
                  )),
         tabPanel("3. Scientific Analysis & Summary",
                  conditionalPanel(
@@ -934,13 +928,18 @@ server <- function(input, output, session) {
   get_projected_raster <- function(r, cache_key) {
     if (exists(cache_key, envir = leaflet_proj_cache)) return(get(cache_key, envir = leaflet_proj_cache))
     if (inherits(r, "PackedSpatRaster")) r <- terra::unwrap(r)
-    r_proj <- tryCatch(terra::project(r, "EPSG:4326"), error = function(e) NULL)
+    # The NULL result is cached too, so this notifies once per layer instead
+    # of silently leaving the map empty.
+    r_proj <- tryCatch(terra::project(r, "EPSG:4326"), error = function(e) {
+      showNotification(paste("Map layer could not be projected for display:", conditionMessage(e)), type = "error")
+      NULL
+    })
     assign(cache_key, r_proj, envir = leaflet_proj_cache)
     r_proj
   }
 
   render_resid_plot <- function(cv_data_reactive, title_suffix = "") {
-    renderPlot({
+    renderCachedPlot({
       req(input$sel_loc_stats, cv_data_reactive())
       loc <- input$sel_loc_stats
       df_list <- cv_data_reactive()
@@ -1002,7 +1001,13 @@ server <- function(input, output, session) {
       }, error = function(e) {
          plot(1, 1, type="n", main=paste("Error:", e$message), axes=F)
       })
-    })
+    }, cacheKeyExpr = {
+      # cv data only changes at run completion (rv$results_rev); the names()
+      # component invalidates the cache when the lists are reset at dispatch
+      # so a running model shows a blank panel, not the previous run's plot.
+      list("resid_vgm", title_suffix, input$sel_loc_stats, rv$results_rev,
+           names(cv_data_reactive()))
+    }, cache = "session")
   }
 
   # method is passed in from the run that produced the assets: reading
@@ -1087,7 +1092,10 @@ server <- function(input, output, session) {
        df_cv <- as.data.frame(rv$cv_data_act[[l]])
        p_op <- tryCatch({
          build_obs_pred_plot(df_cv, title = paste("Obs vs Pred (Actual):", l), x_lab = "Observed", y_lab = "Predicted")
-       }, error = function(e) NULL)
+       }, error = function(e) {
+         rv$log <- paste0(rv$log, "\n[WARN] Obs vs Pred export plot (Actual) skipped for ", l, ": ", conditionMessage(e))
+         NULL
+       })
        if(!is.null(p_op)) {
          register_export_item(paste0("plot_obs_pred_", l), paste(meta$label, "-", l, "- Obs vs Pred Scatter (Actual)"), "plot", p_op, meta$category)
        }
@@ -1096,7 +1104,10 @@ server <- function(input, output, session) {
        df_cv_p <- as.data.frame(rv$cv_data_pre[[l]])
        p_op_p <- tryCatch({
          build_obs_pred_plot(df_cv_p, title = paste("Obs vs Pred (Predicted Map):", l), x_lab = "Observed", y_lab = "Predicted")
-       }, error = function(e) NULL)
+       }, error = function(e) {
+         rv$log <- paste0(rv$log, "\n[WARN] Obs vs Pred export plot (Predicted Map) skipped for ", l, ": ", conditionMessage(e))
+         NULL
+       })
        if(!is.null(p_op_p)) {
          register_export_item(paste0("plot_obs_pred_pre_", l), paste(meta$label, "-", l, "- Obs vs Pred Scatter (Predicted Map)"), "plot", p_op_p, meta$category)
        }
@@ -1188,7 +1199,7 @@ server <- function(input, output, session) {
     }
   })
 
-  observe({
+  observeEvent(list(rv$disp, rv$has_predictions, rv$cv_data_act), {
     # Committed run context (not the live sidebar): the predicted-side panels
     # describe the run on screen and must survive sidebar reconfiguration.
     d <- rv$disp
@@ -1211,7 +1222,7 @@ server <- function(input, output, session) {
     # stores NA - not NULL - when none exists, hence is_valid_col_ref).
     has_upl_pred <- !is.null(d) && (is_valid_col_ref(d$pred) || is_valid_col_ref(d$pred_ss))
     shinyjs::toggle(id = "prediction_performance_ui", condition = has_upl_pred)
-  })
+  }, ignoreNULL = FALSE)
 
   desc_exploratory_server(
     id = "exploratory",
@@ -1306,7 +1317,8 @@ server <- function(input, output, session) {
     model_summaries = list(), # summaries for UK/RK
     rf_models = list(), # trained random forests
     gstat_objs = list(), # gstat objects for CK
-    loc_names = NULL, metrics = NULL, log = "Ready.",
+    loc_names = NULL, log = "Ready.",
+    results_rev = 0L, # Bumped when a run's results land (keys cached plots)
     drawn_feature = NULL, # Temporarily store drawn shape for grouping
     run_config_summary = NULL, # Plain text summary of latest run configuration
     disp = NULL, # Display context committed at run dispatch (see get_display_meta)
@@ -1413,7 +1425,7 @@ server <- function(input, output, session) {
 
   env_hist <- new.env(parent = emptyenv())
   env_hist$history_obs <- list()
-  observe({
+  observeEvent(rv$run_history, {
     hist <- rv$run_history
     lapply(env_hist$history_obs, function(o) {
       if (!is.null(o)) o$destroy()
@@ -1458,7 +1470,7 @@ server <- function(input, output, session) {
       env_hist$history_obs[[paste0("restore_", run_id)]] <- obs_restore
       env_hist$history_obs[[paste0("delete_", run_id)]] <- obs_delete
     })
-  })
+  }, ignoreNULL = FALSE)
 
   active_styler_item <- reactiveVal(NULL)
   
@@ -1575,19 +1587,27 @@ server <- function(input, output, session) {
     shinyjs::click("open_styler")
   })
   
-  observe({
+  # Persist the styler config once per settled state (debounced), not on
+  # every keystroke/slider tick in every styler field.
+  styler_persist_cfg <- debounce(reactive({
     req(input$styler_title_size)
-    cfg <- lapply(styler_fields, function(field) {
+    lapply(styler_fields, function(field) {
       input[[field$name]]
     })
-    shinyjs::runjs(sprintf("localStorage.setItem('monolith_styler_config', JSON.stringify(%s));", jsonlite::toJSON(cfg, auto_unbox = TRUE)))
+  }), 750)
+  observeEvent(styler_persist_cfg(), {
+    shinyjs::runjs(sprintf("localStorage.setItem('monolith_styler_config', JSON.stringify(%s));", jsonlite::toJSON(styler_persist_cfg(), auto_unbox = TRUE)))
   })
 
   observeEvent(input$open_styler, {
+    # priority: 'event' forces the sync to re-fire on every open: Shiny
+    # dedupes identical input payloads, and the modal re-creates its inputs
+    # with default values each time, so a deduped (skipped) restore would let
+    # the debounced persist observer overwrite the saved config with defaults.
     shinyjs::runjs("
       var cfg = localStorage.getItem('monolith_styler_config');
       if(cfg) {
-        Shiny.setInputValue('styler_local_config', JSON.parse(cfg));
+        Shiny.setInputValue('styler_local_config', JSON.parse(cfg), {priority: 'event'});
       }
     ")
     
@@ -2145,7 +2165,7 @@ server <- function(input, output, session) {
     shinyjs::toggle("pt_style_toolbar", anim = TRUE, animType = "slide", time = 0.3)
   })
 
-  observe({
+  observeEvent(list(rv$user_data, rv$mapping$vars, rv$mapping$loc, rv$mapping$x, rv$mapping$y), {
     req(rv$user_data)
     df <- rv$user_data
     cols <- colnames(df)
@@ -2189,7 +2209,6 @@ server <- function(input, output, session) {
     groups <- sort(unique(as.character(rv$user_data[[input$pt_color_by]])))
     pal_name <- input$pt_palette %||% "Set1"
     rv$pt_style_colors <- generate_group_palette(groups, pal_name)
-    rv$pt_style_palette <- pal_name
   }, ignoreInit = TRUE)
 
   observeEvent(input$pt_custom_colors, {
@@ -2417,19 +2436,13 @@ server <- function(input, output, session) {
     if (!(input$map_x %in% colnames(rv$user_data) && input$map_y %in% colnames(rv$user_data))) return()
     
     if (input$res_mode == "fixed") {
-       output$res_reasoning <- renderText({ "Manual resolution override active." })
        return()
     }
 
     df_raw <- rv$user_data %>% select(x = !!sym(input$map_x), y = !!sym(input$map_y), loc = !!sym(input$map_loc)) %>% na.omit()
-    
-    if (input$res_mode == "global" || "ALL" %in% input$locality || length(input$locality) == 0) {
-      df <- df_raw
-      loc_context <- "dataset-wide (Global)"
-    } else {
-      df <- df_raw %>% filter(loc %in% input$locality)
-      loc_context <- if(length(input$locality) == 1) paste("locality:", input$locality) else "selected localities (Per-Locality)"
-    }
+
+    locs_scope <- resolve_selected_localities(input$locality, df_raw, "loc")
+    df <- if (input$res_mode == "global") df_raw else df_raw %>% filter(loc %in% locs_scope)
     
     if (nrow(df) < 2) return()
     
@@ -2452,13 +2465,11 @@ server <- function(input, output, session) {
 
     final_rec <- max(rec_res, min_res_by_dim)
     final_rec <- max(0.1, min(500, round(final_rec, 1)))
-    reasoning <- sprintf("Suggested: %.1f m. Optimized for %s.", final_rec, loc_context)
 
     if (input$res_mode != "fixed") updateSliderInput(session, "grid_res", value = final_rec)
-    output$res_reasoning <- renderText({ reasoning })
     
     if (input$res_mode == "local") {
-        locs_to_calc <- if("ALL" %in% input$locality || length(input$locality) == 0) unique(df_raw$loc) else input$locality
+        locs_to_calc <- locs_scope
         temp_res <- list()
         for (l in locs_to_calc) {
             sub_df <- df_raw %>% filter(loc == l)
@@ -2476,9 +2487,8 @@ server <- function(input, output, session) {
             temp_res[[l]] <- l_res        }
         rv$loc_resolutions <- temp_res
     } else {
-        locs_to_calc <- if("ALL" %in% input$locality || length(input$locality) == 0) unique(df_raw$loc) else input$locality
         temp_res <- list()
-        for (l in locs_to_calc) temp_res[[l]] <- final_rec
+        for (l in locs_scope) temp_res[[l]] <- final_rec
         rv$loc_resolutions <- temp_res
     }
   })
@@ -2501,8 +2511,11 @@ server <- function(input, output, session) {
     m_df <- tryCatch({
       if (tolower(ext) == "csv") read.csv(input$meta_file$datapath)
       else readxl::read_excel(input$meta_file$datapath)
-    }, error = function(e) NULL)
-    
+    }, error = function(e) {
+      showNotification(paste("Could not read the metadata file:", conditionMessage(e)), type = "error")
+      NULL
+    })
+
     req(m_df)
     user_cols <- colnames(rv$user_data)
     new_vars <- match_metadata_columns(m_df, user_cols)
@@ -2607,22 +2620,37 @@ server <- function(input, output, session) {
     showNotification("Variable mapping saved!", type = "message")
   })
 
-  observe({
+  # Rebuild the Context-panel locality selector, preserving the current
+  # selection. Re-issued ONLY when the choice set actually changed: data
+  # mutations that keep the same localities (drawn groups, discretized
+  # columns) must not churn the selector mid-analysis.
+  refresh_locality_choices <- function() {
+    loc_col <- rv$mapping$loc
+    if (is.null(rv$user_data) || is.null(loc_col) || !(loc_col %in% colnames(rv$user_data))) return(invisible(NULL))
+    loc_choices <- unique(rv$user_data[[loc_col]])
+    new_choices <- c("ALL", loc_choices)
+    if (identical(session_state$locality_choices, new_choices)) return(invisible(NULL))
+    session_state$locality_choices <- new_choices
+    curr_locs <- isolate(input$locality)
+    selected_locs <- intersect(curr_locs, new_choices)
+    if (length(selected_locs) == 0) selected_locs <- loc_choices[1]
+    updateSelectInput(session, "locality", choices = new_choices, selected = selected_locs)
+  }
+
+  observeEvent(list(input$map_x, input$map_y, input$map_loc, input$map_crs), {
     req(input$map_x, input$map_y, input$map_loc, input$map_crs)
     rv$mapping$x <- input$map_x
     rv$mapping$y <- input$map_y
     rv$mapping$loc <- input$map_loc
     rv$mapping$crs <- input$map_crs
-    
-    if (!is.null(rv$user_data) && input$map_loc %in% colnames(rv$user_data)) {
-      loc_choices <- unique(rv$user_data[[input$map_loc]])
-      curr_locs <- isolate(input$locality)
-      new_choices <- c("ALL", loc_choices)
-      selected_locs <- intersect(curr_locs, new_choices)
-      if (length(selected_locs) == 0) selected_locs <- loc_choices[1]
-      updateSelectInput(session, "locality", choices = new_choices, selected = selected_locs)
-    }
+    refresh_locality_choices()
   })
+
+  # Data-driven refresh (new upload, added locality values); no-ops unless
+  # the locality choice set changed.
+  observeEvent(rv$user_data, {
+    refresh_locality_choices()
+  }, ignoreInit = TRUE)
 
   output$setup_minimap <- renderLeaflet({
     req(rv$user_data, rv$mapping$x, rv$mapping$y, rv$mapping$crs)
@@ -2712,11 +2740,11 @@ server <- function(input, output, session) {
     d
   }
 
-  observe({
+  observeEvent(list(rv$mapping$vars, input$var_category), {
     req(rv$mapping$vars)
     vars <- rv$mapping$vars
     cats <- unique(sapply(vars, function(x) x$category))
-    
+
     current_cat <- input$var_category
     sel_cat <- if(!is.null(current_cat) && current_cat %in% cats) current_cat else cats[1]
     updateSelectInput(session, "var_category", choices = cats, selected = sel_cat)
@@ -2751,12 +2779,15 @@ server <- function(input, output, session) {
     }
   })
 
+  # Open/close via the .open class (not inline right) so the drawer's CSS -
+  # including the floating nav buttons and the outside-click closer - keys on
+  # a single source of truth.
   observeEvent(input$info_btn, {
-    shinyjs::runjs("$('#docs_drawer').css('right', '0');")
+    shinyjs::runjs("document.getElementById('docs_drawer').classList.add('open');")
   })
-  
+
   observeEvent(input$close_docs_btn, {
-    shinyjs::runjs("$('#docs_drawer').css('right', '-600px');")
+    shinyjs::runjs("document.getElementById('docs_drawer').classList.remove('open');")
   })
 
   observeEvent(input$about_btn, {
@@ -3043,11 +3074,30 @@ server <- function(input, output, session) {
   })
 
 
-  observe({
+  # The range slider parameterizes a variogram fitted in the analysis CRS
+  # (metric), so its scale must be measured there; the raw x/y columns may be
+  # in degrees. The projection is cached against (data, mapping, CRS) so the
+  # slider-bounds observer below does not re-transform every coordinate each
+  # time a run finishes or the diagnostics locality changes.
+  projected_max_dist <- reactive({
+    req(rv$user_data)
+    x_col <- rv$mapping$x
+    y_col <- rv$mapping$y
+    req(x_col, y_col, x_col %in% colnames(rv$user_data), y_col %in% colnames(rv$user_data))
+    coords_df <- rv$user_data[, c(x_col, y_col)]
+    coords_df <- coords_df[complete.cases(coords_df), , drop = FALSE]
+    tryCatch({
+      pts_proj <- st_transform(st_as_sf(coords_df, coords = c(x_col, y_col), crs = rv$mapping$crs), input$crs_selection)
+      bb <- st_bbox(pts_proj)
+      as.numeric(sqrt((bb["xmax"] - bb["xmin"])^2 + (bb["ymax"] - bb["ymin"])^2))
+    }, error = function(e) NA_real_)
+  })
+
+  observeEvent(list(input$var_id, input$m_loc, input$crs_selection, rv$user_data, rv$v_fit_list), {
     req(rv$user_data, input$var_id, rv$mapping$vars)
     meta <- get_current_meta()
     req(meta)
-    
+
     col_name <- meta$actual
     v_data <- rv$user_data[[col_name]]
     if (!is.null(v_data) && is.numeric(v_data) && length(na.omit(v_data)) >= 3) {
@@ -3056,31 +3106,18 @@ server <- function(input, output, session) {
         max_sill <- round(variance * 2, 2)
         step_val <- round(variance / 100, 4)
         if(step_val == 0) step_val <- 0.01
-        
-        x_col <- rv$mapping$x
-        y_col <- rv$mapping$y
-        if (!is.null(x_col) && !is.null(y_col) && x_col %in% colnames(rv$user_data) && y_col %in% colnames(rv$user_data)) {
-          # The range slider parameterizes a variogram fitted in the analysis
-          # CRS (metric), so its scale must be measured there; the raw x/y
-          # columns may be in degrees.
-          coords_df <- rv$user_data[, c(x_col, y_col)]
-          coords_df <- coords_df[complete.cases(coords_df), , drop = FALSE]
-          max_dist <- tryCatch({
-            pts_proj <- st_transform(st_as_sf(coords_df, coords = c(x_col, y_col), crs = rv$mapping$crs), input$crs_selection)
-            bb <- st_bbox(pts_proj)
-            as.numeric(sqrt((bb["xmax"] - bb["xmin"])^2 + (bb["ymax"] - bb["ymin"])^2))
-          }, error = function(e) NA_real_)
-          if (!is.na(max_dist) && max_dist > 0) {
-            max_range <- round(max_dist * 1.5, 0)
-            step_range <- round(max_range / 100, 0)
-            if(step_range == 0) step_range <- 1
-            
-            fit <- rv$v_fit_list[[paste0(input$m_loc %||% "global", "_act")]]
-            if (is.null(fit)) {
-              updateSliderInput(session, "m_nugget", min = 0, max = max_sill, value = 0, step = step_val)
-              updateSliderInput(session, "m_psill", min = 0, max = max_sill, value = round(variance, 2), step = step_val)
-              updateSliderInput(session, "m_range", min = 1, max = max_range, value = round(max_dist / 4, 0), step = step_range)
-            }
+
+        max_dist <- tryCatch(projected_max_dist(), error = function(e) NA_real_)
+        if (!is.null(max_dist) && !is.na(max_dist) && max_dist > 0) {
+          max_range <- round(max_dist * 1.5, 0)
+          step_range <- round(max_range / 100, 0)
+          if(step_range == 0) step_range <- 1
+
+          fit <- rv$v_fit_list[[paste0(input$m_loc %||% "global", "_act")]]
+          if (is.null(fit)) {
+            updateSliderInput(session, "m_nugget", min = 0, max = max_sill, value = 0, step = step_val)
+            updateSliderInput(session, "m_psill", min = 0, max = max_sill, value = round(variance, 2), step = step_val)
+            updateSliderInput(session, "m_range", min = 1, max = max_range, value = round(max_dist / 4, 0), step = step_range)
           }
         }
       }
@@ -3262,7 +3299,7 @@ server <- function(input, output, session) {
   tps_opt_vals <- reactiveVal(NULL)
   observeEvent(input$opt_tps, {
     req(rv$user_data, input$var_id, input$method == "TPS")
-    locs <- if("ALL" %in% input$locality) unique(rv$user_data[[rv$mapping$loc]]) else input$locality
+    locs <- resolve_selected_localities(input$locality, rv$user_data, rv$mapping$loc)
     meta <- get_current_meta(); req(meta)
     
     lambdas <- c(0, 10^seq(-8, 1, length.out = 30))
@@ -3335,38 +3372,40 @@ server <- function(input, output, session) {
     showNotification("TPS Optimization Complete. Per-region Lambdas stored.", type = "message")
   })
   
-  output$tps_opt_panel <- renderUI({
-    res <- tps_opt_vals(); if(is.null(res)) return(NULL)
-    
-    rows <- lapply(res$locs, function(l) {
-      act_val <- get_regional_param("TPS", l, "act")
-      pre_val <- if("pre" %in% res$targets) get_regional_param("TPS", l, "pre") else NA
-      tags$tr(
-        tags$td(l),
-        tags$td(sprintf("%.6f", act_val)),
-        tags$td(if(is.na(pre_val)) "N/A" else sprintf("%.6f", pre_val))
+  # Shared builder for the per-locality optimization summary panels (TPS
+  # lambdas / IDW power factors) - same table, different engine and format.
+  render_opt_summary_panel <- function(engine, vals_reactive, fmt, heading) {
+    renderUI({
+      res <- vals_reactive(); if(is.null(res)) return(NULL)
+
+      rows <- lapply(res$locs, function(l) {
+        act_val <- get_regional_param(engine, l, "act")
+        pre_val <- if("pre" %in% res$targets) get_regional_param(engine, l, "pre") else NA
+        tags$tr(
+          tags$td(l),
+          tags$td(sprintf(fmt, act_val)),
+          tags$td(if(is.na(pre_val)) "N/A" else sprintf(fmt, pre_val))
+        )
+      })
+
+      div(style = "margin-top: 10px; padding: 10px; background-color: #f8f9fa; color: #495057; border: 1px solid #dee2e6; border-radius: 4px; font-size: 0.8em;",
+          h5(heading),
+          tags$table(class = "table table-condensed table-bordered", style = "background-color: #ffffff; color: #000000;",
+            tags$thead(tags$tr(tags$th("Locality"), tags$th("Actual"), tags$th("Predicted"))),
+            tags$tbody(rows)
+          )
       )
     })
-    
-    div(style = "margin-top: 10px; padding: 10px; background-color: #f8f9fa; color: #495057; border: 1px solid #dee2e6; border-radius: 4px; font-size: 0.8em;",
-        h5("Optimization Summary (Best Lambdas):"),
-        tags$table(class = "table table-condensed table-bordered", style = "background-color: #ffffff; color: #000000;",
-          tags$thead(tags$tr(tags$th("Locality"), tags$th("Actual"), tags$th("Predicted"))),
-          tags$tbody(rows)
-        )
-    )
-  })
+  }
+
+  output$tps_opt_panel <- render_opt_summary_panel("TPS", tps_opt_vals, "%.6f", "Optimization Summary (Best Lambdas):")
 
   idw_opt_vals <- reactiveVal(NULL)
   observeEvent(input$opt_idw, {
     req(rv$user_data, input$var_id, input$method == "IDW", input$locality)
     
-    locs <- if("ALL" %in% input$locality || length(input$locality) == 0) {
-      unique(rv$user_data[[rv$mapping$loc]])
-    } else {
-      input$locality
-    }
-    
+    locs <- resolve_selected_localities(input$locality, rv$user_data, rv$mapping$loc)
+
     meta <- get_current_meta(); req(meta)
     factors <- seq(0.5, 5.0, by = 0.5)
     
@@ -3408,27 +3447,7 @@ server <- function(input, output, session) {
     showNotification(paste("IDW Optimization Complete for:", paste(locs, collapse=", ")), type = "message", duration = 5)
   })
   
-  output$idw_opt_panel <- renderUI({
-    res <- idw_opt_vals(); if(is.null(res)) return(NULL)
-    
-    rows <- lapply(res$locs, function(l) {
-      act_val <- get_regional_param("IDW", l, "act")
-      pre_val <- if("pre" %in% res$targets) get_regional_param("IDW", l, "pre") else NA
-      tags$tr(
-        tags$td(l),
-        tags$td(sprintf("%.1f", act_val)),
-        tags$td(if(is.na(pre_val)) "N/A" else sprintf("%.1f", pre_val))
-      )
-    })
-    
-    div(style = "margin-top: 10px; padding: 10px; background-color: #f8f9fa; color: #495057; border: 1px solid #dee2e6; border-radius: 4px; font-size: 0.8em;",
-        h5("Optimization Summary (Best Factors):"),
-        tags$table(class = "table table-condensed table-bordered", style = "background-color: #ffffff; color: #000000;",
-          tags$thead(tags$tr(tags$th("Locality"), tags$th("Actual"), tags$th("Predicted"))),
-          tags$tbody(rows)
-        )
-    )
-  })
+  output$idw_opt_panel <- render_opt_summary_panel("IDW", idw_opt_vals, "%.1f", "Optimization Summary (Best Factors):")
 
     output$idw_metrics_table <- renderTable({
       req(input$method == "IDW", rv$cv_metrics_act)
@@ -3449,9 +3468,8 @@ server <- function(input, output, session) {
     })
   observeEvent(list(input$locality, rv$user_data, rv$mapping$loc), {
     req(input$locality, rv$user_data, rv$mapping$loc)
-    loc_col <- rv$mapping$loc
-    locs <- if("ALL" %in% input$locality) unique(rv$user_data[[loc_col]]) else input$locality
-    
+    locs <- resolve_selected_localities(input$locality, rv$user_data, rv$mapping$loc)
+
     update_selector <- function(id, current_locs) {
       current_sel <- isolate(input[[id]])
       if (!identical(sort(as.character(current_locs)), sort(as.character(current_sel)))) {
@@ -3529,7 +3547,7 @@ server <- function(input, output, session) {
 
   observeEvent(input$auto_fit, {
     req(rv$user_data, input$locality, rv$mapping$x, rv$mapping$y)
-    locs <- if("ALL" %in% input$locality) unique(rv$user_data[[rv$mapping$loc]]) else input$locality
+    locs <- resolve_selected_localities(input$locality, rv$user_data, rv$mapping$loc)
     meta <- get_current_meta()
     req(meta)
     results <- list()
@@ -3627,13 +3645,7 @@ server <- function(input, output, session) {
     req(meta)
     
     loc_col <- rv$mapping$loc
-    selected_locs <- if ("ALL" %in% input$locality || length(input$locality) == 0) {
-      if (!is.null(rv$user_data) && !is.null(loc_col) && loc_col %in% colnames(rv$user_data)) {
-        unique(na.omit(rv$user_data[[loc_col]]))
-      } else "Unknown"
-    } else {
-      input$locality
-    }
+    selected_locs <- resolve_selected_localities(input$locality, rv$user_data, loc_col)
     n_locs <- length(selected_locs)
     if (n_locs == 0) n_locs <- 1
     
@@ -3644,7 +3656,7 @@ server <- function(input, output, session) {
     cores <- if (n_locs > 1) max(1L, min(cores - 1L, n_locs)) else 1L
     
     loc_sample_counts <- numeric(n_locs)
-    if (!is.null(rv$user_data) && !is.null(loc_col) && loc_col %in% colnames(rv$user_data) && !("Unknown" %in% selected_locs)) {
+    if (length(selected_locs) > 0 && !is.null(rv$user_data) && !is.null(loc_col) && loc_col %in% colnames(rv$user_data)) {
       for (idx in seq_along(selected_locs)) {
         l <- selected_locs[idx]
         n_samples <- nrow(rv$user_data[rv$user_data[[loc_col]] == l, ])
@@ -3949,7 +3961,7 @@ server <- function(input, output, session) {
       }
     }
 
-    locs <- if("ALL" %in% input$locality) unique(rv$user_data[[rv$mapping$loc]]) else input$locality
+    locs <- resolve_selected_localities(input$locality, rv$user_data, rv$mapping$loc)
 
     if (!is.null(rv$run_config_summary) && rv$run_config_summary$method != input$method) {
       rv$v_fit_list <- list()
@@ -4381,6 +4393,9 @@ server <- function(input, output, session) {
       rv$bound <- do.call(rbind, unname(b_list_aligned)) %>% sf::st_union()
     }
     rv$loc_names <- names(valid_a)
+    # Signals "this run's results are now in rv$..." to the cached Scientific
+    # Analysis plots (their cache keys embed it).
+    rv$results_rev <- rv$results_rev + 1L
 
     # Point error map: the discrete sample-location errors the Map Viewer's
     # Point Residuals panel shows, exported as points (not the IDW surface,
@@ -4411,13 +4426,11 @@ server <- function(input, output, session) {
         mbe_val <- mean(df_met$pv - df_met$v)
         nse_val <- 1 - sum(resids^2) / sum((df_met$v - mean(df_met$v))^2)
         
-        rv$metrics <- data.frame(
-          Metric = c("RMSE (Avg Error)", "R2 (Correlation)", "R2 (Traditional)", "MBE (Bias)"), 
+        global_metrics <- data.frame(
+          Metric = c("RMSE (Avg Error)", "R2 (Correlation)", "R2 (Traditional)", "MBE (Bias)"),
           Value = c(round(rmse_val, 4), round(r2_val, 4), round(nse_val, 4), round(mbe_val, 4))
         )
-        register_export_item("table_global_metrics", paste(meta$label, "- Global Performance Metrics"), "table", rv$metrics, meta$category)
-      } else {
-        rv$metrics <- data.frame(Metric = c("RMSE (Avg Error)", "R2 (Correlation)", "R2 (Traditional)", "MBE (Bias)"), Value = c(NA, NA, NA, NA))
+        register_export_item("table_global_metrics", paste(meta$label, "- Global Performance Metrics"), "table", global_metrics, meta$category)
       }
     }
     # NOTE: intentionally no get_current_meta() re-read here - the export
@@ -4562,39 +4575,29 @@ server <- function(input, output, session) {
 
   observe({
     req(rv$model_running)
-    n_locs <- 1
-    if (!is.null(rv$sf) && "loc" %in% colnames(rv$sf)) {
-      n_locs <- length(unique(rv$sf$loc))
-    } else if (!is.null(input$locality) && !("ALL" %in% input$locality) && length(input$locality) > 0) {
-      n_locs <- length(input$locality)
-    }
-    poll_interval <- if (n_locs < 5) 250 else if (n_locs <= 20) 1000 else 2000
-    invalidateLater(poll_interval)
-    
-    loc_col <- rv$mapping$loc
-    selected_locs <- if ("ALL" %in% input$locality || length(input$locality) == 0) {
-      if (!is.null(rv$user_data) && !is.null(loc_col) && loc_col %in% colnames(rv$user_data)) {
-        unique(na.omit(rv$user_data[[loc_col]]))
-      } else NULL
-    } else {
-      input$locality
-    }
-    n_locs_calc <- length(selected_locs)
-    if (n_locs_calc == 0) n_locs_calc <- 1
-    # expected model count belongs to the run in progress (committed context),
-    # not to whatever the sidebar was changed to while it runs
+    # Everything about the run in progress comes from the committed context
+    # (rv$disp), never the live sidebar: changing the locality selection while
+    # a run executes must not move the expected-model count under the bar.
     d <- rv$disp
+    selected_locs <- if (!is.null(d)) d$localities else NULL
+    n_locs_calc <- max(1L, length(selected_locs))
+    poll_interval <- if (n_locs_calc < 5) 250 else if (n_locs_calc <= 20) 1000 else 2000
+    invalidateLater(poll_interval)
+
     comp_mode <- !is.null(d) && (isTRUE(d$comp_mode) || !identical(d$value_type, "actual"))
     expected_models <- n_locs_calc * (if(comp_mode) 2 else 1)
-    
+
     files <- list.files(path = session_progress_dir, pattern = paste0("^progress_", session_id, "_.*_.*\\.txt$"), full.names = TRUE)
     if(length(files) > 0) {
       vals <- vapply(files, function(f) {
         val <- tryCatch(as.numeric(readLines(f, warn = FALSE)), error = function(e) NA_real_)
         if(length(val) == 0 || is.na(val)) 0 else val
       }, numeric(1))
-      
-      avg_pct <- sum(vals, na.rm = TRUE) / expected_models
+
+      # Defensive denominator: if an engine fails before its progress file
+      # exists, averaging over the full expectation would park the bar short
+      # of its cap until the completion handler resolves.
+      avg_pct <- sum(vals, na.rm = TRUE) / max(1L, min(expected_models, length(files)))
       
       bar_width <- 50 + (avg_pct * 0.5)
       bar_width <- max(50, min(99, bar_width)) # Cap at 99% until complete handler resolves
@@ -4915,17 +4918,25 @@ server <- function(input, output, session) {
 
   # --- proxy-managed overlays (no raster re-encode on toggle) ---
 
+  # Run points reprojected for Leaflet, cached on rv$sf only: styling ticks
+  # (marker size slider, label toggles, palette) reuse the projected object
+  # instead of re-running st_transform on every invalidation.
+  pts_view_4326 <- reactive({
+    pts <- rv$sf
+    if (is.null(pts) || nrow(pts) == 0) return(NULL)
+    tryCatch(st_transform(pts, 4326), error = function(e) NULL)
+  })
+
   # Styled sampling points + labels + their legend
   observe({
     map_overlay_rev()
     show <- isTRUE(input$show_points_viewer)
     is_resid <- identical(input$map_view, "view_resid")
-    pts <- rv$sf
 
     pts_view <- NULL
     popup_fn <- NULL
-    if (show && !is.null(pts) && nrow(pts) > 0) {
-      pts_view <- tryCatch(st_transform(pts, 4326), error = function(e) NULL)
+    if (show) {
+      pts_view <- pts_view_4326()
       if (!is.null(pts_view)) popup_fn <- make_popup_fn(colnames(st_drop_geometry(pts_view)))
     }
 
@@ -4990,9 +5001,10 @@ server <- function(input, output, session) {
     }
   })
 
-  # Distance scale. The control lives in the external #distance_scale_container
-  # (a global setInterval relocates any .leaflet-control-scale there), so it is
-  # toggled with plain JS on the live map instances instead of a re-render.
+  # Distance scale. The control lives in the external #distance_scale_container:
+  # it is moved (and styled) there right after creation, so no DOM polling is
+  # needed, and it is toggled with plain JS on the live map instances instead
+  # of a re-render.
   observe({
     map_overlay_rev()
     show <- isTRUE(input$show_scale)
@@ -5010,6 +5022,15 @@ server <- function(input, output, session) {
           if (map._monolithScale) { try { map.removeControl(map._monolithScale); } catch(e) {} map._monolithScale = null; }
           if (show) {
             map._monolithScale = L.control.scale({position: 'bottomleft', metric: true, imperial: false}).addTo(map);
+            var sc = map._monolithScale.getContainer();
+            if (c && sc) {
+              c.appendChild(sc);
+              sc.style.background = 'white';
+              sc.style.padding = '5px';
+              sc.style.border = '1px solid #ccc';
+              sc.style.borderRadius = '4px';
+              sc.style.margin = '0 auto';
+            }
           }
         });
       }, 400);
@@ -5193,7 +5214,22 @@ server <- function(input, output, session) {
       }
    })
 
-   output$vgm_plot_main <- renderPlot({
+   # Manual-mode slider values feed a live overlay line on the fitted
+   # variogram plots; they belong in the cache key only while they actually
+   # affect the plot (the short-circuit reads mirror the plot's own logic).
+   vgm_manual_overlay_key <- function(target) {
+     if (identical(input$vgm_mode, "manual") && identical(input$sel_loc_stats, input$m_loc)) {
+       applies <- if (target == "act") {
+         is.null(input$m_target) || input$m_target == "act"
+       } else {
+         identical(input$m_target, "pre")
+       }
+       if (applies) return(list(input$m_psill, input$k_mod, input$m_range, input$m_nugget))
+     }
+     NULL
+   }
+
+   output$vgm_plot_main <- renderCachedPlot({
      loc <- input$sel_loc_stats; meta <- get_display_meta()
      req(loc, meta)
      if(loc == "Total (Combined)") {
@@ -5234,8 +5270,13 @@ server <- function(input, output, session) {
        }
        p
      }
-   })
-   output$vgm_plot_pred <- renderPlot({
+   }, cacheKeyExpr = {
+     loc <- input$sel_loc_stats
+     list("vgm_main", loc, rv$results_rev, rv$disp$actual,
+          rv$v_emp_list[[paste0(loc, "_act")]], rv$v_fit_list[[paste0(loc, "_act")]],
+          vgm_manual_overlay_key("act"))
+   }, cache = "session")
+   output$vgm_plot_pred <- renderCachedPlot({
      loc <- input$sel_loc_stats; meta <- get_display_meta()
      req(loc, meta)
      if(loc == "Total (Combined)") {
@@ -5282,27 +5323,60 @@ server <- function(input, output, session) {
        }
        p
      }
-   })
+   }, cacheKeyExpr = {
+     loc <- input$sel_loc_stats
+     list("vgm_pred", loc, rv$results_rev, rv$disp$actual, rv$disp$value_type,
+          rv$v_emp_list[[paste0(loc, "_pre")]], rv$v_fit_list[[paste0(loc, "_pre")]],
+          vgm_manual_overlay_key("pre"))
+   }, cache = "session")
 
-    output$model_summary_ui_act <- renderUI({
+  # RK linear-trend panels: fit-statistic chips + coefficient table (raw
+  # summary.lm print kept behind a collapsible details element). Falls back to
+  # the verbatim print if the stored object is not a summary.lm.
+  output$model_summary_ui_act <- renderUI({
     loc <- input$sel_loc_stats; req(loc)
     if (loc == "Total (Combined)") {
-      return(div(style="padding: 12px; background-color: #f8f9fa; border: 1px dashed #ced4da; border-radius: 6px; color: #6c757d; font-style: italic; text-align: center;", 
+      return(div(style="padding: 12px; background-color: #f8f9fa; border: 1px dashed #ced4da; border-radius: 6px; color: #6c757d; font-style: italic; text-align: center;",
                  "Linear trend summaries are computed per locality. Please select a specific locality from the analysis filter list above to view details."))
     }
-    req(rv$model_summaries[[paste0(loc, "_act")]])
-    tagList(verbatimTextOutput("summ_act_static"))
+    summary_obj <- rv$model_summaries[[paste0(loc, "_act")]]
+    req(summary_obj)
+    build_rk_trend_ui(summary_obj, "rk_coef_dt_act", "summ_act_static") %||%
+      tagList(verbatimTextOutput("summ_act_static"))
   })
   output$model_summary_ui_pre <- renderUI({
     loc <- input$sel_loc_stats; req(loc)
     if (loc == "Total (Combined)") {
-      return(div(style="padding: 12px; background-color: #f8f9fa; border: 1px dashed #ced4da; border-radius: 6px; color: #6c757d; font-style: italic; text-align: center;", 
+      return(div(style="padding: 12px; background-color: #f8f9fa; border: 1px dashed #ced4da; border-radius: 6px; color: #6c757d; font-style: italic; text-align: center;",
                  "Linear trend summaries are computed per locality. Please select a specific locality from the analysis filter list above to view details."))
     }
-    req(rv$model_summaries[[paste0(loc, "_pre")]])
-    tagList(verbatimTextOutput("summ_pre_static"))
+    summary_obj <- rv$model_summaries[[paste0(loc, "_pre")]]
+    req(summary_obj)
+    build_rk_trend_ui(summary_obj, "rk_coef_dt_pre", "summ_pre_static") %||%
+      tagList(verbatimTextOutput("summ_pre_static"))
   })
-  
+
+  output$rk_coef_dt_act <- DT::renderDataTable({
+    loc <- input$sel_loc_stats
+    req(loc, loc != "Total (Combined)")
+    summary_obj <- rv$model_summaries[[paste0(loc, "_act")]]
+    req(summary_obj)
+    df <- rk_coef_table(summary_obj, rv$mapping$vars)
+    req(df)
+    sci_dt(df)
+  })
+
+  output$rk_coef_dt_pre <- DT::renderDataTable({
+    loc <- input$sel_loc_stats
+    req(loc, loc != "Total (Combined)")
+    summary_obj <- rv$model_summaries[[paste0(loc, "_pre")]]
+    req(summary_obj)
+    df <- rk_coef_table(summary_obj, rv$mapping$vars)
+    req(df)
+    sci_dt(df)
+  })
+
+
   output$summ_act_static <- renderPrint({
     loc <- input$sel_loc_stats
     req(loc, loc != "Total (Combined)")
@@ -5319,25 +5393,33 @@ server <- function(input, output, session) {
     summary_obj
   })
 
-  output$rf_importance_plot_act <- renderPlot({
+  output$rf_importance_plot_act <- renderCachedPlot({
     loc <- input$sel_loc_stats; req(loc)
     if (loc == "Total (Combined)") {
       return(ggplot() + annotate("text", x = 4, y = 4, label = "RF Variable Importance is generated per locality.\nPlease select a specific locality from the dropdown.", size = 5, color = "grey40") + theme_void())
     }
     req(rv$rf_models[[paste0(loc, "_act")]])
     randomForest::varImpPlot(rv$rf_models[[paste0(loc, "_act")]], main = paste("Variable Importance (Actual):", loc))
-  })
-  output$rf_importance_plot_pre <- renderPlot({
+  }, cacheKeyExpr = {
+    # is.null() stands in for the model object itself (too heavy to hash);
+    # rv$results_rev separates runs, the null flag catches the dispatch reset.
+    loc <- input$sel_loc_stats
+    list("rf_imp_act", loc, rv$results_rev, is.null(rv$rf_models[[paste0(loc, "_act")]]))
+  }, cache = "session")
+  output$rf_importance_plot_pre <- renderCachedPlot({
     loc <- input$sel_loc_stats; req(loc)
     if (loc == "Total (Combined)") {
       return(ggplot() + annotate("text", x = 4, y = 4, label = "RF Variable Importance is generated per locality.\nPlease select a specific locality from the dropdown.", size = 5, color = "grey40") + theme_void())
     }
     req(rv$rf_models[[paste0(loc, "_pre")]])
     randomForest::varImpPlot(rv$rf_models[[paste0(loc, "_pre")]], main = paste("Variable Importance (Predicted):", loc))
-  })
+  }, cacheKeyExpr = {
+    loc <- input$sel_loc_stats
+    list("rf_imp_pre", loc, rv$results_rev, is.null(rv$rf_models[[paste0(loc, "_pre")]]))
+  }, cache = "session")
   
   render_internal_vgm_plot <- function(type) {
-    renderPlot({
+    renderCachedPlot({
       loc <- input$sel_loc_stats; req(loc)
       title_suffix <- if (type == "act") "(Actual)" else "(Predicted)"
       col_resid <- if (type == "act") "model_resid_act" else "model_resid_pre"
@@ -5353,11 +5435,15 @@ server <- function(input, output, session) {
         print(p_res)
       } else {
         req(rv$v_emp_list[[paste0(loc, "_", type)]], rv$v_fit_list[[paste0(loc, "_", type)]])
-        p_res <- plot(rv$v_emp_list[[paste0(loc, "_", type)]], rv$v_fit_list[[paste0(loc, "_", type)]], 
+        p_res <- plot(rv$v_emp_list[[paste0(loc, "_", type)]], rv$v_fit_list[[paste0(loc, "_", type)]],
              main = list(label = paste("Internal Residual Variogram", paste0(title_suffix, ":"), loc), cex = 0.85), scales = list(cex = 0.75))
         print(p_res)
       }
-    })
+    }, cacheKeyExpr = {
+      loc <- input$sel_loc_stats
+      list("internal_vgm", type, loc, rv$results_rev,
+           rv$v_emp_list[[paste0(loc, "_", type)]], rv$v_fit_list[[paste0(loc, "_", type)]])
+    }, cache = "session")
   }
 
   output$rk_internal_vgm_act  <- render_internal_vgm_plot("act")
@@ -5366,7 +5452,7 @@ server <- function(input, output, session) {
   output$rfk_internal_vgm_pre <- render_internal_vgm_plot("pre")
 
   render_ck_variogram_plot <- function(type) {
-    renderPlot({
+    renderCachedPlot({
       loc <- input$sel_loc_stats; req(loc)
       if (loc == "Total (Combined)") {
         return(ggplot() + annotate("text", x = 4, y = 4, label = "Cross-variograms are generated per locality.\nPlease select a specific locality from the dropdown.", size = 5, color = "grey40") + theme_void())
@@ -5380,7 +5466,10 @@ server <- function(input, output, session) {
       title_suffix <- if (type == "act") "(Actual)" else "(Predicted)"
       p_ck <- plot(vm, model = g$model, main = paste("Cross-Variogram", paste0(title_suffix, ":"), loc))
       print(p_ck)
-    })
+    }, cacheKeyExpr = {
+      loc <- input$sel_loc_stats
+      list("ck_vgm", type, loc, rv$results_rev, is.null(rv$gstat_objs[[paste0(loc, "_", type)]]))
+    }, cache = "session")
   }
 
   output$ck_variogram_plot_act <- render_ck_variogram_plot("act")
@@ -5429,14 +5518,18 @@ server <- function(input, output, session) {
                       Actual = get_vgm_params(f_a),
                       Predicted = get_vgm_params(f_p)))
   })
-  output$tps_gcv_plot_act <- renderPlot({
+  output$tps_gcv_plot_act <- renderCachedPlot({
     loc <- input$sel_loc_stats; req(loc, identical(rv$disp$method, "TPS"))
     tryCatch({
       build_tps_gcv_plot(rv$tps_gcv_data, loc, "act")
     }, error = function(e) {
       plot(1, 1, type="n", main=paste("GCV Plot Error:", e$message), axes=F, xlab="", ylab="")
     })
-  })
+  }, cacheKeyExpr = {
+    # tps_gcv_data also changes outside runs (the Optimize button), so the
+    # whole (small) list is part of the key.
+    list("tps_gcv_act", input$sel_loc_stats, rv$results_rev, rv$disp$method, rv$tps_gcv_data)
+  }, cache = "session")
 
   build_obs_pred_plot <- function(df, title, x_lab = "Observed", y_lab = "Predicted") {
     req(df, nrow(df) > 0)
@@ -5465,7 +5558,7 @@ server <- function(input, output, session) {
       theme_minimal()
   }
 
-  output$obs_pred_plot_act <- renderPlot({
+  output$obs_pred_plot_act <- renderCachedPlot({
     req(input$sel_loc_stats, rv$cv_data_act)
     loc <- input$sel_loc_stats
     if(loc == "Total (Combined)") {
@@ -5477,11 +5570,13 @@ server <- function(input, output, session) {
        if(inherits(df, "Spatial")) df <- as.data.frame(df)
     }
     build_obs_pred_plot(df, title = paste("Observed vs Predicted:", loc))
-  })
+  }, cacheKeyExpr = {
+    list("obs_pred_act", input$sel_loc_stats, rv$results_rev, names(rv$cv_data_act))
+  }, cache = "session")
 
   output$resid_vgm_plot_act <- render_resid_plot(reactive(rv$cv_data_act), "")
 
-  output$obs_pred_plot_pre <- renderPlot({
+  output$obs_pred_plot_pre <- renderCachedPlot({
     req(input$sel_loc_stats, rv$cv_data_pre)
     loc <- input$sel_loc_stats
     if(loc == "Total (Combined)") {
@@ -5493,18 +5588,22 @@ server <- function(input, output, session) {
        if(inherits(df, "Spatial")) df <- as.data.frame(df)
     }
     build_obs_pred_plot(df, title = paste("Observed vs Predicted (Predicted Map):", loc))
-  })
+  }, cacheKeyExpr = {
+    list("obs_pred_pre", input$sel_loc_stats, rv$results_rev, names(rv$cv_data_pre))
+  }, cache = "session")
 
   output$resid_vgm_plot_pre <- render_resid_plot(reactive(rv$cv_data_pre), "(Predicted Map)")
 
-  output$tps_gcv_plot_pre <- renderPlot({
+  output$tps_gcv_plot_pre <- renderCachedPlot({
     loc <- input$sel_loc_stats; req(loc, identical(rv$disp$method, "TPS"))
     tryCatch({
       build_tps_gcv_plot(rv$tps_gcv_data, loc, "pre")
     }, error = function(e) {
       plot(1, 1, type="n", main=paste("GCV Plot Error:", e$message), axes=F, xlab="", ylab="")
     })
-  })
+  }, cacheKeyExpr = {
+    list("tps_gcv_pre", input$sel_loc_stats, rv$results_rev, rv$disp$method, rv$tps_gcv_data)
+  }, cache = "session")
 
   output$regional_params_table <- DT::renderDataTable({
     loc <- input$sel_loc_stats; req(loc, (rv$disp$method %||% "") %in% c("IDW", "TPS"))
@@ -5840,12 +5939,16 @@ server <- function(input, output, session) {
                    "area_table_total_act", "area_table_total_pre",
                    "area_table_loc_act", "area_table_loc_pre",
                    "uploaded_metrics_table", "kappa_table",
-                   "run_config_display", "log_output")) {
+                   "run_config_display", "log_output",
+                   # raw RK summaries live inside a collapsed <details>:
+                   # opening it fires no Shiny visibility event, so they must
+                   # render eagerly or they would stay blank until reveal
+                   "summ_act_static", "summ_pre_static")) {
     outputOptions(output, out_id, suspendWhenHidden = FALSE)
   }
 
   last_notified_warnings <- reactiveVal(character(0))
-  observe({
+  observeEvent(rv$log, {
     req(rv$log)
     log_lines <- unlist(strsplit(rv$log, "\n", fixed = TRUE))
     warn_lines <- grep("\\[WARN\\]", log_lines, value = TRUE)

@@ -1240,6 +1240,12 @@ run_regional_interpolation <- function(item, current_method, current_crs, aux_va
             }
           } else NULL
         }, error = function(e) NULL)
+        if (is.null(local_shp)) {
+          # The user supplied a boundary shapefile but it cannot be applied to
+          # this locality (projection failure or no spatial overlap); say so
+          # instead of silently swapping in the point-derived boundary.
+          write_warning_file(l, "act", "Uploaded shapefile boundary could not be applied (projection or overlap issue); using point-derived boundary.")
+        }
       }
     }
     

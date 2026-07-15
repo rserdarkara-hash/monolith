@@ -1,3 +1,9 @@
+## In-App Documentation
+
+The header's **info (i) button** opens this documentation in a slide-in drawer with three tabs (User Guide, Scientific Guide, Descriptive & Exploratory Suite). While the drawer is open:
+  - Click anywhere **outside the drawer** (or the ✕ button) to close it.
+  - A **floating button column** in the lower-right corner of the drawer navigates the open document: jump to the top or end, or step to the previous/next section heading.
+
 ## Data Ingestion & Configuration
 
 The Data Setup tab presents the configuration as sequential step cards; the later steps appear automatically once a dataset is loaded.
@@ -48,7 +54,7 @@ The application requires cleanly structured, georeferenced tabular data.
 ## Mapping: 1. Context
 
 **1.1 Locality (Spatial Grouping)**
-* **Locality Selection:** The app uses your designated "Grouping" column to partition the dataset (Step 2). You can select a single field (e.g., "Zone A") or "ALL" to run a batch-parallelized interpolation across multiple separate spatial domains simultaneously.
+* **Locality Selection:** The app uses your designated "Grouping" column to partition the dataset (Step 2). You can select a single field (e.g., "Zone A") or "ALL" to run a batch-parallelized interpolation across multiple separate spatial domains simultaneously. Clearing the selection entirely is treated the same as "ALL": every analysis path (runs, optimizers, auto-fit, resolution suggestions) resolves it to all localities. Rows with a missing locality value are excluded from "ALL"-type selections.
 * This selection also seeds the **Spatial Scope** of the Classification Suite (Tab 6): the module's locality picker follows it by default and can then be adjusted independently there.
 
 **1.2 Variable Selection & Category**
@@ -150,8 +156,9 @@ Once selections are made, the main interface transitions to the analytical modul
      - **History-Aware Logic:** If sufficient prior runs exist in the `.csv` log for the chosen method, the engine uses a linear model to predict runtime based on sample counts.
      - **Cold-Start Method Multipliers:** If no history exists, it uses base multipliers: RFK (1.0x), RK (1.0x), and CK (1.3x) which are calibrated from real measurements. OK (0.5x), IDW (0.5x), and TPS (0.3x) are currently unverified estimates based on theoretical complexity.
    - Click **Run Interpolation** and proceed to **Map Viewer** tab. The system will perform cross-validation (Leave-One-Out CV for 50 or fewer observations, or 10-fold CV for larger datasets) *(Note: cross-validation utilizes a fixed random seed by default; see the Scientific Guide Section 9 for customization)*, generate the surface, and populate the Validation Diagnostics table with RMSE, R², and Moran's I metrics *(Note: Moran's I uses a hardcoded distance threshold multiplier; see the Scientific Guide Section 9 for customization)*.
-   - **Automatic Fallbacks:** If an engine cannot be fitted for a locality (e.g., TPS on a degenerate point layout, or CK/RK/RFK model failures), the app automatically falls back to a simpler engine and reports this in the run log and as a warning notification; check the log if a map looks different from the method you selected.
+   - **Automatic Fallbacks:** If an engine cannot be fitted for a locality (e.g., TPS on a degenerate point layout, or CK/RK/RFK model failures), the app automatically falls back to a simpler engine and reports this in the run log and as a warning notification; check the log if a map looks different from the method you selected. Likewise, if an uploaded boundary shapefile cannot be applied to a locality (projection failure or no spatial overlap), the run proceeds with the point-derived boundary and says so in the progress warnings.
    - **Responsive Diagnostic Views:** The UI employs `shinyjs` to dynamically toggle the visibility of complex validation diagnostics (like the RF Variable Importance Plot, Internal Residual Variogram, or TPS GCV Diagnostic Plot) based on the active Spatial Engine and whether the user is viewing `Actual` or `Predicted` data. This prevents empty plots from rendering and provides visual cleanliness.
+   - **RK Linear Trend Panel:** For Regression Kriging runs, the Scientific Analysis tab presents the trend model as compact fit-statistic chips (R², adjusted R², residual standard error, F statistic with its p-value, and sample size) followed by a sortable coefficient table listing each covariate's estimate, standard error, 95% confidence interval, t value, p-value, and significance code. Select a specific locality in the analysis filter to view it (trend models are fitted per locality). The classic R console summary remains available under the collapsible *Raw R model summary* link, and the exported RK coefficient table keeps full-precision numeric values.
 
 ---
 

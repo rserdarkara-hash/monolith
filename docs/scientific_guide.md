@@ -34,6 +34,8 @@ First, a generalized linear model fits the trend <i>m(x)</i> using secondary cov
 
 **Agronomical Example:** Mapping Soil Organic Carbon (SOC). Elevation and soil moisture (derived from satellite imagery) are used to predict the baseline SOC trend. RK then kriges the residuals to adjust for localized organic matter accumulations missed by the remote sensing data.
 
+**Reported Trend Diagnostics:** For each per-locality trend model, the Scientific Analysis tab reports R², adjusted R², the residual standard error with its degrees of freedom, the overall F test (with p-value), and a coefficient table with standard errors, t statistics, p-values, and 95% confidence intervals computed from the t distribution on the residual degrees of freedom. These describe the *trend component only*; the quality of the full RK prediction (trend + kriged residuals) is assessed by the cross-validation metrics in the Model Performance table.
+
 ### 1.3 Random Forest Kriging (RFK)
 
 **Mathematical Intuition:** RFK mirrors the logic of Regression Kriging but replaces the linear trend model with a Random Forest ensemble learning algorithm. Random Forests build numerous decision trees and average their predictions. RFs are highly flexible and capable of capturing complex, non-linear interactions among covariates without strictly assuming a linear or parametric functional form. OK is then applied to the Random Forest residuals.

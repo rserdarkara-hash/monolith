@@ -146,6 +146,39 @@ create_app_theme <- function(light_blue, dark_bg, content_bg, font_family, map_t
       padding: 20px;
       border-left: 2px solid {{light_blue}} !important;
     }
+    .docs-drawer.open {
+      right: 0;
+    }
+    /* Floating in-drawer document navigation (visible only while open) */
+    .docs-nav-fab {
+      display: none;
+    }
+    .docs-drawer.open .docs-nav-fab {
+      display: flex;
+      flex-direction: column;
+      gap: 6px;
+      position: fixed;
+      right: 24px;
+      bottom: 40px;
+      z-index: 2510;
+    }
+    .docs-nav-fab .btn {
+      width: 40px;
+      height: 40px;
+      border-radius: 50%;
+      padding: 0;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      background-color: {{light_blue}} !important;
+      color: #ffffff !important;
+      border: none;
+      box-shadow: 0 2px 6px rgba(0,0,0,0.35);
+      opacity: 0.85;
+    }
+    .docs-nav-fab .btn:hover {
+      opacity: 1;
+    }
     
     /* Bootstrap Modal Overrides for Correct Layering on Top of Map Viewer Covers */
     .modal {
