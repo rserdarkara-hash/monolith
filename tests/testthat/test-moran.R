@@ -79,3 +79,45 @@ test_that("calc_moran handles collinear coordinates gracefully", {
   moran_val <- suppressWarnings(calc_moran(residuals, coords))
   expect_true(is.na(moran_val) || is.numeric(moran_val))
 })
+test_that("calc_moran's duplicate jitter scales to the coordinate magnitude", {
+  # A fixed 1e-8 displacement is only ~10 ULPs at a UTM northing of 4.5e6, so
+  # it collides back onto the original double and leaves duplicates in place;
+  # spdep then warns "identical points found" and the neighbour definition
+  # becomes ambiguous. The jitter must scale with the data instead.
+  set.seed(3)
+  n <- 600
+  coords <- cbind(runif(n, 450000, 460000), runif(n, 4500000, 4510000))
+  coords[1:20, ] <- coords[1, ]          # 20 exactly co-located points
+  resid <- rnorm(n)
+
+  warns <- character(0)
+  mi <- withCallingHandlers(
+    calc_moran(resid, coords),
+    warning = function(w) {
+      warns <<- c(warns, conditionMessage(w))
+      invokeRestart("muffleWarning")
+    })
+
+  expect_true(is.finite(mi))
+  # n > 500 means the all-pairs fallback returns NA, so a finite value proves
+  # the primary kNN path ran; no identical-point warning proves the duplicates
+  # were actually separated rather than merely nudged below representability.
+  expect_false(any(grepl("identical points", warns, fixed = TRUE)))
+
+  # Guard the mechanism directly: at this magnitude the historical amount is
+  # not enough to keep six copies of one coordinate distinct.
+  v <- rep(4500000, 6)
+  set.seed(1); old_amt <- jitter(v, amount = 1e-8)
+  set.seed(1); new_amt <- jitter(v, amount = max(1e-8, 1e4 * 1e-9, 4500000 * 1e-12))
+  expect_lt(length(unique(old_amt)), 6L)
+  expect_equal(length(unique(new_amt)), 6L)
+})
+
+test_that("calc_moran stays reproducible for duplicate coordinates", {
+  set.seed(11)
+  coords <- cbind(runif(40, 450000, 451000), runif(40, 4500000, 4501000))
+  coords[1:5, ] <- coords[1, ]
+  resid <- rnorm(40)
+  expect_equal(suppressWarnings(calc_moran(resid, coords)),
+               suppressWarnings(calc_moran(resid, coords)))
+})

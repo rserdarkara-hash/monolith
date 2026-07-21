@@ -67,6 +67,9 @@ desc_exploratory_ui <- function(id) {
     shiny::div(style = "padding: 20px;",
         shiny::h2("Analytics Engine"),
         shiny::p("Explore your data with descriptive statistics, correlation mapping, and principal component analysis. Investigate governing factors on a specific parameter."),
+        shinyWidgets::radioGroupButtons(ns("name_mode"), "Variable naming:",
+                            choices = c("Variable labels" = "label", "Column names" = "colname"),
+                            selected = "label", size = "sm"),
         shiny::hr(),
         shiny::fluidRow(
           shiny::column(12,
@@ -192,14 +195,21 @@ desc_exploratory_ui <- function(id) {
 desc_exploratory_server <- function(id, data_reactive, vars_metadata_reactive) {
   shiny::moduleServer(id, function(input, output, session) {
     ns <- session$ns
-    
+
+    # Naming-mode switch: "label" feeds the uploaded variable metadata to every
+    # dropdown/plot/table builder; "colname" feeds NULL, which makes
+    # get_var_label()/apply_labels_to_df() fall back to raw column names.
+    vmeta <- shiny::reactive({
+      if (identical(input$name_mode, "colname")) NULL else vars_metadata_reactive()
+    })
+
     shiny::observe({
       req(data_reactive())
       df <- data_reactive()
       cols <- colnames(df)
-      valid_cols <- cols[!grepl("\\bx\\b|\\by\\b|lon|lat|latitude|longitude", cols, ignore.case=TRUE)]
+      valid_cols <- cols[!is_coord_col(cols)]
       
-      vars_metadata <- vars_metadata_reactive()
+      vars_metadata <- vmeta()
       if (!is.null(vars_metadata)) {
         choices_named <- setNames(valid_cols, get_var_labels(valid_cols, vars_metadata))
       } else {
@@ -278,9 +288,9 @@ desc_exploratory_server <- function(id, data_reactive, vars_metadata_reactive) {
       df <- data_reactive()
       cols <- colnames(df)
       num_cols <- cols[sapply(df, is.numeric)]
-      valid_cols <- cols[!grepl("\\bx\\b|\\by\\b|lon|lat|latitude|longitude", cols, ignore.case=TRUE)]
+      valid_cols <- cols[!is_coord_col(cols)]
       
-      vars_metadata <- vars_metadata_reactive()
+      vars_metadata <- vmeta()
       if (!is.null(vars_metadata)) {
         valid_named <- setNames(valid_cols, get_var_labels(valid_cols, vars_metadata))
         num_named <- setNames(num_cols, get_var_labels(num_cols, vars_metadata))
@@ -453,8 +463,8 @@ desc_exploratory_server <- function(id, data_reactive, vars_metadata_reactive) {
         return(p)
       }
       
-      var_x_label <- get_var_label(input$desc_var_x, vars_metadata_reactive())
-      var_y_label <- get_var_label(input$desc_var_y, vars_metadata_reactive())
+      var_x_label <- get_var_label(input$desc_var_x, vmeta())
+      var_y_label <- get_var_label(input$desc_var_y, vmeta())
       
       if(!is.null(input$desc_var_x) && input$desc_var_x != "") {
           colnames(df_global)[colnames(df_global) == input$desc_var_x] <- var_x_label
@@ -485,21 +495,21 @@ desc_exploratory_server <- function(id, data_reactive, vars_metadata_reactive) {
                                   stat_letter_pos = input$desc_stat_letter_pos)
         }
       } else {
-        var_z_label <- get_var_label(input$desc_var_z, vars_metadata_reactive())
+        var_z_label <- get_var_label(input$desc_var_z, vmeta())
         if(!is.null(input$desc_var_z) && input$desc_var_z != "") {
             colnames(df_global)[colnames(df_global) == input$desc_var_z] <- var_z_label
             colnames(df_local)[colnames(df_local) == input$desc_var_z] <- var_z_label
         }
         
-        multi_labels <- get_var_labels(input$desc_vars_multi, vars_metadata_reactive())
+        multi_labels <- get_var_labels(input$desc_vars_multi, vmeta())
         if(!is.null(input$desc_vars_multi)) {
-            df_global <- apply_labels_to_df(df_global, input$desc_vars_multi, vars_metadata_reactive())
-            df_local <- apply_labels_to_df(df_local, input$desc_vars_multi, vars_metadata_reactive())
+            df_global <- apply_labels_to_df(df_global, input$desc_vars_multi, vmeta())
+            df_local <- apply_labels_to_df(df_local, input$desc_vars_multi, vmeta())
         }
         
         vars <- switch(p_type,
                        "qq" = var_x_label,
-                       "sinaplot" = if(isTruthy(input$desc_var_y)) c(var_x_label, get_var_label(input$desc_var_y, vars_metadata_reactive())) else var_x_label,
+                       "sinaplot" = if(isTruthy(input$desc_var_y)) c(var_x_label, get_var_label(input$desc_var_y, vmeta())) else var_x_label,
                        "ridge" = var_x_label,
                        "density_heatmap" = c(var_x_label, var_y_label),
                        "xyz_surface" = c(var_x_label, var_y_label, var_z_label),
@@ -547,19 +557,20 @@ desc_exploratory_server <- function(id, data_reactive, vars_metadata_reactive) {
       var <- input$desc_var_x
       if(!is.numeric(df[[var]])) return(data.frame(Message="Selected primary variable is not numeric."))
       
-      agg_mean <- aggregate(df[[var]] ~ df$group_id, FUN=function(x) mean(x, na.rm=TRUE))
-      agg_sd <- aggregate(df[[var]] ~ df$group_id, FUN=function(x) sd(x, na.rm=TRUE))
-      agg_n <- aggregate(df[[var]] ~ df$group_id, FUN=length)
-      agg_min <- aggregate(df[[var]] ~ df$group_id, FUN=function(x) min(x, na.rm=TRUE))
-      agg_max <- aggregate(df[[var]] ~ df$group_id, FUN=function(x) max(x, na.rm=TRUE))
-      
+      # One grouped pass for all five statistics; the formula interface
+      # na.omit()s beforehand, so each x arrives NA-free (same numbers as the
+      # former five separate aggregate() calls).
+      agg <- aggregate(df[[var]] ~ df$group_id,
+                       FUN = function(x) c(n = length(x), mean = mean(x), sd = sd(x),
+                                           min = min(x), max = max(x)))
+      stats_mat <- agg[, 2]
       res <- data.frame(
-        Group = agg_mean[,1], 
-        Count = agg_n[,2], 
-        Mean = round(agg_mean[,2], 3), 
-        SD = round(agg_sd[,2], 3),
-        Min = round(agg_min[,2], 3),
-        Max = round(agg_max[,2], 3)
+        Group = agg[, 1],
+        Count = as.integer(stats_mat[, "n"]),
+        Mean = round(stats_mat[, "mean"], 3),
+        SD = round(stats_mat[, "sd"], 3),
+        Min = round(stats_mat[, "min"], 3),
+        Max = round(stats_mat[, "max"], 3)
       )
       
       tot_mean <- mean(df[[var]], na.rm=TRUE)
@@ -631,7 +642,7 @@ desc_exploratory_server <- function(id, data_reactive, vars_metadata_reactive) {
       cols <- colnames(df)
       num_cols <- cols[sapply(df, is.numeric)]
       
-      vars_metadata <- vars_metadata_reactive()
+      vars_metadata <- vmeta()
       num_named <- if (!is.null(vars_metadata)) {
         setNames(num_cols, get_var_labels(num_cols, vars_metadata))
       } else { num_cols }
@@ -671,8 +682,8 @@ desc_exploratory_server <- function(id, data_reactive, vars_metadata_reactive) {
       req(vars)
       if (length(vars) < 2) return(NULL)
       method <- input$corr_method %||% "pearson"
-      df_labeled <- apply_labels_to_df(df, vars, vars_metadata_reactive())
-      vars_lab <- get_var_labels(vars, vars_metadata_reactive())
+      df_labeled <- apply_labels_to_df(df, vars, vmeta())
+      vars_lab <- get_var_labels(vars, vmeta())
       df_clean <- na.omit(df_labeled[, vars_lab, drop=FALSE])
       if (nrow(df_clean) < 3) return(NULL)
       cor(df_clean, method = method)
@@ -692,8 +703,8 @@ desc_exploratory_server <- function(id, data_reactive, vars_metadata_reactive) {
       
       if (p_type == "lagged") {
         req(input$corr_var_1, input$corr_var_2)
-        v1_lab <- get_var_label(input$corr_var_1, vars_metadata_reactive())
-        v2_lab <- get_var_label(input$corr_var_2, vars_metadata_reactive())
+        v1_lab <- get_var_label(input$corr_var_1, vmeta())
+        v2_lab <- get_var_label(input$corr_var_2, vmeta())
         colnames(df)[colnames(df) == input$corr_var_1] <- v1_lab
         colnames(df)[colnames(df) == input$corr_var_2] <- v2_lab
         p <- generate_lagged_correlation(df, v1_lab, v2_lab, max_lag = input$corr_max_lag %||% 10)
@@ -702,8 +713,8 @@ desc_exploratory_server <- function(id, data_reactive, vars_metadata_reactive) {
         vars <- input$corr_vars_multi
         if (length(vars) < 2) return(ggplot() + annotate("text", x=0, y=0, label="Need >=2 variables"))
         
-        df <- apply_labels_to_df(df, vars, vars_metadata_reactive())
-        vars_lab <- get_var_labels(vars, vars_metadata_reactive())
+        df <- apply_labels_to_df(df, vars, vmeta())
+        vars_lab <- get_var_labels(vars, vmeta())
         
         if (p_type == "heatmap") {
           p <- generate_correlation_heatmap(df, vars_lab, method = method, cormat = corr_matrix_reactive())
@@ -712,8 +723,8 @@ desc_exploratory_server <- function(id, data_reactive, vars_metadata_reactive) {
         } else if (p_type == "partial") {
           c_vars <- input$corr_vars_control
           if(!is.null(c_vars) && length(c_vars) > 0) {
-             df <- apply_labels_to_df(df, c_vars, vars_metadata_reactive())
-             c_vars_lab <- get_var_labels(c_vars, vars_metadata_reactive())
+             df <- apply_labels_to_df(df, c_vars, vmeta())
+             c_vars_lab <- get_var_labels(c_vars, vmeta())
           } else {
              c_vars_lab <- NULL
           }
@@ -754,15 +765,15 @@ desc_exploratory_server <- function(id, data_reactive, vars_metadata_reactive) {
         vars <- input$corr_vars_multi
         if (length(vars) < 2) return(NULL)
         
-        df <- apply_labels_to_df(df, vars, vars_metadata_reactive())
-        vars_lab <- get_var_labels(vars, vars_metadata_reactive())
+        df <- apply_labels_to_df(df, vars, vmeta())
+        vars_lab <- get_var_labels(vars, vmeta())
         
         n_controls <- 0
         if (p_type == "partial") {
           c_vars <- input$corr_vars_control
           if(!is.null(c_vars) && length(c_vars) > 0) {
-             df <- apply_labels_to_df(df, c_vars, vars_metadata_reactive())
-             c_vars_lab <- get_var_labels(c_vars, vars_metadata_reactive())
+             df <- apply_labels_to_df(df, c_vars, vmeta())
+             c_vars_lab <- get_var_labels(c_vars, vmeta())
 
              all_vars <- unique(c(vars_lab, c_vars_lab))
              df_clean <- na.omit(df[, all_vars, drop=FALSE])
@@ -859,7 +870,7 @@ desc_exploratory_server <- function(id, data_reactive, vars_metadata_reactive) {
       cols <- colnames(df)
       num_cols <- cols[sapply(df, is.numeric)]
       
-      vars_metadata <- vars_metadata_reactive()
+      vars_metadata <- vmeta()
       num_named <- if (!is.null(vars_metadata)) {
         setNames(num_cols, get_var_labels(num_cols, vars_metadata))
       } else { num_cols }
@@ -892,7 +903,7 @@ desc_exploratory_server <- function(id, data_reactive, vars_metadata_reactive) {
         pca_rv$collinearity_warn <- FALSE
         pca_rv$collinear_pairs <- NULL
         
-        vars_lab <- get_var_labels(input$pca_vars, vars_metadata_reactive())
+        vars_lab <- get_var_labels(input$pca_vars, vmeta())
         keep <- stats::complete.cases(df[, input$pca_vars, drop=FALSE])
         df_clean <- df[keep, input$pca_vars, drop=FALSE]
 
@@ -936,7 +947,7 @@ desc_exploratory_server <- function(id, data_reactive, vars_metadata_reactive) {
       req(rv_analytics_data(), input$pca_vars)
       df <- rv_filtered_analytics_data()
       
-      vars_lab <- get_var_labels(input$pca_vars, vars_metadata_reactive())
+      vars_lab <- get_var_labels(input$pca_vars, vmeta())
       keep <- stats::complete.cases(df[, input$pca_vars, drop=FALSE])
       df_clean <- df[keep, input$pca_vars, drop=FALSE]
       colnames(df_clean) <- vars_lab
@@ -1010,6 +1021,9 @@ desc_exploratory_server <- function(id, data_reactive, vars_metadata_reactive) {
        } else if (p_type == "mahalanobis") {
           p <- generate_pca_mahalanobis(pca_rv$res)
        } else if (p_type == "3d_biplot") {
+          # Same guard as the 2-D biplot: switching straight to 3D before the
+          # axis controls render would otherwise throw a transient error.
+          req(input$pca_pc_x, input$pca_pc_y, input$pca_pc_z)
           aligned_df <- data.frame(group_id = pca_rv$groups %||% factor(rep("All", nrow(pca_rv$res$x))))
           p <- generate_pca_biplot_3d(pca_rv$res, aligned_df, pc_x = input$pca_pc_x, pc_y = input$pca_pc_y, pc_z = input$pca_pc_z, group_col="group_id")
        }
@@ -1088,7 +1102,7 @@ desc_exploratory_server <- function(id, data_reactive, vars_metadata_reactive) {
       pca_3d_special = shiny::reactive({ input$pca_plot_type == "3d_biplot" })
     )
     
-    gov_factors_server("gov", data_reactive = shiny::reactive(rv_analytics_data()), vars_metadata_reactive = vars_metadata_reactive)
+    gov_factors_server("gov", data_reactive = shiny::reactive(rv_analytics_data()), vars_metadata_reactive = vmeta)
     
     return(list(
       analytics_data = rv_analytics_data

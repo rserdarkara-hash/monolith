@@ -14,6 +14,13 @@ required_packages <- c(
 
 missing_packages <- required_packages[!(required_packages %in% installed.packages()[, "Package"])]
 if (length(missing_packages) > 0) {
+  # Convenience fallback only: this pulls the LATEST CRAN versions, which can
+  # drift from the pinned versions in renv.lock. For reproducible results
+  # (matching the versions the app was validated against), restore the
+  # environment with renv::restore() instead — see README.
+  message("Installing missing packages from CRAN (latest versions): ",
+          paste(missing_packages, collapse = ", "),
+          "\nNote: for the reproducible, validated environment use renv::restore() (renv.lock).")
   install.packages(missing_packages, repos = "https://cloud.r-project.org")
 }
 

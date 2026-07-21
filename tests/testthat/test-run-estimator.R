@@ -144,3 +144,41 @@ test_that("estimate_run_duration prefers history with matching cores when enough
   expect_equal(res_cores_8$est_time_sec, 68.75)
 })
 
+
+test_that("a malformed run history falls back to the cold-start formula, not a half-filtered frame", {
+  # The error handler used to run `history_data <- NULL`, which assigns into the
+  # handler's OWN frame and leaves the outer binding untouched. A throw partway
+  # through the filter chain therefore left the partially-filtered frame in
+  # place and the ETA lm was fitted on it. The whole block is now the tryCatch
+  # value, so any failure yields NULL and the cold-start path.
+  old_wd <- getwd()
+  tmp_dir <- tempfile("run_estimator_broken_")
+  dir.create(tmp_dir)
+  setwd(tmp_dir)
+  on.exit({
+    setwd(old_wd)
+    unlink(tmp_dir, recursive = TRUE)
+  }, add = TRUE)
+
+  dir.create("run_history")
+  history_file <- file.path("run_history", "run_history.csv")
+
+  cold <- estimate_run_duration(c(100), "OK", comp_mode = FALSE, cores = 4)
+
+  # A history file with the per-locality column MISSING: the method/comp_mode
+  # filters succeed, so a stale partial frame would survive and reach the lm.
+  broken <- data.frame(
+    method = rep("OK", 10),
+    comp_mode = rep(FALSE, 10),
+    cores_used = rep(4, 10),
+    n_samples = seq(10, 100, length.out = 10),
+    stringsAsFactors = FALSE
+  )
+  write.csv(broken, history_file, row.names = FALSE)
+
+  res <- estimate_run_duration(c(100), "OK", comp_mode = FALSE, cores = 4)
+  expect_true(is.finite(res$est_time_sec))
+  expect_gt(res$est_time_sec, 0)
+  # Falls back to the cold-start estimate rather than an lm on a bad frame.
+  expect_equal(res$est_time_sec, cold$est_time_sec)
+})

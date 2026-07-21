@@ -308,6 +308,11 @@ classif_make_fold_id <- function(pts_sf, strategy = c("spatial", "standard"),
       if (!is.null(target)) {
         y <- as.factor(sf::st_drop_geometry(pts_sf)[[target]])
         # Cap v at the smallest class so stratified folds can each hold a class.
+        # A singleton class floors this at v = 2 and lands that class in exactly
+        # one fold, so it is absent from that fold's training set and its recall
+        # is 0 by construction, not by model failure. This is inherent to
+        # stratified CV with singleton classes; classif_scope_adequacy() warns
+        # up front for every class below 3 samples.
         v <- max(2L, min(v, min(table(y))))
         fold_id <- integer(n)
         for (lev in levels(y)) {
@@ -472,12 +477,71 @@ classif_per_class_accuracy <- function(pred_df, target) {
 #' Inner folds reuse the outer `strategy` (spatial folds inside spatial CV,
 #' so inner selection faces the same leakage regime as the outer estimate).
 #' Cost multiplies roughly by `inner_v`.
+# Cooperative cancellation for the classification worker: the module writes a
+# flag file, the worker checks it between expensive stages (fold boundaries,
+# tuning, final fit, surface build) — the same file-based machinery the
+# interpolation pipeline uses, since Shiny reactives don't exist in workers.
+.classif_check_cancel <- function(cancel_file) {
+  if (!is.null(cancel_file) && file.exists(cancel_file)) {
+    stop("Classification run cancelled by user.", call. = FALSE)
+  }
+  invisible(NULL)
+}
+
+# ── Progress ladder ─────────────────────────────────────────────────────────
+#' Cumulative upper bounds, as a fraction of the progress bar, for each stage of
+#' run_classification_pipeline. The original denominator (outer folds + 2) gave
+#' the whole post-CV half of the run two steps, so the bar reached ~92% the
+#' moment cross-validation ended and then sat there for the longest part of the
+#' job: interpolating every covariate onto the grid and classifying every cell.
+#' These shares are wall-clock estimates, not guarantees; their only job is to
+#' keep the bar moving through the stages that actually take the time.
+.classif_stage_anchors <- function(make_surface = TRUE) {
+  if (isTRUE(make_surface)) {
+    c(cv = 0.50, fit = 0.60, importance = 0.66,
+      grid = 0.70, covariates = 0.88, surface = 0.99)
+  } else {
+    # No surface: CV and the final fit are the whole run.
+    c(cv = 0.80, fit = 0.94, importance = 0.99,
+      grid = 0.99, covariates = 0.99, surface = 0.99)
+  }
+}
+
+#' Build the worker's progress reporter, or NULL when progress is not being
+#' reported (direct calls, tests). The returned closure takes a stage name, a
+#' 0-1 fraction WITHIN that stage, and an optional human-readable label; it
+#' writes the percent through the shared update_progress_file() and the label to
+#' a sibling stage file the module polls, so the text tracks what is actually
+#' running instead of always claiming cross-validation.
+.classif_progress_reporter <- function(progress_dir, session_id = "classif",
+                                       make_surface = TRUE) {
+  if (is.null(progress_dir)) return(NULL)
+  anchors <- .classif_stage_anchors(make_surface)
+  stage_file <- file.path(progress_dir,
+                          paste0("stage_", session_id, "_classification_cls.txt"))
+  function(stage, frac = 1, label = NULL) {
+    i <- match(stage, names(anchors))
+    if (is.na(i)) return(invisible(NULL))
+    lo <- if (i == 1L) 0 else unname(anchors[i - 1L])
+    hi <- unname(anchors[i])
+    pct <- lo + max(0, min(1, frac)) * (hi - lo)
+    # step/total = pct, at 0.1% resolution (update_progress_file rounds to %).
+    update_progress_file("classification", "cls", round(pct * 1000), 1000)
+    if (!is.null(label)) {
+      tryCatch(writeLines(label, stage_file), error = function(e) NULL)
+    }
+    invisible(NULL)
+  }
+}
+
 run_classification_cv <- function(pts_sf, target, predictors,
                                   method = "rf",
                                   strategy = c("spatial", "standard"),
                                   v = 10L, depth = "none", seed = 12345L,
                                   group = NULL, class_weights = FALSE,
-                                  nested = FALSE, inner_v = 5L) {
+                                  nested = FALSE, inner_v = 5L,
+                                  oof_importance = FALSE, importance_reps = 5L,
+                                  cancel_file = NULL, progress_cb = NULL) {
   strategy <- match.arg(strategy)
   if (!is.null(group) && length(group) != nrow(pts_sf)) {
     stop("`group` must have one entry per row of `pts_sf`.")
@@ -524,6 +588,13 @@ run_classification_cv <- function(pts_sf, target, predictors,
   best_params <- NULL
   nested_active <- isTRUE(nested) && length(tune_params) > 0
   tune_grid_df <- NULL
+  # Share of this stage's bar given to the non-nested tuning search, which runs
+  # before the fold loop and can rival it in cost (it fits grid x folds models).
+  # Under nesting the search happens inside the folds, so the fold loop owns the
+  # whole stage. progress_cb(frac, label) reports progress WITHIN the CV stage;
+  # the pipeline maps it onto the overall bar.
+  tune_share <- if (length(tune_params) > 0 && !nested_active) 0.30 else 0
+  report_cv <- if (is.function(progress_cb)) progress_cb else function(...) invisible(NULL)
   if (length(tune_params) > 0) {
     # One space-filling grid shared by every tuning pass. Finalising the
     # parameter set against the full predictor frame leaks nothing label-borne
@@ -540,6 +611,8 @@ run_classification_cv <- function(pts_sf, target, predictors,
     # tuned-depth metrics are mildly optimistic. Depth "none" has no tuning
     # step and is unaffected; `nested = TRUE` removes the optimism at ~inner_v
     # times the cost.
+    .classif_check_cancel(cancel_file)
+    report_cv(0, "Tuning hyperparameters (grid search)...")
     tuned <- .classif_with_seed(seed, {
       tune::tune_grid(wf, resamples = rset, grid = tune_grid_df,
                       metrics = resample_metrics,
@@ -547,6 +620,7 @@ run_classification_cv <- function(pts_sf, target, predictors,
     })
     best_params <- tune::select_best(tuned, metric = "accuracy")
     fit_wf <- tune::finalize_workflow(wf, best_params)
+    report_cv(tune_share)
   }
 
   # Manual out-of-fold loop: fit on the analysis rows, predict hard class AND
@@ -556,8 +630,17 @@ run_classification_cv <- function(pts_sf, target, predictors,
   # `.row` records each prediction's row index in train_df so the spatial
   # baseline below (and McNemar pairing) can align with the model predictions.
   nested_params <- list()
+  imp_parts <- list()
+  folds_seq <- sort(unique(fold_id))
+  n_fold <- length(folds_seq)
   preds <- .classif_with_seed(seed, {
-    parts <- lapply(sort(unique(fold_id)), function(i) {
+    parts <- lapply(seq_along(folds_seq), function(k) {
+      i <- folds_seq[k]
+      .classif_check_cancel(cancel_file)
+      # Reported at the START of the fold, so the label names the fold that is
+      # actually running and the fraction counts folds already finished.
+      report_cv(tune_share + (1 - tune_share) * ((k - 1) / n_fold),
+                sprintf("Cross-validation: fold %d of %d", k, n_fold))
       tr <- train_df[fold_id != i, , drop = FALSE]
       te <- train_df[fold_id == i, , drop = FALSE]
       if (weights_applied) {
@@ -585,6 +668,19 @@ run_classification_cv <- function(pts_sf, target, predictors,
         fold_wf <- tune::finalize_workflow(wf, bp_i)
       }
       fit_i <- parsnip::fit(fold_wf, data = tr)
+      # Out-of-fold permutation importance: score THIS fold's model on the rows
+      # it never saw, before they are used for anything else. Done here because
+      # the fold's fitted workflow only exists inside this iteration — the
+      # alternative (refitting afterwards) would double the CV cost, whereas
+      # this reuses a fit that already exists and predicts the same number of
+      # rows in total as the training-row design. Permutation shuffles a
+      # predictor WITHIN the assessment rows, so very small folds decorrelate
+      # it less thoroughly; that caveat is documented in the guide.
+      if (isTRUE(oof_importance) && length(predictors)) {
+        imp_parts[[length(imp_parts) + 1]] <<-
+          .classif_perm_delta(fit_i, te, target, predictors,
+                              n_rep = importance_reps, cancel_file = cancel_file)
+      }
       cls <- predict(fit_i, te, type = "class")
       prob <- predict(fit_i, te, type = "prob")
       p <- cbind(data.frame(.fold = i, .row = which(fold_id == i)),
@@ -618,6 +714,9 @@ run_classification_cv <- function(pts_sf, target, predictors,
     # One row per outer fold: the hyperparameters that fold's inner search
     # chose. Fold-to-fold agreement is itself a stability diagnostic.
     nested_params = if (length(nested_params)) do.call(rbind, nested_params) else NULL,
+    # NULL unless oof_importance was requested; the pipeline falls back to the
+    # training-row design in that case.
+    importance = .classif_pool_fold_importance(imp_parts, predictors),
     weights_applied = weights_applied
   )
 }
@@ -697,19 +796,18 @@ classif_covariate_lift <- function(pred_df, target) {
 #' Comparable across all learners, unlike engine-native measures (ranger
 #' impurity vs xgboost gain vs multinom coefficients).
 #'
-#' Computed on the training rows with the final fitted model — the standard
-#' default (vip::vi_permute); rankings are informative but absolute values
-#' lean optimistic for flexible learners, which the module documents.
-#' `share_pct` renormalises the positive importances to sum to 100 for the
-#' "elevation contributed X%" reading; negative raw values (pure noise) clamp
-#' to a 0 share. Seed-sandboxed; permutations use `n_rep` repeats.
-classif_permutation_importance <- function(model, train_df, target, predictors,
-                                           n_rep = 5L, seed = 12345L) {
-  wf <- model$workflow
-  df <- as.data.frame(train_df)
-  df <- df[stats::complete.cases(df[, c(target, predictors), drop = FALSE]), , drop = FALSE]
+#' Two evaluation designs are supported (see `classif_permutation_importance`
+#' for the training-row one and `run_classification_cv(oof_importance = TRUE)`
+#' for the out-of-fold one); both share the core below so the two variants are
+#' guaranteed to compute the same quantity on different rows.
+#'
+#' Core: given ONE fitted workflow and ONE evaluation frame, return the
+#' per-predictor increase in multiclass log-loss under permutation, plus the
+#' unpermuted baseline and the row count (the caller needs `n` to pool folds).
+#' Callers are responsible for the seed sandbox — the shuffles happen here.
+.classif_perm_delta <- function(wf, df, target, predictors, n_rep = 5L,
+                                cancel_file = NULL, progress = NULL) {
   truth <- as.factor(df[[target]])
-  levs <- levels(truth)
 
   log_loss_of <- function(newdata) {
     prob <- as.matrix(predict(wf, newdata, type = "prob"))
@@ -719,38 +817,91 @@ classif_permutation_importance <- function(model, train_df, target, predictors,
   }
 
   base_ll <- log_loss_of(df)
-  imp <- .classif_with_seed(seed, {
-    vapply(predictors, function(p) {
-      lls <- vapply(seq_len(n_rep), function(r) {
-        d2 <- df
-        d2[[p]] <- d2[[p]][sample.int(nrow(d2))]
-        log_loss_of(d2)
-      }, numeric(1))
-      mean(lls) - base_ll
+  n_pred <- length(predictors)
+  # The cancel check and the progress tick consume no RNG, so the shuffle
+  # sequence (and therefore every importance value) is unchanged.
+  delta <- vapply(seq_len(n_pred), function(j) {
+    p <- predictors[j]
+    .classif_check_cancel(cancel_file)
+    lls <- vapply(seq_len(n_rep), function(r) {
+      d2 <- df
+      d2[[p]] <- d2[[p]][sample.int(nrow(d2))]
+      log_loss_of(d2)
     }, numeric(1))
-  })
+    if (is.function(progress)) progress(j / n_pred)
+    mean(lls) - base_ll
+  }, numeric(1))
 
-  pos <- pmax(imp, 0)
+  list(delta = delta, baseline = base_ll, n = nrow(df))
+}
+
+#' Shared presentation frame for both importance designs. `share_pct`
+#' renormalises the positive importances to sum to 100 for the "elevation
+#' contributed X%" reading; negative raw values (a predictor whose permutation
+#' IMPROVES the loss, i.e. pure noise) clamp to a 0 share. `evaluated_on`
+#' records the design so the plot, the table and the metrics CSV can never
+#' present an optimistic and an honest number as though they were the same.
+.classif_importance_frame <- function(predictors, delta, baseline, evaluated_on) {
+  pos <- pmax(delta, 0)
   share <- if (sum(pos) > 0) 100 * pos / sum(pos) else rep(NA_real_, length(pos))
   out <- data.frame(
     predictor = predictors,
-    importance = as.numeric(imp),      # increase in multiclass log-loss
+    importance = as.numeric(delta),    # increase in multiclass log-loss
     share_pct = as.numeric(share),
-    baseline_logloss = base_ll,
+    baseline_logloss = baseline,
+    evaluated_on = evaluated_on,
     stringsAsFactors = FALSE
   )
   out[order(-out$importance), , drop = FALSE]
 }
 
+#' Training-row design: the final fitted model scored on the rows it was fitted
+#' on — the standard default (vip::vi_permute). Rankings are informative but the
+#' absolute values lean optimistic for flexible learners, because a model that
+#' has partly memorised its training rows loses more when a predictor it
+#' memorised through is destroyed. Seed-sandboxed; `n_rep` permutation repeats.
+classif_permutation_importance <- function(model, train_df, target, predictors,
+                                           n_rep = 5L, seed = 12345L,
+                                           cancel_file = NULL, progress = NULL) {
+  wf <- model$workflow
+  df <- as.data.frame(train_df)
+  df <- df[stats::complete.cases(df[, c(target, predictors), drop = FALSE]), , drop = FALSE]
+  core <- .classif_with_seed(seed, {
+    .classif_perm_delta(wf, df, target, predictors, n_rep = n_rep,
+                        cancel_file = cancel_file, progress = progress)
+  })
+  .classif_importance_frame(predictors, core$delta, core$baseline, "training")
+}
+
+#' Pool per-fold out-of-fold importances into one frame. Each fold contributed
+#' a mean-over-its-own-rows log-loss delta, so weighting by fold size and
+#' dividing by the total reproduces EXACTLY the delta that pooling every
+#' out-of-fold row into a single evaluation set would give.
+.classif_pool_fold_importance <- function(parts, predictors) {
+  if (!length(parts)) return(NULL)
+  w <- vapply(parts, function(z) as.numeric(z$n), numeric(1))
+  if (sum(w) <= 0) return(NULL)
+  dl <- do.call(cbind, lapply(parts, function(z) z$delta))   # n_pred x n_fold
+  delta <- as.numeric(dl %*% w) / sum(w)
+  base <- sum(vapply(parts, function(z) z$baseline, numeric(1)) * w) / sum(w)
+  .classif_importance_frame(predictors, delta, base, "out-of-fold")
+}
+
 # ── Final fit ───────────────────────────────────────────────────────────────
 #' Fit the final classification workflow on all training points, tuning first
-#' if `depth` requests it (inner CV over class-stratified standard folds).
+#' if `depth` requests it. The tuning CV uses the SAME `strategy` as the run's
+#' evaluation CV: tuning under random stratified folds while reporting spatial-CV
+#' metrics picks hyperparameters against exactly the optimism spatial CV exists
+#' to remove, and those hyperparameters are what the map, the entropy surface,
+#' the permutation importance and the exported .rds bundle are all built from.
 #' Returns the fitted workflow plus the target levels for downstream raster
 #' layer naming.
 fit_classification_model <- function(pts_sf, target, predictors,
                                      method = "rf", depth = "none",
+                                     strategy = c("spatial", "standard"),
                                      v = 10L, seed = 12345L,
                                      class_weights = FALSE) {
+  strategy <- match.arg(strategy)
   full_df <- as.data.frame(sf::st_drop_geometry(pts_sf))
   cc <- stats::complete.cases(full_df[, c(target, predictors), drop = FALSE])
   train_df <- full_df[cc, c(target, predictors), drop = FALSE]
@@ -775,7 +926,7 @@ fit_classification_model <- function(pts_sf, target, predictors,
   final_params <- NULL
   if (length(tune_params) > 0) {
     keep_sf <- pts_sf[cc, ]
-    fold_id <- classif_make_fold_id(keep_sf, "standard", target = target, v = v, seed = seed)
+    fold_id <- classif_make_fold_id(keep_sf, strategy, target = target, v = v, seed = seed)
     rset <- classif_folds_to_rset(train_df, fold_id)
     tuned <- .classif_with_seed(seed, {
       pset <- hardhat::extract_parameter_set_dials(wf)
@@ -807,26 +958,61 @@ classif_shannon_entropy <- function(prob_mat) {
   prob_mat <- as.matrix(prob_mat)
   k <- ncol(prob_mat)
   if (k < 2) return(rep(0, nrow(prob_mat)))
-  ent <- apply(prob_mat, 1, function(p) {
-    p <- p[p > 0]
-    -sum(p * log(p))
-  })
-  as.numeric(ent / log(k))
+  # Vectorised -sum(p log p). Zeroing the non-finite terms is equivalent to the
+  # old per-row p[p > 0] filter (adding an exact 0 to a running sum is a no-op
+  # and the surviving terms keep their column order), but avoids apply()'s
+  # per-row list allocation, which dominated on million-cell prediction grids.
+  pl <- prob_mat * log(prob_mat)
+  pl[!is.finite(pl)] <- 0
+  as.numeric(-rowSums(pl) / log(k))
 }
 
 #' Predict class, per-class probability, and normalised entropy for a covariate
 #' data.frame (typically the interpolated prediction grid from
 #' krige_covariates()). Returns `newdata` with `.pred_class`, `.pred_<level>`
 #' columns, and `.entropy` appended.
-predict_classification_surface <- function(model, newdata) {
+#' Prediction runs in row blocks. Every recipe step in classif_build_recipe is
+#' TRAINED (novel levels, impute medians/modes, dummy levels, zv removals,
+#' normalise centres/scales), so baking is row-independent and a blocked
+#' prediction is identical to a single whole-grid call. Blocking buys two
+#' things on the million-cell grids this stage produces: a cancel checkpoint
+#' and a progress tick between blocks (the surface stage used to run for
+#' minutes with the bar frozen and the cancel flag unread), plus a lower peak
+#' memory footprint.
+predict_classification_surface <- function(model, newdata, chunk_size = NULL,
+                                           cancel_file = NULL, progress = NULL) {
   wf <- model$workflow
-  cls <- predict(wf, newdata, type = "class")
-  prob <- predict(wf, newdata, type = "prob")
-  ent <- classif_shannon_entropy(prob)
-  out <- cbind(as.data.frame(newdata),
-               .pred_class = cls$.pred_class,
-               as.data.frame(prob))
-  out$.entropy <- ent
+  nd <- as.data.frame(newdata)
+  n <- nrow(nd)
+  if (n == 0) stop("No prediction locations to classify.")
+  # ~40 blocks so the bar moves visibly, but never smaller than 5000 rows
+  # (per-call predict overhead would start to matter below that).
+  if (is.null(chunk_size)) chunk_size <- max(5000L, as.integer(ceiling(n / 40)))
+  chunk_size <- max(1L, as.integer(chunk_size))
+
+  starts <- seq.int(1L, n, by = chunk_size)
+  cls_parts <- vector("list", length(starts))
+  prob_parts <- vector("list", length(starts))
+  for (j in seq_along(starts)) {
+    .classif_check_cancel(cancel_file)
+    idx <- seq.int(starts[j], min(starts[j] + chunk_size - 1L, n))
+    block <- nd[idx, , drop = FALSE]
+    cls_parts[[j]] <- predict(wf, block, type = "class")$.pred_class
+    prob_parts[[j]] <- as.data.frame(predict(wf, block, type = "prob"))
+    if (is.function(progress)) progress(j / length(starts))
+  }
+  # Rebuild the factor against the trained level set rather than relying on
+  # c()/unlist() level handling, which differs across R versions.
+  lev <- levels(cls_parts[[1]])
+  cls <- factor(unlist(lapply(cls_parts, as.character), use.names = FALSE),
+                levels = lev)
+  prob <- if (length(prob_parts) == 1L) prob_parts[[1]] else do.call(rbind, prob_parts)
+  # rbind carries each block's row names through; drop them so the assembled
+  # frame is identical whatever the block size.
+  rownames(prob) <- NULL
+
+  out <- cbind(nd, .pred_class = cls, prob)
+  out$.entropy <- classif_shannon_entropy(prob)
   out
 }
 
@@ -943,7 +1129,13 @@ classif_build_grid <- function(pts_proj, res = NULL,
   grid_r <- terra::rast(terra::ext(bbox), resolution = res, crs = sf::st_crs(pts_proj)$wkt)
   grid_p <- terra::as.points(grid_r, values = FALSE) |> sf::st_as_sf()
   inside <- sf::st_within(grid_p, bnd, sparse = FALSE)[, 1]
-  if (any(inside)) grid_p <- grid_p[inside, ]
+  # Falling back to the full bbox here would silently predict over the entire
+  # bounding box — the opposite of what scoping promises. Fail loudly instead;
+  # the module's promise-error handler surfaces this message.
+  if (!any(inside)) {
+    stop("No grid cells fall inside the scope boundary at this resolution; reduce the grid resolution or widen the scope.")
+  }
+  grid_p <- grid_p[inside, ]
   coords <- sf::st_coordinates(grid_p)
   grid_p$x <- coords[, 1]; grid_p$y <- coords[, 2]
   list(grid_p = grid_p, res = res, crs_wkt = sf::st_crs(pts_proj)$wkt)
@@ -954,8 +1146,18 @@ classif_build_grid <- function(pts_proj, res = NULL,
 #' as RK/RFK); categorical covariates, which cannot be kriged, inherit the class
 #' of their nearest training point (FNN). Both approaches are documented as
 #' approximations that propagate onto the classifier's inputs.
-build_classification_grid_aux <- function(pts_proj, grid_p, predictors) {
+build_classification_grid_aux <- function(pts_proj, grid_p, predictors,
+                                          cancel_file = NULL, progress = NULL) {
   df <- sf::st_drop_geometry(pts_proj)
+  # A predictor absent from the frame yields df[[p]] = NULL, and is.numeric(NULL)
+  # is FALSE - it would be routed to the categorical branch, become an all-NA
+  # column, get mode-imputed to a constant and then dropped by step_zv, leaving
+  # the model quietly trained on fewer predictors than the user selected.
+  missing_preds <- setdiff(predictors, names(df))
+  if (length(missing_preds) > 0) {
+    stop("Predictor column(s) not found in the training data: ",
+         paste(missing_preds, collapse = ", "))
+  }
   is_num <- vapply(predictors, function(p) is.numeric(df[[p]]), logical(1))
   num_preds <- predictors[is_num]
   cat_preds <- predictors[!is_num]
@@ -964,7 +1166,14 @@ build_classification_grid_aux <- function(pts_proj, grid_p, predictors) {
   if (length(num_preds) > 0) {
     lags <- calc_scientific_lags(pts_proj)
     mp <- list(idw_p = 2, idw_nmax = 12)
-    kc <- krige_covariates(pts_proj, grid_p, num_preds, lags, mp)
+    # One covariate kriged onto the full grid is the coarsest interruptible
+    # unit here (gstat's krige() call is a black box), so cancel latency in
+    # this stage is one covariate.
+    kc <- krige_covariates(pts_proj, grid_p, num_preds, lags, mp,
+                           on_var = function(i, total) {
+                             .classif_check_cancel(cancel_file)
+                             if (is.function(progress)) progress(i / total)
+                           })
     grid_aux <- kc$grid_aux
   }
   if (length(cat_preds) > 0) {
@@ -1247,7 +1456,24 @@ run_classification_pipeline <- function(df, target, predictors,
                                         class_weights = FALSE,
                                         model_rds_path = NULL,
                                         importance_reps = 5L,
-                                        nested = FALSE) {
+                                        importance_mode = c("oof", "training"),
+                                        nested = FALSE,
+                                        progress_dir = NULL,
+                                        session_id = "classif",
+                                        cancel_file = NULL) {
+  # File-based progress + cooperative cancel, mirroring the interpolation
+  # pipeline (update_progress_file reads these options inside the worker).
+  report_progress <- !is.null(progress_dir)
+  if (report_progress) {
+    options(monolith_progress_dir = progress_dir)
+    options(monolith_session_id = session_id)
+  }
+  # Stage-aware reporter; a no-op for direct calls and tests (no progress_dir).
+  report <- .classif_progress_reporter(progress_dir, session_id, make_surface)
+  if (is.null(report)) report <- function(...) invisible(NULL)
+  importance_mode <- match.arg(importance_mode)
+  .classif_check_cancel(cancel_file)
+
   keep_cols <- unique(c(target, predictors, x_col, y_col, group_col))
   d <- df[, intersect(keep_cols, names(df)), drop = FALSE]
   d <- d[!is.na(d[[x_col]]) & !is.na(d[[y_col]]), , drop = FALSE]
@@ -1261,7 +1487,11 @@ run_classification_pipeline <- function(df, target, predictors,
   cv <- run_classification_cv(pts, target, predictors, method = method,
                               strategy = strategy, v = v, depth = depth, seed = seed,
                               group = grp, class_weights = class_weights,
-                              nested = nested)
+                              nested = nested,
+                              oof_importance = identical(importance_mode, "oof"),
+                              importance_reps = importance_reps,
+                              cancel_file = cancel_file,
+                              progress_cb = function(frac, label = NULL) report("cv", frac, label))
 
   levs <- levels(as.factor(sf::st_drop_geometry(pts)[[target]]))
   out <- list(
@@ -1286,14 +1516,36 @@ run_classification_pipeline <- function(df, target, predictors,
 
   # The final model is always fitted (not only for surfaces): it drives the
   # permutation feature importance and the exportable model bundle.
+  .classif_check_cancel(cancel_file)
+  report("fit", 0, "Fitting the final model on all points...")
   model <- fit_classification_model(pts, target, predictors, method = method,
-                                    depth = depth, v = v, seed = seed,
+                                    depth = depth, strategy = strategy,
+                                    v = v, seed = seed,
                                     class_weights = class_weights)
-  train_cc <- sf::st_drop_geometry(pts)
-  out$importance <- tryCatch(
-    classif_permutation_importance(model, train_cc, target, predictors,
-                                   n_rep = importance_reps, seed = seed),
-    error = function(e) NULL)
+  report("fit", 1)
+
+  .classif_check_cancel(cancel_file)
+  # Out-of-fold importance was already scored inside the CV loop (each fold's
+  # model on its own held-out rows), so there is nothing left to do here; only
+  # the training-row design needs the final model. Falling back when the pooled
+  # frame is NULL covers the degenerate cases (no predictors, every fold empty).
+  cv_imp <- if (identical(importance_mode, "oof")) cv$importance else NULL
+  if (!is.null(cv_imp)) {
+    out$importance <- cv_imp
+    report("importance", 1)
+  } else {
+    report("importance", 0, "Scoring permutation feature importance...")
+    train_cc <- sf::st_drop_geometry(pts)
+    out$importance <- tryCatch(
+      classif_permutation_importance(model, train_cc, target, predictors,
+                                     n_rep = importance_reps, seed = seed,
+                                     cancel_file = cancel_file,
+                                     progress = function(f) report("importance", f)),
+      error = function(e) NULL)
+  }
+  # An importance failure is non-fatal and is swallowed above; a cancellation
+  # raised inside that loop must NOT be. Re-read the flag to tell them apart.
+  .classif_check_cancel(cancel_file)
 
   if (!is.null(model_rds_path)) {
     bundle <- list(
@@ -1331,11 +1583,27 @@ run_classification_pipeline <- function(df, target, predictors,
   }
 
   if (make_surface) {
+    .classif_check_cancel(cancel_file)
+    report("grid", 0, "Building the prediction grid...")
     bnd_sf <- if (is.null(boundary_wkt)) NULL else sf::st_as_sfc(boundary_wkt, crs = proj_crs)
     gr <- classif_build_grid(pts, res = grid_res, boundary = boundary, boundary_sf = bnd_sf,
                              buffer_mode = buffer_mode, buffer_dist = buffer_dist)
-    grid_aux <- build_classification_grid_aux(pts, gr$grid_p, predictors)
-    surf <- predict_classification_surface(model, sf::st_drop_geometry(grid_aux))
+    report("grid", 1)
+    n_cell_lab <- format(nrow(gr$grid_p), big.mark = ",")
+
+    .classif_check_cancel(cancel_file)
+    report("covariates", 0,
+           sprintf("Interpolating covariates onto %s grid cells...", n_cell_lab))
+    grid_aux <- build_classification_grid_aux(
+      pts, gr$grid_p, predictors,
+      cancel_file = cancel_file,
+      progress = function(f) report("covariates", f))
+
+    report("surface", 0, sprintf("Classifying %s grid cells...", n_cell_lab))
+    surf <- predict_classification_surface(
+      model, sf::st_drop_geometry(grid_aux),
+      cancel_file = cancel_file,
+      progress = function(f) report("surface", f))
 
     cell_ha <- gr$res^2 / 10000
     counts <- table(factor(as.character(surf$.pred_class), levels = levs))
@@ -1346,5 +1614,10 @@ run_classification_pipeline <- function(df, target, predictors,
                            area_ha = as.numeric(counts) * cell_ha,
                            stringsAsFactors = FALSE)
   }
+  report("surface", 1, "Finishing...")
+  # A cancel requested during the last unguarded moments still counts: the module
+  # has already told the user the run is being cancelled, so a completed result
+  # must never arrive behind their back.
+  .classif_check_cancel(cancel_file)
   out
 }

@@ -50,17 +50,17 @@ test_that("calc_ccc returns 1.0 for perfectly identical vectors", {
   expect_equal(calc_ccc(obs, pre), 1.0)
 })
 
-test_that("calc_ccc returns NA when variance of observed or predicted is zero with unequal means", {
-  # var(obs) = 0, means differ → NA
+test_that("calc_ccc returns NA whenever either vector is constant (CCC undefined)", {
+  # var(obs) = 0: the correlation term is 0/0 regardless of the means, so the
+  # 2026-07-19 convention reports NA instead of asserting agreement.
   obs <- c(5, 5, 5, 5)
   pre <- c(4, 5, 6, 5)
-  # Both means are 5.0, so the code returns 1.0 (means equal branch)
-  expect_equal(calc_ccc(obs, pre), 1.0)
+  expect_true(is.na(calc_ccc(obs, pre)))
 
-  # Both constant and identical values → CCC = 1
+  # Two equal constant vectors: formula degenerates to 0/0 → NA.
   obs2 <- c(5, 5, 5, 5)
   pre2 <- c(5, 5, 5, 5)
-  expect_equal(calc_ccc(obs2, pre2), 1.0)
+  expect_true(is.na(calc_ccc(obs2, pre2)))
 })
 
 test_that("calc_ccc returns NA when variance is zero and means truly differ", {
@@ -140,6 +140,48 @@ test_that("augment_metrics NRMSE_mean is percentage-scaled", {
   pre <- c(10, 20, 30, 40, 50)
   res <- augment_metrics(obs, pre)
   expect_equal(res$nrmse_mean, 0.0)
+})
+
+# Every metric here is a ratio and each has a zero-denominator configuration.
+# NA (undefined), never +/-Inf, which would flow into the Model Performance
+# table, the metrics CSV and the pooled Total (Combined) diagnostics.
+test_that("augment_metrics NSE is NA when observations are constant", {
+  obs <- rep(7.5, 8)
+  pre <- c(7.4, 7.6, 7.5, 7.7, 7.3, 7.5, 7.6, 7.4)
+  res <- augment_metrics(obs, pre)
+  expect_true(is.na(res$nse))
+  expect_false(is.infinite(res$nse))
+})
+
+test_that("augment_metrics NRMSE_mean is NA for a zero-mean variable", {
+  obs <- c(-2, -1, 0, 1, 2)          # centred/anomaly variable: mean(obs) == 0
+  pre <- c(-1.8, -1.1, 0.2, 0.9, 2.1)
+  res <- augment_metrics(obs, pre)
+  expect_true(is.na(res$nrmse_mean))
+  expect_false(is.infinite(res$nrmse_mean))
+})
+
+test_that("augment_metrics RPD and RPIQ are NA at zero RMSE", {
+  obs <- c(10, 20, 30, 40, 50)
+  res <- augment_metrics(obs, obs)   # perfect prediction: RMSE == 0
+  expect_true(is.na(res$rpd))
+  expect_true(is.na(res$rpiq))
+  expect_false(is.infinite(res$rpd))
+  expect_false(is.infinite(res$rpiq))
+})
+
+test_that("augment_metrics sMAPE defines the 0/0 term as 0, keeping n consistent", {
+  # Rows where obs == pre == 0 would give NaN and be dropped by na.rm,
+  # averaging sMAPE over a different n than every other metric.
+  obs <- c(0, 10, 20, 0)
+  pre <- c(0, 10, 20, 0)
+  expect_equal(augment_metrics(obs, pre)$smape, 0)
+
+  # One genuinely wrong row out of four: mean over n = 4, not n = 2.
+  obs2 <- c(0, 0, 10, 10)
+  pre2 <- c(0, 0, 10, 30)
+  # terms: 0, 0, 0, 2*20/40 = 1  ->  mean = 0.25  ->  25%
+  expect_equal(augment_metrics(obs2, pre2)$smape, 25)
 })
 
 # ── .cv_to_df ──────────────────────────────────────────────────────────────
@@ -287,6 +329,15 @@ test_that("resolve_cv_plan encodes fold type and count per strategy", {
   expect_equal(resolve_cv_plan("block", 25)$type, "loocv") # small-n degrade
 })
 
+test_that("resolve_cv_plan degrades to auto on an unrecognised strategy", {
+  # A stale or hand-edited run-config upload must not raise match.arg's error
+  # inside a PSOCK worker (it surfaces as the generic "Parallel Interpolation
+  # Failed" modal instead of anything actionable).
+  expect_silent(plan <- resolve_cv_plan("spatial", 100))
+  expect_equal(plan$type, resolve_cv_plan("auto", 100)$type)
+  expect_equal(resolve_cv_plan("nonsense", 30)$type, "loocv")
+})
+
 test_that("make_cv_folds returns valid, reproducible, strategy-appropriate folds", {
   set.seed(1)
   coords <- cbind(runif(100, 0, 1000), runif(100, 0, 1000))
@@ -319,4 +370,47 @@ test_that("make_cv_folds preserves the caller's RNG stream", {
   set.seed(123); expected <- runif(1)
   set.seed(123); invisible(make_cv_folds(coords, "block", 60)); actual <- runif(1)
   expect_equal(actual, expected)
+})
+
+# ── pool_cv_sf: pooled "Total (Combined)" diagnostics CRS ───────────────────
+
+test_that("pool_cv_sf pools per-locality sf CV objects in a metric auto-UTM CRS", {
+  # Two localities projected in different local UTM zones (35N and 36N).
+  make_loc_sf <- function(lon0, epsg) {
+    df <- data.frame(lon = lon0 + runif(10, 0, 0.01), lat = 41 + runif(10, 0, 0.01),
+                     observed = rnorm(10), var1.pred = rnorm(10))
+    sf::st_transform(sf::st_as_sf(df, coords = c("lon", "lat"), crs = 4326), epsg)
+  }
+  set.seed(7)
+  cv_list <- list(A = make_loc_sf(27.0, 32635), B = make_loc_sf(33.5, 32636))
+
+  pooled <- pool_cv_sf(cv_list)
+  expect_s3_class(pooled, "sf")
+  expect_equal(nrow(pooled), 20)
+
+  crs <- sf::st_crs(pooled)
+  expect_false(isTRUE(sf::st_is_longlat(pooled)))
+  expect_false(identical(crs, sf::st_crs(3857)))
+  # combined centroid lon ~30.25 deg -> UTM zone 36 ((30.25+180)/6 + 1)
+  expect_true(grepl("zone=36", crs$proj4string) || grepl("zone 36", crs$wkt))
+  # metric units: pooled spread must be on the order of the true separation
+  # (~540 km between zones), impossible if degrees survived
+  bb <- sf::st_bbox(pooled)
+  expect_gt(bb["xmax"] - bb["xmin"], 1e5)
+})
+
+test_that("pool_cv_sf skips CRS-less entries and returns NULL when nothing is poolable", {
+  set.seed(8)
+  good <- sf::st_as_sf(data.frame(lon = 27 + runif(5, 0, 0.01), lat = 41 + runif(5, 0, 0.01),
+                                  observed = rnorm(5), var1.pred = rnorm(5)),
+                       coords = c("lon", "lat"), crs = 4326)
+  bad <- data.frame(x = 1:5, y = 1:5, observed = rnorm(5), var1.pred = rnorm(5))
+
+  pooled <- pool_cv_sf(list(A = good, B = bad))
+  expect_s3_class(pooled, "sf")
+  expect_equal(nrow(pooled), 5)
+
+  expect_null(pool_cv_sf(list(A = bad)))
+  expect_null(pool_cv_sf(list()))
+  expect_null(pool_cv_sf(NULL))
 })

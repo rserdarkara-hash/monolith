@@ -175,3 +175,14 @@ test_that("is_valid_col_ref is FALSE for detect_pred_column's no-match result", 
   no_match <- detect_pred_column("pH", c("foo", "bar"), type = "cve")
   expect_false(is_valid_col_ref(no_match))
 })
+
+# ── is_coord_col ──────────────────────────────────────────────────────────
+
+test_that("is_coord_col matches only whole-name coordinate tokens", {
+  expect_true(all(is_coord_col(c("x", "Y", "lon", "LAT", "Longitude",
+                                 "latitude", " easting ", "Northing", "lng"))))
+  # Substring false-positives the old regex excluded from variable mapping
+  expect_false(any(is_coord_col(c("Precipitation_cumulative", "correlation_index",
+                                  "latent_heat", "longevity", "along_slope",
+                                  "Platinum", "x_offset", "pH"))))
+})

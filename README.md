@@ -237,9 +237,35 @@ Ensure your project directory maintains the following structure. The application
 monolith/
 │
 ├── global.R                          # Centralized package loader & environment configuration
-├── monolith.R                        # Main Application Runner (Sources global.R)
-├── spatial_helpers.R                 # Spatial math, interpolation methods & CV logic
-├── ui_helpers.R                      # Analytics, descriptive plots & fuzzy matching helpers
+├── monolith.R                        # Main Application Runner (assembles UI + server from the files below)
+├── global_utils.R                    # Static configuration & pure utility functions
+│
+├── ui_main.R                         # Master UI assembly (fluidPage skeleton)
+├── ui_sidebar.R                      # Sidebar panel definition
+├── ui_main_tabs.R                    # Main tab panel definition
+│
+├── server_setup.R                    # Session infrastructure, caches & central reactive state
+├── server_export.R                   # Export registry, styler & batch export handlers
+├── server_map_interactions.R         # Draw tools, popups & point styling
+├── server_data_setup.R               # Upload, CRS parsing & variable mapping
+├── server_run_config.R               # Display context, config persistence & selectors
+├── server_model_tuning.R             # TPS/IDW optimization & variogram tuning
+├── server_execution.R                # Parallel interpolation pipeline (future/furrr)
+├── server_map_viewer.R               # Leaflet map rendering & proxy overlays
+├── server_sci_analysis.R             # Diagnostics, metrics & results tables
+│
+├── spatial_helpers.R                 # Geostatistical core loader (sources the four spatial_* files)
+├── spatial_vgm.R                     # Variogram fitting machinery
+├── spatial_metrics.R                 # CV folds, error metrics & Moran's I
+├── spatial_kriging.R                 # Interpolation engines (IDW/TPS/OK/CK/RK/RFK)
+├── spatial_pipeline.R                # Regional orchestration & parallel worker entry points
+│
+├── ui_helpers.R                      # UI/analytics helper loader (sources the four ui_* helper files)
+├── ui_colors.R                       # Palettes & colour resolution
+├── ui_formatting.R                   # Labels, metadata matching & fuzzy matching helpers
+├── ui_components.R                   # Shiny widget/tag generators
+├── ui_plotting.R                     # Descriptive, correlation, PCA & diagnostic plot builders
+│
 ├── theme_helpers.R                   # Theming & export configurations
 ├── gov_module.R                      # Governing Factors UI & Server Modules
 ├── desc_exploratory_module.R         # Descriptive & Exploratory Suite (Tab 5 Module)

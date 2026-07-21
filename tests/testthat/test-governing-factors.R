@@ -114,3 +114,37 @@ test_that("compute_governing_factors does not perturb the caller's RNG (T19)", {
   set.seed(123); invisible(compute_governing_factors(df, "a", c("b", "c"))); actual_draw <- runif(1)
   expect_equal(actual_draw, expected_draw)
 })
+
+# ── Cooperative cancellation ────────────────────────────────────────────────
+
+test_that("compute_governing_factors aborts when the cancel flag is set", {
+  df <- make_test_df(60)
+  preds <- c("b", "c", "d")
+  cancel_file <- tempfile(fileext = ".txt")
+  file.create(cancel_file)
+  on.exit(unlink(cancel_file), add = TRUE)
+
+  # The first checkpoint runs before the random forest is fitted, so a flag
+  # that is already set must abort essentially immediately.
+  expect_error(
+    compute_governing_factors(df, "a", preds, n_permutations = 2,
+                              rf_ntree = 10, shap_sample_size = 10,
+                              cancel_file = cancel_file),
+    "cancelled by user")
+})
+
+test_that("compute_governing_factors is unchanged when no cancel file is given", {
+  df <- make_test_df(60)
+  preds <- c("b", "c", "d")
+  missing_flag <- file.path(tempdir(), "gov_cancel_never_created.txt")
+  unlink(missing_flag)
+
+  a <- compute_governing_factors(df, "a", preds, n_permutations = 2,
+                                 rf_ntree = 20, shap_sample_size = 10)
+  b <- compute_governing_factors(df, "a", preds, n_permutations = 2,
+                                 rf_ntree = 20, shap_sample_size = 10,
+                                 cancel_file = missing_flag)
+  expect_equal(a$importance, b$importance)
+  expect_equal(a$shap, b$shap)
+  expect_identical(a$top_var, b$top_var)
+})

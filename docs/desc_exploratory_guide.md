@@ -4,6 +4,10 @@ The **Descriptive and Exploratory Suite**  provides a comprehensive set of stati
 
 > *Note: The statistical and geostatistical methods described in this document (e.g., kriging variants, IDW, TPS, cross-validation metrics, PCA, statistical tests) are established methods previously published in the literature; they are not original scientific contributions of this software or its author. This document explains how these methods are implemented within Monolith for practical and operational clarity, and is not designed to serve as a citable source for their theoretical origins. Users who wish to cite the original literature source for a given method should locate and review the relevant sources themselves, as this document does not aim to provide academic citations for each method.*
 
+## 0. Variable Naming
+
+A **Variable naming** radio at the top of the Analytics Engine switches every dropdown, plot axis, title, and table in the suite (including the Governing Factors tab) between the human-readable **variable labels** defined in your metadata mapping (default) and the raw **column names** of the uploaded file. When no metadata mapping was provided, both options show the column names. The toggle is purely cosmetic and never changes a computed value.
+
 ## 1. Global Data Grouping & Discretization
 
 At the top of the Analytics Engine, a master control panel dictates the data subset fed into all subsequent analysis tabs (Descriptive, Correlation, PCA, Governing Factors). Any filter or grouping applied persists across your entire analytical session through this tabs, the results will instantly updated if grouping modified.
@@ -84,6 +88,9 @@ This module leverages machine learning explainability to discover non-linear rel
 *   **Permutations:** A slider controls the robustness of the Random Forest variable importance calculation (default: 50).
 *   **Number of Trees (ntree):** Controls the depth and complexity of the underlying Random Forest model. Higher values (e.g., 500) ensure extreme stability in permutations but take longer.
 *   **SHAP Sample Size (Max):** Since calculating SHAP explanations is computationally intense, this slider dictates the maximum random subsample size. Lower values execute faster for quick exploration; higher values provide more robust, comprehensive representations of the dataset.
+
+**5.1.1 Cancelling a run**
+A **Cancel Run** button sits in the running panel. Like the Classification Suite's, it takes effect at the next checkpoint rather than instantly: checkpoints sit before the Random Forest fit, before the permutation-importance pass, before the ALE/PDP profiles, and between individual SHAP observations. Because the SHAP loop is normally the longest stage and is checked per observation, a cancel there is usually picked up within a second or two. The exception is the permutation-importance step, which runs all of its passes inside a single uninterruptible call and must finish before the cancel is seen — lowering **Permutations** shortens that window. A cancelled run keeps no partial results; the previous run's plots (if any) stay on screen and the Run Analysis button becomes available again.
 
 **5.2 Functional Effect Plots**
 Users can toggle between two advanced explainability frameworks:

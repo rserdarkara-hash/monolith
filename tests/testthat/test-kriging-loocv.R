@@ -88,3 +88,37 @@ test_that("perform_kriging_loocv output has expected columns on success", {
     expect_true("residual" %in% colnames(result))
   }
 })
+
+test_that("perform_kriging_loocv refuses a rank-deficient trend instead of returning NA metrics", {
+  # With fewer training rows than the lm has coefficients, the fold fit aliases
+  # coefficients, predict() returns NA, the NAs propagate through the residual
+  # kriging and the reported metrics degrade to NA with nothing saying why.
+  pts <- make_test_points(8)
+  for (i in 1:6) pts[[paste0("cv", i)]] <- rnorm(8)
+  aux <- paste0("cv", 1:6)   # 6 covariates + intercept = 7 coefficients
+
+  # LOOCV leaves 7 training rows for 7 coefficients: no residual df.
+  expect_error(
+    perform_kriging_loocv(pts, "v", aux, calc_scientific_lags, robust_vgm_fit,
+                          model_type = "lm", cv_strategy = "loocv"),
+    "regression coefficients")
+
+  # randomForest has no rank requirement, so the guard must not fire for RFK.
+  # (suppressWarnings: randomForest's own seq(along=) partial-match notice.)
+  rf_res <- suppressWarnings(tryCatch(
+    perform_kriging_loocv(pts, "v", aux, calc_scientific_lags, robust_vgm_fit,
+                          model_type = "rf", cv_strategy = "loocv"),
+    error = function(e) e))
+  expect_false(inherits(rf_res, "error") &&
+                 grepl("regression coefficients", conditionMessage(rf_res)))
+})
+
+test_that("a comfortably-specified lm passes the rank guard", {
+  pts <- make_test_points(30)
+  res <- tryCatch(
+    perform_kriging_loocv(pts, "v", c("aux1", "aux2"), calc_scientific_lags,
+                          robust_vgm_fit, model_type = "lm", cv_strategy = "loocv"),
+    error = function(e) e)
+  expect_false(inherits(res, "error") &&
+                 grepl("regression coefficients", conditionMessage(res)))
+})

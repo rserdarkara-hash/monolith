@@ -59,6 +59,11 @@ create_app_theme <- function(light_blue, dark_bg, content_bg, font_family, map_t
     ".header-banner { max-height: 50px; width: auto; object-fit: contain; }"
   }
 
+  # NOTE: theme fonts are fetched from Google Fonts at runtime — a silent
+  # external network call. Offline it fails gracefully (the browser falls back
+  # to the local sans-serif stack); documented in the user guide. Bundling via
+  # showtext was considered and deferred: webfont delivery only affects UI
+  # typography, never computed results or exported figures' data content.
   manual_style <- glue::glue(
     "
     @import url('https://fonts.googleapis.com/css2?family={{font_url_name}}:wght@300;400;700&display=swap');
@@ -438,7 +443,9 @@ themes_params <- list(
     map_tiles = "CartoDB.DarkMatter",
     box_bg = "#3c0073",
     sidebar_text_color = "#f0f0f0",
-    body_text_color = "#2b0052",
+    # Must stay light: content_bg is #2b0052 — a matching body color renders
+    # plain text and inactive tab labels invisible.
+    body_text_color = "#e8e2f5",
     header_text_color = "#ffffff"
   ),
   "Muted Sage (modified)" = list(
@@ -459,7 +466,9 @@ themes_params <- list(
     map_tiles = "CartoDB.DarkMatter",
     box_bg = "#455a64",
     sidebar_text_color = "#ecf0f1",
-    body_text_color = "#3e2723",
+    # Must stay light: dark brown on the #34495e slate content background was
+    # ~2:1 contrast (unreadable tab labels / loose paragraphs).
+    body_text_color = "#ecf0f1",
     header_text_color = "#000000"
   ),
   "Oceanic Deep" = list(

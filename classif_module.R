@@ -20,8 +20,17 @@ classif_build_target <- function(df, mode, cat_col, num_col, n_classes = 4,
     ci <- classInt::classIntervals(x[is.finite(x)], n = n_classes, style = style)
     brks <- unique(ci$brks)
     if (length(brks) < 3) return(NULL)
-    labs <- paste0("[", utils::head(round(brks, 2), -1), ", ",
-                   round(brks[-1], 2), ")")
+    # Distinct breaks can still collide after rounding (tight distributions),
+    # and factor() errors on duplicated levels — widen the label precision
+    # until every interval label is unique.
+    lab_digits <- 2
+    repeat {
+      labs <- paste0("[", round(utils::head(brks, -1), lab_digits), ", ",
+                     round(brks[-1], lab_digits), ")")
+      if (anyDuplicated(labs) == 0 || lab_digits >= 10) break
+      lab_digits <- lab_digits + 1
+    }
+    if (anyDuplicated(labs) > 0) return(NULL)
     factor(cut(x, breaks = brks, labels = labs, include.lowest = TRUE, right = FALSE),
            levels = labs)
   } else {
@@ -90,11 +99,46 @@ classif_ui <- function(id) {
             shiny::div(style = "display: flex; align-items: center; margin-bottom: 6px;",
               shiny::tags$b("Spatial Scope"),
               shiny::tags$i(class = "fa fa-info-circle",
-                title = "Restrict where the classifier is trained, evaluated, and mapped. Localities default to the sidebar Context panel selection; polygons drawn on the map or uploaded as a shapefile can restrict the scope further.",
+                title = "Restrict where the classifier is trained, evaluated, and mapped. These settings are specific to the Classification Suite and independent of the interpolation sidebar. Polygons drawn on the map or uploaded as a shapefile can restrict the scope further.",
                 style = "color: #007bff; cursor: help; margin-left: 6px;")
             ),
             shiny::uiOutput(ns("scope_loc_ui")),
             shiny::uiOutput(ns("scope_poly_ui")),
+            # Boundary / buffer / grid resolution for the classification maps.
+            # Module-local on purpose: the sidebar Spatial Engine settings
+            # belong to the interpolation runs and are hidden on this tab.
+            shiny::selectInput(ns("boundary_type"),
+              shiny::tags$span("Boundary Type",
+                shiny::tags$i(class = "fa fa-info-circle",
+                  title = "How the predicted class surface is cropped around the scoped samples. Concave/Convex hull wrap the points; Wrapped adds a buffer around the hull; Strict buffers each point individually.",
+                  style = "color: #007bff; cursor: help; margin-left: 5px;")),
+              choices = c("Concave Hull" = "concave", "Convex Hull" = "convex",
+                          "Wrapped (Buffered)" = "wrapped",
+                          "Strict Measured (Point Buffer)" = "strict"),
+              selected = "concave"),
+            shiny::conditionalPanel(
+              condition = sprintf("input['%s'] == 'wrapped'", ns("boundary_type")),
+              shiny::radioButtons(ns("buff_mode"), "Buffer Logic",
+                choices = c("Auto (Dynamic)" = "dynamic", "Fixed (Manual)" = "fixed"),
+                selected = "dynamic", inline = TRUE)
+            ),
+            shiny::conditionalPanel(
+              condition = sprintf("input['%s'] == 'strict' || (input['%s'] == 'wrapped' && input['%s'] == 'fixed')",
+                                  ns("boundary_type"), ns("boundary_type"), ns("buff_mode")),
+              shiny::numericInput(ns("buff_dist"), "Buffer Distance (m)", value = 250, min = 0)
+            ),
+            shiny::radioButtons(ns("res_mode"),
+              shiny::tags$span("Grid Resolution",
+                shiny::tags$i(class = "fa fa-info-circle",
+                  title = "Auto derives a cell size from the scope boundary area (~50k cells). Fixed forces a specific cell size in metres.",
+                  style = "color: #007bff; cursor: help; margin-left: 5px;")),
+              choices = c("Auto" = "auto", "Fixed" = "fixed"),
+              selected = "auto", inline = TRUE),
+            shiny::conditionalPanel(
+              condition = sprintf("input['%s'] == 'fixed'", ns("res_mode")),
+              shiny::sliderInput(ns("grid_res"), "Manual Resolution (m)",
+                                 min = 5, max = 500, value = 50)
+            ),
             shiny::uiOutput(ns("scope_note"))
           ),
 
@@ -125,11 +169,15 @@ classif_ui <- function(id) {
               value = FALSE)
           ),
 
+          shiny::radioButtons(ns("importance_mode"),
+            shiny::tags$span("Feature importance scored on",
+              shiny::tags$i(class = "fa fa-info-circle",
+                title = "Out-of-fold reuses each cross-validation fold's own model and permutes predictors in the rows that fold never saw, so importance is measured under the same honest design as the reported accuracy. Training rows is the conventional default (vip), but it rewards a flexible model for memorising its training data and so overstates importance. Both cost the same.",
+                style = "color: #007bff; cursor: help; margin-left: 5px;")),
+            choices = c("Out-of-fold (recommended)" = "oof", "Training rows" = "training"),
+            selected = "oof"),
+
           shiny::checkboxInput(ns("make_surface"), "Predict maps", value = TRUE),
-          # Boundary/buffer/resolution are the sidebar Spatial Engine settings
-          # (one source of truth); the module only mirrors them here so the user
-          # knows what the next run will use and where to change it.
-          shiny::uiOutput(ns("shared_grid_note")),
 
           shiny::actionButton(ns("run_btn"), "Run Classification", class = "btn-primary btn-block"),
           shiny::hr(),
@@ -141,8 +189,18 @@ classif_ui <- function(id) {
             shiny::div(id = ns("running_panel"),
               style = "text-align: center; padding: 100px 50px; background-color: rgba(255,255,255,0.02); border-radius: 8px; border: 2px dashed #007bff; margin-bottom: 20px;",
               shiny::icon("circle-notch", class = "fa-spin fa-4x", style = "color: #007bff; margin-bottom: 20px;"),
-              shiny::h3("Training and cross-validating classifier...", style = "color: #007bff; font-weight: bold;"),
-              shiny::p("Fitting the model, running spatial cross-validation, and predicting class / probability / entropy surfaces in the background.", style = "color: #666;")
+              shiny::h3("Running classification...", style = "color: #007bff; font-weight: bold;"),
+              shiny::p("Fitting the model, running spatial cross-validation, and predicting class / probability / entropy surfaces in the background.", style = "color: #666;"),
+              shiny::div(style = "max-width: 420px; margin: 15px auto 0 auto; background-color: rgba(0,123,255,0.15); border-radius: 6px; height: 14px; overflow: hidden;",
+                shiny::div(id = ns("classif_progress_fill"),
+                           style = "width: 0%; height: 100%; background-color: #007bff; border-radius: 6px; transition: width 0.6s ease;")
+              ),
+              shiny::div(id = ns("classif_progress_text"),
+                         style = "margin-top: 6px; font-size: 0.9em; color: #666;", "Starting..."),
+              shiny::actionButton(ns("cancel_btn"), "Cancel Run",
+                                  icon = shiny::icon("stop"),
+                                  class = "btn-danger btn-sm",
+                                  style = "margin-top: 15px;")
             )
           ),
           shiny::conditionalPanel(
@@ -326,26 +384,85 @@ classif_ui <- function(id) {
 }
 
 classif_server <- function(id, data_reactive, vars_metadata_reactive, spatial_reactive,
-                           context_localities_reactive = shiny::reactive(NULL),
-                           polygons_reactive = shiny::reactive(NULL),
-                           boundary_settings_reactive = shiny::reactive(NULL)) {
+                           polygons_reactive = shiny::reactive(NULL)) {
   shiny::moduleServer(id, function(input, output, session) {
     ns <- session$ns
     cl_rv <- shiny::reactiveValues(res = NULL, ready = "no", vif_decision = NULL,
-                                   modal_map = NULL)
+                                   modal_map = NULL, cancelling = FALSE)
 
-    # Sidebar Spatial Engine settings (boundary type, buffer logic, grid
-    # resolution), normalised with the same defaults the interpolation run
-    # uses. One source of truth: the live scope preview, the run dispatch, and
-    # the summary note below all read this reactive.
+    # ── Run progress + cancel (file-based, parity with the interpolation
+    # pipeline: the worker writes percent files via update_progress_file and
+    # polls a cancel flag between folds/stages) ──────────────────────────────
+    cls_session_id <- substr(session$token, 1, 8)
+    cls_progress_dir <- file.path(tempdir(), paste0("classif_progress_", cls_session_id))
+    cls_cancel_file <- file.path(cls_progress_dir, "classif_cancel.txt")
+    cls_progress_file <- file.path(
+      cls_progress_dir, paste0("progress_", cls_session_id, "_classification_cls.txt"))
+    # Companion file naming the stage the worker is in, so the caption tracks
+    # the real work (grid build, covariate interpolation, classifying cells)
+    # instead of always claiming cross-validation.
+    cls_stage_file <- file.path(
+      cls_progress_dir, paste0("stage_", cls_session_id, "_classification_cls.txt"))
+
+    set_classif_progress <- function(pct, txt) {
+      shinyjs::runjs(sprintf(
+        "var el = document.getElementById('%s'); if (el) el.style.width = '%d%%';",
+        ns("classif_progress_fill"), as.integer(pct)))
+      shinyjs::html("classif_progress_text", txt)
+    }
+
+    # Restore the idle UI. Called from BOTH promise handlers so the Run button
+    # can never stay stuck on "Running..." once the worker has settled.
+    reset_run_ui <- function() {
+      shinyjs::enable("run_btn")
+      shiny::updateActionButton(session, "run_btn", label = "Run Classification",
+                                icon = character(0))
+      shinyjs::hide("running_panel")
+      shinyjs::enable("cancel_btn")
+      cl_rv$cancelling <- FALSE
+    }
+
+    shiny::observe({
+      if (!identical(cl_rv$ready, "running")) return(invisible(NULL))
+      shiny::invalidateLater(800, session)
+      # While a cancel is pending, leave the notice alone: the old poller
+      # overwrote it on the next tick, which is why "Cancelling..." flipped
+      # straight back to a progress caption.
+      if (isTRUE(cl_rv$cancelling)) return(invisible(NULL))
+      pct <- tryCatch({
+        v <- suppressWarnings(as.numeric(readLines(cls_progress_file, warn = FALSE)))
+        if (length(v) == 0 || is.na(v[1])) 0 else v[1]
+      }, error = function(e) 0)
+      pct <- max(0, min(99, round(pct)))
+      stage <- tryCatch({
+        s <- readLines(cls_stage_file, warn = FALSE)
+        if (length(s) == 0 || !nzchar(s[1])) NULL else s[1]
+      }, error = function(e) NULL)
+      set_classif_progress(pct, sprintf("%s  %d%%", stage %||% "Working...", pct))
+    })
+
+    shiny::observeEvent(input$cancel_btn, {
+      if (!identical(cl_rv$ready, "running")) return()
+      if (!dir.exists(cls_progress_dir)) dir.create(cls_progress_dir, recursive = TRUE, showWarnings = FALSE)
+      tryCatch(file.create(cls_cancel_file), error = function(e) NULL)
+      cl_rv$cancelling <- TRUE
+      shinyjs::disable("cancel_btn")
+      shinyjs::html("classif_progress_text",
+                    "Cancelling, waiting for the current stage to reach a checkpoint...")
+      shiny::showNotification("Cancelling classification run...", type = "message")
+    })
+
+    # Module-local boundary type, buffer logic, and grid resolution
+    # (independent of the interpolation sidebar, which is hidden on this
+    # tab), normalised with defaults. One source of truth: the live scope
+    # preview and the run dispatch both read this reactive.
     bset <- shiny::reactive({
-      bs <- boundary_settings_reactive()
       list(
-        type      = bs$type %||% "concave",
-        buff_mode = bs$buff_mode %||% "dynamic",
-        buff_dist = if (is.null(bs$buff_dist) || is.na(bs$buff_dist)) 250 else as.numeric(bs$buff_dist),
-        res_mode  = bs$res_mode %||% "local",
-        res       = if (is.null(bs$res) || is.na(bs$res)) NULL else as.numeric(bs$res)
+        type      = input$boundary_type %||% "concave",
+        buff_mode = input$buff_mode %||% "dynamic",
+        buff_dist = if (is.null(input$buff_dist) || is.na(input$buff_dist)) 250 else as.numeric(input$buff_dist),
+        res_mode  = input$res_mode %||% "auto",
+        res       = if (is.null(input$grid_res) || is.na(input$grid_res)) NULL else as.numeric(input$grid_res)
       )
     })
 
@@ -357,18 +474,20 @@ classif_server <- function(id, data_reactive, vars_metadata_reactive, spatial_re
       sort(unique(as.character(stats::na.omit(df[[sp$loc]]))))
     })
 
-    # Locality picker, defaulting to (and re-synced from) the sidebar Context
-    # panel selection; the user can then diverge for classification only.
+    # Locality picker, specific to the Classification Suite (deliberately NOT
+    # synced with the sidebar Context panel: the two selections used to drift
+    # apart mid-session, leaving it ambiguous which one a run would honour).
+    # Defaults to all localities; a previous selection survives re-renders.
     output$scope_loc_ui <- shiny::renderUI({
       ch <- scope_choices()
       if (is.null(ch)) return(NULL)
-      ctx <- context_localities_reactive()
-      sel <- if (is.null(ctx) || length(ctx) == 0 || "ALL" %in% ctx) ch else intersect(ctx, ch)
+      prev <- shiny::isolate(input$scope_loc)
+      sel <- if (is.null(prev) || length(prev) == 0) ch else intersect(prev, ch)
       if (length(sel) == 0) sel <- ch
       shinyWidgets::pickerInput(ns("scope_loc"),
         shiny::tags$span("Localities",
           shiny::tags$i(class = "fa fa-info-circle",
-            title = "Follows the Context panel selection by default; changing it here scopes this classification run only. Empty = all localities.",
+            title = "Localities this classification run is trained, evaluated, and mapped on. Independent of the sidebar Context panel. Empty = all localities.",
             style = "color: #007bff; cursor: help; margin-left: 5px;")),
         choices = ch, selected = sel, multiple = TRUE,
         options = list(`actions-box` = TRUE))
@@ -415,27 +534,6 @@ classif_server <- function(id, data_reactive, vars_metadata_reactive, spatial_re
                               buffer_mode = bs$buff_mode,
                               buffer_dist = bs$buff_dist),
         error = function(e) NULL)
-    })
-
-    # Mirror of the sidebar Spatial Engine settings this module's runs share.
-    output$shared_grid_note <- shiny::renderUI({
-      bs <- bset()
-      type_lbl <- c(concave = "Concave Hull", convex = "Convex Hull",
-                    wrapped = "Wrapped (Buffered)", strict = "Strict Point Buffer")[bs$type]
-      if (is.na(type_lbl)) type_lbl <- bs$type
-      buff_lbl <- if (bs$type == "wrapped") {
-        if (identical(bs$buff_mode, "dynamic")) " | Buffer: dynamic"
-        else sprintf(" | Buffer: %.0f m", bs$buff_dist)
-      } else if (bs$type == "strict") {
-        sprintf(" | Buffer: %.0f m", bs$buff_dist)
-      } else ""
-      res_lbl <- if (identical(bs$res_mode, "fixed") && !is.null(bs$res)) {
-        sprintf("%.0f m (fixed)", bs$res)
-      } else "Auto"
-      shiny::tags$small(style = "color:#888; display:block; margin-bottom:8px;",
-        sprintf("Boundary: %s%s | Grid: %s", type_lbl %||% bs$type, buff_lbl, res_lbl),
-        shiny::tags$br(),
-        "Shared with the interpolation engine - change under Boundary Type / Resolution Logic in the sidebar's '2. Spatial Engine'.")
     })
 
     # ── Multicollinearity guardrail (scoped) ─────────────────────────────────
@@ -645,6 +743,15 @@ classif_server <- function(id, data_reactive, vars_metadata_reactive, spatial_re
       }
       boundary_wkt_v <- sc$boundary_wkt
 
+      # Fresh progress/cancel state for this run before the worker starts.
+      if (!dir.exists(cls_progress_dir)) dir.create(cls_progress_dir, recursive = TRUE, showWarnings = FALSE)
+      for (f in c(cls_cancel_file, cls_progress_file, cls_stage_file)) {
+        if (file.exists(f)) tryCatch(file.remove(f), error = function(e) NULL)
+      }
+      cl_rv$cancelling <- FALSE
+      shinyjs::enable("cancel_btn")
+      set_classif_progress(0, "Starting...")
+
       shinyjs::disable("run_btn")
       shiny::updateActionButton(session, "run_btn", label = "Running...",
                                 icon = shiny::icon("spinner", class = "fa-spin"))
@@ -662,15 +769,19 @@ classif_server <- function(id, data_reactive, vars_metadata_reactive, spatial_re
         p_sf <- sf::st_as_sf(sdf[, c(sp$x, sp$y)], coords = c(sp$x, sp$y), crs = sp$src_crs)
         sf::st_coordinates(sf::st_transform(p_sf, sp$proj_crs))
       }, error = function(e) NULL)
-      # Boundary type, buffer, and grid resolution come from the sidebar
-      # Spatial Engine settings (shared with the interpolation runs): fixed
-      # resolution mode uses the manual slider value; auto modes let the
-      # pipeline derive a resolution from the boundary area.
+      # Boundary type, buffer, and grid resolution come from the module's own
+      # Spatial Scope controls: fixed resolution mode uses the manual slider
+      # value; auto lets the pipeline derive a resolution from the boundary
+      # area.
       bs_v <- bset()
       gres <- if (identical(bs_v$res_mode, "fixed")) bs_v$res else NULL
       weights_v <- isTRUE(input$class_weights)
+      imp_mode_v <- input$importance_mode %||% "oof"
       x_v <- sp$x; y_v <- sp$y; src_v <- sp$src_crs; proj_v <- sp$proj_crs
       proj_root_ship <- getwd()
+      progress_dir_ship <- cls_progress_dir
+      session_id_ship <- cls_session_id
+      cancel_file_ship <- cls_cancel_file
       # The trained workflow is persisted by the worker (same machine) into a
       # main-session tempfile, keeping the promise payload lean; the Download
       # Model button copies this file.
@@ -696,12 +807,12 @@ classif_server <- function(id, data_reactive, vars_metadata_reactive, spatial_re
           make_surface = make_surf,
           group_col = ".scope_group", boundary_wkt = boundary_wkt_v,
           class_weights = weights_v, model_rds_path = model_path_ship,
-          nested = nested_v
+          nested = nested_v, importance_mode = imp_mode_v,
+          progress_dir = progress_dir_ship, session_id = session_id_ship,
+          cancel_file = cancel_file_ship
         )
       }) %...>% (function(res) {
-        shinyjs::enable("run_btn")
-        shiny::updateActionButton(session, "run_btn", label = "Run Classification", icon = character(0))
-        shinyjs::hide("running_panel")
+        reset_run_ui()
         # Unique run token: keys the per-run plot cache (renderCachedPlot).
         res$run_id <- paste0(substr(session$token, 1, 8), "-",
                              format(Sys.time(), "%Y%m%d%H%M%OS3"))
@@ -718,11 +829,13 @@ classif_server <- function(id, data_reactive, vars_metadata_reactive, spatial_re
           shiny::showNotification("Classification completed.", type = "message")
         }
       }) %...!% (function(err) {
-        shinyjs::enable("run_btn")
-        shiny::updateActionButton(session, "run_btn", label = "Run Classification", icon = character(0))
-        shinyjs::hide("running_panel")
+        reset_run_ui()
         cl_rv$ready <- "no"
-        shiny::showNotification(paste("Classification failed:", err$message), type = "error")
+        if (grepl("cancelled by user", conditionMessage(err), fixed = TRUE)) {
+          shiny::showNotification("Classification run cancelled.", type = "message")
+        } else {
+          shiny::showNotification(paste("Classification failed:", err$message), type = "error")
+        }
       })
       NULL
     }
@@ -870,11 +983,19 @@ classif_server <- function(id, data_reactive, vars_metadata_reactive, spatial_re
                           function(v) get_var_label(v, vars_metadata_reactive()), character(1))
       imp$label <- factor(imp$label, levels = rev(imp$label))
       imp$txt <- ifelse(is.na(imp$share_pct), "", sprintf("%.1f%%", imp$share_pct))
+      # Name the evaluation design on the axis: an out-of-fold and a
+      # training-row importance are different quantities and must never be
+      # compared as if they were the same number.
+      x_lab <- if (identical(imp$evaluated_on[1], "out-of-fold")) {
+        "Permutation importance (out-of-fold Δ log-loss)"
+      } else {
+        "Permutation importance (training-row Δ log-loss)"
+      }
       ggplot2::ggplot(imp, ggplot2::aes(x = importance, y = label)) +
         ggplot2::geom_col(fill = "#2c7fb8", width = 0.7) +
         ggplot2::geom_text(ggplot2::aes(label = txt), hjust = -0.15, size = 3.4) +
         ggplot2::scale_x_continuous(expand = ggplot2::expansion(mult = c(0.02, 0.18))) +
-        ggplot2::labs(x = "Permutation importance", y = NULL) +
+        ggplot2::labs(x = x_lab, y = NULL) +
         ggplot2::theme_minimal(base_size = 13)
     })
 
@@ -1204,11 +1325,14 @@ classif_server <- function(id, data_reactive, vars_metadata_reactive, spatial_re
             value = c(lf$baseline_acc, lf$baseline_kap, lf$majority_acc,
                       lf$lift_abs, lf$mcnemar_p)))
         }
-        # Permutation feature importance (final model, training data).
+        # Permutation feature importance. The scope names the evaluation design
+        # (each fold's model on its held-out rows, or the final model on its own
+        # training rows) so a reader of the CSV alone cannot mistake one for the
+        # other — they are not comparable numbers.
         if (!is.null(res$importance)) {
           imp <- res$importance
           out <- rbind(out, data.frame(
-            scope = "Feature importance",
+            scope = sprintf("Feature importance (%s)", imp$evaluated_on[1]),
             metric = imp$predictor,
             yardstick_id = "perm_delta_logloss",
             estimator = sprintf("share %.1f%%", imp$share_pct),

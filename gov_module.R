@@ -31,7 +31,11 @@ gov_factors_ui <- function(id) {
               shiny::icon("circle-notch", class = "fa-spin fa-4x", style = "color: #007bff; margin-bottom: 20px;"),
               shiny::h3("Executing Machine Learning Analytics...", style = "color: #007bff; font-weight: bold; margin-bottom: 10px;"),
               shiny::p("Fitting high-dimensional Random Forest models and extracting explanatory SHAP, PDP, and ALE profiles in the background.", style = "color: #666; font-size: 1.1em;"),
-              shiny::p("The dashboard remains fully responsive. You can view other tabs or start other operations.", style = "color: #888; font-style: italic; font-size: 0.9em; margin-top: 15px;")
+              shiny::p("The dashboard remains fully responsive. You can view other tabs or start other operations.", style = "color: #888; font-style: italic; font-size: 0.9em; margin-top: 15px;"),
+              shiny::actionButton(ns("gov_cancel_btn"), "Cancel Run",
+                                  icon = shiny::icon("stop"),
+                                  class = "btn-danger btn-sm",
+                                  style = "margin-top: 15px;")
             )
           ),
 
@@ -93,8 +97,36 @@ gov_factors_server <- function(id, data_reactive, vars_metadata_reactive) {
   shiny::moduleServer(id, function(input, output, session) {
     ns <- session$ns
     
-    gov_rv <- shiny::reactiveValues(res = NULL, ready = "no")
-    
+    gov_rv <- shiny::reactiveValues(res = NULL, ready = "no", cancelling = FALSE)
+
+    # Cooperative cancellation, mirroring the classification module: the flag is
+    # a file because the run lives in a future worker where Shiny reactives do
+    # not exist. Session-scoped so two browser sessions cannot cancel each
+    # other's runs.
+    gov_cancel_file <- file.path(tempdir(),
+      paste0("gov_cancel_", substr(session$token, 1, 12), ".txt"))
+
+    # One place that puts the run controls back to idle, so no failure path can
+    # leave "Running..." on a button that is no longer running.
+    reset_gov_run_ui <- function() {
+      shinyjs::enable("gov_run_btn")
+      shiny::updateActionButton(session, "gov_run_btn", label = "Run Analysis", icon = character(0))
+      shinyjs::hide("gov_running_panel")
+      shinyjs::show("gov_idle_content")
+      shinyjs::enable("gov_cancel_btn")
+      gov_rv$cancelling <- FALSE
+    }
+
+    shiny::observeEvent(input$gov_cancel_btn, {
+      if (!identical(gov_rv$ready, "running")) return(NULL)
+      tryCatch(file.create(gov_cancel_file), error = function(e) NULL)
+      gov_rv$cancelling <- TRUE
+      shinyjs::disable("gov_cancel_btn")
+      shiny::showNotification(
+        "Cancelling after the current step finishes...", type = "warning", duration = 4)
+    })
+
+
     output$gov_target_ui <- shiny::renderUI({
       df <- data_reactive()
       shiny::req(df)
@@ -138,6 +170,14 @@ gov_factors_server <- function(id, data_reactive, vars_metadata_reactive) {
         return()
       }
       
+      # Clear any flag left by a previous cancelled run, or this run would abort
+      # at its first checkpoint.
+      if (file.exists(gov_cancel_file)) {
+        tryCatch(file.remove(gov_cancel_file), error = function(e) NULL)
+      }
+      gov_rv$cancelling <- FALSE
+      shinyjs::enable("gov_cancel_btn")
+
       shinyjs::disable("gov_run_btn")
       # Must be updateActionButton, not shinyjs::html: Shiny 1.13 updates the
       # label inside a .action-label child span, which raw innerHTML replacement
@@ -162,6 +202,7 @@ gov_factors_server <- function(id, data_reactive, vars_metadata_reactive) {
       # Read the core count here in the main session: inside the promise worker
       # availableCores() reports 1, which would suppress the SHAP escalation.
       cores_hint_val <- tryCatch(as.integer(future::availableCores()), error = function(e) 1L)
+      cancel_file_ship <- gov_cancel_file
 
       promises::future_promise({
         library(DALEX)
@@ -173,14 +214,17 @@ gov_factors_server <- function(id, data_reactive, vars_metadata_reactive) {
           n_permutations = n_perms,
           rf_ntree = ntree_val,
           shap_sample_size = shap_size_val,
-          cores_hint = cores_hint_val
+          cores_hint = cores_hint_val,
+          cancel_file = cancel_file_ship
         )
       }) %...>% (function(res) {
-        shinyjs::enable("gov_run_btn")
-        shiny::updateActionButton(session, "gov_run_btn", label = "Run Analysis", icon = character(0))
-        shinyjs::hide("gov_running_panel")
-        shinyjs::show("gov_idle_content")
+        reset_gov_run_ui()
         if (!is.null(res)) {
+          # Commit the run's display context (T24 convention): the scatter
+          # panel must keep describing THIS run's target and data even if the
+          # sidebar target or the underlying table changes afterwards.
+          res$target_col <- target_col
+          res$analysis_df <- df
           gov_rv$res <- res
           gov_rv$ready <- "yes"
           shiny::showNotification("ML evaluation completed successfully!", type = "message")
@@ -189,12 +233,18 @@ gov_factors_server <- function(id, data_reactive, vars_metadata_reactive) {
           shiny::showNotification("Failed to calculate governing factors. Check data quality.", type = "error")
         }
       }) %...!% (function(err) {
-        shinyjs::enable("gov_run_btn")
-        shiny::updateActionButton(session, "gov_run_btn", label = "Run Analysis", icon = character(0))
-        shinyjs::hide("gov_running_panel")
-        shinyjs::show("gov_idle_content")
+        was_cancelled <- grepl("cancelled by user", err$message, fixed = TRUE)
+        reset_gov_run_ui()
         gov_rv$ready <- "no"
-        shiny::showNotification(paste("Error running ML analysis:", err$message), type = "error")
+        if (was_cancelled) {
+          # A cancelled run is a user action, not a failure: say so plainly and
+          # clear the flag so the next run is not aborted by a stale file.
+          tryCatch(if (file.exists(gov_cancel_file)) file.remove(gov_cancel_file),
+                   error = function(e) NULL)
+          shiny::showNotification("Analysis cancelled.", type = "message")
+        } else {
+          shiny::showNotification(paste("Error running ML analysis:", err$message), type = "error")
+        }
       })
       
       NULL
@@ -257,13 +307,18 @@ gov_factors_server <- function(id, data_reactive, vars_metadata_reactive) {
             ggplot2::theme_minimal(base_size = base_size)
         }
       } else if (plot_type == "interaction_b") {
-        df <- data_reactive()
-        shiny::req(df)
+        # Committed run context only — never live input$gov_target or
+        # data_reactive(): changing the Target dropdown after a run must not
+        # silently swap this panel's y-axis while the importance/SHAP/ALE
+        # panels still describe the completed run.
+        df <- gov_rv$res$analysis_df
+        run_target <- gov_rv$res$target_col
+        shiny::req(df, run_target)
         top_var_label <- get_var_label(gov_rv$res$top_var, vars_metadata_reactive())
-        target_label <- get_var_label(input$gov_target, vars_metadata_reactive())
-        
-        if (gov_rv$res$top_var %in% colnames(df) && input$gov_target %in% colnames(df)) {
-          p <- ggplot2::ggplot(df, ggplot2::aes(x = .data[[gov_rv$res$top_var]], y = .data[[input$gov_target]]))
+        target_label <- get_var_label(run_target, vars_metadata_reactive())
+
+        if (gov_rv$res$top_var %in% colnames(df) && run_target %in% colnames(df)) {
+          p <- ggplot2::ggplot(df, ggplot2::aes(x = .data[[gov_rv$res$top_var]], y = .data[[run_target]]))
           if (expanded) {
             p <- p + ggplot2::geom_point(alpha = 0.5, size = 3) + 
                      ggplot2::geom_smooth(method = "lm", color = "red", linewidth = 1.5)
@@ -295,7 +350,7 @@ gov_factors_server <- function(id, data_reactive, vars_metadata_reactive) {
     })
     
     output$gov_plot_interaction_b <- shiny::renderPlot({
-      shiny::req(gov_rv$res, input$gov_target)
+      shiny::req(gov_rv$res)
       gov_create_plot("interaction_b", expanded = FALSE)
     })
     
@@ -324,7 +379,7 @@ gov_factors_server <- function(id, data_reactive, vars_metadata_reactive) {
     gov_build_imp_plot <- function() { shiny::req(gov_rv$res); gov_create_plot("importance", expanded = TRUE) }
     gov_build_inta_plot <- function() { shiny::req(gov_rv$res); gov_create_plot("interaction_a", expanded = TRUE) }
     gov_build_eff_plot <- function() { shiny::req(gov_rv$res); gov_create_plot("effect", expanded = TRUE) }
-    gov_build_intb_plot <- function() { shiny::req(gov_rv$res, input$gov_target); gov_create_plot("interaction_b", expanded = TRUE) }
+    gov_build_intb_plot <- function() { shiny::req(gov_rv$res); gov_create_plot("interaction_b", expanded = TRUE) }
     
     register_expanded_modal(
       input, output, session,

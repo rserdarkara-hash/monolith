@@ -580,14 +580,307 @@ test_that("apply_interpolation returns error result for unknown method", {
   expect_match(res$log_msg, "Unknown interpolation method: NOPE")
 })
 
-test_that("apply_interpolation treats RK without aux vars as an error", {
-  # Current contract: covariate methods require aux_vars; with none supplied
-  # the dispatcher falls through to the unknown-method error
+test_that("pre-resolved VIF set (aux_kept) reproduces the engine's own gate exactly", {
+  # run_regional_interpolation resolves the multicollinearity gate BEFORE the
+  # covariates are kriged onto the grid (so dropped ones are never kriged) and
+  # passes the surviving set down as method_params$aux_kept. That is a compute-
+  # path change only: the gate sees the same frame either way, so the fitted
+  # model and its predictions must be identical.
+  pts <- make_test_points(30)
+  pts$aux3 <- pts$aux1 * 2 + rnorm(30, 0, 1e-3)   # collinear with aux1
+  grid <- make_test_grid_safe(pts, res = 200)
+  lags <- calc_scientific_lags(pts)
+  aux <- c("aux1", "aux2", "aux3")
+
+  gate <- check_vif(sf::st_drop_geometry(pts)[, aux, drop = FALSE], threshold = 10)
+  expect_gt(length(gate$dropped), 0)   # the fixture must actually exercise the gate
+
+  # Engine recomputes the gate itself (aux_kept absent)
+  res_self <- suppressWarnings(apply_interpolation(
+    pts, "v", "RK", grid, aux, lags, list(cv_strategy = "loocv"), "region", "act", 10))
+  # Gate pre-resolved upstream and handed down
+  res_pre <- suppressWarnings(apply_interpolation(
+    pts, "v", "RK", grid, aux, lags,
+    list(cv_strategy = "loocv", aux_kept = gate$kept), "region", "act", 10))
+
+  expect_false(is.null(res_self$res_sf))
+  expect_equal(res_pre$res_sf$var1.pred, res_self$res_sf$var1.pred)
+  expect_equal(res_pre$res_sf$var1.var, res_self$res_sf$var1.var)
+  expect_equal(res_pre$cv_metrics$rmse, res_self$cv_metrics$rmse)
+  # both paths report the same dropped covariates
+  expect_match(res_pre$log_msg, "\\[VIF\\] Dropped")
+  expect_match(res_self$log_msg, "\\[VIF\\] Dropped")
+})
+
+test_that("covariate engines without aux vars report the real cause, not 'unknown method'", {
+  # Every covariate branch tests length(aux_vars) > 0, so RK/RFK/CK with no
+  # covariates used to fall through to the unknown-method stop() and tell the
+  # user RK was an unrecognised method. server_execution.R guards the UI path,
+  # but the engine is publicly callable.
   pts <- make_test_points(10)
   grid <- make_test_grid_safe(pts, res = 200)
   lags <- calc_scientific_lags(pts)
-  res <- apply_interpolation(pts, "v", "RK", grid, character(0), lags,
-                             list(), "region", "act")
-  expect_null(res$res_sf)
-  expect_match(res$log_msg, "Unknown interpolation method: RK")
+
+  for (m in c("RK", "RFK", "CK")) {
+    res <- apply_interpolation(pts, "v", m, grid, character(0), lags,
+                               list(), "region", "act")
+    expect_null(res$res_sf)
+    expect_match(res$log_msg, "requires at least one auxiliary covariate")
+    expect_false(grepl("Unknown interpolation method", res$log_msg))
+  }
+})
+
+# ── raster_value_layer (PackedSpatRaster safety) ──────────────────────────
+
+test_that("raster_value_layer reads packed and live rasters identically", {
+  r <- terra::rast(nrows = 20, ncols = 20, vals = seq_len(400))
+  names(r) <- "var1.pred"
+  live <- raster_value_layer(r)
+  packed <- raster_value_layer(terra::wrap(r))
+  expect_equal(live, packed)
+  expect_length(live, 400)
+  # first-layer fallback when var1.pred is absent
+  names(r) <- "something_else"
+  expect_equal(raster_value_layer(r), live)
+  expect_null(raster_value_layer(NULL))
+  expect_null(raster_value_layer("not a raster"))
+})
+
+# ── calc_class_breaks (seeded, sampled classification breaks) ─────────────
+
+test_that("calc_class_breaks is deterministic and seed-sandboxed", {
+  set.seed(999)
+  vv <- rnorm(20000, 50, 10)
+
+  set.seed(1); b1 <- calc_class_breaks(vv, 5, "kmeans")
+  set.seed(2); b2 <- calc_class_breaks(vv, 5, "kmeans")
+  expect_equal(b1, b2)          # caller RNG state must not leak in
+  expect_length(b1, 4)
+
+  # jenks subsampling path (n > max_n) is deterministic too
+  j1 <- calc_class_breaks(vv, 4, "jenks", max_n = 1000L)
+  j2 <- calc_class_breaks(vv, 4, "jenks", max_n = 1000L)
+  expect_equal(j1, j2)
+  expect_length(j1, 3)
+  expect_true(all(j1 > min(vv) & j1 < max(vv)))
+
+  # caller's RNG state restored (two-sided sandbox)
+  set.seed(77); before <- .Random.seed
+  invisible(calc_class_breaks(vv, 5, "kmeans"))
+  expect_identical(.Random.seed, before)
+
+  expect_null(calc_class_breaks(c(1, 2), 5, "kmeans"))
+})
+
+test_that("calc_class_breaks emits no conditions (Jenks message regression)", {
+  set.seed(999)
+  vv <- rnorm(20000, 50, 10)
+  # classInt's jenks signals a message() ("Use fisher instead...") that
+  # suppressWarnings alone lets escape; a stray condition unwinding through
+  # the classification_params reactive poisoned it and made Jenks styling
+  # silently fall back to the continuous palette.
+  expect_no_condition(calc_class_breaks(vv, 4, "jenks"))
+  expect_no_condition(calc_class_breaks(vv, 4, "kmeans"))
+  expect_length(calc_class_breaks(vv, 4, "jenks"), 3)
+})
+
+# ── top-level furrr worker items ──────────────────────────────────────────
+
+test_that("autofit_vgm_item fits actual and predicted variograms per item", {
+  pts <- make_test_points(30)
+  coords <- sf::st_coordinates(pts)
+  df_a <- data.frame(x = coords[, 1], y = coords[, 2], v = pts$v)
+  df_p <- data.frame(x = coords[, 1], y = coords[, 2], v = pts$pv)
+
+  res <- autofit_vgm_item(list(l = "LocA", act = df_a, pre = df_p), current_crs = 32633)
+  expect_identical(res$l, "LocA")
+  expect_s3_class(res$act$fit, "variogramModel")
+  expect_s3_class(res$pre$fit, "variogramModel")
+  expect_true(res$act$mod %in% c("Sph", "Exp", "Gau", "Mat"))
+
+  # matches the same fit computed inline (the observer's former lambda body)
+  sub_a <- validate_and_project_sf(sf::st_as_sf(df_a, coords = c("x", "y"), crs = 32633))
+  sub_a <- sub_a[!duplicated(round(sf::st_coordinates(sub_a), 2)), ]
+  lags <- calc_scientific_lags(sub_a)
+  v_emp <- gstat::variogram(v ~ 1, sub_a, width = lags$width, cutoff = lags$cutoff)
+  expect_equal(res$act$emp$gamma, v_emp$gamma)
+  expect_equal(as.character(res$act$fit$model[2]),
+               as.character(robust_vgm_fit(v_emp, sub_a$v)$model[2]))
+
+  # no predicted data -> FAIL placeholder result, actual side unaffected
+  res2 <- autofit_vgm_item(list(l = "LocB", act = df_a, pre = NULL), current_crs = 32633)
+  expect_null(res2$pre$fit)
+  expect_identical(res2$pre$mod, "FAIL")
+})
+
+test_that("tps_gcv_item returns a GCV curve and idw_opt_item an optimized power", {
+  pts <- make_test_points(25)
+  coords <- sf::st_coordinates(pts)
+  df <- data.frame(x = coords[, 1], y = coords[, 2], v = pts$v)
+
+  tps_res <- tps_gcv_item(list(l = "LocA", df = df), current_crs = 32633)
+  expect_identical(tps_res$l, "LocA")
+  expect_null(tps_res$err)
+  expect_true(is.numeric(tps_res$best_lam))
+  expect_true(is.data.frame(tps_res$gcv_data) && all(c("lambda", "gcv") %in% names(tps_res$gcv_data)))
+  expect_true(all(tps_res$gcv_data$lambda > 0))
+
+  idw_res <- idw_opt_item(list(l = "LocA", df = df), current_crs = 32633, idw_nmax_val = 12)
+  expect_true(idw_res$best_f >= 0.5 && idw_res$best_f <= 5)
+
+  # small-n guards
+  small <- df[1:3, ]
+  expect_identical(tps_gcv_item(list(l = "S", df = small), 32633)$best_lam, 0)
+  expect_identical(idw_opt_item(list(l = "S", df = small), 32633, 12)$best_f, 2.0)
+})
+
+test_that("idw_opt_item and tps_gcv_item project geographic input to match the run CRS", {
+  # Finding 1 (third external review): both optimizers searched on the raw
+  # upload CRS. For a geographic upload that means degree distances (and, for
+  # TPS, a degree-scaled unit box), while the actual run interpolates on
+  # projected metres -- so the stored power / lambda disagreed with the run they
+  # feed. They now project via validate_and_project_sf first, exactly like the
+  # sibling autofit_vgm_item and the run pipeline, so the answer is invariant to
+  # whether the same points arrive in a geographic or a projected CRS.
+  set.seed(101)
+  n   <- 40
+  lon <- 13 + runif(n, -0.05, 0.05)                   # UTM zone 33N territory
+  lat <- 52 + runif(n, -0.05, 0.05)
+  v   <- 10 + 5 * lon + 3 * lat + rnorm(n, 0, 0.2)    # smooth spatial signal
+  df_geo <- data.frame(x = lon, y = lat, v = v)
+
+  # The projected twin: exactly what validate_and_project_sf yields for df_geo,
+  # so both inputs reduce to the identical metric coordinate set.
+  pts_proj <- validate_and_project_sf(
+    sf::st_as_sf(df_geo, coords = c("x", "y"), crs = 4326))
+  cc       <- sf::st_coordinates(pts_proj)
+  df_proj  <- data.frame(x = cc[, 1], y = cc[, 2], v = v)
+  utm_crs  <- sf::st_crs(pts_proj)
+
+  # IDW power: identical whether supplied as geographic or projected.
+  idw_geo  <- idw_opt_item(list(l = "L", df = df_geo),  current_crs = 4326,    idw_nmax_val = 12)$best_f
+  idw_proj <- idw_opt_item(list(l = "L", df = df_proj), current_crs = utm_crs, idw_nmax_val = 12)$best_f
+  expect_identical(idw_geo, idw_proj)
+
+  # TPS lambda: same invariance (the unit-box normalization now runs on metres).
+  # suppressWarnings muffles fields' benign "GCV minimum at endpoint" note that
+  # a near-linear signal provokes; it is orthogonal to the CRS invariance tested.
+  tps_geo  <- suppressWarnings(tps_gcv_item(list(l = "L", df = df_geo),  current_crs = 4326))$best_lam
+  tps_proj <- suppressWarnings(tps_gcv_item(list(l = "L", df = df_proj), current_crs = utm_crs))$best_lam
+  expect_equal(tps_geo, tps_proj)
+})
+
+test_that("interp_run_item forwards a run_params list into a full regional run", {
+  pts <- make_test_points(15)
+  coords <- sf::st_coordinates(pts)
+  pts_data <- data.frame(x = coords[, 1], y = coords[, 2],
+                         v = pts$v, pv = NA, Locality = "LocA")
+  item <- list(l = "LocA", pts_data = pts_data,
+               m_params = list(idw_p_act = 2, idw_p_pre = 2, idw_nmax = 12,
+                               tps_lambda_act = -1, tps_lambda_pre = -1,
+                               pre_fit_act = NULL, pre_fit_pre = NULL,
+                               cv_strategy = "auto", rfk_uncertainty = "jackknife"))
+  proj_root <- normalizePath(file.path(testthat::test_path(), "..", ".."), winslash = "/")
+  run_params <- list(
+    main_wd = proj_root, current_method = "IDW", current_crs = 32633,
+    aux_vars = character(0), shp_bound = NULL, b_type = "wrapped",
+    buff_mode = "dynamic", b_dist = 250, res_mode = "fixed", grid_res = 200,
+    crs_sel = "EPSG:4326", comp_mode = FALSE, val_type = "actual",
+    progress_dir_val = tempdir(), session_id_val = "test",
+    cancel_file_val = NULL, vif_threshold = 10
+  )
+  res <- interp_run_item(item, run_params)
+  expect_identical(res$l, "LocA")
+  expect_false(grepl("Error", res$log_msg))
+  expect_false(is.null(res$r_a))
+})
+
+test_that("CK applies the multicollinearity gate to its co-kriging system", {
+  # apply_CK had NO gate: the Auto-Drop / Keep All threshold was threaded to
+  # RK/RFK only, so collinear covariates still reached fit.lmc() -- which is
+  # precisely what makes the LMC fit fail and drop the run into the silent
+  # Ordinary Kriging fallback.
+  set.seed(11)
+  pts <- make_test_points(30)
+  pts$aux3 <- pts$aux1 * 2 + rnorm(30, 0, 1e-3)   # collinear with aux1
+  grid <- make_test_grid_safe(pts, res = 200)
+  lags <- calc_scientific_lags(pts)
+  aux <- c("aux1", "aux2", "aux3")
+
+  gate <- check_vif(sf::st_drop_geometry(pts)[, aux, drop = FALSE], threshold = 10)
+  expect_gt(length(gate$dropped), 0)   # the fixture must actually trip the gate
+
+  res <- suppressWarnings(apply_CK(
+    pts, "v", grid, lags,
+    list(cv_strategy = "loocv", aux_kept = gate$kept), aux, "region", "act"))
+  expect_match(res$log_msg, "\\[VIF\\] Dropped")
+  # The dropped covariate must not appear in the fitted co-kriging system.
+  if (!is.null(res$gstat_obj)) {
+    expect_false(any(gate$dropped %in% names(res$gstat_obj$data)))
+  }
+})
+
+test_that("apply_interpolation threads vif_threshold through to CK", {
+  set.seed(12)
+  pts <- make_test_points(30)
+  pts$aux3 <- pts$aux1 * 2 + rnorm(30, 0, 1e-3)
+  grid <- make_test_grid_safe(pts, res = 200)
+  lags <- calc_scientific_lags(pts)
+  aux <- c("aux1", "aux2", "aux3")
+
+  auto_drop <- suppressWarnings(apply_interpolation(
+    pts, "v", "CK", grid, aux, lags, list(cv_strategy = "loocv"),
+    "region", "act", vif_threshold = 10))
+  # Inf == the user's "Keep All" answer: no iterative pruning at all.
+  keep_all <- suppressWarnings(apply_interpolation(
+    pts, "v", "CK", grid, aux, lags, list(cv_strategy = "loocv"),
+    "region", "act", vif_threshold = Inf))
+
+  expect_match(auto_drop$log_msg, "\\[VIF\\] Dropped")
+  expect_false(grepl("\\[VIF\\] Dropped", keep_all$log_msg))
+})
+
+test_that("engine parameter guards: absent IDW params and an NA TPS lambda", {
+  pts <- make_test_points(20)
+  grid <- make_test_grid_safe(pts, res = 200)
+
+  # R2: apply_IDW is publicly callable, and apply_TPS's fallback depends on
+  # these defaults existing rather than on a run_regional_interpolation
+  # invariant holding.
+  idw_res <- suppressWarnings(apply_IDW(pts, "v", grid, list(cv_strategy = "loocv")))
+  expect_false(is.null(idw_res$res_sf))
+  expect_true(any(is.finite(idw_res$res_sf$var1.pred)))
+
+  # R1: `NA < 0` is NA, which errors the if() and silently sent the entire
+  # surface down the IDW fallback. NA now means unset = Auto (GCV).
+  tps_res <- suppressWarnings(apply_TPS(
+    pts, "v", grid, list(cv_strategy = "loocv", tps_lambda = NA_real_)))
+  expect_false(is.null(tps_res$res_sf))
+  expect_false(grepl("TPS failed", tps_res$log_msg))
+})
+
+test_that("residual (Delta) raster carries only the prediction layer", {
+  # r_a - r_p differenced the whole stack, so when both surfaces carried a
+  # kriging-variance layer the exported residual GeoTIFF gained a
+  # "difference of two kriging variances" band -- not a quantity that exists.
+  # The viewer was safe (raster_value_layer picks var1.pred); the export was not.
+  pts <- make_test_points(20)
+  coords <- sf::st_coordinates(pts)
+  pts_data <- data.frame(x = coords[, 1], y = coords[, 2],
+                         v = pts$v, pv = pts$pv, Locality = "LocA")
+  item <- list(l = "LocA", pts_data = pts_data,
+               m_params = list(idw_p_act = 2, idw_p_pre = 2, idw_nmax = 12,
+                               tps_lambda_act = -1, tps_lambda_pre = -1,
+                               pre_fit_act = NULL, pre_fit_pre = NULL,
+                               cv_strategy = "auto", rfk_uncertainty = "jackknife"))
+  res <- suppressWarnings(run_regional_interpolation(
+    item, "OK", 32633, character(0), NULL, "wrapped", "dynamic", 250,
+    "fixed", 200, "EPSG:4326", TRUE, "actual"))
+
+  expect_false(is.null(res$r_res))
+  rr <- terra::unwrap(res$r_res)
+  expect_equal(terra::nlyr(rr), 1)
+  expect_identical(names(rr), "var1.pred")
+  # ...and the OK surfaces it was built from DO carry a variance layer.
+  expect_true("var1.var" %in% names(terra::unwrap(res$r_a)))
 })

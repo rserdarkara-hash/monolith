@@ -61,6 +61,21 @@ test_that("normalised Shannon entropy hits its analytic bounds", {
   expect_lt(peaked, flat)
 })
 
+test_that("vectorised entropy is bit-identical to the per-row reference", {
+  # Guards the apply() -> rowSums() rewrite, including the p == 0 terms the old
+  # code dropped via p[p > 0] and the new code zeroes.
+  set.seed(11)
+  m <- matrix(runif(300), ncol = 3)
+  m <- m / rowSums(m)
+  m[1, ] <- c(1, 0, 0)
+  m[2, ] <- c(0.5, 0.5, 0)
+  reference <- apply(m, 1, function(p) {
+    p <- p[p > 0]
+    -sum(p * log(p))
+  }) / log(ncol(m))
+  expect_identical(classif_shannon_entropy(m), as.numeric(reference))
+})
+
 test_that("run_classification_cv produces valid pooled metrics and confusion matrix", {
   pts <- make_classif_points(n = 60)
   cv <- run_classification_cv(pts, "soil", c("elev", "slope", "parent"),
@@ -111,6 +126,105 @@ test_that("final fit predicts a valid class/probability/entropy surface", {
   psum <- rowSums(surf[, paste0(".pred_", mod$levels)])
   expect_true(all(abs(psum - 1) < 1e-6))
   expect_true(all(surf$.entropy >= 0 & surf$.entropy <= 1))
+})
+
+test_that("blocked surface prediction is identical to a single-block call", {
+  # The surface stage predicts in row blocks so it can tick progress and poll the
+  # cancel flag. Every recipe step is trained, so baking is row-independent and
+  # the blocked result must match the whole-grid result exactly.
+  pts <- make_classif_points(n = 60)
+  mod <- fit_classification_model(pts, "soil", c("elev", "slope", "parent"),
+                                  method = "rf", depth = "none")
+  nd <- data.frame(elev = seq(0, 30, length.out = 50), slope = 7,
+                   parent = factor("Granite", levels = c("Granite", "Shale")))
+
+  expect_identical(predict_classification_surface(mod, nd, chunk_size = nrow(nd)),
+                   predict_classification_surface(mod, nd, chunk_size = 7))
+
+  seen <- numeric(0)
+  invisible(predict_classification_surface(
+    mod, nd, chunk_size = 10, progress = function(f) seen <<- c(seen, f)))
+  expect_equal(seen, seq_len(5) / 5)
+})
+
+test_that("a cancel flag stops the surface stage instead of running to completion", {
+  # The regression this pins: cancellation used to be checked only BEFORE the
+  # surface stage, so a cancel pressed while the grid was being classified (the
+  # longest part of a run) was never seen and the run completed anyway.
+  pts <- make_classif_points(n = 40)
+  mod <- fit_classification_model(pts, "soil", c("elev", "slope"), method = "rf")
+  nd <- data.frame(elev = seq(0, 30, length.out = 40), slope = 7)
+
+  flag <- tempfile(fileext = ".txt")
+  file.create(flag)
+  on.exit(unlink(flag), add = TRUE)
+  expect_error(
+    predict_classification_surface(mod, nd, chunk_size = 5, cancel_file = flag),
+    "cancelled by user")
+  # No flag: unchanged behaviour.
+  expect_s3_class(predict_classification_surface(mod, nd, chunk_size = 5),
+                  "data.frame")
+})
+
+test_that("the progress ladder is monotone and gives the map stages real room", {
+  dir <- tempfile(); dir.create(dir)
+  old_dir <- getOption("monolith_progress_dir")
+  old_sid <- getOption("monolith_session_id")
+  options(monolith_progress_dir = dir, monolith_session_id = "cls_ladder")
+  on.exit({
+    options(monolith_progress_dir = old_dir, monolith_session_id = old_sid)
+    unlink(dir, recursive = TRUE)
+  }, add = TRUE)
+
+  report <- .classif_progress_reporter(dir, "cls_ladder", make_surface = TRUE)
+  pct_file <- file.path(dir, "progress_cls_ladder_classification_cls.txt")
+  stage_file <- file.path(dir, "stage_cls_ladder_classification_cls.txt")
+
+  steps <- list(
+    function() report("cv", 0, "Cross-validation: fold 1 of 10"),
+    function() report("cv", 1),
+    function() report("fit", 1),
+    function() report("importance", 1),
+    function() report("grid", 1),
+    function() report("covariates", 1),
+    function() report("surface", 1, "Finishing...")
+  )
+  pcts <- vapply(steps, function(f) {
+    f()
+    as.numeric(readLines(pct_file, warn = FALSE))[1]
+  }, numeric(1))
+
+  expect_equal(pcts, c(0, 50, 60, 66, 70, 88, 99))
+  expect_false(is.unsorted(pcts))
+  # The caption travels with the bar, so the UI stops claiming
+  # "cross-validation" while the grid is being classified.
+  expect_equal(readLines(stage_file, warn = FALSE)[1], "Finishing...")
+  # Regression: under the old folds+2 denominator everything from the end of CV
+  # onward collapsed into ~92%-100%. The map-building stages now own ~40 points.
+  expect_gt(pcts[7] - pcts[3], 35)
+})
+
+test_that("krige_covariates reports each covariate and propagates a cancel", {
+  pts <- make_test_points(n = 25)
+  grid <- make_test_grid_safe(pts, res = 250)
+  lags <- calc_scientific_lags(pts)
+  mp <- list(idw_p = 2, idw_nmax = 12)
+
+  seen <- list()
+  kc <- krige_covariates(pts, grid, c("aux1", "aux2"), lags, mp,
+                         on_var = function(i, total) {
+                           seen[[length(seen) + 1]] <<- c(i, total)
+                         })
+  expect_equal(seen, list(c(1, 2), c(2, 2)))
+  expect_true(all(c("aux1", "aux2") %in% names(kc$grid_aux)))
+
+  # A hook that raises (the classification cancel path) aborts the loop.
+  expect_error(
+    krige_covariates(pts, grid, c("aux1", "aux2"), lags, mp,
+                     on_var = function(i, total) {
+                       stop("Classification run cancelled by user.")
+                     }),
+    "cancelled by user")
 })
 
 test_that("surface rasterisation yields aligned class/prob/entropy layers and hectare areas", {
@@ -701,4 +815,126 @@ test_that("stricter VIF threshold flags moderate collinearity the default keeps"
   expect_length(loose$dropped, 0)
   expect_gte(length(strict$dropped), 1)
   expect_true(all(strict$dropped %in% c("x1", "x2")))
+})
+
+test_that("classif_build_target widens label precision when rounded breaks collide", {
+  # Values so tightly clustered that every quantile break rounds to the same
+  # 2-dp label; factor() errors on duplicated levels, so the labels must be
+  # widened until unique.
+  df <- data.frame(v = seq(1.0001, 1.0009, length.out = 40))
+  tv <- classif_build_target(df, mode = "bin", cat_col = NULL, num_col = "v",
+                             n_classes = 4, style = "quantile")
+  expect_s3_class(tv, "factor")
+  expect_equal(anyDuplicated(levels(tv)), 0L)
+  expect_true(all(!is.na(tv)))
+  expect_gte(nlevels(tv), 2)
+})
+
+test_that("the final classification model tunes under the run's CV strategy", {
+  # fit_classification_model hardcoded "standard" folds for its own tuning
+  # search while run_classification_cv honoured the user's strategy. The class
+  # map, entropy surface, permutation importance and exported .rds bundle are
+  # all built from the FINAL model, so under Spatial CV every one of them
+  # shipped hyperparameters chosen under random stratified folds -- exactly the
+  # optimism spatial CV exists to remove -- while the metrics table advertised
+  # a leakage-free estimate.
+  pts <- make_classif_points(60)
+
+  seen <- character(0)
+  orig <- classif_make_fold_id
+  assign("classif_make_fold_id",
+         function(pts_sf, strategy = c("spatial", "standard"), ...) {
+           strategy <- match.arg(strategy)
+           seen <<- c(seen, strategy)
+           orig(pts_sf, strategy, ...)
+         }, envir = globalenv())
+  on.exit(assign("classif_make_fold_id", orig, envir = globalenv()), add = TRUE)
+
+  suppressWarnings(fit_classification_model(
+    pts, "soil", c("elev", "slope"), method = "rf", depth = "light",
+    strategy = "spatial", v = 3L))
+  expect_identical(unique(seen), "spatial")
+
+  seen <- character(0)
+  suppressWarnings(fit_classification_model(
+    pts, "soil", c("elev", "slope"), method = "rf", depth = "light",
+    strategy = "standard", v = 3L))
+  expect_identical(unique(seen), "standard")
+})
+
+test_that("untuned classification fits are unaffected by the CV strategy", {
+  # depth = "none" tunes nothing, so no folds are built for the final fit and
+  # both strategies must give the same model.
+  pts <- make_classif_points(60)
+  a <- suppressWarnings(fit_classification_model(
+    pts, "soil", c("elev", "slope"), method = "rf", depth = "none",
+    strategy = "spatial"))
+  b <- suppressWarnings(fit_classification_model(
+    pts, "soil", c("elev", "slope"), method = "rf", depth = "none",
+    strategy = "standard"))
+
+  nd <- data.frame(elev = seq(0, 30, length.out = 25), slope = 7)
+  expect_identical(predict_classification_surface(a, nd),
+                   predict_classification_surface(b, nd))
+  expect_null(a$best_params)
+})
+
+test_that("fit_classification_model rejects an unknown CV strategy", {
+  pts <- make_classif_points(40)
+  expect_error(
+    fit_classification_model(pts, "soil", c("elev", "slope"),
+                             method = "rf", strategy = "nonsense"),
+    "arg")
+})
+
+# ── Out-of-fold permutation importance ──────────────────────────────────────
+
+test_that("out-of-fold importance is scored on held-out rows and labelled", {
+  pts <- make_classif_points(80)
+  cv <- suppressWarnings(run_classification_cv(
+    pts, "soil", c("elev", "slope"), method = "rf", strategy = "standard",
+    v = 4L, depth = "none", oof_importance = TRUE, importance_reps = 2L))
+
+  imp <- cv$importance
+  expect_s3_class(imp, "data.frame")
+  expect_setequal(imp$predictor, c("elev", "slope"))
+  expect_true(all(imp$evaluated_on == "out-of-fold"))
+  expect_true(all(is.finite(imp$importance)))
+  # share_pct renormalises the positive importances to 100
+  pos <- imp$share_pct[!is.na(imp$share_pct)]
+  if (length(pos)) expect_equal(sum(pos), 100, tolerance = 1e-6)
+})
+
+test_that("out-of-fold importance is not computed unless asked for", {
+  pts <- make_classif_points(60)
+  cv <- suppressWarnings(run_classification_cv(
+    pts, "soil", c("elev", "slope"), method = "rf", strategy = "standard",
+    v = 3L, depth = "none"))
+  expect_null(cv$importance)
+})
+
+test_that("pooling fold importances equals a size-weighted mean", {
+  # The pooled delta must be what one evaluation over every out-of-fold row
+  # would give, so folds contribute in proportion to the rows they scored.
+  parts <- list(
+    list(delta = c(1, 0), baseline = 0.5, n = 10),
+    list(delta = c(3, 4), baseline = 1.5, n = 30)
+  )
+  out <- .classif_pool_fold_importance(parts, c("a", "b"))
+  # a: (1*10 + 3*30)/40 = 2.5 ; b: (0*10 + 4*30)/40 = 3.0
+  expect_equal(out$importance[out$predictor == "a"], 2.5)
+  expect_equal(out$importance[out$predictor == "b"], 3.0)
+  expect_equal(out$baseline_logloss[1], (0.5 * 10 + 1.5 * 30) / 40)
+  expect_true(all(out$evaluated_on == "out-of-fold"))
+  expect_null(.classif_pool_fold_importance(list(), c("a", "b")))
+})
+
+test_that("training-row importance keeps its own label", {
+  pts <- make_classif_points(60)
+  mod <- suppressWarnings(fit_classification_model(
+    pts, "soil", c("elev", "slope"), method = "rf", depth = "none"))
+  imp <- classif_permutation_importance(mod, sf::st_drop_geometry(pts),
+                                        "soil", c("elev", "slope"), n_rep = 2L)
+  expect_true(all(imp$evaluated_on == "training"))
+  expect_setequal(imp$predictor, c("elev", "slope"))
 })

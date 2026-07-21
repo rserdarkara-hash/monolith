@@ -48,18 +48,71 @@ test_that("handles all-NA columns", {
   expect_true("a" %in% res$kept)
 })
 
-test_that("zero-variance column causes detectable failure in VIF path", {
+test_that("zero-variance column is pruned instead of crashing the VIF path", {
   df <- make_test_df(10)
   df$const <- 5
-  # A constant column produces NaN in the correlation matrix, which causes
-  # solve() or the max_vif comparison to fail.  The function is not currently
-  # hardened against this edge case — we verify the behaviour is known.
-  expect_error(
-    suppressWarnings(
-      detect_multicollinearity_engine(df, vars = c("a", "b", "const"))
-    ),
-    NULL  # any error class is acceptable
+  # A constant column used to produce NA rows in the correlation matrix and
+  # crash the solve() fallback ("subscript out of bounds"); it is now dropped
+  # before the iterative loop.
+  res <- suppressWarnings(
+    detect_multicollinearity_engine(df, vars = c("a", "b", "const"))
   )
+  expect_true("const" %in% res$dropped)
+  expect_true(all(c("a", "b") %in% res$kept))
+})
+
+test_that("small-unit covariates survive the constant check (scale-free)", {
+  # The old absolute floor (var > 1e-6) treated any covariate whose natural
+  # units put its variance below 1e-6 as a constant and pruned it before the
+  # VIF loop even ran - and constants are dropped even under Keep All, so the
+  # user could not rescue it. Fractions, ratios, normalized indices and
+  # anything in km or Mg live in this range.
+  set.seed(42)
+  df <- data.frame(
+    ph = rnorm(30, 6.5, 0.4),
+    om = rnorm(30, 2.0, 0.5),
+    clay_frac = rnorm(30, 0.25, 5e-4)   # 0-1 fraction: var ~ 1.7e-7
+  )
+  expect_lt(var(df$clay_frac), 1e-6)    # the case the old floor pruned
+
+  res <- suppressWarnings(
+    detect_multicollinearity_engine(df, vars = c("ph", "om", "clay_frac"))
+  )
+  expect_false("clay_frac" %in% res$dropped)
+  expect_true("clay_frac" %in% res$kept)
+})
+
+test_that("numerically constant columns are still pruned regardless of magnitude", {
+  set.seed(7)
+  df <- data.frame(
+    a = rnorm(20, 5, 1),
+    b = rnorm(20, 3, 1),
+    # varies only in the ~13th significant digit of its own magnitude: this is
+    # the case cor()/solve() genuinely cannot handle
+    noise_only = 7.5 + rnorm(20, 0, 1e-13),
+    all_zero = 0
+  )
+  res <- suppressWarnings(
+    detect_multicollinearity_engine(df, vars = c("a", "b", "noise_only", "all_zero"))
+  )
+  expect_true(all(c("noise_only", "all_zero") %in% res$dropped))
+  expect_true(all(c("a", "b") %in% res$kept))
+})
+
+test_that("infinite vif_threshold (user's Keep All choice) never drops collinear vars", {
+  df <- data.frame(
+    a = 1:20,
+    b = 2 * (1:20) + rnorm(20, 0, 1e-4),  # near-perfectly collinear with a
+    c = rnorm(20, 5, 1)
+  )
+  res <- suppressWarnings(
+    detect_multicollinearity_engine(df, vars = c("a", "b", "c"),
+                                    vif_threshold = Inf)
+  )
+  expect_length(res$dropped, 0)
+  expect_setequal(res$kept, c("a", "b", "c"))
+  # collinearity is still REPORTED (pairs), just not acted upon
+  expect_true(res$has_collinearity)
 })
 
 test_that("auto-detects numeric columns when vars = NULL", {
