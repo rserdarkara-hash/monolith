@@ -747,8 +747,14 @@ tps_gcv_item <- function(item, current_crs) {
   # differ from the run that consumes this value. No-op for projected uploads.
   pts_sf <- validate_and_project_sf(
     sf::st_as_sf(item$df, coords = c("x", "y"), crs = current_crs))
+  # Dedup co-located points exactly as dedup_valid_points does on the run path
+  # (the server observer already na.omit()ed, so NA-filter-then-dedup order
+  # holds): fields::Tps treats replicates via its pure-error handling, which
+  # shifts the GCV curve away from the deduped point set the run actually fits.
+  pts_sf <- pts_sf[!duplicated(round(sf::st_coordinates(pts_sf), 2)), ]
+  if (nrow(pts_sf) < 5) return(list(l = item$l, best_lam = 0, gcv_data = NULL, err = NULL))
   raw_coords <- sf::st_coordinates(pts_sf)
-  vals <- item$df$v
+  vals <- pts_sf$v
 
   xm <- min(raw_coords[, 1]); xM <- max(raw_coords[, 1])
   ym <- min(raw_coords[, 2]); yM <- max(raw_coords[, 2])
@@ -783,6 +789,12 @@ idw_opt_item <- function(item, current_crs, idw_nmax_val) {
   # a geographic CRS distorts both. No-op for already-projected uploads.
   pts <- validate_and_project_sf(
     sf::st_as_sf(item$df, coords = c("x", "y"), crs = current_crs))
+  # Dedup co-located points exactly as dedup_valid_points does on the run path
+  # (NA rows already dropped by the server observer's na.omit()): a co-located
+  # twin predicts its held-out partner at distance zero, so every candidate
+  # power scores an exact hit there and the search is inflated.
+  pts <- pts[!duplicated(round(sf::st_coordinates(pts), 2)), ]
+  if (nrow(pts) < 5) return(list(l = item$l, best_f = 2.0))
   best_f <- optimize_idw_p(pts, "v", nmax = idw_nmax_val)
   list(l = item$l, best_f = best_f)
 }

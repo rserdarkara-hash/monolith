@@ -770,6 +770,27 @@ test_that("idw_opt_item and tps_gcv_item project geographic input to match the r
   expect_equal(tps_geo, tps_proj)
 })
 
+test_that("idw_opt_item and tps_gcv_item dedup co-located points like the run pipeline", {
+  # Review 2026-07-22: the run fits on dedup_valid_points() output, but the
+  # optimizer workers searched on the raw na.omit()ed frame. A co-located twin
+  # predicts its held-out partner at distance zero (an exact hit for every IDW
+  # power) and triggers fields::Tps's replicate handling (shifted GCV curve),
+  # so the stored parameter was optimized on a different point set than the
+  # run that consumes it. Appending exact twins must now be a no-op.
+  pts <- make_test_points(25)
+  coords <- sf::st_coordinates(pts)
+  df <- data.frame(x = coords[, 1], y = coords[, 2], v = pts$v)
+  df_dup <- rbind(df, df[1:5, ])
+
+  idw_clean <- idw_opt_item(list(l = "L", df = df),     current_crs = 32633, idw_nmax_val = 12)$best_f
+  idw_dup   <- idw_opt_item(list(l = "L", df = df_dup), current_crs = 32633, idw_nmax_val = 12)$best_f
+  expect_identical(idw_dup, idw_clean)
+
+  tps_clean <- suppressWarnings(tps_gcv_item(list(l = "L", df = df),     current_crs = 32633))$best_lam
+  tps_dup   <- suppressWarnings(tps_gcv_item(list(l = "L", df = df_dup), current_crs = 32633))$best_lam
+  expect_equal(tps_dup, tps_clean)
+})
+
 test_that("interp_run_item forwards a run_params list into a full regional run", {
   pts <- make_test_points(15)
   coords <- sf::st_coordinates(pts)

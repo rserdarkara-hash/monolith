@@ -76,12 +76,16 @@ test_that("calc_ccc matches known external value", {
   expect_equal(ccc_val, k$expected, tolerance = 0.01)
 })
 
-test_that("calc_ccc handles NA values via pairwise complete", {
+test_that("calc_ccc filters to jointly complete pairs before computing moments", {
   obs <- c(10, NA, 30, 40, 50)
   pre <- c(12, 19, NA, 38, 52)
   ccc_val <- calc_ccc(obs, pre)
   expect_true(!is.na(ccc_val))
-  # CCC should be within reasonable bounds; near-perfect concordance
+  # Misaligned NAs: means, variances and the covariance must all come from the
+  # SAME jointly complete subset, so the value equals CCC of the pre-filtered
+  # pairs (the old per-vector na.rm mixed subsets here).
+  ok <- !is.na(obs) & !is.na(pre)
+  expect_equal(ccc_val, calc_ccc(obs[ok], pre[ok]))
   expect_true(ccc_val > 0.5)
 })
 

@@ -74,14 +74,22 @@ detect_multicollinearity_engine <- function(df, vars = NULL, vif_threshold = 10,
   
   kept <- vars
   dropped <- c()
-  
+
+  # One degenerate scan shared by the pairwise report and the zero-var prune
+  # below (kept is not modified in between).
+  degen <- if (length(kept) >= 2) {
+    sapply(df[, kept, drop = FALSE], .is_degenerate_covariate)
+  } else {
+    logical(0)
+  }
+
   collinear_pairs <- data.frame(var1 = character(), var2 = character(), r = numeric(), stringsAsFactors = FALSE)
   has_collinearity <- FALSE
-  
+
   if (length(kept) >= 2) {
     df_clean <- df[, kept, drop = FALSE]
     if (nrow(df_clean) >= 3) {
-      valid_vars <- kept[!sapply(df_clean, .is_degenerate_covariate)]
+      valid_vars <- kept[!degen]
       
       if (length(valid_vars) >= 2) {
         cormat <- cor(df_clean[, valid_vars], use = "pairwise.complete.obs")
@@ -108,7 +116,7 @@ detect_multicollinearity_engine <- function(df, vars = NULL, vif_threshold = 10,
     # makes cor() emit NA rows, which breaks solve() AND the correlation
     # fallback below — prune constants before the iterative loop. A constant
     # carries no information regardless of the user's keep/drop choice.
-    zero_var <- kept[sapply(df[, kept, drop = FALSE], .is_degenerate_covariate)]
+    zero_var <- kept[degen]
     if (length(zero_var) > 0) {
       dropped <- c(dropped, zero_var)
       kept <- setdiff(kept, zero_var)
@@ -541,7 +549,14 @@ apply_CK <- function(data, target_var, grid_p, lags, method_params, aux_vars, l 
       res$gstat_obj <- g
       res <- safe_run_cv(res, {
         folds_ck <- make_cv_folds(sf::st_coordinates(data), method_params$cv_strategy, nrow(data))
-        cv_val <- gstat.cv(g, nfold = folds_ck, debug.level = 0)
+        # remove.all = TRUE: covariates here are co-sampled lab measurements, so
+        # at real prediction locations CK has no covariate observations either -
+        # each fold must remove the ENTIRE held-out row (all LMC variables), not
+        # just the primary. The default (FALSE) scores CV under a collocated-
+        # covariate information regime the map never enjoys (optimistic), and is
+        # inconsistent with RK/RFK's perform_kriging_loocv, which holds out full
+        # rows. See scientific_guide 4.4 / 9.1.
+        cv_val <- gstat.cv(g, nfold = folds_ck, remove.all = TRUE, debug.level = 0)
         if (!is.null(cv_val)) {
           cnames <- names(cv_val)
           pred_col_src <- paste0(target_var, ".pred")

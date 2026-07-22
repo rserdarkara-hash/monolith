@@ -55,7 +55,13 @@
     })
     
     all_best <- sapply(locs, function(l) get_regional_param("TPS", l, "act"))
-    updateSliderInput(session, "tps_lambda", value = mean(all_best))
+    # A locality whose optimization failed never had set_regional_param called,
+    # so get_regional_param returns the -1 Auto sentinel — not a lambda. Keep
+    # sentinels out of the slider mean (one failure would drag it negative and
+    # silently flip the global default to Auto). Per-locality stored values
+    # still win at dispatch; this only sets the fallback slider position.
+    ok_best <- all_best[is.finite(all_best) & all_best >= 0]
+    if (length(ok_best) > 0) updateSliderInput(session, "tps_lambda", value = mean(ok_best))
     
     tps_opt_vals(list(locs = locs, targets = targets))
     showNotification("TPS Optimization Complete. Per-region Lambdas stored.", type = "message")

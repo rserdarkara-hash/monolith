@@ -15,8 +15,14 @@ detect_cv_columns <- function(cnames) {
 }
 
 calc_ccc <- function(observed, predicted) {
+  # Filter to jointly complete pairs up front so means, variances and the
+  # covariance all come from the SAME subset (mixing per-vector na.rm with
+  # pairwise.complete.obs would use different subsets under misaligned NAs).
+  ok <- !is.na(observed) & !is.na(predicted)
+  observed <- observed[ok]
+  predicted <- predicted[ok]
   if (length(observed) < 2) return(NA)
-  
+
   mean_obs <- mean(observed, na.rm = TRUE)
   mean_pred <- mean(predicted, na.rm = TRUE)
   
