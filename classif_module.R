@@ -404,6 +404,12 @@ classif_server <- function(id, data_reactive, vars_metadata_reactive, spatial_re
     cls_stage_file <- file.path(
       cls_progress_dir, paste0("stage_", cls_session_id, "_classification_cls.txt"))
 
+    # Shown while the (cold) future worker is attaching the modelling stack and
+    # sourcing helpers, before the pipeline writes its first progress/stage
+    # file. On the first run of a session this window is ~30s (tidymodels + sf
+    # stack loading in a fresh R process); saying so stops it reading as a hang.
+    cls_cold_start_msg <- "Starting (loading modelling libraries, first run ~30s)..."
+
     set_classif_progress <- function(pct, txt) {
       shinyjs::runjs(sprintf(
         "var el = document.getElementById('%s'); if (el) el.style.width = '%d%%';",
@@ -434,11 +440,23 @@ classif_server <- function(id, data_reactive, vars_metadata_reactive, spatial_re
         if (length(v) == 0 || is.na(v[1])) 0 else v[1]
       }, error = function(e) 0)
       pct <- max(0, min(99, round(pct)))
+      # file.exists first: the poller starts before the worker has written its
+      # first stage line, and readLines() on a missing path emits a "cannot open
+      # file" WARNING to the console before the error the tryCatch would catch.
       stage <- tryCatch({
-        s <- readLines(cls_stage_file, warn = FALSE)
-        if (length(s) == 0 || !nzchar(s[1])) NULL else s[1]
+        if (!file.exists(cls_stage_file)) NULL else {
+          s <- suppressWarnings(readLines(cls_stage_file, warn = FALSE))
+          if (length(s) == 0 || !nzchar(s[1])) NULL else s[1]
+        }
       }, error = function(e) NULL)
-      set_classif_progress(pct, sprintf("%s  %d%%", stage %||% "Working...", pct))
+      if (is.null(stage) && pct == 0) {
+        # Pre-pipeline window: worker still loading packages / sourcing helpers,
+        # no stage written yet. Keep the informative caption instead of "0%",
+        # which otherwise reads like a hang on the first (cold) run.
+        set_classif_progress(0, cls_cold_start_msg)
+      } else {
+        set_classif_progress(pct, sprintf("%s  %d%%", stage %||% "Working...", pct))
+      }
     })
 
     shiny::observeEvent(input$cancel_btn, {
@@ -569,8 +587,15 @@ classif_server <- function(id, data_reactive, vars_metadata_reactive, spatial_re
     output$vif_note <- shiny::renderUI({
       chk <- scoped_collinearity()
       if (is.null(chk) || length(chk$dropped) == 0) return(NULL)
-      labs <- vapply(chk$dropped, function(v) get_var_label(v, vars_metadata_reactive()), character(1))
+      labs_of <- function(v) paste(vapply(v, function(x) get_var_label(x, vars_metadata_reactive()),
+                                          character(1)), collapse = ", ")
       thr <- chk$vif_threshold %||% 10
+      # Zero-variance covariates share the engine's `dropped` vector with the
+      # collinear ones but are a different problem: they are dropped whatever
+      # the user chooses, and calling them collinear sends the user looking for
+      # a correlation that does not exist.
+      vif_vars <- chk$dropped_vif %||% chk$dropped
+      const_vars <- chk$dropped_constant %||% character(0)
       reason <- if (thr < 10) {
         " While often acceptable mathematically, these correlated covariates will split the Random Forest permutation importance between them, making the true drivers look weak - consider dropping them to see the real ranking."
       } else {
@@ -578,9 +603,15 @@ classif_server <- function(id, data_reactive, vars_metadata_reactive, spatial_re
       }
       shiny::tags$small(style = "color:#e0a800; display:block; margin: -4px 0 8px 0;",
         shiny::icon("exclamation-triangle"),
-        sprintf(" Multicollinearity within the current scope (VIF > %s%s): %s.%s You will be asked to drop or keep them at run time.",
-                thr, if (thr < 10) ", stricter screen for Random Forest" else "",
-                paste(labs, collapse = ", "), reason))
+        if (length(vif_vars)) {
+          sprintf(" Multicollinearity within the current scope (VIF > %s%s): %s.%s You will be asked to drop or keep them at run time.",
+                  thr, if (thr < 10) ", stricter screen for Random Forest" else "",
+                  labs_of(vif_vars), reason)
+        },
+        if (length(const_vars)) {
+          sprintf(" Constant within the current scope (no variance, so no information to learn from): %s. These are dropped by the model recipe regardless of the choice above.",
+                  labs_of(const_vars))
+        })
     })
 
     output$weights_note <- shiny::renderUI({
@@ -661,6 +692,15 @@ classif_server <- function(id, data_reactive, vars_metadata_reactive, spatial_re
           if (thr < 10) shiny::tags$p(
             "Random Forest note: predictions are barely affected by keeping them, but the permutation feature importance will be artificially split between the correlated covariates, so genuinely important variables can look weak. Dropping them yields a cleaner importance ranking."),
           shiny::tags$p(shiny::tags$b("Recommended to drop:"), paste(labs, collapse = ", ")),
+          # Constants travel in the same `dropped` vector; name them for what
+          # they are rather than presenting them as a collinearity problem.
+          if (length(intersect(flagged, chk$dropped_constant %||% character(0))) > 0) {
+            shiny::tags$p(shiny::tags$b("Constant in this scope (no variance): "),
+              paste(vapply(intersect(flagged, chk$dropped_constant),
+                           function(v) get_var_label(v, vars_metadata_reactive()), character(1)),
+                    collapse = ", "),
+              " - these carry no information and are removed by the model recipe either way.")
+          },
           footer = shiny::tagList(
             shiny::actionButton(ns("clvif_drop"), "Auto-Drop and Continue", class = "btn-success"),
             shiny::actionButton(ns("clvif_keep"), "Keep All (Not Recommended)", class = "btn-warning"),
@@ -750,7 +790,7 @@ classif_server <- function(id, data_reactive, vars_metadata_reactive, spatial_re
       }
       cl_rv$cancelling <- FALSE
       shinyjs::enable("cancel_btn")
-      set_classif_progress(0, "Starting...")
+      set_classif_progress(0, cls_cold_start_msg)
 
       shinyjs::disable("run_btn")
       shiny::updateActionButton(session, "run_btn", label = "Running...",
@@ -787,18 +827,17 @@ classif_server <- function(id, data_reactive, vars_metadata_reactive, spatial_re
       # Model button copies this file.
       model_path_ship <- tempfile(pattern = "classif_model_", fileext = ".rds")
 
-      promises::future_promise({
-        setwd(proj_root_ship)
-        suppressPackageStartupMessages({
-          library(sf); library(terra); library(gstat); library(automap); library(fields)
-          library(spdep); library(FNN); library(concaveman); library(dplyr); library(classInt)
-          library(recipes); library(parsnip); library(workflows); library(tune)
-          library(rsample); library(dials); library(yardstick); library(spatialsample); library(hardhat)
-        })
-        # Source helpers in-worker so the full internal closure is present,
-        # matching the interpolation pipeline's worker convention (T12).
-        source("spatial_helpers.R"); source("classif_helpers.R")
-        run_classification_pipeline(
+      # Lean worker payload: bundle every input into ONE plain-data list built
+      # here in the main session, then ship only that. run_classification_pipeline
+      # is resolved on the worker by the in-worker source() below, so `globals`
+      # is pinned explicitly and future does NOT auto-detect it (auto-detection
+      # would walk and serialise the whole classif_helpers call graph on the
+      # main thread at dispatch, and needlessly ship a function the worker
+      # re-defines anyway). Mirrors the interpolation pipeline's plain-data
+      # hand-off (server_execution.R): no rv$/input$/reactives cross the boundary.
+      run_args <- list(
+        proj_root = proj_root_ship,
+        pipeline = list(
           df = adf, target = ".class_target", predictors = preds,
           x_col = x_v, y_col = y_v, src_crs = src_v, proj_crs = proj_v,
           method = method_v, strategy = strategy_v, depth = depth_v,
@@ -811,7 +850,29 @@ classif_server <- function(id, data_reactive, vars_metadata_reactive, spatial_re
           progress_dir = progress_dir_ship, session_id = session_id_ship,
           cancel_file = cancel_file_ship
         )
-      }) %...>% (function(res) {
+      )
+
+      promises::future_promise({
+        setwd(run_args$proj_root)
+        suppressPackageStartupMessages({
+          library(sf); library(terra); library(gstat); library(automap); library(fields)
+          library(spdep); library(FNN); library(concaveman); library(dplyr); library(classInt)
+          library(recipes); library(parsnip); library(workflows); library(tune)
+          library(rsample); library(dials); library(yardstick); library(spatialsample); library(hardhat)
+        })
+        # Source helpers in-worker so the full internal closure is present,
+        # matching the interpolation pipeline's worker convention (T12).
+        source("spatial_helpers.R"); source("classif_helpers.R")
+        do.call(run_classification_pipeline, run_args$pipeline)
+      }, globals = list(run_args = run_args),
+         # seed = TRUE gives the worker a proper parallel-safe L'Ecuyer stream.
+         # Without it future warns "UNEXPECTED VALUE: ... generated random
+         # numbers without specifying argument 'seed'" on every run, because a
+         # fresh PSOCK process otherwise seeds itself from process entropy.
+         # Reproducibility is unaffected either way: every RNG-consuming step in
+         # the pipeline runs inside .classif_with_seed()'s two-sided sandbox,
+         # which sets its own seed and restores the caller's state.
+         seed = TRUE) %...>% (function(res) {
         reset_run_ui()
         # Unique run token: keys the per-run plot cache (renderCachedPlot).
         res$run_id <- paste0(substr(session$token, 1, 8), "-",
@@ -827,6 +888,24 @@ classif_server <- function(id, data_reactive, vars_metadata_reactive, spatial_re
                     paste(dropped, collapse = ", ")), type = "message")
         } else {
           shiny::showNotification("Classification completed.", type = "message")
+        }
+        # CV-design caveat, not a failure: some fold's training rows held none of
+        # these classes, so that fold could not predict them and their held-out
+        # samples score as misses by construction. Worth naming — it depresses
+        # the reported accuracy/kappa for exactly those classes.
+        gaps <- res$class_gaps
+        if (!is.null(gaps) && nrow(gaps) > 0) {
+          gl <- sort(unique(as.character(gaps$class)))
+          shiny::showNotification(
+            sprintf(paste("Some folds contained no training samples of %d class%s (%s):",
+                          "those folds could not predict %s, so its held-out samples count",
+                          "as errors and the reported skill for it is pessimistic.",
+                          "Consider fewer classes, quantile breaks, random k-fold CV,",
+                          "or a wider spatial scope."),
+                    length(gl), if (length(gl) == 1) "" else "es",
+                    paste(gl, collapse = ", "),
+                    if (length(gl) == 1) "it" else "them"),
+            type = "warning", duration = 15)
         }
       }) %...!% (function(err) {
         reset_run_ui()

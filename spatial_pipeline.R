@@ -155,16 +155,27 @@ compute_governing_factors <- function(df, target_col, predictors, n_permutations
   shap_df <- do.call(rbind, shap_list)
   check_cancel()
 
+  # predict_parts(type = "shap") returns B+1 rows per variable: the aggregated
+  # attribution (B == 0) plus one row per permutation. Summing them inflates the
+  # value by a factor of B+1, so only the aggregated B == 0 row is used.
+  # ONE pass: the previous per-observation subset rescanned all
+  # shap_sample_size x (B+1) x n_predictors rows for each sampled observation
+  # (three full-length comparisons each). Filtering once and grouping by obs_id
+  # gives identical values (the per-observation mean of the same rows).
+  top_rows <- shap_df[shap_df$variable_name == top_var & shap_df$B == 0, , drop = FALSE]
+  contrib_by_obs <- if (nrow(top_rows) > 0) {
+    tapply(top_rows$contribution, as.character(top_rows$obs_id), mean)
+  } else {
+    numeric(0)
+  }
+  # as.numeric(): tapply returns a 1-d array, and the column must be plain
+  # numeric like the sapply() it replaces.
+  contribution <- as.numeric(contrib_by_obs[as.character(sample_idx)])
+  contribution[is.na(contribution)] <- 0
+
   shap_val_df <- data.frame(
     feature_value = df_clean[[top_var]][sample_idx],
-    contribution = sapply(sample_idx, function(i) {
-      # predict_parts(type = "shap") returns B+1 rows per variable: the
-      # aggregated attribution (B == 0) plus one row per permutation.
-      # Summing them inflates the value by a factor of B+1, so take only the
-      # aggregated B == 0 row.
-      sub <- shap_df[shap_df$obs_id == i & shap_df$variable_name == top_var & shap_df$B == 0, ]
-      if(nrow(sub) > 0) mean(sub$contribution) else 0
-    })
+    contribution = contribution
   )
 
   list(
@@ -379,13 +390,22 @@ run_regional_interpolation <- function(item, current_method, current_crs, aux_va
           actual_res, min_res_cap))
         actual_res <- min_res_cap
       }
+      # Absolute sanity floor only. The slider itself cannot go below 5 m, but a
+      # restored run-config could carry any value, and a sub-decimetre grid over
+      # any real extent is a memory accident rather than an intent.
+      actual_res <- max(actual_res, 0.1)
     } else {
+      # Auto is SELF-CONTAINED: the resolution follows this locality's own
+      # boundary area (~100k cells), clamped to [5, 1000] m. It must NOT be
+      # floored against grid_res — that slider is hidden outside Fixed mode
+      # (ui_sidebar.R) and in Auto modes it holds the GLOBAL recommendation
+      # (max(mean_1NN * 0.5, max_dim / 300), server_data_setup.R), so a widely
+      # spread dataset pushed the floor to ~50 m and silently coarsened every
+      # compact locality's density-derived grid via an input the user could
+      # neither see nor set.
       actual_res <- sqrt(cell_area_target)
       actual_res <- max(5, min(1000, actual_res))
     }
-    
-    min_res_safe <- max(0.1, grid_res_safe * 0.1)
-    if (actual_res < min_res_safe) actual_res <- min_res_safe
 
     grid_r <- terra::rast(terra::ext(bbox), resolution = actual_res, crs = sf::st_crs(pts)$wkt)
     grid_p <- terra::as.points(grid_r, values=FALSE) %>% sf::st_as_sf()
@@ -542,7 +562,10 @@ run_regional_interpolation <- function(item, current_method, current_crs, aux_va
       paste(round(cc[, 1], 2), round(cc[, 2], 2))
     }
     pts$model_resid_act <- NA_real_
-    if (nrow(pts_a) >= 3 && exists("res_a_list") && !is.null(res_a_list$residuals) &&
+    # inherits = FALSE: without it the lookup walks up to globalenv(), which the
+    # workers source() this file into, so a leftover object of that name from a
+    # previous item could satisfy the guard.
+    if (nrow(pts_a) >= 3 && exists("res_a_list", inherits = FALSE) && !is.null(res_a_list$residuals) &&
         length(res_a_list$residuals) == nrow(pts_a)) {
       idx_a <- match(coord_key(pts_a), coord_key(pts))
       ok_a <- !is.na(idx_a)
@@ -550,7 +573,7 @@ run_regional_interpolation <- function(item, current_method, current_crs, aux_va
     }
 
     pts$model_resid_pre <- NA_real_
-    if (run_pre && nrow(pts_p) >= 3 && exists("res_p_list") && !is.null(res_p_list$residuals) &&
+    if (run_pre && nrow(pts_p) >= 3 && exists("res_p_list", inherits = FALSE) && !is.null(res_p_list$residuals) &&
         length(res_p_list$residuals) == nrow(pts_p)) {
       idx_p <- match(coord_key(pts_p), coord_key(pts))
       ok_p <- !is.na(idx_p)

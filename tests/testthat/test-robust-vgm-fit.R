@@ -95,6 +95,29 @@ test_that("tiny empirical variogram fallback is tagged is_fallback", {
   expect_true(isTRUE(attr(fit_tiny, "is_fallback")))
 })
 
+test_that("the sanity window is applied to the PRACTICAL range, per family", {
+  # gstat's `a` means a different ground distance per family, so screening on it
+  # made the window ~3x tighter (at the low end) for Exp than for Sph and let an
+  # Exp structure three times longer than the data extent through at the top.
+  expect_equal(.vgm_practical_range_factor("Sph"), 1)
+  expect_equal(.vgm_practical_range_factor("Exp"), 3)
+  expect_equal(.vgm_practical_range_factor("Gau"), sqrt(3))
+  expect_equal(.vgm_practical_range_factor("Mat", 1.5), 4.75)
+  # Matern with nu = 0.5 IS the exponential model and must screen like one.
+  expect_equal(.vgm_practical_range_factor("Mat", 0.5), 3)
+  # Unknown/nugget-only families fall back to "a is the practical range".
+  expect_equal(.vgm_practical_range_factor("Nug"), 1)
+
+  pts <- make_test_points(30)
+  lags <- calc_scientific_lags(pts)
+  v_emp <- gstat::variogram(v ~ 1, pts, width = lags$width, cutoff = lags$cutoff)
+  fit <- robust_vgm_fit(v_emp, pts$v)
+  max_dist <- max(v_emp$dist, na.rm = TRUE)
+  prange <- fit$range[2] * .vgm_practical_range_factor(fit$model[2], fit$kappa[2])
+  expect_gt(prange, max_dist / 100)
+  expect_lt(prange, max_dist * 2)
+})
+
 test_that("build_vgm_warning_html returns NULL when nothing is flagged", {
   expect_null(build_vgm_warning_html(list(A_act = make_mock_vgm())))
   expect_null(build_vgm_warning_html(list()))

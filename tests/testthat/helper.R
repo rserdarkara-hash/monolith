@@ -167,6 +167,23 @@ make_collinear_df <- function(n = 50, seed = 456) {
   )
 }
 
+#' Create a point table with two SPATIALLY co-structured variables plus an
+#' unstructured one, for the spatial cross-correlogram tests. Coordinates are
+#' plain projected metres (columns `x`/`y`); `a` and `b` share a smooth field, so
+#' their cross-correlation must decay with lag distance, while `c` is white noise.
+make_xcorr_df <- function(n = 200, seed = 7) {
+  set.seed(seed)
+  x <- runif(n, 0, 1000)
+  y <- runif(n, 0, 1000)
+  field <- sin(x / 250) + cos(y / 250)
+  data.frame(
+    x = x, y = y,
+    a = field + rnorm(n, 0, 0.2),
+    b = field + rnorm(n, 0, 0.2),
+    c = rnorm(n)
+  )
+}
+
 #' Create a known-answer pair for Lin's CCC.
 make_ccc_known <- function() {
   list(

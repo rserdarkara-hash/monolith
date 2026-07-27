@@ -306,7 +306,9 @@ classif_make_fold_id <- function(pts_sf, strategy = c("spatial", "standard"),
       fold_id
     } else {
       if (!is.null(target)) {
-        y <- as.factor(sf::st_drop_geometry(pts_sf)[[target]])
+        # droplevels: an empty level would make min(table(y)) zero and collapse
+        # the cap below to v = 2 for a target that supports far more folds.
+        y <- droplevels(as.factor(sf::st_drop_geometry(pts_sf)[[target]]))
         # Cap v at the smallest class so stratified folds can each hold a class.
         # A singleton class floors this at v = 2 and lands that class in exactly
         # one fold, so it is absent from that fold's training set and its recall
@@ -525,13 +527,40 @@ classif_per_class_accuracy <- function(pred_df, target) {
     lo <- if (i == 1L) 0 else unname(anchors[i - 1L])
     hi <- unname(anchors[i])
     pct <- lo + max(0, min(1, frac)) * (hi - lo)
-    # step/total = pct, at 0.1% resolution (update_progress_file rounds to %).
+    # step/total carries the percent scaled by 1000; update_progress_file itself
+    # rounds step/total to a whole percent, so the reported bar resolution is 1%.
     update_progress_file("classification", "cls", round(pct * 1000), 1000)
     if (!is.null(label)) {
       tryCatch(writeLines(label, stage_file), error = function(e) NULL)
     }
     invisible(NULL)
   }
+}
+
+#' Align one fold's probability frame to the trained level set.
+#'
+#' A fold's analysis rows need not contain every class: under spatial folds a
+#' spatially clustered class can fall entirely inside one held-out block, and
+#' even class-stratified folds strand a singleton class in exactly one fold.
+#' ranger and nnet::multinom then DROP the unused outcome level ("Dropped unused
+#' factor level(s) in dependent variable"), so `predict(type = "prob")` comes
+#' back with fewer `.pred_<level>` columns than the target has levels and the
+#' pooled `rbind` fails with "numbers of columns of arguments do not match"
+#' (xgboost happens to keep all columns, so the crash was engine-dependent).
+#'
+#' Absent classes are padded with probability 0 and the columns pinned to the
+#' trained level order. Zero is the fold model's genuine posterior, not an
+#' imputation: a model fitted without a class cannot assign it any mass. Rows
+#' whose truth IS that class therefore score as a total miss, which is the
+#' honest reading — the fold had no chance at them. `missing` reports the
+#' affected classes so the caller can surface the CV-design caveat.
+.classif_align_prob_cols <- function(prob, lvl) {
+  prob <- as.data.frame(prob)
+  want <- paste0(".pred_", lvl)
+  absent <- setdiff(want, names(prob))
+  for (cc in absent) prob[[cc]] <- 0
+  list(prob = prob[, want, drop = FALSE],
+       missing = sub("^\\.pred_", "", absent))
 }
 
 run_classification_cv <- function(pts_sf, target, predictors,
@@ -551,7 +580,16 @@ run_classification_cv <- function(pts_sf, target, predictors,
   cc <- stats::complete.cases(full_df[, c(target, predictors), drop = FALSE])
   keep_sf <- pts_sf[cc, ]
   train_df <- full_df[cc, c(target, predictors), drop = FALSE]
-  train_df[[target]] <- as.factor(train_df[[target]])
+  # droplevels, not as.factor alone: classif_build_target() carries EVERY bin
+  # label as a level (an equal-interval or Jenks break can enclose no samples),
+  # and dropping rows with missing covariates can empty a level that the scoped
+  # data did populate. A level with no rows is not a class the model can learn:
+  # it makes yardstick's macro recall undefined (bal_accuracy comes back NA),
+  # adds an all-zero row and column to the confusion matrix, and later trips
+  # predict_classification_surface()'s missing-column stop() because the fitted
+  # engine never emits a probability column for it.
+  train_df[[target]] <- droplevels(as.factor(train_df[[target]]))
+  lvl <- levels(train_df[[target]])
   grp <- if (is.null(group)) NULL else as.character(group)[cc]
 
   if (nlevels(train_df[[target]]) < 2) {
@@ -631,6 +669,11 @@ run_classification_cv <- function(pts_sf, target, predictors,
   # baseline below (and McNemar pairing) can align with the model predictions.
   nested_params <- list()
   imp_parts <- list()
+  # (fold, class) pairs whose class was absent from that fold's analysis rows.
+  # Collected rather than warned about in-worker: the module surfaces them once,
+  # naming the classes, because it is a property of the CV design (and of the
+  # class balance), not a model failure.
+  class_gaps <- list()
   folds_seq <- sort(unique(fold_id))
   n_fold <- length(folds_seq)
   preds <- .classif_with_seed(seed, {
@@ -676,16 +719,41 @@ run_classification_cv <- function(pts_sf, target, predictors,
       # rows in total as the training-row design. Permutation shuffles a
       # predictor WITHIN the assessment rows, so very small folds decorrelate
       # it less thoroughly; that caveat is documented in the guide.
+      #
+      # Its OWN seed sandbox, deliberately: .classif_perm_delta burns
+      # n_rep x n_predictors sample.int() draws, and on the shared fold-loop
+      # stream those draws shifted the random state every LATER fold's fit
+      # started from — so a purely diagnostic toggle could move the reported
+      # accuracy/kappa/confusion matrix. It bites whenever the learner consumes
+      # RNG: with the current registry that is xgboost at depth "full" (which
+      # tunes sample_size and mtry, i.e. row subsampling and colsample), while
+      # multinom (nnet's rang = 0 starts weights at zero), ranger (engine
+      # seed = 12345L) and xgboost at none/light (sample_size = 1) fit
+      # deterministically. Nesting the two-sided sandbox restores the fold
+      # stream on exit, so the CV loop is byte-identical whether or not
+      # importance is requested — for every learner, including any stochastic
+      # one added later — and each fold's importance is independently
+      # reproducible from `seed` and `k` alone.
       if (isTRUE(oof_importance) && length(predictors)) {
         imp_parts[[length(imp_parts) + 1]] <<-
-          .classif_perm_delta(fit_i, te, target, predictors,
-                              n_rep = importance_reps, cancel_file = cancel_file)
+          .classif_with_seed(seed + 977L + k,
+            .classif_perm_delta(fit_i, te, target, predictors,
+                                n_rep = importance_reps, cancel_file = cancel_file))
       }
       cls <- predict(fit_i, te, type = "class")
-      prob <- predict(fit_i, te, type = "prob")
+      # Pad any class this fold's model never saw, so every fold contributes the
+      # same columns in the same order and the pooled rbind below is well posed.
+      al <- .classif_align_prob_cols(predict(fit_i, te, type = "prob"), lvl)
+      if (length(al$missing)) {
+        class_gaps[[length(class_gaps) + 1]] <<-
+          data.frame(fold = i, class = al$missing, stringsAsFactors = FALSE)
+      }
       p <- cbind(data.frame(.fold = i, .row = which(fold_id == i)),
                  te[, target, drop = FALSE],
-                 .pred_class = cls$.pred_class, as.data.frame(prob))
+                 # Rebuilt against the trained level set rather than trusted:
+                 # rbind() on factors with differing levels coerces silently.
+                 .pred_class = factor(as.character(cls$.pred_class), levels = lvl),
+                 al$prob)
       if (!is.null(grp)) p$.scope_group <- grp[fold_id == i]
       p
     })
@@ -704,6 +772,12 @@ run_classification_cv <- function(pts_sf, target, predictors,
     strategy = strategy,
     fold_id = fold_id,
     n_folds = length(unique(fold_id)),
+    # The levels actually modelled (complete cases, empty levels dropped) — the
+    # single source of truth for the surface columns and the exported bundle.
+    levels = lvl,
+    # NULL when every fold saw every class; otherwise one row per (fold, class)
+    # the fold's training set lacked. See .classif_align_prob_cols().
+    class_gaps = if (length(class_gaps)) do.call(rbind, class_gaps) else NULL,
     predictions = preds,
     metrics = classif_compute_metrics(preds, target),
     per_class = classif_per_class_accuracy(preds, target),
@@ -812,6 +886,17 @@ classif_covariate_lift <- function(pred_df, target) {
   log_loss_of <- function(newdata) {
     prob <- as.matrix(predict(wf, newdata, type = "prob"))
     colnames(prob) <- sub("^\\.pred_", "", colnames(prob))
+    # Out-of-fold design: this fold's model may have been fitted without one of
+    # the classes and so emits no column for it (see .classif_align_prob_cols).
+    # Without the pad, match() returns NA, p_true is NA, and the WHOLE
+    # importance frame collapses to NA. Padding at 0 keeps the baseline and the
+    # permuted scores on the same footing, so their difference — which is all
+    # the importance measure uses — stays meaningful.
+    absent <- setdiff(levels(truth), colnames(prob))
+    if (length(absent)) {
+      prob <- cbind(prob, matrix(0, nrow(prob), length(absent),
+                                 dimnames = list(NULL, absent)))
+    }
     p_true <- prob[cbind(seq_len(nrow(prob)), match(as.character(truth), colnames(prob)))]
     -mean(log(pmax(p_true, 1e-15)))
   }
@@ -905,7 +990,10 @@ fit_classification_model <- function(pts_sf, target, predictors,
   full_df <- as.data.frame(sf::st_drop_geometry(pts_sf))
   cc <- stats::complete.cases(full_df[, c(target, predictors), drop = FALSE])
   train_df <- full_df[cc, c(target, predictors), drop = FALSE]
-  train_df[[target]] <- as.factor(train_df[[target]])
+  # Same droplevels contract as run_classification_cv, so `model$levels` (which
+  # names the surface probability columns and the exported bundle's classes) can
+  # never claim a class the fitted engine has no column for.
+  train_df[[target]] <- droplevels(as.factor(train_df[[target]]))
 
   weights_applied <- isTRUE(class_weights) && classif_supports_weights(method)
   weight_col <- if (weights_applied) ".case_wt" else NULL
@@ -991,25 +1079,40 @@ predict_classification_surface <- function(model, newdata, chunk_size = NULL,
   chunk_size <- max(1L, as.integer(chunk_size))
 
   starts <- seq.int(1L, n, by = chunk_size)
-  cls_parts <- vector("list", length(starts))
   prob_parts <- vector("list", length(starts))
   for (j in seq_along(starts)) {
     .classif_check_cancel(cancel_file)
     idx <- seq.int(starts[j], min(starts[j] + chunk_size - 1L, n))
     block <- nd[idx, , drop = FALSE]
-    cls_parts[[j]] <- predict(wf, block, type = "class")$.pred_class
     prob_parts[[j]] <- as.data.frame(predict(wf, block, type = "prob"))
     if (is.function(progress)) progress(j / length(starts))
   }
-  # Rebuild the factor against the trained level set rather than relying on
-  # c()/unlist() level handling, which differs across R versions.
-  lev <- levels(cls_parts[[1]])
-  cls <- factor(unlist(lapply(cls_parts, as.character), use.names = FALSE),
-                levels = lev)
   prob <- if (length(prob_parts) == 1L) prob_parts[[1]] else do.call(rbind, prob_parts)
   # rbind carries each block's row names through; drop them so the assembled
   # frame is identical whatever the block size.
   rownames(prob) <- NULL
+
+  # Every learner in .classif_method_defs() is a probability model, so the hard
+  # class IS the argmax of the probabilities parsnip just returned — asking for
+  # type = "class" as well would re-bake the recipe and re-run the model over
+  # the whole grid a second time, on the longest stage of the run. The only
+  # behavioural difference is at exact probability ties, where ties.method =
+  # "first" fixes the winner on the trained level order instead of leaving it to
+  # the engine. The factor is rebuilt against the trained level set rather than
+  # relying on c()/unlist() level handling, which differs across R versions.
+  lev <- model$levels
+  if (is.null(lev)) lev <- sub("^\\.pred_", "", names(prob))
+  prob_cols <- paste0(".pred_", lev)
+  missing_cols <- setdiff(prob_cols, names(prob))
+  if (length(missing_cols) > 0) {
+    stop("Predicted probabilities are missing columns for class level(s): ",
+         paste(sub("^\\.pred_", "", missing_cols), collapse = ", "))
+  }
+  prob_mat <- as.matrix(prob[, prob_cols, drop = FALSE])
+  cls <- factor(lev[max.col(prob_mat, ties.method = "first")], levels = lev)
+  # A row with any non-finite probability has no defined argmax; predict(type =
+  # "class") returns NA there too.
+  cls[!stats::complete.cases(prob_mat)] <- NA
 
   out <- cbind(nd, .pred_class = cls, prob)
   out$.entropy <- classif_shannon_entropy(prob)
@@ -1058,7 +1161,12 @@ classif_surface_to_rasters <- function(grid_sf, res, crs_wkt, levels_order = NUL
                     min(df$y) - res / 2, max(df$y) + res / 2)
   templ <- terra::rast(ext, resolution = res, crs = crs_wkt)
 
-  class_r <- terra::rasterize(as.matrix(df[, c("x", "y")]), templ, values = cls_int)
+  # One coordinate matrix for every layer below (class + k probability layers +
+  # entropy): it was rebuilt inside the probability lapply, materialising an
+  # n x 2 matrix once per class on a million-cell grid.
+  xy <- as.matrix(df[, c("x", "y")])
+
+  class_r <- terra::rasterize(xy, templ, values = cls_int)
   levels(class_r) <- data.frame(ID = seq_along(levs_map), class = levs_map)
   # Embed the same viridis palette the in-app map uses so the exported class
   # GeoTIFF opens coloured in GIS/image viewers (a bare integer band renders
@@ -1070,11 +1178,11 @@ classif_surface_to_rasters <- function(grid_sf, res, crs_wkt, levels_order = NUL
   names(class_r) <- "class"
 
   prob_r <- terra::rast(lapply(prob_cols, function(cc) {
-    terra::rasterize(as.matrix(df[, c("x", "y")]), templ, values = df[[cc]])
+    terra::rasterize(xy, templ, values = df[[cc]])
   }))
   names(prob_r) <- sub("^\\.pred_", "P_", prob_cols)
 
-  ent_r <- terra::rasterize(as.matrix(df[, c("x", "y")]), templ, values = df$.entropy)
+  ent_r <- terra::rasterize(xy, templ, values = df$.entropy)
   names(ent_r) <- "entropy"
 
   cell_ha <- (res * res) / 10000
@@ -1493,7 +1601,11 @@ run_classification_pipeline <- function(df, target, predictors,
                               cancel_file = cancel_file,
                               progress_cb = function(frac, label = NULL) report("cv", frac, label))
 
-  levs <- levels(as.factor(sf::st_drop_geometry(pts)[[target]]))
+  # The modelled level set, taken from the CV (complete cases, empty levels
+  # dropped) rather than re-derived from every scoped point: the two disagree
+  # whenever a class has no complete covariate row, and this vector names the
+  # surface probability columns, the raster legend and the exported bundle.
+  levs <- cv$levels
   out <- list(
     cv_metrics = as.data.frame(cv$metrics),
     per_class  = cv$per_class,
@@ -1502,6 +1614,9 @@ run_classification_pipeline <- function(df, target, predictors,
     nested = isTRUE(cv$nested),
     nested_params = cv$nested_params,
     fold_id = cv$fold_id, n_folds = cv$n_folds,
+    # Classes some fold could not learn because its analysis rows held none of
+    # them; NULL in the ordinary case. A CV-design caveat the module reports.
+    class_gaps = cv$class_gaps,
     method = method, strategy = strategy, depth = depth,
     n = nrow(pts), levels = levs, predictors = predictors,
     target_col = target,
@@ -1605,14 +1720,15 @@ run_classification_pipeline <- function(df, target, predictors,
       cancel_file = cancel_file,
       progress = function(f) report("surface", f))
 
-    cell_ha <- gr$res^2 / 10000
-    counts <- table(factor(as.character(surf$.pred_class), levels = levs))
     out$surface_df <- surf
     out$res <- gr$res
     out$crs_wkt <- gr$crs_wkt
-    out$area <- data.frame(class = levs, n_cells = as.integer(counts),
-                           area_ha = as.numeric(counts) * cell_ha,
-                           stringsAsFactors = FALSE)
+    # No area table here: the MAIN session rasterises surface_df through
+    # classif_surface_to_rasters(), whose table is the one the UI and the
+    # exports read (it alone knows the live confidence threshold and its
+    # "Unclassified" row). A second, always-tau-0 table shipped across the
+    # future boundary was dead payload and an invitation to report the wrong
+    # numbers.
   }
   report("surface", 1, "Finishing...")
   # A cancel requested during the last unguarded moments still counts: the module

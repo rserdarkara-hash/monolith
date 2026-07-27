@@ -63,6 +63,12 @@ optimize_idw_p <- function(pts, target_var, nmax = 12) {
 }
 
 detect_multicollinearity_engine <- function(df, vars = NULL, vif_threshold = 10, pairwise_threshold = 0.95) {
+  # sf's geometry column is sticky under `[ , ]`, so an sf input would carry an
+  # sfc into the degenerate scan (is.finite() on an sfc errors) and, if it ever
+  # simplified instead, `degen` would be longer than `kept` and misalign the
+  # prune silently. Every current caller drops geometry first; this keeps the
+  # publicly callable, worker-shared helper safe on its own terms.
+  if (inherits(df, "sf")) df <- sf::st_drop_geometry(df)
   if (is.null(vars)) {
     df_num <- df[sapply(df, is.numeric)]
     vars <- colnames(df_num)
@@ -74,6 +80,9 @@ detect_multicollinearity_engine <- function(df, vars = NULL, vif_threshold = 10,
   
   kept <- vars
   dropped <- c()
+  # Two DIFFERENT reasons to drop a covariate share the `dropped` vector, and
+  # consumers were labelling all of them "High VIF". Track them apart.
+  dropped_constant <- character(0)
 
   # One degenerate scan shared by the pairwise report and the zero-var prune
   # below (kept is not modified in between).
@@ -119,6 +128,7 @@ detect_multicollinearity_engine <- function(df, vars = NULL, vif_threshold = 10,
     zero_var <- kept[degen]
     if (length(zero_var) > 0) {
       dropped <- c(dropped, zero_var)
+      dropped_constant <- zero_var
       kept <- setdiff(kept, zero_var)
     }
   }
@@ -166,13 +176,54 @@ detect_multicollinearity_engine <- function(df, vars = NULL, vif_threshold = 10,
     has_collinearity = has_collinearity,
     pairs = if (nrow(collinear_pairs) > 0) collinear_pairs else NULL,
     kept = kept,
-    dropped = dropped
+    # `dropped` stays the union so existing consumers are unaffected; the two
+    # components let callers report the actual reason.
+    dropped = dropped,
+    dropped_constant = dropped_constant,
+    dropped_vif = setdiff(dropped, dropped_constant)
   ))
 }
 
 check_vif <- function(df, threshold = 10) {
   res <- detect_multicollinearity_engine(df, vif_threshold = threshold)
-  return(list(kept = res$kept, dropped = res$dropped))
+  return(list(kept = res$kept, dropped = res$dropped,
+              dropped_constant = res$dropped_constant,
+              dropped_vif = res$dropped_vif))
+}
+
+#' Resolve the covariate gate for one surface. `run_regional_interpolation`
+#' resolves it up front on this exact point set and hands the survivors down as
+#' `method_params$aux_kept` (so dropped covariates are never kriged onto the
+#' grid); a direct engine call recomputes it. Since `aux_kept` carries no
+#' provenance, the constants among the dropped set are re-derived here — an
+#' exact, local test costing one sd() per dropped column — so the run log names
+#' the same reason on both paths.
+.resolve_aux_gate <- function(data, aux_vars, method_params, vif_threshold) {
+  if (is.null(method_params$aux_kept)) {
+    return(check_vif(st_drop_geometry(data)[, aux_vars, drop = FALSE], threshold = vif_threshold))
+  }
+  drop_all <- setdiff(aux_vars, method_params$aux_kept)
+  cst <- drop_all[vapply(drop_all, function(v) {
+    .is_degenerate_covariate(st_drop_geometry(data)[[v]])
+  }, logical(1))]
+  list(kept = intersect(aux_vars, method_params$aux_kept),
+       dropped = drop_all, dropped_constant = cst,
+       dropped_vif = setdiff(drop_all, cst))
+}
+
+#' Run-log line for a covariate gate result. Constants and collinear covariates
+#' are dropped for different reasons, so they must not both be reported as
+#' "[VIF] Dropped". When the gate was pre-resolved upstream (only kept/dropped
+#' are known) the provenance is unavailable, so the line stays neutral.
+.vif_drop_log <- function(vif_res) {
+  if (is.null(vif_res$dropped_vif) && is.null(vif_res$dropped_constant)) {
+    if (!length(vif_res$dropped)) return("")
+    return(paste0(" [Covariate gate] Dropped: ", paste(vif_res$dropped, collapse = ", ")))
+  }
+  paste0(
+    if (length(vif_res$dropped_vif)) paste0(" [VIF] Dropped: ", paste(vif_res$dropped_vif, collapse = ", ")) else "",
+    if (length(vif_res$dropped_constant)) paste0(" [Constant] Dropped: ", paste(vif_res$dropped_constant, collapse = ", ")) else ""
+  )
 }
 
 # Interpolate each auxiliary covariate onto the prediction grid so RK can
@@ -317,14 +368,9 @@ apply_kriging_pipeline <- function(engine = c("OK", "RK", "RFK"), data, target_v
         # point set, so covariates the gate drops are never kriged onto the
         # prediction grid; it passes the surviving set down as
         # method_params$aux_kept. Recompute only when called directly.
-        vif_res <- if (!is.null(method_params$aux_kept)) {
-          list(kept = intersect(aux_vars, method_params$aux_kept),
-               dropped = setdiff(aux_vars, method_params$aux_kept))
-        } else {
-          check_vif(st_drop_geometry(data)[, aux_vars, drop = FALSE], threshold = vif_threshold)
-        }
+        vif_res <- .resolve_aux_gate(data, aux_vars, method_params, vif_threshold)
         if (length(vif_res$dropped) > 0) {
-          res$log_msg <- paste0(res$log_msg, " [VIF] Dropped: ", paste(vif_res$dropped, collapse=", "))
+          res$log_msg <- paste0(res$log_msg, .vif_drop_log(vif_res))
           aux_vars <- vif_res$kept
         }
       }
@@ -469,14 +515,9 @@ apply_CK <- function(data, target_var, grid_p, lags, method_params, aux_vars, l 
     # set and passes the survivors as method_params$aux_kept; recompute only
     # when apply_CK is called directly.
     if (length(aux_vars) > 1) {
-      vif_res <- if (!is.null(method_params$aux_kept)) {
-        list(kept = intersect(aux_vars, method_params$aux_kept),
-             dropped = setdiff(aux_vars, method_params$aux_kept))
-      } else {
-        check_vif(st_drop_geometry(data)[, aux_vars, drop = FALSE], threshold = vif_threshold)
-      }
+      vif_res <- .resolve_aux_gate(data, aux_vars, method_params, vif_threshold)
       if (length(vif_res$dropped) > 0) {
-        res$log_msg <- paste0(res$log_msg, " [VIF] Dropped: ", paste(vif_res$dropped, collapse=", "))
+        res$log_msg <- paste0(res$log_msg, .vif_drop_log(vif_res))
         aux_vars <- vif_res$kept
       }
     }

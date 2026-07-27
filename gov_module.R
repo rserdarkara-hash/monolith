@@ -217,7 +217,14 @@ gov_factors_server <- function(id, data_reactive, vars_metadata_reactive) {
           cores_hint = cores_hint_val,
           cancel_file = cancel_file_ship
         )
-      }) %...>% (function(res) {
+      },
+      # Parallel-safe L'Ecuyer stream for the worker. Without it a fresh PSOCK
+      # process seeds itself from clock/PID entropy and future warns
+      # "UNRELIABLE VALUE: ... generated random numbers without specifying
+      # argument 'seed'". Numerics-neutral: compute_governing_factors() opens
+      # with set.seed(12345) under a two-sided sandbox, so it overwrites
+      # whatever stream the worker was handed before drawing anything.
+      seed = TRUE) %...>% (function(res) {
         reset_gov_run_ui()
         if (!is.null(res)) {
           # Commit the run's display context (T24 convention): the scatter

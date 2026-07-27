@@ -96,6 +96,65 @@ test_that("run_classification_cv produces valid pooled metrics and confusion mat
   expect_true(all(abs(psum - 1) < 1e-6))
 })
 
+test_that("a fold that never sees a class still pools its predictions", {
+  pts <- make_classif_points(n = 60)
+  # A singleton class is capped to v = 2 by classif_make_fold_id and lands in
+  # exactly ONE fold, so that fold's analysis rows hold none of it. ranger (and
+  # nnet::multinom) then drop the unused outcome level and return one fewer
+  # .pred_ column, which used to abort the pooled rbind with "numbers of columns
+  # of arguments do not match".
+  soil <- as.character(sf::st_drop_geometry(pts)$soil)
+  soil[1] <- "Rare"
+  pts$soil <- factor(soil, levels = c("Low", "Med", "High", "Rare"))
+
+  cv <- suppressWarnings(run_classification_cv(
+    pts, "soil", c("elev", "slope"), method = "rf", strategy = "standard",
+    v = 5, depth = "none", oof_importance = TRUE, importance_reps = 2L))
+
+  prob_cols <- paste0(".pred_", c("Low", "Med", "High", "Rare"))
+  expect_true(all(prob_cols %in% names(cv$predictions)))
+  expect_equal(nrow(cv$predictions), nrow(pts))
+  expect_true(all(abs(rowSums(cv$predictions[, prob_cols]) - 1) < 1e-6))
+
+  # The gap is reported by fold and class rather than silently absorbed.
+  expect_false(is.null(cv$class_gaps))
+  expect_true("Rare" %in% cv$class_gaps$class)
+  # A fold with no Rare training rows assigns Rare exactly zero mass — the
+  # model's genuine posterior, not an imputed share.
+  gap_fold <- cv$class_gaps$fold[cv$class_gaps$class == "Rare"][1]
+  expect_true(all(cv$predictions$.pred_Rare[cv$predictions$.fold == gap_fold] == 0))
+
+  # Out-of-fold importance survives the gap: matching truth against the missing
+  # probability column used to turn every importance value NA.
+  expect_false(is.null(cv$importance))
+  expect_true(all(is.finite(cv$importance$importance)))
+})
+
+test_that("target levels with no samples are dropped before modelling", {
+  pts <- make_classif_points(n = 60)
+  # classif_build_target() carries every bin label as a level, so an equal-
+  # interval or Jenks break enclosing no samples reaches the engine as an empty
+  # class — as does a class whose every row lacks a covariate value.
+  pts$soil <- factor(as.character(sf::st_drop_geometry(pts)$soil),
+                     levels = c("Low", "Med", "High", "Absent"))
+
+  cv <- run_classification_cv(pts, "soil", c("elev", "slope"),
+                              method = "rf", strategy = "standard",
+                              v = 4, depth = "none")
+
+  expect_equal(cv$levels, c("Low", "Med", "High"))
+  expect_false(".pred_Absent" %in% names(cv$predictions))
+  expect_false("Absent" %in% cv$per_class$class)
+  expect_equal(sum(cv$conf_mat$table), nrow(pts))
+  # An empty level leaves yardstick's macro recall undefined, which propagated
+  # into a silently NA balanced accuracy.
+  ba <- cv$metrics$.estimate[cv$metrics$.metric == "bal_accuracy"]
+  expect_length(ba, 1)
+  expect_false(is.na(ba))
+  # The empty level must not collapse the stratified fold cap (min class = 0).
+  expect_gt(cv$n_folds, 2)
+})
+
 test_that("all three learners fit and cross-validate", {
   pts <- make_classif_points(n = 60)
   for (m in c("multinom", "rf", "xgboost")) {
@@ -145,6 +204,24 @@ test_that("blocked surface prediction is identical to a single-block call", {
   invisible(predict_classification_surface(
     mod, nd, chunk_size = 10, progress = function(f) seen <<- c(seen, f)))
   expect_equal(seen, seq_len(5) / 5)
+})
+
+test_that("the argmax class agrees with a direct type = 'class' prediction", {
+  # The surface stage derives the hard class from the probabilities it already
+  # has instead of running a second full predict() pass over the grid. Every
+  # shipped learner is a probability model, so the two must agree (bar exact
+  # ties, which the argmax resolves to the first trained level).
+  pts <- make_classif_points(n = 60)
+  nd <- data.frame(elev = seq(0, 30, length.out = 60), slope = c(4, 7, 11),
+                   parent = factor(c("Granite", "Shale"),
+                                   levels = c("Granite", "Shale")))
+  for (m in c("rf", "multinom", "xgboost")) {
+    mod <- suppressWarnings(fit_classification_model(
+      pts, "soil", c("elev", "slope", "parent"), method = m, depth = "none"))
+    surf <- predict_classification_surface(mod, nd, chunk_size = 13)
+    direct <- predict(mod$workflow, nd, type = "class")$.pred_class
+    expect_identical(surf$.pred_class, direct, info = m)
+  }
 })
 
 test_that("a cancel flag stops the surface stage instead of running to completion", {
@@ -318,7 +395,12 @@ test_that("run_classification_pipeline returns only serialisable pieces and hono
   # No terra pointers may leak into the (serialisable) result.
   expect_false(any(vapply(res, function(x) inherits(x, "SpatRaster"), logical(1))))
   expect_setequal(res$levels, c("A", "B", "C"))
-  expect_true(all(c("class", "n_cells", "area_ha") %in% names(res$area)))
+  # Grid metadata the main session needs to rasterise surface_df. The worker
+  # deliberately ships NO area table: area accounting belongs to
+  # classif_surface_to_rasters(), which alone knows the confidence threshold.
+  expect_true(is.numeric(res$res) && res$res > 0)
+  expect_true(is.character(res$crs_wkt) && nzchar(res$crs_wkt))
+  expect_null(res$area)
 
   res_eval <- run_classification_pipeline(
     df, target = "soil", predictors = c("elev", "slope"),
@@ -903,6 +985,48 @@ test_that("out-of-fold importance is scored on held-out rows and labelled", {
   # share_pct renormalises the positive importances to 100
   pos <- imp$share_pct[!is.na(imp$share_pct)]
   if (length(pos)) expect_equal(sum(pos), 100, tolerance = 1e-6)
+})
+
+test_that("the out-of-fold importance sandbox leaves the fold RNG stream untouched", {
+  # .classif_perm_delta burns n_rep x n_predictors sample.int() draws. Before the
+  # sandbox those draws landed on the fold loop's own stream, so every LATER
+  # fold's fit started from a different random state and a purely diagnostic
+  # toggle could move the reported CV metrics. It bites whenever the learner
+  # consumes RNG: with the shipped registry that is xgboost at depth "full",
+  # which tunes sample_size / mtry (subsampling and colsample are random) —
+  # multinom (nnet rang = 0), ranger (seed = 12345L) and xgboost at
+  # none/light (sample_size = 1) all fit deterministically. This pins the
+  # property that makes the fold loop invariant regardless of learner, which
+  # matters as the tuning registry and learner list are meant to grow.
+  pts <- make_classif_points(60)
+  df <- as.data.frame(sf::st_drop_geometry(pts))
+  mod <- suppressWarnings(fit_classification_model(
+    pts, "soil", c("elev", "slope"), method = "rf", depth = "none"))
+
+  set.seed(99); ref <- runif(3)
+  set.seed(99)
+  imp <- .classif_with_seed(1L + 977L,
+    .classif_perm_delta(mod$workflow, df, "soil", c("elev", "slope"), n_rep = 2L))
+  expect_equal(runif(3), ref)
+  # ... and the importance itself is still computed, reproducibly from the seed
+  expect_length(imp$delta, 2L)
+  imp2 <- .classif_with_seed(1L + 977L,
+    .classif_perm_delta(mod$workflow, df, "soil", c("elev", "slope"), n_rep = 2L))
+  expect_equal(imp2$delta, imp$delta)
+})
+
+test_that("out-of-fold importance leaves the CV predictions unchanged", {
+  pts <- make_classif_points(70)
+  args <- list(pts, "soil", c("elev", "slope"), method = "multinom",
+               strategy = "standard", v = 4L, depth = "none")
+  without  <- suppressWarnings(do.call(run_classification_cv, args))
+  with_imp <- suppressWarnings(do.call(run_classification_cv,
+    c(args, list(oof_importance = TRUE, importance_reps = 2L))))
+
+  expect_equal(with_imp$predictions, without$predictions)
+  expect_equal(with_imp$metrics, without$metrics)
+  expect_s3_class(with_imp$importance, "data.frame")
+  expect_null(without$importance)
 })
 
 test_that("out-of-fold importance is not computed unless asked for", {

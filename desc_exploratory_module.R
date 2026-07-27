@@ -129,7 +129,7 @@ desc_exploratory_ui <- function(id) {
                                 "Correlation Network" = "network",
                                 "Partial Correlation" = "partial",
                                 "Correlogram" = "correlogram",
-                                "Lagged CCF" = "lagged")),
+                                "Spatial Cross-Correlogram" = "spatial_ccf")),
                   shiny::selectInput(ns("corr_method"), "Method", choices = c("pearson", "spearman", "kendall")),
                   shiny::uiOutput(ns("corr_vars_ui"))
                 ),
@@ -192,7 +192,12 @@ desc_exploratory_ui <- function(id) {
   )
 }
 
-desc_exploratory_server <- function(id, data_reactive, vars_metadata_reactive) {
+# `spatial_reactive` carries the confirmed coordinate mapping (x/y column names,
+# source CRS, target mapping CRS) for the Spatial Cross-Correlogram panel, which
+# bins point pairs by ground distance. It defaults to NULL so the module still
+# runs headless (tests) and so every other panel stays independent of it.
+desc_exploratory_server <- function(id, data_reactive, vars_metadata_reactive,
+                                    spatial_reactive = shiny::reactive(NULL)) {
   shiny::moduleServer(id, function(input, output, session) {
     ns <- session$ns
 
@@ -654,11 +659,12 @@ desc_exploratory_server <- function(id, data_reactive, vars_metadata_reactive) {
       curr_var1 <- isolate(input$corr_var_1) %||% num_cols[1]
       curr_var2 <- isolate(input$corr_var_2) %||% (if(length(num_cols) > 1) num_cols[2] else num_cols[1])
       
-      if (p_type == "lagged") {
+      if (p_type == "spatial_ccf") {
         shiny::tagList(
           shiny::selectInput(ns("corr_var_1"), "Primary Variable", choices = num_named, selected = curr_var1),
           shiny::selectInput(ns("corr_var_2"), "Secondary Variable", choices = num_named, selected = curr_var2),
-          shiny::numericInput(ns("corr_max_lag"), "Max Lag", value = 10, min = 1, max = 100)
+          shiny::numericInput(ns("corr_n_bins"), "Distance Bins", value = 15, min = 3, max = 50),
+          shiny::helpText("Lags are ground distances between sample points, not table rows.")
         )
       } else {
         shiny::tagList(
@@ -701,13 +707,17 @@ desc_exploratory_server <- function(id, data_reactive, vars_metadata_reactive) {
       p_type <- input$corr_plot_type
       method <- input$corr_method %||% "pearson"
       
-      if (p_type == "lagged") {
+      if (p_type == "spatial_ccf") {
         req(input$corr_var_1, input$corr_var_2)
+        sp <- spatial_reactive()
         v1_lab <- get_var_label(input$corr_var_1, vmeta())
         v2_lab <- get_var_label(input$corr_var_2, vmeta())
         colnames(df)[colnames(df) == input$corr_var_1] <- v1_lab
         colnames(df)[colnames(df) == input$corr_var_2] <- v2_lab
-        p <- generate_lagged_correlation(df, v1_lab, v2_lab, max_lag = input$corr_max_lag %||% 10)
+        p <- generate_spatial_cross_correlogram(
+          df, v1_lab, v2_lab,
+          x_col = sp$x, y_col = sp$y, src_crs = sp$src_crs, proj_crs = sp$proj_crs,
+          n_bins = input$corr_n_bins %||% 15, method = method)
       } else {
         req(input$corr_vars_multi)
         vars <- input$corr_vars_multi
@@ -749,17 +759,28 @@ desc_exploratory_server <- function(id, data_reactive, vars_metadata_reactive) {
       p_type <- input$corr_plot_type
       method <- input$corr_method %||% "pearson"
       
-      if (p_type == "lagged") {
+      if (p_type == "spatial_ccf") {
         req(input$corr_var_1, input$corr_var_2)
-        v1 <- input$corr_var_1
-        v2 <- input$corr_var_2
-        df_clean <- na.omit(df[, c(v1, v2)])
-        if(nrow(df_clean) < 3) return(NULL)
-        showNotification("Note: Lagged Cross-Correlation (CCF) is designed for sequentially ordered time-series. If data is strictly spatial or cross-sectional, interpretations may be invalid.", type = "warning", duration = 8)
-        max_lag <- input$corr_max_lag %||% 10
-        ccf_res <- ccf(df_clean[[v1]], df_clean[[v2]], lag.max = max_lag, plot = FALSE)
-        res_df <- data.frame(Lag = ccf_res$lag[,1,1], CrossCorrelation = round(ccf_res$acf[,1,1], 3))
-        return(DT::datatable(res_df, options = list(pageLength = 10, dom = 't', scrollX = TRUE)))
+        sp <- spatial_reactive()
+        v1 <- get_var_label(input$corr_var_1, vmeta())
+        v2 <- get_var_label(input$corr_var_2, vmeta())
+        colnames(df)[colnames(df) == input$corr_var_1] <- v1
+        colnames(df)[colnames(df) == input$corr_var_2] <- v2
+        # Same computation the plot uses, so the table can never disagree with it.
+        res <- compute_spatial_cross_correlogram(
+          df, v1, v2, x_col = sp$x, y_col = sp$y,
+          src_crs = sp$src_crs, proj_crs = sp$proj_crs,
+          n_bins = input$corr_n_bins %||% 15, method = method)
+        if (is.null(res$bins)) return(NULL)
+        res_df <- data.frame(
+          Lag = round(res$bins$dist, 1),
+          Pairs = res$bins$np,
+          CrossCorrelation = round(res$bins$rho, 3),
+          CrossSemivariance = round(res$bins$gamma, 3)
+        )
+        colnames(res_df) <- c(paste0("Lag distance (", res$unit, ")"), "Pairs",
+                              "Cross-correlation", "Cross-semivariance (std.)")
+        return(DT::datatable(res_df, options = list(pageLength = 10, dom = 'tip', scrollX = TRUE)))
       } else {
         req(input$corr_vars_multi)
         vars <- input$corr_vars_multi
@@ -769,57 +790,68 @@ desc_exploratory_server <- function(id, data_reactive, vars_metadata_reactive) {
         vars_lab <- get_var_labels(vars, vmeta())
         
         n_controls <- 0
+        pcor <- NULL
         if (p_type == "partial") {
           c_vars <- input$corr_vars_control
           if(!is.null(c_vars) && length(c_vars) > 0) {
              df <- apply_labels_to_df(df, c_vars, vmeta())
              c_vars_lab <- get_var_labels(c_vars, vmeta())
 
-             all_vars <- unique(c(vars_lab, c_vars_lab))
-             df_clean <- na.omit(df[, all_vars, drop=FALSE])
-             if(nrow(df_clean) < 5) return(NULL)
-
-             res_list <- list()
-             for (v in vars_lab) {
-               mod <- try(lm(as.formula(paste0("`", v, "` ~ ", paste(paste0("`", c_vars_lab, "`"), collapse=" + "))), data=df_clean), silent=TRUE)
-               if(!inherits(mod, "try-error")) res_list[[v]] <- residuals(mod)
-             }
-             if(length(res_list) < length(vars_lab)) {
+             # Shared with the Partial Correlation heatmap: raw residuals for
+             # pearson, rank residuals for spearman, inverted tau matrix for
+             # kendall (ppcor conventions, matching the p-values below).
+             pcor <- compute_partial_correlation(df, vars_lab, c_vars_lab, method = method)
+             if (is.null(pcor$cormat) || length(pcor$failed) > 0) {
                  # Never fall back to raw correlations while the table is
-                 # labelled partial: abort and tell the user which variables
-                 # could not be residualized.
-                 failed_vars <- setdiff(vars_lab, names(res_list))
-                 showNotification(paste0("Partial correlation table aborted: could not residualize ",
-                                         paste(failed_vars, collapse = ", "),
-                                         " against the control variables."), type = "error", duration = 8)
+                 # labelled partial: abort and say so.
+                 if (length(pcor$failed) > 0) {
+                   showNotification(paste0("Partial correlation table aborted: could not partial out the control variables for ",
+                                           paste(pcor$failed, collapse = ", "), "."),
+                                    type = "error", duration = 8)
+                 }
                  return(NULL)
              }
-             df_clean <- as.data.frame(res_list)
-             n_controls <- length(c_vars_lab)
+             if (pcor$n < 5) return(NULL)
+             if (pcor$k == 0) {
+               # Every named control is also one of the correlated variables, so
+               # nothing is left to partial out (a variable never controls for
+               # itself): report the plain correlations, with their own tests.
+               pcor <- NULL
+               df_clean <- na.omit(df[, vars_lab, drop = FALSE])
+             } else {
+               df_clean <- na.omit(df[, unique(c(vars_lab, c_vars_lab)), drop = FALSE])
+               n_controls <- pcor$k
+             }
           } else {
              df_clean <- na.omit(df[, vars_lab, drop=FALSE])
           }
         } else {
           df_clean <- na.omit(df[, vars_lab, drop=FALSE])
         }
-        
+
         if(nrow(df_clean) < 3) return(NULL)
-        
+
         if (p_type %in% c("heatmap", "network", "correlogram", "partial")) {
-           n_v <- ncol(df_clean)
+           pair_vars <- if (!is.null(pcor)) vars_lab else colnames(df_clean)
+           n_v <- length(pair_vars)
            res_list <- list()
            for(i in 1:(n_v-1)) {
               for(j in (i+1):n_v) {
-                 ct <- tryCatch(cor.test(df_clean[[i]], df_clean[[j]], method = method), error=function(e) NULL)
+                 ct <- if (!is.null(pcor)) {
+                   list(estimate = pcor$cormat[pair_vars[i], pair_vars[j]], p.value = NA_real_)
+                 } else {
+                   tryCatch(cor.test(df_clean[[i]], df_clean[[j]], method = method), error=function(e) NULL)
+                 }
                  if(!is.null(ct)) {
                     p_val <- ct$p.value
                     if (n_controls > 0) {
-                       # cor.test on residuals uses df = n - 2, ignoring the k
-                       # control variables partialled out. Recompute the p-value
-                       # with the partial-correlation df = n - 2 - k (same
-                       # convention as ppcor::pcor.test).
+                       # The partial estimate carries no test of its own, and a
+                       # cor.test on residuals would use df = n - 2, ignoring the
+                       # k control variables partialled out. The p-value uses the
+                       # partial-correlation df = n - 2 - k (same convention as
+                       # ppcor::pcor.test).
                        r_est <- unname(ct$estimate)
-                       n_obs <- nrow(df_clean)
+                       n_obs <- pcor$n
                        if (method == "kendall") {
                           n_eff <- n_obs - n_controls
                           if (n_eff > 2) {
@@ -834,10 +866,11 @@ desc_exploratory_server <- function(id, data_reactive, vars_metadata_reactive) {
                        }
                     }
                     res_list[[length(res_list)+1]] <- data.frame(
-                        Variable_1 = colnames(df_clean)[i],
-                        Variable_2 = colnames(df_clean)[j],
-                        Correlation = round(ct$estimate, 3),
-                        p_raw = p_val
+                        Variable_1 = pair_vars[i],
+                        Variable_2 = pair_vars[j],
+                        Correlation = round(unname(ct$estimate), 3),
+                        p_raw = p_val,
+                        stringsAsFactors = FALSE
                     )
                  }
               }

@@ -1,28 +1,52 @@
 # server_sci_analysis.R (sourced with local = TRUE inside server) - model
 # diagnostics, variogram/importance/obs-pred plots, stats/area/metrics/kappa
 # tables, notifications, log and polygon export.
+  # Shared note box for the per-locality diagnostic panels (same look as the
+  # "select a locality" hints these panels already used).
+  sci_ui_note <- function(msg) {
+    div(style="padding: 12px; background-color: #f8f9fa; border: 1px dashed #ced4da; border-radius: 6px; color: #6c757d; font-style: italic; text-align: center;",
+        msg)
+  }
+
+  # A missing per-locality trend object is NOT "nothing worth saying": for
+  # RK/RFK it means the trend step did not run for that locality, so
+  # apply_kriging_pipeline took its Ordinary Kriging fallback (it writes
+  # "<engine> failed, using Ordinary Kriging fallback" via write_warning_file
+  # and logs the cause), or the locality failed outright. A bare req() blanked
+  # the panel and left the reason sitting in the Run Log; these panels name it
+  # in place instead.
+  trend_missing_msg <- function(loc, what) {
+    m <- rv$disp$method %||% ""
+    if (m %in% c("RK", "RFK")) {
+      sprintf(paste0("No %s is stored for \"%s\".\nThis locality's %s trend model was not fitted, so the run fell back to ",
+                     "Ordinary Kriging for it (or the locality failed).\nSee the Run Log on this tab for the reported cause."),
+              what, loc, m)
+    } else {
+      sprintf("No %s is stored for \"%s\".\nThe displayed run used %s, which fits no covariate trend model.",
+              what, loc, if (nzchar(m)) m else "an engine without a trend step")
+    }
+  }
+
   # RK linear-trend panels: fit-statistic chips + coefficient table (raw
   # summary.lm print kept behind a collapsible details element). Falls back to
   # the verbatim print if the stored object is not a summary.lm.
   output$model_summary_ui_act <- renderUI({
     loc <- input$sel_loc_stats; req(loc)
     if (loc == "Total (Combined)") {
-      return(div(style="padding: 12px; background-color: #f8f9fa; border: 1px dashed #ced4da; border-radius: 6px; color: #6c757d; font-style: italic; text-align: center;",
-                 "Linear trend summaries are computed per locality. Please select a specific locality from the analysis filter list above to view details."))
+      return(sci_ui_note("Linear trend summaries are computed per locality. Please select a specific locality from the analysis filter list above to view details."))
     }
     summary_obj <- rv$model_summaries[[paste0(loc, "_act")]]
-    req(summary_obj)
+    if (is.null(summary_obj)) return(sci_ui_note(trend_missing_msg(loc, "linear trend summary")))
     build_rk_trend_ui(summary_obj, "rk_coef_dt_act", "summ_act_static") %||%
       tagList(verbatimTextOutput("summ_act_static"))
   })
   output$model_summary_ui_pre <- renderUI({
     loc <- input$sel_loc_stats; req(loc)
     if (loc == "Total (Combined)") {
-      return(div(style="padding: 12px; background-color: #f8f9fa; border: 1px dashed #ced4da; border-radius: 6px; color: #6c757d; font-style: italic; text-align: center;",
-                 "Linear trend summaries are computed per locality. Please select a specific locality from the analysis filter list above to view details."))
+      return(sci_ui_note("Linear trend summaries are computed per locality. Please select a specific locality from the analysis filter list above to view details."))
     }
     summary_obj <- rv$model_summaries[[paste0(loc, "_pre")]]
-    req(summary_obj)
+    if (is.null(summary_obj)) return(sci_ui_note(trend_missing_msg(loc, "linear trend summary")))
     build_rk_trend_ui(summary_obj, "rk_coef_dt_pre", "summ_pre_static") %||%
       tagList(verbatimTextOutput("summ_pre_static"))
   })
@@ -31,9 +55,9 @@
     loc <- input$sel_loc_stats
     req(loc, loc != "Total (Combined)")
     summary_obj <- rv$model_summaries[[paste0(loc, "_act")]]
-    req(summary_obj)
+    validate(need(summary_obj, trend_missing_msg(loc, "coefficient table")))
     df <- rk_coef_table(summary_obj, sci_vars_meta())
-    req(df)
+    validate(need(df, "The stored trend model carries no estimable coefficients."))
     sci_dt(df)
   })
 
@@ -41,9 +65,9 @@
     loc <- input$sel_loc_stats
     req(loc, loc != "Total (Combined)")
     summary_obj <- rv$model_summaries[[paste0(loc, "_pre")]]
-    req(summary_obj)
+    validate(need(summary_obj, trend_missing_msg(loc, "coefficient table")))
     df <- rk_coef_table(summary_obj, sci_vars_meta())
-    req(df)
+    validate(need(df, "The stored trend model carries no estimable coefficients."))
     sci_dt(df)
   })
 
@@ -52,15 +76,15 @@
     loc <- input$sel_loc_stats
     req(loc, loc != "Total (Combined)")
     summary_obj <- rv$model_summaries[[paste0(loc, "_act")]]
-    req(summary_obj)
+    validate(need(summary_obj, trend_missing_msg(loc, "linear trend summary")))
     summary_obj
   })
-  
+
   output$summ_pre_static <- renderPrint({
     loc <- input$sel_loc_stats
     req(loc, loc != "Total (Combined)")
     summary_obj <- rv$model_summaries[[paste0(loc, "_pre")]]
-    req(summary_obj)
+    validate(need(summary_obj, trend_missing_msg(loc, "linear trend summary")))
     summary_obj
   })
 
@@ -69,7 +93,9 @@
     if (loc == "Total (Combined)") {
       return(sci_placeholder("RF Variable Importance is generated per locality.\nPlease select a specific locality from the dropdown."))
     }
-    req(rv$rf_models[[paste0(loc, "_", target)]])
+    if (is.null(rv$rf_models[[paste0(loc, "_", target)]])) {
+      return(sci_placeholder(trend_missing_msg(loc, "random-forest trend model"), size = 4))
+    }
     build_rf_importance_plot(rv$rf_models[[paste0(loc, "_", target)]],
                              paste0("Variable Importance (", if (target == "act") "Actual" else "Predicted", "): ", loc),
                              sci_vars_meta())
@@ -96,7 +122,12 @@
     col_resid <- if (type == "act") "model_resid_act" else "model_resid_pre"
 
     if (loc == "Total (Combined)") {
-      req(rv$sf, col_resid %in% colnames(rv$sf))
+      if (is.null(rv$sf) || !col_resid %in% colnames(rv$sf) || !any(!is.na(rv$sf[[col_resid]]))) {
+        return(sci_placeholder(paste0(
+          "No cross-validation residuals are stored for this run ", tolower(title_suffix), ".\n",
+          "Pooled residual variograms need per-locality CV to have succeeded;\n",
+          "see the Run Log on this tab for the reported cause."), size = 4))
+      }
       formula_obj <- as.formula(paste(col_resid, "~ 1"))
       df_filtered <- rv$sf[!is.na(rv$sf[[col_resid]]), ]
       # Unlike the per-locality plots (internal trend-residual variogram of
@@ -105,9 +136,29 @@
       build_variogram_ggplot(variogram(formula_obj, df_filtered),
                              title = paste("Pooled CV Residual Variogram", title_suffix))
     } else {
-      req(rv$v_emp_list[[paste0(loc, "_", type)]], rv$v_fit_list[[paste0(loc, "_", type)]])
-      build_variogram_ggplot(rv$v_emp_list[[paste0(loc, "_", type)]], rv$v_fit_list[[paste0(loc, "_", type)]],
-                             title = paste("Internal Residual Variogram", paste0(title_suffix, ":"), loc))
+      v_emp <- rv$v_emp_list[[paste0(loc, "_", type)]]
+      v_fit <- rv$v_fit_list[[paste0(loc, "_", type)]]
+      if (is.null(v_emp) || is.null(v_fit)) {
+        return(sci_placeholder(sprintf(paste0(
+          "No fitted variogram is stored for \"%s\" %s.\nThe locality failed before the variogram step; ",
+          "see the Run Log on this tab."), loc, tolower(title_suffix)), size = 4))
+      }
+      # RK/RFK store a RESIDUAL variogram only when their trend step ran. When
+      # it did not, apply_kriging_pipeline's OK fallback overwrites v_emp/v_fit
+      # with the variogram of the MEASURED values, so the panel must stop
+      # calling that a residual variogram. The trend object is the marker: it
+      # exists for exactly the localities whose trend step succeeded.
+      trend_obj <- if (identical(rv$disp$method, "RFK")) {
+        rv$rf_models[[paste0(loc, "_", type)]]
+      } else {
+        rv$model_summaries[[paste0(loc, "_", type)]]
+      }
+      ttl <- if ((rv$disp$method %||% "") %in% c("RK", "RFK") && is.null(trend_obj)) {
+        paste("Variogram of Measured Values - Ordinary Kriging Fallback", paste0(title_suffix, ":"), loc)
+      } else {
+        paste("Internal Residual Variogram", paste0(title_suffix, ":"), loc)
+      }
+      build_variogram_ggplot(v_emp, v_fit, title = ttl)
     }
   }
 
@@ -577,7 +628,9 @@
         src_label <- if(!is.null(res)) {
           paste0(label, " (", cv_type_label(n_obs, rv$cv_strategy_sel), ", n=", res$n, ")")
         } else {
-          paste0(label, " (CV)")
+          # An all-NA row used to be labelled plain "(CV)", indistinguishable
+          # from a computed one; say that CV did not produce metrics here.
+          paste0(label, " (CV unavailable - see Run Log)")
         }
         rmse <- if(!is.null(res)) res$rmse else NA
         r2   <- if(!is.null(res)) res$r2 else NA

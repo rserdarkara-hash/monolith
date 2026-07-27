@@ -583,7 +583,18 @@
       })
     }, seed = 12345) %...>% (function(res_all) {
       if (this_token != rv$run_token) return()
-      
+
+      # Everything below runs in the MAIN session on results the workers already
+      # returned successfully. It gets its own tryCatch because `p %...>% f
+      # %...!% g` routes rejections from BOTH p and f to g: without this, a
+      # failure in merge_wrapped_rasters, register_export_item, the leaflet
+      # fitBounds or the kappa tables was reported as "Parallel Interpolation
+      # Failed" with troubleshooting advice about coordinate columns and
+      # collinear covariates — i.e. the user was sent to debug a worker that
+      # had in fact finished. With the assembly body guarded here, `%...!%`
+      # below genuinely means "the parallel run itself failed".
+      tryCatch({
+
       tryCatch({
         batch_elapsed_sec <- as.numeric(difftime(Sys.time(), log_start_time, units = "secs"))
         history_dir <- "run_history"
@@ -871,6 +882,32 @@
     rv$model_running <- FALSE
     old_files <- list.files(path = session_progress_dir, pattern = paste0("^(progress|warn)_", session_id, "_.*_.*\\.txt$"), full.names = TRUE)
     if(length(old_files) > 0) tryCatch(file.remove(old_files), error = function(e) NULL)
+
+      }, error = function(e) {
+        # The interpolation itself completed; assembling/registering its results
+        # in the main session did not. Say exactly that, and still release the
+        # run UI so the app is usable. Whatever was assembled before the failure
+        # stays in rv$ — the Reveal button is offered so partial surfaces can be
+        # inspected, with the modal warning that they may be incomplete.
+        rv$log <- paste0(rv$log, "\n\n[ERROR] Results assembly failed after a successful run: ", conditionMessage(e))
+        shinyjs::hide("map_spinner")
+        shinyjs::html("map_processing_title", "Results Assembly Failed")
+        shinyjs::show("reveal_maps_btn")
+        shinyjs::enable("run")
+        updateActionButton(session, "run", label = "Run Interpolation", icon = character(0))
+        shinyjs::runjs("$('#run i').remove();")
+        rv$model_running <- FALSE
+        stale <- list.files(path = session_progress_dir, pattern = paste0("^(progress|warn)_", session_id, "_.*_.*\\.txt$"), full.names = TRUE)
+        if (length(stale) > 0) tryCatch(file.remove(stale), error = function(e2) NULL)
+        showModal(modalDialog(
+          title = tags$div(style = "color: #d9534f; font-weight: bold;", icon("exclamation-triangle"), "Results Assembly Failed"),
+          tags$p("The parallel interpolation finished, but an error occurred while assembling the results (merging rasters, building tables, or registering exports) in the main session:"),
+          tags$pre(style = "background-color: #f8d7da; color: #721c24; border: 1px solid #f5c6cb; padding: 15px; border-radius: 4px; overflow-x: auto; white-space: pre-wrap; font-family: monospace; font-size: 0.9em;", conditionMessage(e)),
+          tags$p(style = "margin-top: 15px;", "The model outputs themselves are not in question. Any surfaces already assembled can be revealed, but maps, tables and the export registry may be incomplete for this run."),
+          easyClose = TRUE,
+          footer = modalButton("Dismiss")
+        ))
+      })
     }) %...!% (function(err) {
       if (this_token != rv$run_token) return()
       shinyjs::hide("map_spinner")

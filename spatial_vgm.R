@@ -11,6 +11,31 @@ suggest_lmc_model <- function(primary_vgm) {
   return(m_type[1])
 }
 
+# gstat's `range` parameter (`a`) is NOT the practical range. The distance at
+# which a family reaches ~95% of its sill is a for Spherical (which reaches the
+# sill exactly at a), but 3a for Exponential, sqrt(3)a for Gaussian and ~4.75a
+# for Matern with nu = 1.5. Screening candidates on the raw `a` therefore
+# applied a window whose meaning changed with the family - an Exponential fit
+# whose structure extended three times further than a Spherical one was judged
+# by the same number - so the clean-candidate pool was composed on a
+# family-dependent criterion rather than on fit quality. Multiplying by the
+# factor below puts every candidate on the ground-distance scale before the
+# sanity window is applied.
+#
+# Matern: fit.kappa is deliberately left off (see scientific_guide), so kappa
+# stays at the 1.5 the screen starts it on; the other half-integer values are
+# listed for the day that changes.
+.vgm_practical_range_factor <- function(model, kappa = NA_real_) {
+  m <- as.character(model)[1]
+  if (identical(m, "Mat")) {
+    k <- suppressWarnings(as.numeric(kappa)[1])
+    if (isTRUE(abs(k - 0.5) < 1e-8)) return(3)      # Matern nu = 0.5 IS exponential
+    if (isTRUE(abs(k - 2.5) < 1e-8)) return(5.92)
+    return(4.75)                                    # nu = 1.5 (the screen's value)
+  }
+  switch(m, "Sph" = 1, "Exp" = 3, "Gau" = sqrt(3), 1)
+}
+
 calc_scientific_lags <- function(sf_pts) {
   bbox <- sf::st_bbox(sf_pts)
   max_dist <- as.numeric(sqrt((bbox$xmax - bbox$xmin)^2 + (bbox$ymax - bbox$ymin)^2))
@@ -133,7 +158,10 @@ robust_vgm_fit <- function(v_emp, v_data) {
       if (is.null(f)) next
       flawed <- flawed || isTRUE(attr(f, "singular"))
       sse <- attr(f, "SSErr")
-      in_window <- !is.null(sse) && !is.na(sse) && f$range[2] > (max_dist/100) && f$range[2] < max_dist * 2 && f$psill[2] > 0
+      # Sanity window on the PRACTICAL range (ground distance), not on gstat's
+      # `a` - see .vgm_practical_range_factor().
+      prange <- f$range[2] * .vgm_practical_range_factor(f$model[2], f$kappa[2])
+      in_window <- !is.null(sse) && !is.na(sse) && prange > (max_dist/100) && prange < max_dist * 2 && f$psill[2] > 0
       candidates[[length(candidates) + 1]] <- list(fit = f, sse = sse, flawed = flawed, in_window = in_window)
     }
   }

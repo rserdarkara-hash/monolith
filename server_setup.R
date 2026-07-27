@@ -342,7 +342,13 @@
   desc_exploratory_server(
     id = "exploratory",
     data_reactive = reactive(rv$user_data),
-    vars_metadata_reactive = reactive(rv$mapping$vars)
+    vars_metadata_reactive = reactive(rv$mapping$vars),
+    # Coordinate mapping for the Spatial Cross-Correlogram (same contract as
+    # classif_server): it bins point pairs by projected ground distance.
+    spatial_reactive = reactive(list(
+      x = rv$mapping$x, y = rv$mapping$y,
+      src_crs = rv$mapping$crs, proj_crs = input$crs_selection
+    ))
   )
 
   classif_server(

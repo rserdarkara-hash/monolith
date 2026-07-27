@@ -128,7 +128,7 @@
           p("Supported with the Descriptive and Exploratory Suite with dynamic visualizations and statistics."),
           hr(),
           p(strong("A product of `that` couple of months following the loss of institutional e-mail address.")),
-          p(style = "color: #666; font-size: 0.9em;", "  by Recep Serdar Kara in cooperation with Antigravity CLI and Claude Code - 2026 (v1.0.2)"),
+          p(style = "color: #666; font-size: 0.9em;", "  by Recep Serdar Kara in cooperation with Antigravity CLI and Claude Code - 2026 (v1.0.5"),
           hr(),
           tags$details(
             tags$summary(style = "cursor: pointer; color: #007bff;", "Session Info (reproducibility)"),

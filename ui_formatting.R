@@ -43,6 +43,85 @@ melt_cormat <- function(cormat, value_name = "Corr") {
   df
 }
 
+# Partial correlation matrix for `vars`, controlling for `control_vars`.
+# Single source for BOTH the Partial Correlation heatmap and the correlation
+# summary table, which used to residualize independently (and disagreed with
+# each other on quoting, so labels containing spaces broke the plot).
+#
+# Conventions follow ppcor, which the table's p-value block already cites:
+#   pearson  - residualize the RAW values on the controls, product-moment
+#              correlation of the residuals (algebraically identical to
+#              inverting the Pearson correlation matrix).
+#   spearman - rank-transform EVERY column first, then residualize and take the
+#              product-moment correlation of the rank residuals. Correlating
+#              raw-value residuals with method = "spearman" (the old behaviour)
+#              is NOT a partial rank correlation: ppcor residualizes the ranks,
+#              and cor(method = "spearman") of the residuals would instead
+#              re-rank residuals of an unranked fit.
+#   kendall  - no residualization analogue exists; ppcor inverts the Kendall
+#              tau matrix (the multi-control generalisation of Kendall's
+#              first-order partial tau), so that is what is done here.
+# Residualization uses one pivoted QR over the shared control design matrix
+# (model.matrix keeps factor controls and awkward column names working) — the
+# same fit lm() would produce, but computed once for all variables.
+#
+# Returns list(cormat, n, k, method, failed). `cormat` is NULL when the partial
+# correlation could not be computed; `failed` then names the offending columns
+# so the caller can abort instead of silently reporting raw correlations under
+# a "partial" label.
+compute_partial_correlation <- function(df, vars, control_vars = NULL,
+                                        method = "pearson") {
+  vars <- unique(vars)
+  # A variable must never control for itself: residualizing v against a set
+  # containing v yields ~zero residuals and a NaN row.
+  ctrl <- setdiff(unique(control_vars), vars)
+  out <- list(cormat = NULL, n = 0L, k = length(ctrl), method = method,
+              failed = character(0))
+
+  cols <- c(vars, ctrl)
+  missing_cols <- setdiff(cols, colnames(df))
+  if (length(missing_cols) > 0) {
+    out$failed <- missing_cols
+    return(out)
+  }
+
+  d <- stats::na.omit(df[, cols, drop = FALSE])
+  out$n <- nrow(d)
+  if (length(vars) < 2 || out$n < 3) return(out)
+
+  if (length(ctrl) == 0) {
+    out$cormat <- stats::cor(d[, vars, drop = FALSE], method = method)
+    return(out)
+  }
+
+  if (identical(method, "kendall")) {
+    tau <- stats::cor(d, method = "kendall")
+    inv <- tryCatch(solve(tau), error = function(e) NULL)
+    if (is.null(inv) || any(!is.finite(inv))) {
+      out$failed <- vars
+      return(out)
+    }
+    pc <- -inv / sqrt(outer(diag(inv), diag(inv)))
+    diag(pc) <- 1
+    out$cormat <- pc[vars, vars, drop = FALSE]
+    return(out)
+  }
+
+  fit_df <- d
+  if (identical(method, "spearman")) fit_df[] <- lapply(d, rank)
+  resid_mat <- tryCatch({
+    X <- stats::model.matrix(~ ., data = fit_df[, ctrl, drop = FALSE])
+    qr.resid(qr(X), as.matrix(fit_df[, vars, drop = FALSE]))
+  }, error = function(e) NULL)
+  if (is.null(resid_mat)) {
+    out$failed <- vars
+    return(out)
+  }
+  colnames(resid_mat) <- vars
+  out$cormat <- stats::cor(resid_mat, method = "pearson")
+  out
+}
+
 method_labels <- c(
   "OK"  = "Ordinary Kriging",
   "UK"  = "Universal Kriging",

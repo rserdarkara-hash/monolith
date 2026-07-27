@@ -1001,26 +1001,20 @@ generate_correlation_network <- function(df, vars, threshold = 0.3, method = "pe
 generate_partial_correlation <- function(df, vars, control_vars = NULL, method = "pearson") {
 
   if (length(vars) < 2) return(ggplot() + annotate("text", x=0, y=0, label="Need >=2 variables to correlate"))
-  
-  all_vars <- unique(c(vars, control_vars))
-  df_clean <- na.omit(df[, all_vars, drop=FALSE])
-  if (nrow(df_clean) < 5) return(ggplot() + annotate("text", x=0, y=0, label="Insufficient data"))
-  
-  # A variable must never control for itself: residualizing v against a set
-  # containing v yields ~zero residuals and a NaN row in the heatmap.
-  control_vars <- setdiff(control_vars, vars)
-  if (!is.null(control_vars) && length(control_vars) > 0) {
-    res_list <- list()
-    formula_rhs <- paste(control_vars, collapse=" + ")
-    for (v in vars) {
-      mod <- lm(as.formula(paste(v, "~", formula_rhs)), data=df_clean)
-      res_list[[v]] <- residuals(mod)
-    }
-    df_clean <- as.data.frame(res_list)
+
+  # Residualization + the rank/kendall conventions live in
+  # compute_partial_correlation() so this plot and the correlation summary
+  # table can never disagree about what "partial" means.
+  pc <- compute_partial_correlation(df, vars, control_vars, method = method)
+  if (length(pc$failed) > 0) {
+    return(ggplot() + annotate("text", x=0, y=0,
+      label="Could not partial out the control variables") + theme_void())
   }
-  
-  cormat <- cor(df_clean[, vars, drop=FALSE], method = method)
-  
+  if (is.null(pc$cormat) || pc$n < 5) return(ggplot() + annotate("text", x=0, y=0, label="Insufficient data"))
+
+  cormat <- pc$cormat
+  n_ctrl <- pc$k
+
   cormat_df <- melt_cormat(cormat, "pCorr")
   
   cormat_df$Var1 <- factor(cormat_df$Var1, levels = vars)
@@ -1032,9 +1026,12 @@ generate_partial_correlation <- function(df, vars, control_vars = NULL, method =
     scale_fill_gradient2(low = "red", high = "blue", mid = "white", midpoint = 0, limits = c(-1,1), name="Partial\nCorrelation") +
     theme_minimal() + 
     theme(axis.text.x = element_text(angle = 45, vjust = 1, hjust = 1)) +
-    labs(x="", y="", title=ifelse(is.null(control_vars) || length(control_vars)==0, 
-                                  "Standard Correlation Heatmap", 
-                                  paste("Partial Correlation (Controlling for", length(control_vars), "vars)")))
+    labs(x="", y="",
+         title = if (n_ctrl == 0) "Standard Correlation Heatmap" else paste("Partial Correlation (Controlling for", n_ctrl, "vars)"),
+         subtitle = if (n_ctrl == 0) NULL else switch(method,
+           spearman = "Spearman: ranks residualized on the controls (ppcor convention)",
+           kendall  = "Kendall: partial tau from the inverted tau matrix (ppcor convention)",
+           NULL))
   return(p)
 }
 
@@ -1064,26 +1061,144 @@ generate_correlogram <- function(df, vars, method = "pearson", cormat = NULL) {
   return(p)
 }
 
-generate_lagged_correlation <- function(df, var1, var2, max_lag = 10) {
+# ── Spatial cross-correlogram ──────────────────────────────────────────────
+# Replaces the former row-order "Lagged CCF" panel. stats::ccf() measures lag in
+# ROWS of the uploaded table, which for a soil point table is upload order, not
+# distance, and its +/-1.96/sqrt(n) bands additionally assume a stationary
+# series - neither holds for cross-sectional spatial samples.
+#
+# The estimator here is the standard geostatistical one. With both variables
+# standardised to zero mean and unit variance, the empirical cross variogram
+# gamma_12(h) - computed by gstat with the same pair binning as every other
+# variogram in the app - and the cross-covariance are related by
+#     gamma_12(h) = C_12(0) - (C_12(h) + C_21(h)) / 2
+# so the spatial cross-correlation at lag h is
+#     rho_12(h) = r_12 - gamma_12(h)
+# with r_12 the ordinary non-spatial correlation of the standardised variables
+# (Goovaerts 1997 section 4.2.3; Isaaks & Srivastava 1989 ch. 4). Only the
+# SYMMETRIC part of the cross-covariance is estimable from omnidirectional bins
+# (pairs (i,j) and (j,i) land in the same bin), which is also why there is no
+# negative-lag half: unlike a time series, an unordered point set has no
+# "leads" and "lags".
+#
+# Coordinates are projected before binning (the app's never-measure-distance-in-
+# degrees invariant). Returns list(bins, r0, n, unit, ranked, message); `message`
+# is a user-facing placeholder reason and is non-NULL exactly when `bins` is NULL.
+compute_spatial_cross_correlogram <- function(df, var1, var2, x_col, y_col,
+                                              src_crs, proj_crs = NULL,
+                                              n_bins = 15, method = "pearson") {
+  out <- list(bins = NULL, r0 = NA_real_, n = 0L, unit = "m",
+              ranked = !identical(method, "pearson"), message = NULL)
+  fail <- function(msg) { out$message <- msg; out }
 
-  
-  if (is.null(var1) || is.null(var2) || !var1 %in% colnames(df) || !var2 %in% colnames(df)) {
-     return(ggplot() + annotate("text", x=0, y=0, label="Invalid variables specified"))
+  if (is.null(x_col) || is.null(y_col) || is.null(src_crs) ||
+      !all(c(x_col, y_col) %in% colnames(df))) {
+    return(fail("Coordinates are not mapped yet.\nConfirm the variable mapping on the Data Setup tab."))
   }
-  
-  df_clean <- na.omit(df[, c(var1, var2)])
-  if (nrow(df_clean) < max_lag + 3) return(ggplot() + annotate("text", x=0, y=0, label="Insufficient data for lags"))
-  
-  ccf_res <- ccf(df_clean[[var1]], df_clean[[var2]], lag.max = max_lag, plot = FALSE)
-  
-  plot_df <- data.frame(Lag = ccf_res$lag[,1,1], ACF = ccf_res$acf[,1,1])
-  
-  p <- ggplot(plot_df, aes(x=Lag, y=ACF)) + 
-    geom_segment(aes(xend=Lag, yend=0), linewidth = 1) + 
-    geom_hline(yintercept = 0, color="gray") +
-    geom_hline(yintercept = c(-1.96/sqrt(nrow(df_clean)), 1.96/sqrt(nrow(df_clean))), linetype="dashed", color="blue") +
+  if (is.null(var1) || is.null(var2) || !all(c(var1, var2) %in% colnames(df))) {
+    return(fail("Invalid variables specified"))
+  }
+  if (identical(var1, var2)) return(fail("Select two different variables"))
+
+  d <- na.omit(df[, unique(c(var1, var2, x_col, y_col)), drop = FALSE])
+  if (!is.numeric(d[[var1]]) || !is.numeric(d[[var2]])) return(fail("Both variables must be numeric"))
+  if (nrow(d) < 15) return(fail("Insufficient data: at least 15 complete observations are needed"))
+  # Fixed internal names: the coordinate columns are themselves selectable as
+  # variables, so copying by position keeps a var1 == x_col choice from
+  # producing a duplicated column name in the working frame.
+  work <- data.frame(.cx = d[[x_col]], .cy = d[[y_col]],
+                     .v1 = d[[var1]], .v2 = d[[var2]])
+
+  pts <- tryCatch({
+    p <- sf::st_as_sf(work, coords = c(".cx", ".cy"), crs = src_crs)
+    if (!is.null(proj_crs) && !identical(proj_crs, "")) {
+      p <- tryCatch(sf::st_transform(p, proj_crs), error = function(e) p)
+    }
+    validate_and_project_sf(p)
+  }, error = function(e) NULL)
+  if (is.null(pts) || nrow(pts) == 0) return(fail("Could not project the coordinates"))
+
+  # Same coordinate deduplication (2 dp, projected) the interpolation point sets
+  # use, so co-located twins do not stack the shortest bin.
+  pts <- pts[!duplicated(round(sf::st_coordinates(pts), 2)), ]
+  out$n <- nrow(pts)
+  if (out$n < 15) return(fail("Insufficient data: at least 15 distinct locations are needed"))
+
+  crs_unit <- tryCatch(sf::st_crs(pts)$units, error = function(e) NULL)
+  if (!is.null(crs_unit) && nzchar(crs_unit)) out$unit <- crs_unit
+
+  # Rank transform for the rank-based methods: Spearman is the product-moment
+  # correlation of ranks, so the whole estimator simply runs on ranks. Kendall
+  # has no distance-binned analogue and is served by the same rank-based curve
+  # (named as such in the plot subtitle).
+  v1v <- pts$.v1; v2v <- pts$.v2
+  if (out$ranked) { v1v <- rank(v1v); v2v <- rank(v2v) }
+  s1 <- stats::sd(v1v); s2 <- stats::sd(v2v)
+  if (!is.finite(s1) || !is.finite(s2) || s1 == 0 || s2 == 0) {
+    return(fail("A selected variable is constant - no correlation is defined"))
+  }
+  pts$z1 <- (v1v - mean(v1v)) / s1
+  pts$z2 <- (v2v - mean(v2v)) / s2
+  out$r0 <- stats::cor(pts$z1, pts$z2)
+
+  lags <- calc_scientific_lags(pts)
+  # A cleared numericInput arrives as NA, not as NULL.
+  nb <- suppressWarnings(as.integer(n_bins)[1])
+  if (is.na(nb)) nb <- 15L
+  width <- lags$cutoff / max(3L, min(50L, nb))
+  if (!is.finite(width) || width <= 0) return(fail("Could not derive distance bins from the coordinates"))
+
+  vg <- tryCatch({
+    g <- gstat::gstat(NULL, id = "z1", formula = z1 ~ 1, data = pts)
+    g <- gstat::gstat(g, id = "z2", formula = z2 ~ 1, data = pts)
+    gstat::variogram(g, cross = TRUE, cutoff = lags$cutoff, width = width)
+  }, error = function(e) NULL)
+  if (is.null(vg)) return(fail("The cross variogram could not be computed for this pair"))
+
+  cross <- vg[as.character(vg$id) == "z1.z2", , drop = FALSE]
+  if (nrow(cross) == 0) return(fail("No point pairs fall inside the lag distance range"))
+
+  out$bins <- data.frame(
+    dist  = as.numeric(cross$dist),
+    np    = as.integer(cross$np),
+    gamma = as.numeric(cross$gamma),
+    rho   = out$r0 - as.numeric(cross$gamma),
+    stringsAsFactors = FALSE
+  )
+  out
+}
+
+generate_spatial_cross_correlogram <- function(df, var1, var2, x_col, y_col,
+                                               src_crs, proj_crs = NULL,
+                                               n_bins = 15, method = "pearson") {
+  res <- compute_spatial_cross_correlogram(df, var1, var2, x_col, y_col,
+                                           src_crs, proj_crs, n_bins, method)
+  if (is.null(res$bins)) {
+    return(ggplot() + annotate("text", x = 0, y = 0, label = res$message, size = 4.5) + theme_void())
+  }
+
+  b <- res$bins
+  # Journel & Huijbregts' rule of thumb for variogram bins: below ~30 pairs the
+  # estimate is too noisy to read, so those bins are greyed instead of dropped.
+  b$reliable <- b$np >= 30
+
+  p <- ggplot(b, aes(x = dist, y = rho)) +
+    geom_hline(yintercept = 0, color = "gray50") +
+    geom_hline(yintercept = res$r0, linetype = "dashed", color = "#2c7fb8") +
+    geom_line(color = "gray40", linewidth = 0.6) +
+    geom_point(aes(size = np, color = reliable)) +
+    scale_color_manual(values = c("TRUE" = "#2c7fb8", "FALSE" = "grey65"), guide = "none") +
+    scale_size_continuous(range = c(1.5, 6), name = "Pairs") +
     theme_minimal() +
-    labs(title=sprintf("Lagged Correlation (CCF): %s vs %s", var1, var2), y="Cross-Correlation")
+    labs(
+      title = sprintf("Spatial Cross-Correlogram: %s vs %s", var1, var2),
+      subtitle = sprintf("%srho(h) = r - gamma12(h) on standardised values | non-spatial r = %.3f | n = %d",
+                         if (res$ranked) "Rank-based (Spearman-type). " else "",
+                         res$r0, res$n),
+      x = sprintf("Lag distance (%s)", res$unit),
+      y = "Cross-correlation",
+      caption = "Dashed line = non-spatial correlation. Point size = pairs per bin; grey = fewer than 30 pairs."
+    )
   return(p)
 }
 
@@ -1097,10 +1212,13 @@ check_collinearity <- function(df, vars, threshold = 0.95) {
     if (is.null(pairs_df)) {
       pairs_df <- data.frame(var1 = character(), var2 = character(), r = numeric(), stringsAsFactors = FALSE)
     }
+    # The engine drops ZERO-VARIANCE covariates into the same vector as the
+    # collinear ones; reporting a constant to the PCA user as a collinearity
+    # problem sends them to inspect a correlation that does not exist.
     for (d_var in res$dropped) {
       pairs_df <- rbind(pairs_df, data.frame(
         var1 = d_var,
-        var2 = "High VIF (> 10)",
+        var2 = if (d_var %in% res$dropped_constant) "Constant (no variance)" else "High VIF (> 10)",
         r = NA,
         stringsAsFactors = FALSE
       ))
@@ -1226,6 +1344,14 @@ generate_pca_mahalanobis <- function(pca_res) {
   # PC scores are uncorrelated by construction, so their covariance is
   # diag(sdev^2); near-zero-variance PCs (collinear inputs) would make that
   # matrix numerically singular, so they are excluded from the distance
+  #
+  # This is the CLASSICAL Mahalanobis distance: the centre and scatter are the
+  # ordinary mean/covariance, which the outliers themselves contribute to. A
+  # small cluster of extreme observations therefore inflates the covariance and
+  # can pull its own distance back under the threshold (masking). A robust
+  # estimator (MCD, robustbase::covMcd on the retained scores) is the standard
+  # remedy but is a new dependency; the panel names its estimator instead so the
+  # limitation is visible where it matters. See scientific_guide.md 8.2.
   keep <- pca_res$sdev > max(pca_res$sdev) * 1e-8
   scores <- as.data.frame(pca_res$x[, keep, drop = FALSE])
   center <- colMeans(scores)
@@ -1242,9 +1368,10 @@ generate_pca_mahalanobis <- function(pca_res) {
     geom_hline(yintercept = thresh, linetype="dashed", color="red") +
     scale_color_manual(values = c("TRUE" = "red", "FALSE" = "black"), guide="none") +
     theme_minimal() +
-    labs(title = "Mahalanobis Distance (Outlier Detection)",
+    labs(title = "Mahalanobis Distance (Classical Estimator)",
+         subtitle = "Classical mean/covariance: outliers inflate the covariance and can mask themselves",
          x = "Observation Index", y = "Distance",
-         caption = "Dashed line indicates 97.5% Chi-Square threshold")
+         caption = sprintf("Dashed line indicates the 97.5%% Chi-Square threshold (df = %d retained PCs)", ncol(scores)))
   return(p)
 }
 
