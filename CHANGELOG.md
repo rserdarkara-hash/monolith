@@ -2,7 +2,13 @@
 
 All notable changes to Monolith are documented in this file.
 
+
+### Fixed
+- **A single constant covariate degraded the trend model silently**: the multicollinearity gate needs at least two covariates to run, so a run whose sole covariate is (near-)constant in a locality reached the RK/RFK/CK engines ungated. Nothing broke — RK aliases the coefficient and fits an intercept-only trend, and CK falls back to Ordinary Kriging with its usual named warning — but nothing said *why* the covariate carried no information. The run warnings now name the constant covariate per locality. Message only; no numeric results change.
+
 ## [1.0.5] - 2026-07-27
+
+> Consolidated entry: versions 1.0.3 and 1.0.4 were development increments folded into this release; everything since [1.0.2] is documented here.
 
 
 ### Added

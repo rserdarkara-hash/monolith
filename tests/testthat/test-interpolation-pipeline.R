@@ -905,3 +905,43 @@ test_that("residual (Delta) raster carries only the prediction layer", {
   # ...and the OK surfaces it was built from DO carry a variance layer.
   expect_true("var1.var" %in% names(terra::unwrap(res$r_a)))
 })
+
+test_that("a sole degenerate covariate is named in the run warnings", {
+  # The multicollinearity gate needs >= 2 covariates, so a single constant
+  # covariate reaches the engines ungated: RK aliases its coefficient and fits
+  # an intercept-only trend rather than failing. The run must still complete,
+  # the covariate must be passed through (dropping it would hard-error the
+  # dispatch), and the warning file must name it so the degradation is not
+  # silent.
+  pts <- make_test_points(20)
+  coords <- sf::st_coordinates(pts)
+  pts_data <- data.frame(x = coords[, 1], y = coords[, 2],
+                         v = pts$v, pv = pts$pv, covA = 1.0, Locality = "LocA")
+  item <- list(l = "LocA", pts_data = pts_data,
+               m_params = list(idw_p_act = 2, idw_p_pre = 2, idw_nmax = 12,
+                               tps_lambda_act = -1, tps_lambda_pre = -1,
+                               pre_fit_act = NULL, pre_fit_pre = NULL,
+                               cv_strategy = "auto", rfk_uncertainty = "jackknife"))
+
+  tmp <- tempfile("degen_cov_")
+  dir.create(tmp)
+  old_progress_dir <- getOption("monolith_progress_dir")
+  old_session_id  <- getOption("monolith_session_id")
+  on.exit({
+    options(monolith_progress_dir = old_progress_dir,
+            monolith_session_id  = old_session_id)
+    unlink(tmp, recursive = TRUE)
+  }, add = TRUE)
+
+  res <- suppressWarnings(run_regional_interpolation(
+    item, "RK", 32633, "covA", NULL, "wrapped", "dynamic", 250,
+    "fixed", 200, "EPSG:4326", FALSE, "actual",
+    progress_dir_val = tmp, session_id_val = "degen_cov"))
+
+  # The run completed (RK degraded to an intercept-only trend, not a crash).
+  expect_false(is.null(res$r_a))
+  wf <- file.path(tmp, "warn_degen_cov_LocA_act.txt")
+  expect_true(file.exists(wf))
+  expect_match(paste(readLines(wf), collapse = " "), "covA")
+  expect_match(paste(readLines(wf), collapse = " "), "constant")
+})

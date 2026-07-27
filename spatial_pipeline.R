@@ -437,9 +437,25 @@ run_regional_interpolation <- function(item, current_method, current_crs, aux_va
     pts_p <- if (run_pre) dedup_valid_points(pts_projected, "pv") else NULL
 
     # NULL = unresolved (gate failed); the engine then recomputes it itself.
-    resolve_aux_kept <- function(p) {
+    resolve_aux_kept <- function(p, prefix = "act") {
       if (is.null(p) || nrow(p) < 3) return(character(0))
-      if (length(aux_vars) <= 1) return(aux_vars)
+      if (length(aux_vars) < 1) return(aux_vars)
+      if (length(aux_vars) == 1) {
+        # The multicollinearity gate needs >= 2 covariates, so a sole
+        # degenerate covariate reaches the engines ungated. Every downstream
+        # path degrades visibly rather than wrongly (RK aliases the
+        # coefficient to an intercept-only trend; CK's scale() yields NaN and
+        # lands in the named OK fallback) — but nothing names the cause, so
+        # say it here. It is deliberately passed through, not dropped:
+        # emptying aux_vars would turn a degraded-but-working run into a hard
+        # dispatch error. Message only, no numeric change.
+        if (.is_degenerate_covariate(sf::st_drop_geometry(p)[[aux_vars]])) {
+          write_warning_file(l, prefix, paste0(
+            "Covariate '", aux_vars, "' is (near-)constant in this locality; ",
+            "the ", current_method, " trend model will carry no covariate information."))
+        }
+        return(aux_vars)
+      }
       tryCatch(
         check_vif(sf::st_drop_geometry(p)[, aux_vars, drop = FALSE], threshold = vif_threshold)$kept,
         error = function(e) NULL
@@ -454,8 +470,8 @@ run_regional_interpolation <- function(item, current_method, current_crs, aux_va
     # kriged covariate grid, so it takes the gate result WITHOUT the
     # krige_covariates pass below.
     if (current_method %in% c("RK", "RFK", "CK") && length(aux_vars) > 0) {
-        aux_kept_a <- resolve_aux_kept(pts_a)
-        aux_kept_p <- resolve_aux_kept(pts_p)
+        aux_kept_a <- resolve_aux_kept(pts_a, "act")
+        aux_kept_p <- resolve_aux_kept(pts_p, "pre")
     }
     if (current_method %in% c("RK", "RFK") && length(aux_vars) > 0) {
         # Krige the union of the surfaces' kept sets (they can differ: the two
