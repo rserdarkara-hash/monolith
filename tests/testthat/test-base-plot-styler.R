@@ -477,13 +477,28 @@ test_that("KML keeps every attribute, in the two fields the driver can carry", {
   expect_true(sf::st_crs(back) == sf::st_crs(4326))   # KML is WGS84 by spec
   expect_equal(back$Name, c("Med", "High"))           # class label, not a row number
 
+  # The payload is asserted on the file itself, not on the read-back frame:
+  # which driver GDAL picks to READ a .kml varies by build (plain KML here,
+  # LIBKML on the Linux CI image) and the two name the field differently
+  # ("Description" vs "description"), so a column lookup either breaks or
+  # passes vacuously on a zero-length vector. <description> is KML per spec.
+  xml <- paste(readLines(f, warn = FALSE), collapse = "\n")
+  desc <- regmatches(xml, gregexpr("(?s)<description>.*?</description>", xml, perl = TRUE))[[1]]
+  desc <- gsub("</?description>", "", desc)
+  expect_length(desc, 2)
+
   for (field in c("class_min", "class_max", "area_ha", "surface", "variable", "method")) {
-    expect_true(all(grepl(field, back$Description, fixed = TRUE)))
+    expect_true(all(grepl(field, desc, fixed = TRUE)))
   }
-  expect_true(grepl("area_ha: 20481.34", back$Description[1], fixed = TRUE))
+  expect_true(grepl("area_ha: 20481.34", desc[1], fixed = TRUE))
   # the open outer break stays empty rather than printing a bogus limit
-  expect_true(grepl("class_max: ;|class_max: $", back$Description[2]))
-  expect_false(any(grepl("NA", back$Description, fixed = TRUE)))
+  expect_true(grepl("class_max: ;|class_max: $", desc[2]))
+  expect_false(any(grepl("NA", desc, fixed = TRUE)))
+
+  # ...and a reader really does surface it, under whichever name its driver uses.
+  desc_col <- grep("^description$", names(back), ignore.case = TRUE, value = TRUE)
+  expect_gt(length(desc_col), 0)
+  expect_true(all(nzchar(as.character(back[[desc_col[1]]]))))
 })
 
 test_that("kml_attribute_fields falls back sanely without a class column", {
