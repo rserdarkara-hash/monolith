@@ -62,15 +62,15 @@ The interface is six numbered tabs. Tabs 1 to 4 are the spine of an interpolatio
 
 ```mermaid
 flowchart TD
-    U["Sample table (.xlsx / .csv)<br/>optional variable list and boundary shapefile"] --> T1
-    T1["<b>1. Data Setup</b><br/>column mapping, CRS, validation mini-map"] --> T2
+    U["Sample table (.xlsx / .csv), optional variable list and boundary shapefile"] --> T1
+    T1["1. Data Setup: column mapping, CRS, validation mini-map"] --> T2
     T1 --> T5
     T1 --> T6
-    T2["<b>2. Map Viewer</b><br/>context and spatial engine, regions,<br/>run and cancel, surface views"] --> T3
-    T3["<b>3. Scientific Analysis and Summary</b><br/>variograms, CV metrics, residuals, areas"] --> T4
-    T4["<b>4. Export Panel</b><br/>styled figures, GeoTIFFs, merged tables"]
-    T5["<b>5. Descriptive and Exploratory Suite</b><br/>statistics, correlation, PCA, governing factors"]
-    T6["<b>6. Classification Suite</b><br/>class, probability and entropy maps<br/>exported from its own panel"]
+    T2["2. Map Viewer: context and spatial engine, regions, run and cancel, surface views"] --> T3
+    T3["3. Scientific Analysis and Summary: variograms, CV metrics, residuals, areas"] --> T4
+    T4["4. Export Panel: styled figures, GeoTIFFs, merged tables"]
+    T5["5. Descriptive and Exploratory Suite: statistics, correlation, PCA, governing factors"]
+    T6["6. Classification Suite: class, probability and entropy maps, exported from its own panel"]
 ```
 
 1. **Data Setup.** Upload the sample table, optionally a variable list and a boundary shapefile, map the X and Y columns, declare the coordinate reference system, and confirm the mapping. The mini-map coloured by locality is the check that coordinates and CRS are right before anything is modelled.
