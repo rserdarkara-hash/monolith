@@ -4,7 +4,7 @@
 # that ui_main.R + the nine server_*.R chunks actually assemble into a running
 # Shiny app. A typo in a chunk, a duplicated input id, or a UI element that
 # references a helper removed elsewhere is invisible to unit tests and fatal in
-# production. These four tests boot the app in a headless browser and assert the
+# production. These six tests boot the app in a headless browser and assert the
 # shell: the server initialises without error, the sidebar defaults are what the
 # engines assume, and the tab strip's stable `value=` ids still drive the
 # sidebar swap.
