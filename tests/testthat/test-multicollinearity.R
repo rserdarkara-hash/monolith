@@ -138,6 +138,33 @@ test_that("handles singular covariance matrix via fallback", {
   expect_true("c" %in% res$kept)
 })
 
+test_that("the singular-matrix fallback drops the globally redundant member, whatever the column order", {
+  # `ab` is an exact linear combination of `a` and `b`, so the correlation
+  # matrix is singular and solve() throws -> the fallback picks the drop. `b`
+  # carries four times the variance of `a`, so the maximally correlated pair is
+  # (b, ab); of those two, `ab` is the more globally redundant one (it
+  # correlates with BOTH other covariates, `b` only with `ab`). The old rule
+  # dropped whichever member came first in column order, so the surviving
+  # covariate - and hence the fitted model - depended on the upload's layout.
+  set.seed(20260811)
+  n <- 40
+  a <- rnorm(n, 0, 1)
+  b <- rnorm(n, 0, 4)
+  df <- data.frame(a = a, b = b, ab = a + b)
+
+  res <- detect_multicollinearity_engine(df, vars = c("a", "b", "ab"),
+                                         vif_threshold = 10)
+  expect_true("ab" %in% res$dropped)
+  expect_setequal(res$kept, c("a", "b"))
+
+  # Same data, reversed column order: identical outcome.
+  res_rev <- detect_multicollinearity_engine(df[, c("ab", "b", "a")],
+                                             vars = c("ab", "b", "a"),
+                                             vif_threshold = 10)
+  expect_setequal(res_rev$kept, res$kept)
+  expect_setequal(res_rev$dropped, res$dropped)
+})
+
 test_that("pairwise_threshold parameter is respected", {
   df <- make_test_df(30)
   # With threshold = 0.0, nearly everything is flagged

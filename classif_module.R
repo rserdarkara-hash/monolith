@@ -50,6 +50,11 @@ classif_build_target <- function(df, mode, cat_col, num_col, n_classes = 4,
   is.character(x) || is.factor(x)
 }
 
+# Constant header height for the four result cards: the titles differ in length
+# and two of them carry an info icon, so a reserved header keeps all four plot
+# frames on the same baseline even when one title wraps in a narrow window.
+CLASSIF_CARD_HEAD_H <- "34px"
+
 classif_ui <- function(id) {
   ns <- shiny::NS(id)
 
@@ -63,9 +68,14 @@ classif_ui <- function(id) {
               title = "Supervised classification of soil / land classes from co-sampled covariates. A minimum of ~50 samples with several members per class is recommended.")
           ),
 
+          # Default to binning: .classif_is_categorical accepts character /
+          # factor columns only (the cardinality heuristic was removed after it
+          # mislabelled coarse-resolution climate covariates), so a typical soil
+          # dataset offers no categorical column at all and "cat" would open the
+          # panel on nothing but "switch to binning".
           shiny::radioButtons(ns("target_mode"), "Target",
             choices = c("Categorical column" = "cat", "Bin a continuous variable" = "bin"),
-            selected = "cat"),
+            selected = "bin"),
 
           shiny::conditionalPanel(
             condition = sprintf("input['%s'] == 'cat'", ns("target_mode")),
@@ -259,54 +269,54 @@ classif_ui <- function(id) {
                 " Click any map (or its expand icon) for a full-size, high-resolution view.")
             ),
 
-            # 2x2 Grid (Top row: Class Map | Entropy Map)
+            # 2x2 result grid. All four panels use the SAME card (shared with
+            # the Scientific Analysis tab): equal frames, and the expand
+            # control in a header row instead of floating over the figure.
+            # Ids are pre-namespaced here, and the three map buttons keep their
+            # historical names so their observers are untouched.
+            # conditionalPanel wraps the whole card, never its contents, so a
+            # surface-less run leaves no orphan header behind.
             shiny::fluidRow(
               shiny::column(6,
                 shiny::conditionalPanel(
                   condition = sprintf("output['%s'] == 'yes'", ns("has_surface")),
-                  shiny::h4("Predicted Class Map"),
-                  shiny::div(style = "position: relative;",
-                    shiny::tags$button(id = ns("class_expand_btn"), type = "button",
-                      class = "btn btn-default action-button expand-icon-btn",
-                      title = "Expand map", shiny::icon("expand")),
-                    shiny::plotOutput(ns("class_map"), height = "350px",
-                                      click = ns("class_map_click"))))
+                  sci_plot_card(ns("class_map"), "Predicted Class Map",
+                                expand_id = ns("class_expand_btn"), download = FALSE,
+                                click_id = ns("class_map_click"),
+                                head_min_height = CLASSIF_CARD_HEAD_H)
+                )
               ),
               shiny::column(6,
                 shiny::conditionalPanel(
                   condition = sprintf("output['%s'] == 'yes'", ns("has_surface")),
-                  shiny::h4(shiny::tags$span("Prediction Uncertainty (Entropy)",
-                    shiny::tags$i(class = "fa fa-info-circle",
-                      title = "Normalised Shannon entropy of the class probabilities: 0 = confident single class, 1 = uniform over classes.",
-                      style = "color: #007bff; cursor: help; margin-left: 5px;"))),
-                  shiny::div(style = "position: relative;",
-                    shiny::tags$button(id = ns("entropy_expand_btn"), type = "button",
-                      class = "btn btn-default action-button expand-icon-btn",
-                      title = "Expand map", shiny::icon("expand")),
-                    shiny::plotOutput(ns("entropy_map"), height = "350px",
-                                      click = ns("entropy_map_click"))))
+                  sci_plot_card(ns("entropy_map"), "Prediction Uncertainty (Entropy)",
+                                expand_id = ns("entropy_expand_btn"), download = FALSE,
+                                click_id = ns("entropy_map_click"),
+                                info = shiny::tags$i(class = "fa fa-info-circle",
+                                  title = "Normalised Shannon entropy of the class probabilities: 0 = confident single class, 1 = uniform over classes.",
+                                  style = "color: #007bff; cursor: help; margin-left: 5px;"),
+                                head_min_height = CLASSIF_CARD_HEAD_H)
+                )
               )
             ),
-            
-            # 2x2 Grid (Bottom row: Prob Map | Importance)
+
             shiny::fluidRow(
               shiny::column(6,
                 shiny::conditionalPanel(
                   condition = sprintf("output['%s'] == 'yes'", ns("has_surface")),
-                  shiny::h4("Class Probability Map"),
-                  shiny::div(style = "position: relative;",
-                    shiny::tags$button(id = ns("prob_expand_btn"), type = "button",
-                      class = "btn btn-default action-button expand-icon-btn",
-                      title = "Expand map", shiny::icon("expand")),
-                    shiny::plotOutput(ns("prob_map"), height = "350px",
-                                      click = ns("prob_map_click"))))
+                  sci_plot_card(ns("prob_map"), "Class Probability Map",
+                                expand_id = ns("prob_expand_btn"), download = FALSE,
+                                click_id = ns("prob_map_click"),
+                                head_min_height = CLASSIF_CARD_HEAD_H)
+                )
               ),
               shiny::column(6,
-                shiny::h4(shiny::tags$span("Feature Importance",
-                  shiny::tags$i(class = "fa fa-info-circle",
-                    title = "Permutation importance: how much the multiclass log-loss worsens when one covariate is randomly shuffled (mean of 5 shuffles, final model, training data). Shares renormalise the positive importances to 100%. Correlated covariates split their importance between them, so read this alongside the collinearity note.",
-                    style = "color: #007bff; cursor: help; margin-left: 5px;"))),
-                shiny::plotOutput(ns("importance_plot"), height = "350px")
+                sci_plot_card(ns("importance_plot"), "Feature Importance",
+                              expand_id = ns("importance_expand_btn"), download = FALSE,
+                              info = shiny::tags$i(class = "fa fa-info-circle",
+                                title = "Permutation importance: how much the multiclass log-loss worsens when one covariate is randomly shuffled (mean of 5 shuffles). Scored either out-of-fold or on the final model's training rows, following the 'Feature importance scored on' setting - the axis label states which. Shares renormalise the positive importances to 100%. Correlated covariates split their importance between them, so read this alongside the collinearity note.",
+                                style = "color: #007bff; cursor: help; margin-left: 5px;"),
+                              head_min_height = CLASSIF_CARD_HEAD_H)
               )
             ),
             shiny::hr(),
@@ -1055,7 +1065,8 @@ classif_server <- function(id, data_reactive, vars_metadata_reactive, spatial_re
     })
 
     # ── Permutation feature importance ───────────────────────────────────────
-    output$importance_plot <- shiny::renderPlot({
+    # One builder for the in-page card and its expanded modal.
+    build_importance_plot <- function() {
       res <- cl_rv$res; shiny::req(res, res$importance)
       imp <- res$importance
       imp$label <- vapply(imp$predictor,
@@ -1064,19 +1075,26 @@ classif_server <- function(id, data_reactive, vars_metadata_reactive, spatial_re
       imp$txt <- ifelse(is.na(imp$share_pct), "", sprintf("%.1f%%", imp$share_pct))
       # Name the evaluation design on the axis: an out-of-fold and a
       # training-row importance are different quantities and must never be
-      # compared as if they were the same number.
+      # compared as if they were the same number. Kept short because ggplot
+      # centres the axis title on the PANEL, not the device: long covariate
+      # labels push the panel right, and the full phrase ran off the edge of
+      # this half-width card. "Importance" is already the panel heading, so the
+      # axis only has to name the quantity and the design.
       x_lab <- if (identical(imp$evaluated_on[1], "out-of-fold")) {
-        "Permutation importance (out-of-fold Δ log-loss)"
+        "Permutation Δ log-loss (out-of-fold)"
       } else {
-        "Permutation importance (training-row Δ log-loss)"
+        "Permutation Δ log-loss (training rows)"
       }
       ggplot2::ggplot(imp, ggplot2::aes(x = importance, y = label)) +
         ggplot2::geom_col(fill = "#2c7fb8", width = 0.7) +
         ggplot2::geom_text(ggplot2::aes(label = txt), hjust = -0.15, size = 3.4) +
         ggplot2::scale_x_continuous(expand = ggplot2::expansion(mult = c(0.02, 0.18))) +
+        # Wrap long metadata labels instead of letting them eat the panel width.
+        ggplot2::scale_y_discrete(labels = scales::label_wrap(22)) +
         ggplot2::labs(x = x_lab, y = NULL) +
         ggplot2::theme_minimal(base_size = 13)
-    })
+    }
+    output$importance_plot <- shiny::renderPlot({ build_importance_plot() })
 
     output$group_metrics_table <- DT::renderDataTable({
       res <- cl_rv$res; shiny::req(res, res$group_metrics)
@@ -1258,6 +1276,17 @@ classif_server <- function(id, data_reactive, vars_metadata_reactive, spatial_re
     shiny::observeEvent(input$entropy_map_click,  show_map_modal("entropy"))
     shiny::observeEvent(input$prob_expand_btn,    show_map_modal("prob"))
     shiny::observeEvent(input$prob_map_click,     show_map_modal("prob"))
+    # The importance panel is the one a reader most often wants enlarged (long
+    # covariate labels, many bars), and after the card rework it would
+    # otherwise be the only one of the four without an expand control.
+    shiny::observeEvent(input$importance_expand_btn, {
+      shiny::showModal(shiny::modalDialog(
+        title = "Expanded View: Feature Importance", size = "l", easyClose = TRUE,
+        shiny::plotOutput(ns("modal_importance"), height = "700px"),
+        footer = shiny::modalButton("Close")
+      ))
+    })
+    output$modal_importance <- shiny::renderPlot({ build_importance_plot() }, res = 96)
     output$modal_map <- shiny::renderPlot({
       which <- cl_rv$modal_map; shiny::req(which)
       rl <- get_rasters()

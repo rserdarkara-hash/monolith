@@ -1,8 +1,11 @@
 # ui_sidebar.R - sidebar panel as a plain variable assignment (no function
 # wrapper), consumed by ui_main.R inside sidebarLayout().
 ui_sidebar_panel <- sidebarPanel(width = 3,
+      # The suite tabs are matched on their value= ids (tab_desc / tab_classif),
+      # never on their titles - the titles carry the "5."/"6." numbering and are
+      # free to be reworded without touching these conditions.
       conditionalPanel(
-        condition = "input.main_tabs !== 'Classification Suite'",
+        condition = "input.main_tabs !== 'tab_classif'",
       div(style="background-color: #f8f9fa; padding: 10px; border: 1px solid #ddd;",
         tags$details(class = "sidebar-section", `data-key` = "context", open = NA,
           tags$summary(h4("1. Context")),
@@ -26,7 +29,7 @@ ui_sidebar_panel <- sidebarPanel(width = 3,
       )
       ),
       conditionalPanel(
-        condition = "input.main_tabs !== 'Descriptive and Exploratory Suite' && input.main_tabs !== 'Classification Suite'",
+        condition = "input.main_tabs !== 'tab_desc' && input.main_tabs !== 'tab_classif'",
         br(),
         div(style="background-color: #e7f5ff; padding: 10px; border: 1px solid #a5d8ff;",
           tags$details(class = "sidebar-section", `data-key` = "engine", open = NA,
@@ -47,6 +50,22 @@ ui_sidebar_panel <- sidebarPanel(width = 3,
               HTML(paste0("Cross-Validation Strategy", info_tooltip("cv_strategy_info", "How held-out folds are formed for the reported performance metrics; it does NOT change the interpolated map. Auto (Default): LOOCV for n ≤ 50, seeded random 10-fold above. Standard LOOCV: full leave-one-out, the most rigorous, but noticeably slow beyond ~2000 samples (especially RK/RFK, which refit the variogram every fold). Spatial Block CV: 10 spatially-clustered (k-means) folds that hold out contiguous regions to curb the optimistic bias random folds suffer under spatial autocorrelation; recommended for DSM-style validation. Below n=30 it degrades to LOOCV."))),
               choices = c("Auto (Default)" = "auto", "Standard LOOCV" = "loocv", "Spatial Block CV" = "block"),
               selected = "auto", size = "sm", direction = "vertical", justified = TRUE),
+
+            # Repeated CV. Hidden under Standard LOOCV, whose folds are
+            # deterministic (every "repeat" is the same partition); under Auto
+            # it still collapses to a single realization for any locality with
+            # n <= 50, which the run log reports.
+            conditionalPanel(condition = "input.cv_strategy != 'loocv'",
+              checkboxInput("cv_repeat_on",
+                HTML(paste0("Repeated CV (fold-realization stability)", info_tooltip("cv_repeat_info", "OFF (default): metrics come from ONE fold assignment (fixed seed 12345), which is reproducible and keeps method comparisons paired. ON: the cross-validation is re-run under additional fold assignments (seeds 12346, 12347, ...) and an extra table reports each metric as mean ± SD across realizations, so you can see whether a difference between two methods is larger than the split-to-split noise. The reported single-realization numbers and the interpolated map are IDENTICAL either way - realization 1 is the reference run. Cost: one extra full cross-validation per repeat (RK/RFK refit the variogram in every fold, so 5 repeats is roughly 5x the CV time). Leave-one-out plans are deterministic and are never repeated."))),
+                value = FALSE),
+              conditionalPanel(condition = "input.cv_repeat_on == true",
+                selectInput("cv_repeat_n", "Fold realizations:",
+                            choices = c("3 (fast)" = 3, "5 (recommended)" = 5, "10 (thorough)" = 10),
+                            selected = 5),
+                helpText(HTML("<em style='color: #ffffff; font-size: 0.9em;'>Adds one full cross-validation pass per realization. The map and the reported metrics do not change; the extra table quantifies how much of a metric gap is fold luck.</em>"))
+              )
+            ),
 
             conditionalPanel(condition = "input.method == 'RFK'",
               radioButtons("rfk_uncertainty",
@@ -95,7 +114,17 @@ ui_sidebar_panel <- sidebarPanel(width = 3,
                     sliderInput("m_nugget", "Nugget", min = 0, max = 1, value = 0, step = 0.01),
                     sliderInput("m_psill", "Partial Sill", min = 0, max = 1, value = 1, step = 0.01),
                     sliderInput("m_range", "Range", min = 1, max = 1000, value = 100),
-                    actionButton("apply_manual", "Apply Manual Model", class = "btn-warning btn-block")
+                    actionButton("apply_manual", "Apply Manual Model", class = "btn-warning btn-block"),
+                    # A hand-tuned fit describes the VALUE-scale variogram, so
+                    # it is only meaningful for OK. RK/RFK model the residual
+                    # variogram after the trend is removed and CK fits an LMC;
+                    # imposing a value-scale model on either would be wrong, so
+                    # they refit - which used to happen silently.
+                    conditionalPanel(condition = "['RK', 'RFK', 'CK'].includes(input.method)",
+                      tags$p(style = "font-size: 0.8em; color: #7f6000; background-color: #fff3bf; border-left: 3px solid #f59f00; padding: 6px 8px; margin: 8px 0 0 0; line-height: 1.35;",
+                             tags$b("Not used by the selected method. "),
+                             "Manual variogram fits are consumed by Ordinary Kriging only. RK/RFK fit the residual variogram automatically after the trend is removed; CK fits a linear model of coregionalization.")
+                    )
                 )
               )
             ),
@@ -217,7 +246,7 @@ ui_sidebar_panel <- sidebarPanel(width = 3,
       ),
       
       conditionalPanel(
-        condition = "input.main_tabs === 'Descriptive and Exploratory Suite'",
+        condition = "input.main_tabs === 'tab_desc'",
         div(style="background-color: rgba(255, 255, 255, 0.08); padding: 12px; border: 1px solid rgba(255, 255, 255, 0.15); border-radius: 6px; margin-top: 10px;",
             h4("Exploratory Suite Active", style="margin-top: 0; color: #ffffff; font-weight: bold;"),
             p(style="font-size:0.85em; color:#cbd5e1; line-height:1.45; margin-bottom: 0;",
@@ -225,7 +254,7 @@ ui_sidebar_panel <- sidebarPanel(width = 3,
         )
       ),
       conditionalPanel(
-        condition = "input.main_tabs === 'Classification Suite'",
+        condition = "input.main_tabs === 'tab_classif'",
         div(style="background-color: rgba(255, 255, 255, 0.08); padding: 12px; border: 1px solid rgba(255, 255, 255, 0.15); border-radius: 6px; margin-top: 10px;",
             h4("Classification Suite Active", style="margin-top: 0; color: #ffffff; font-weight: bold;"),
             p(style="font-size:0.85em; color:#cbd5e1; line-height:1.45; margin-bottom: 0;",

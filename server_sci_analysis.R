@@ -55,9 +55,12 @@
     loc <- input$sel_loc_stats
     req(loc, loc != "Total (Combined)")
     summary_obj <- rv$model_summaries[[paste0(loc, "_act")]]
-    validate(need(summary_obj, trend_missing_msg(loc, "coefficient table")))
+    # Always qualify: global.R attaches jsonlite after shiny, and
+    # jsonlite::validate() masks shiny::validate() - a bare call dies with
+    # "is.character(txt) is not TRUE". need() is qualified for the same reason.
+    shiny::validate(shiny::need(summary_obj, trend_missing_msg(loc, "coefficient table")))
     df <- rk_coef_table(summary_obj, sci_vars_meta())
-    validate(need(df, "The stored trend model carries no estimable coefficients."))
+    shiny::validate(shiny::need(df, "The stored trend model carries no estimable coefficients."))
     sci_dt(df)
   })
 
@@ -65,9 +68,9 @@
     loc <- input$sel_loc_stats
     req(loc, loc != "Total (Combined)")
     summary_obj <- rv$model_summaries[[paste0(loc, "_pre")]]
-    validate(need(summary_obj, trend_missing_msg(loc, "coefficient table")))
+    shiny::validate(shiny::need(summary_obj, trend_missing_msg(loc, "coefficient table")))
     df <- rk_coef_table(summary_obj, sci_vars_meta())
-    validate(need(df, "The stored trend model carries no estimable coefficients."))
+    shiny::validate(shiny::need(df, "The stored trend model carries no estimable coefficients."))
     sci_dt(df)
   })
 
@@ -76,7 +79,7 @@
     loc <- input$sel_loc_stats
     req(loc, loc != "Total (Combined)")
     summary_obj <- rv$model_summaries[[paste0(loc, "_act")]]
-    validate(need(summary_obj, trend_missing_msg(loc, "linear trend summary")))
+    shiny::validate(shiny::need(summary_obj, trend_missing_msg(loc, "linear trend summary")))
     summary_obj
   })
 
@@ -84,7 +87,7 @@
     loc <- input$sel_loc_stats
     req(loc, loc != "Total (Combined)")
     summary_obj <- rv$model_summaries[[paste0(loc, "_pre")]]
-    validate(need(summary_obj, trend_missing_msg(loc, "linear trend summary")))
+    shiny::validate(shiny::need(summary_obj, trend_missing_msg(loc, "linear trend summary")))
     summary_obj
   })
 
@@ -243,14 +246,16 @@
             Structural.Dep. = pr[5], check.names = FALSE)
         }
       }
-      if(length(rows) == 0) return(NULL)
+      # sci_dt(NULL) is the empty state, not a NULL payload: a DT output must
+      # never be handed NULL (see sci_dt() in ui_components.R).
+      if(length(rows) == 0) return(sci_dt(NULL))
       res <- do.call(rbind, rows)
       names(res)[7] <- "Structural Dep."
       return(sci_dt(res))
     }
 
     f_a <- rv$v_fit_list[[paste0(loc, "_act")]]; f_p <- rv$v_fit_list[[paste0(loc, "_pre")]]
-    if(is.null(f_a) && is.null(f_p)) return(NULL)
+    if(is.null(f_a) && is.null(f_p)) return(sci_dt(NULL))
 
     res <- data.frame(Param = c("Model", "Nugget", "Sill", "Range", "Structural Dep."),
                       Actual = get_vgm_params(f_a))
@@ -451,7 +456,7 @@
       df <- df %>% filter(!!sym(loc_col) %in% meta$localities)
     }
     v_act <- if(!is.null(meta$actual) && !is.na(meta$actual) && meta$actual %in% colnames(df)) df[[meta$actual]] else NULL
-    if (is.null(v_act)) return(NULL)
+    if (is.null(v_act)) return(sci_dt(NULL))
 
     # Predicted summary only when the displayed run actually mapped
     # predictions (user's choice), not merely because a prediction column
@@ -475,13 +480,13 @@
 
   output$stats_table_loc <- DT::renderDataTable({
     req(rv$user_data, input$sel_loc_stats)
-    if(input$sel_loc_stats == "Total (Combined)") return(NULL)
+    if(input$sel_loc_stats == "Total (Combined)") return(sci_dt(NULL))
     meta <- get_display_meta()
     req(meta)
     
     df <- rv$user_data %>% filter(!!sym(rv$mapping$loc) == input$sel_loc_stats)
     v_act <- if(!is.null(meta$actual) && !is.na(meta$actual) && meta$actual %in% colnames(df)) df[[meta$actual]] else NULL
-    if (is.null(v_act)) return(NULL)
+    if (is.null(v_act)) return(sci_dt(NULL))
 
     # Same gate as stats_table_total: Predicted column only when the run
     # mapped predictions.
@@ -575,11 +580,11 @@
 
   output$area_table_loc_act <- DT::renderDataTable({
     req(rv$rast_list_act, input$color_style %in% c("agro", "bin")); loc <- input$sel_loc_stats
-    if(loc == "Total (Combined)") return(NULL) else sci_dt(calc_area_df(rv$rast_list_act[[loc]], paste0("loc_act_", loc)))
+    if(loc == "Total (Combined)") sci_dt(NULL) else sci_dt(calc_area_df(rv$rast_list_act[[loc]], paste0("loc_act_", loc)))
   })
   output$area_table_loc_pre <- DT::renderDataTable({
     req(rv$rast_list_pre, input$color_style %in% c("agro", "bin")); loc <- input$sel_loc_stats
-    if(loc == "Total (Combined)") return(NULL) else sci_dt(calc_area_df(rv$rast_list_pre[[loc]], paste0("loc_pre_", loc)))
+    if(loc == "Total (Combined)") sci_dt(NULL) else sci_dt(calc_area_df(rv$rast_list_pre[[loc]], paste0("loc_pre_", loc)))
   })
 
   output$cv_strategy_badge <- renderUI({
@@ -589,11 +594,34 @@
       "loocv" = "Standard LOOCV (full leave-one-out)",
       "block" = "Spatial Block CV (10 k-means folds; LOOCV below n=30)",
       "Auto (LOOCV for n ≤ 50, random 10-fold above)")
-    tags$div(
-      style = "font-size: 0.82em; color: #495057; margin: -4px 0 8px 0;",
-      tags$span(style = "font-weight: 600;", "Cross-validation: "),
-      tags$span(label),
-      tags$span(style = "color: #868e96;", " (applies to these metrics only, not the map).")
+    # The pooled row's variance-explained scores are measured against the POOLED
+    # mean, so between-locality differences in level count as variance the model
+    # gets credit for explaining. That is an aggregation artifact, not skill, and
+    # it makes the pooled row incomparable with the per-locality rows above it.
+    # Message only - the computation is deliberately left as it is.
+    pooled_note <- if (identical(input$sel_loc_stats, "Total (Combined)")) {
+      tags$div(
+        style = "font-size: 0.82em; color: #495057; margin: -4px 0 8px 0;",
+        tags$span(style = "color: #868e96;",
+                  "Pooled R²/NSE are computed against the pooled mean; when localities differ in their means, between-locality variance inflates these scores. Judge model skill on the per-locality rows.")
+      )
+    }
+    # Repeated CV never moves the numbers above (realization 1 keeps the fixed
+    # seed); say where the extra realizations are reported instead.
+    n_rep <- rv$cv_repeats_sel %||% 1L
+    repeat_note <- if (is.numeric(n_rep) && n_rep > 1) {
+      tags$span(style = "color: #868e96;",
+                sprintf(" Repeated CV is on (%d fold realizations); the values here are realization 1, the spread is in the table below.", n_rep))
+    }
+    tagList(
+      tags$div(
+        style = "font-size: 0.82em; color: #495057; margin: -4px 0 8px 0;",
+        tags$span(style = "font-weight: 600;", "Cross-validation: "),
+        tags$span(label),
+        tags$span(style = "color: #868e96;", " (applies to these metrics only, not the map)."),
+        repeat_note
+      ),
+      pooled_note
     )
   })
 
@@ -601,6 +629,20 @@
     req(input$sel_loc_stats)
     loc <- input$sel_loc_stats
     
+    # One definition of the Model Performance column set, shared by the empty
+    # stub and by both populated branches so they cannot drift apart. The
+    # labels and their order mirror the uploaded-prediction metrics table so the
+    # two can be read side by side: perform_cv already computed MAE, NRMSE, CCC
+    # and RPIQ, they were simply never displayed. Moran's I / p have no
+    # counterpart there (uploaded predictions carry no CV residual field).
+    metric_cols <- c("Source", "RMSE", "NRMSE (%)", "MAE", "R2 (Corr)",
+                     "R2 (NSE/Trad)", "Bias (ME)", "Lin's CCC (Agree)",
+                     "RPD (Prec)", "RPIQ", "SMAPE (%)", "Moran's I", "Moran p")
+    # NA in the Moran columns means the statistic could not be computed for this
+    # point set (fewer than 3 points, no coordinate columns, or the neighbour
+    # search failed) - it never means "no spatial structure was detected".
+    na_marker <- '<span title="Not computable (see Run Log)">NA*</span>'
+
     get_metrics_df <- function(cv_list, data_list, label) {
       if(loc == "Total (Combined)") {
         # Pool in the auto-UTM zone of the combined centroid: pooled Moran's I
@@ -608,20 +650,26 @@
         # 1/cos(latitude). perform_cv/.cv_to_df extract x/y from the geometry.
         all_cv <- pool_cv_sf(data_list)
         if(is.null(all_cv) || nrow(all_cv) == 0) {
-          empty_df <- data.frame(Source=paste0(label, " (pooled CV)"), RMSE=NA, R2_Corr=NA, R2_NSE=NA, Bias_ME=NA, RPD_Prec=NA, SMAPE_Pct=NA, Moran_I=NA)
-          names(empty_df) <- c("Source", "RMSE", "R2 (Corr)", "R2 (NSE/Trad)", "Bias (ME)", "RPD (Prec)", "SMAPE (%)", "Moran's I")
+          empty_df <- data.frame(Source=paste0(label, " (pooled CV)"), RMSE=NA, NRMSE_Pct=NA, MAE=NA, R2_Corr=NA, R2_NSE=NA, Bias_ME=NA, CCC=NA, RPD_Prec=NA, RPIQ=NA, SMAPE_Pct=NA, Moran_I=NA, Moran_P=NA)
+          names(empty_df) <- metric_cols
           return(empty_df)
         }
 
         res <- perform_cv(all_cv)
         src_label <- paste0(label, " (pooled per-locality CV, n=", res$n, ")")
         rmse <- res$rmse
+        nrmse <- res$nrmse_mean
+        mae <- res$mae
         r2 <- res$r2
         nse <- res$nse
         me <- res$me
+        ccc <- res$ccc
         rpd <- res$rpd
+        rpiq <- res$rpiq
         smape <- res$smape
         moran_i <- res$moran_i
+        moran_e <- res$moran_e
+        moran_p <- res$moran_p
       } else {
         res <- cv_list[[loc]]
         n_obs <- if(!is.null(data_list[[loc]])) nrow(data_list[[loc]]) else NA
@@ -633,35 +681,108 @@
           paste0(label, " (CV unavailable - see Run Log)")
         }
         rmse <- if(!is.null(res)) res$rmse else NA
+        nrmse <- if(!is.null(res)) res$nrmse_mean else NA
+        mae  <- if(!is.null(res)) res$mae else NA
         r2   <- if(!is.null(res)) res$r2 else NA
         nse  <- if(!is.null(res)) res$nse else NA
         me   <- if(!is.null(res)) res$me else NA
+        ccc  <- if(!is.null(res)) res$ccc else NA
         rpd  <- if(!is.null(res)) res$rpd else NA
+        rpiq <- if(!is.null(res)) res$rpiq else NA
         smape <- if(!is.null(res)) res$smape else NA
         moran_i <- if(!is.null(res)) res$moran_i else NA
+        moran_e <- if(!is.null(res)) res$moran_e else NA
+        moran_p <- if(!is.null(res)) res$moran_p else NA
       }
                   res_df <- data.frame(
                     Source = src_label,
                     RMSE = round(rmse, 4),
+                    NRMSE_Pct = round(nrmse, 4),
+                    MAE = round(mae, 4),
                     R2_Corr = round(r2, 4),
                     R2_NSE = round(nse, 4),
                     Bias_ME = round(me, 4),
+                    CCC = round(ccc, 4),
                     RPD_Prec = round(rpd, 4),
+                    RPIQ = round(rpiq, 4),
                     SMAPE_Pct = round(smape, 4),
-                    Moran_I = if(is.na(moran_i)) '<span title="No Spatial Structure Detected">NA*</span>' else as.character(round(moran_i, 4))
+                    # The null expectation rides along as a per-row tooltip: I is
+                    # centred on E[I] = -1/(n-1), not on 0, so an I marginally
+                    # above zero is not evidence of clustering at small n.
+                    Moran_I = if(is.na(moran_i)) na_marker else sprintf(
+                      '<span title="Expected I under no spatial autocorrelation: E[I] = -1/(n-1) = %s">%s</span>',
+                      if(is.na(moran_e)) "NA" else as.character(round(moran_e, 4)),
+                      as.character(round(moran_i, 4))),
+                    # Rendered like every other p in the app ("< 0.001" rather
+                    # than a rounded 0), HTML-escaped because this table renders
+                    # with escape = FALSE. NA on the all-pairs fallback path,
+                    # which has no sampling distribution.
+                    Moran_P = if(is.na(moran_p)) na_marker else htmltools::htmlEscape(format_p_value(moran_p))
                     )
-                    names(res_df) <- c("Source", "RMSE", "R2 (Corr)", "R2 (NSE/Trad)", "Bias (ME)", "RPD (Prec)", "SMAPE (%)", "Moran's I")
+                    names(res_df) <- metric_cols
                     res_df
                     }
 
     m_act <- get_metrics_df(rv$cv_metrics_act, rv$cv_data_act, "Actual Model")
     if(rv$has_predictions) {
       m_pre <- get_metrics_df(rv$cv_metrics_pre, rv$cv_data_pre, "Predicted Model")
-      # escape = FALSE keeps the tooltip-bearing NA* span in the Moran's I column
+      # escape = FALSE keeps the tooltip-bearing spans in the two Moran columns
       sci_dt(rbind(m_act, m_pre), escape = FALSE, header_tooltips = sci_metric_tooltips())
     } else {
       sci_dt(m_act, escape = FALSE, header_tooltips = sci_metric_tooltips())
     }
+  })
+
+  # ── Repeated cross-validation (opt-in) ────────────────────────────────────
+  # The table above reports ONE fold realization (seed CV_FOLD_SEED). When the
+  # user asked for repeated CV, this second table reports the mean and the
+  # standard deviation of the same metrics across the alternative realizations,
+  # which is the honest scale for comparing two methods: an RMSE gap smaller
+  # than this SD is fold luck, not skill.
+  cv_repeat_row <- function(summ, label) {
+    if (is.null(summ)) return(NULL)
+    fmt <- function(m, s) {
+      if (!is.finite(m)) return("NA")
+      digits <- if (abs(m) >= 100) 2 else 4
+      # formatC, not round(): a small SD next to a larger mean would otherwise
+      # print in scientific notation ("0.0287 ± 5e-04"), which reads as a
+      # different quantity at a glance. drop0trailing keeps short values short.
+      num <- function(x) formatC(round(x, digits), format = "f", digits = digits, drop0trailing = TRUE)
+      paste0(num(m), " ± ", if (is.finite(s)) num(s) else "NA")
+    }
+    row <- data.frame(
+      Source = paste0(label, " (", summ$n_repeats, " fold realizations, n=", summ$n, ")"),
+      stringsAsFactors = FALSE
+    )
+    for (k in names(CV_REPEAT_METRICS)) {
+      row[[k]] <- fmt(summ$mean[[k]], summ$sd[[k]])
+    }
+    names(row) <- c("Source", unname(CV_REPEAT_METRICS))
+    row
+  }
+
+  cv_repeat_rows <- reactive({
+    loc <- input$sel_loc_stats
+    pick <- function(rep_summary) {
+      if (is.null(rep_summary)) return(NULL)
+      if (identical(loc, "Total (Combined)")) rep_summary$total else rep_summary$per_loc[[loc]]
+    }
+    rows <- list(cv_repeat_row(pick(rv$cv_repeats_act), "Actual Model"))
+    if (isTRUE(rv$has_predictions)) {
+      rows <- c(rows, list(cv_repeat_row(pick(rv$cv_repeats_pre), "Predicted Model")))
+    }
+    rows <- Filter(Negate(is.null), rows)
+    if (!length(rows)) return(NULL)
+    do.call(rbind, rows)
+  })
+
+  output$has_cv_repeats <- reactive({ !is.null(cv_repeat_rows()) })
+  outputOptions(output, "has_cv_repeats", suspendWhenHidden = FALSE)
+
+  output$cv_repeats_table <- DT::renderDataTable({
+    df <- cv_repeat_rows()
+    req(df)
+    sci_dt(df, header_tooltips = sci_metric_tooltips())
   })
 
   output$uploaded_metrics_table <- DT::renderDataTable({
@@ -765,7 +886,8 @@
   # flush makes the tab current the moment it is opened. Plots stay
   # suspended: hidden plots re-render on reveal anyway (client sizing).
   for (out_id in c("vgm_params_table", "regional_params_table", "metrics_table",
-                   "cv_strategy_badge", "stats_table_total", "stats_table_loc",
+                   "cv_strategy_badge", "cv_repeats_table",
+                   "stats_table_total", "stats_table_loc",
                    "area_table_total_act", "area_table_total_pre",
                    "area_table_loc_act", "area_table_loc_pre",
                    "uploaded_metrics_table", "kappa_table",
@@ -806,42 +928,116 @@
     return(sf_combined)
   })
   
+  vector_export_ext <- function(fmt) {
+    switch(fmt %||% "shp", "shp" = "zip", "geojson" = "geojson", "kml" = "kml", "gpkg" = "gpkg", "zip")
+  }
+
+  # A downloadHandler cannot decline: whatever its content function does, the
+  # browser has already opened the download URL, and a content function that
+  # returns without writing its file leaves the user on a dead page with the
+  # app behind them. So the two vector exports state their requirements BEFORE
+  # the click - each reason below both greys its button out and becomes the
+  # wrapper's hover tooltip. The handlers keep the same checks as a backstop
+  # for the click-during-state-change race, raising them as errors so the
+  # sentence is at least readable wherever the browser lands.
+  polygon_block_reason <- reactive({
+    if (length(rv$drawn_polygons) == 0)
+      return("No polygons to export. Draw one first, using the drawing toolbar on the left edge of the map.")
+    NULL
+  })
+
+  class_zone_block_reason <- reactive({
+    if (is.null(rv$rast) && is.null(rv$rast_pred))
+      return("No interpolated surface yet. Run an interpolation first.")
+    if (!isTRUE(input$color_style %in% c("agro", "bin")))
+      return("Class zones exist only under Agronomical or Binned map styling. Switch Map Styling in the sidebar (Agronomical also needs APPLY TO MAPS & STATS).")
+    if (identical(input$map_view, "view_resid"))
+      return("The residual view is not classified. Switch the Map Viewer to Actual, Predicted or Comparison to export its class zones.")
+    NULL
+  })
+
+  set_export_block_state <- function(btn_id, wrap_id, reason) {
+    shinyjs::toggleState(btn_id, condition = is.null(reason))
+    shinyjs::runjs(sprintf("$('#%s').attr('title', %s);", wrap_id,
+                           jsonlite::toJSON(reason %||% "", auto_unbox = TRUE)))
+  }
+
+  observe({
+    set_export_block_state("polygon_download_btn", "polygon_dl_wrap",
+                           polygon_block_reason())
+  })
+
+  observe({
+    set_export_block_state("class_zone_download_btn", "class_zone_dl_wrap",
+                           class_zone_block_reason())
+  })
+
   output$polygon_download_btn <- downloadHandler(
     filename = function() {
-      fmt <- input$polygon_export_format
-      ext <- switch(fmt, "shp" = "zip", "geojson" = "geojson", "kml" = "kml", "gpkg" = "gpkg", "zip")
-      paste0("Drawn_Polygons_", format(Sys.time(), "%Y%m%d_%H%M%S"), ".", ext)
+      paste0("Drawn_Polygons_", format(Sys.time(), "%Y%m%d_%H%M%S"), ".",
+             vector_export_ext(input$polygon_export_format))
     },
     content = function(file) {
+      reason <- polygon_block_reason()
+      if (!is.null(reason)) stop(safeError(reason))
+
       sf_obj <- get_drawn_sf()
-      if(is.null(sf_obj)) {
-        showNotification("No polygons to export. Please draw a polygon first.", type = "warning")
-        return(NULL)
-      }
-      
-      fmt <- input$polygon_export_format
-      
+      if (is.null(sf_obj)) stop(safeError("No polygons to export. Draw one first."))
+
       tryCatch({
-        if (fmt == "shp") {
-          temp_dir <- file.path(tempdir(), paste0("shp_export_", as.integer(Sys.time())))
-          dir.create(temp_dir, showWarnings = FALSE)
-          shp_path <- file.path(temp_dir, "drawn_polygons.shp")
-          
-          sf::st_write(sf_obj, shp_path, driver = "ESRI Shapefile", quiet = TRUE, delete_layer = TRUE)
-          
-          files_to_zip <- list.files(temp_dir, full.names = FALSE)
-          zip::zip(zipfile = file, files = files_to_zip, root = temp_dir)
-          
-          unlink(temp_dir, recursive = TRUE)
-        } else if (fmt == "geojson") {
-          sf::st_write(sf_obj, file, driver = "GeoJSON", quiet = TRUE, delete_dsn = TRUE)
-        } else if (fmt == "kml") {
-          sf::st_write(sf_obj, file, driver = "KML", quiet = TRUE, delete_dsn = TRUE)
-        } else if (fmt == "gpkg") {
-          sf::st_write(sf_obj, file, driver = "GPKG", layer = "drawn_polygons", quiet = TRUE, delete_dsn = TRUE)
-        }
+        write_vector_export(sf_obj, file, input$polygon_export_format, "drawn_polygons")
       }, error = function(e) {
-        showNotification(paste("Export failed:", e$message), type = "error")
+        stop(safeError(paste("Export failed:", conditionMessage(e))))
+      })
+    }
+  )
+
+  # Class zones of the surface on screen, as a GIS vector layer. It follows the
+  # Map Viewer's view switcher rather than the sidebar, for the same reason the
+  # Quick Export button does: what is exported must be what is being looked at.
+  class_zone_sf <- reactive({
+    params <- tryCatch(classification_params(), error = function(e) NULL)
+    if (is.null(params)) return(NULL)
+    meta <- get_display_meta()
+    if (is.null(meta)) return(NULL)
+
+    labs <- if (isTruthy(input$color_style == "bin")) params$leg_labels else params$labels
+    view <- input$map_view %||% "view_act"
+    sources <- switch(view,
+      "view_pred"  = list(list(r = rv$rast_pred, tag = "Predicted")),
+      "view_comp"  = list(list(r = rv$rast, tag = "Actual"),
+                          list(r = rv$rast_pred, tag = "Predicted")),
+      list(list(r = rv$rast, tag = "Actual")))
+
+    parts <- lapply(sources, function(s) {
+      build_class_zone_sf(s$r, params, labs, s$tag, meta$label, meta$method)
+    })
+    parts <- Filter(Negate(is.null), parts)
+    if (length(parts) == 0) return(NULL)
+    do.call(rbind, parts)
+  })
+
+  output$class_zone_download_btn <- downloadHandler(
+    filename = function() {
+      meta <- tryCatch(get_display_meta(), error = function(e) NULL)
+      var_tag <- gsub("[^A-Za-z0-9]+", "_", meta$actual %||% "surface")
+      paste0("Class_Zones_", var_tag, "_", format(Sys.time(), "%Y%m%d_%H%M%S"), ".",
+             vector_export_ext(input$polygon_export_format))
+    },
+    content = function(file) {
+      reason <- class_zone_block_reason()
+      if (!is.null(reason)) stop(safeError(reason))
+
+      zones <- tryCatch(class_zone_sf(), error = function(e) NULL)
+      if (is.null(zones))
+        stop(safeError("Could not build class zones for the displayed surface (no classified cells)."))
+
+      withProgress(message = "Building class zone polygons...", {
+        tryCatch({
+          write_vector_export(zones, file, input$polygon_export_format, "class_zones")
+        }, error = function(e) {
+          stop(safeError(paste("Export failed:", conditionMessage(e))))
+        })
       })
     }
   )

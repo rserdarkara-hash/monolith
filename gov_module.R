@@ -54,14 +54,14 @@ gov_factors_ui <- function(id) {
               shiny::column(6, 
                 shiny::h4("Global Importance"),
                 shiny::div(style = "position: relative;",
-                  shiny::tags$button(id = ns("gov_expand_imp_btn"), type = "button", class = "btn btn-default action-button expand-icon-btn", shiny::icon("expand")),
+                  shiny::tags$button(id = ns("gov_expand_imp_btn"), type = "button", class = "btn btn-default action-button expand-icon-btn", title = "Expand plot", "aria-label" = "Expand global importance plot", shiny::icon("expand")),
                   shiny::plotOutput(ns("gov_plot_importance"), height = "300px")
                 )
               ),
               shiny::column(6, 
                 shiny::h4("SHAP Dependence (Marginal)"),
                 shiny::div(style = "position: relative;",
-                  shiny::tags$button(id = ns("gov_expand_inta_btn"), type = "button", class = "btn btn-default action-button expand-icon-btn", shiny::icon("expand")),
+                  shiny::tags$button(id = ns("gov_expand_inta_btn"), type = "button", class = "btn btn-default action-button expand-icon-btn", title = "Expand plot", "aria-label" = "Expand SHAP dependence plot", shiny::icon("expand")),
                   shiny::plotOutput(ns("gov_plot_interaction_a"), height = "300px")
                 )
               )
@@ -71,14 +71,14 @@ gov_factors_ui <- function(id) {
               shiny::column(6, 
                 shiny::h4("Functional Effect"),
                 shiny::div(style = "position: relative;",
-                  shiny::tags$button(id = ns("gov_expand_eff_btn"), type = "button", class = "btn btn-default action-button expand-icon-btn", shiny::icon("expand")),
+                  shiny::tags$button(id = ns("gov_expand_eff_btn"), type = "button", class = "btn btn-default action-button expand-icon-btn", title = "Expand plot", "aria-label" = "Expand functional effect plot", shiny::icon("expand")),
                   shiny::plotOutput(ns("gov_plot_effect"), height = "300px")
                 )
               ),
               shiny::column(6, 
                 shiny::h4("Feature vs Target Scatterplot"),
                 shiny::div(style = "position: relative;",
-                  shiny::tags$button(id = ns("gov_expand_intb_btn"), type = "button", class = "btn btn-default action-button expand-icon-btn", shiny::icon("expand")),
+                  shiny::tags$button(id = ns("gov_expand_intb_btn"), type = "button", class = "btn btn-default action-button expand-icon-btn", title = "Expand plot", "aria-label" = "Expand feature versus target plot", shiny::icon("expand")),
                   shiny::plotOutput(ns("gov_plot_interaction_b"), height = "300px")
                 )
               )

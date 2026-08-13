@@ -103,8 +103,15 @@ ui_main_tabs <- mainPanel(width = 9,
                                           title = "Point Styling Options"),
                              div(class="map-toolbar-export-container", style="display: flex; align-items: center; gap: 5px; border-left: 1px solid #ccc; padding-left: 10px;",
                                  selectInput("polygon_export_format", NULL, choices = c("Shapefile (ZIP)" = "shp", "GeoJSON" = "geojson", "KML" = "kml", "GPKG" = "gpkg"), selected = "shp", width = "120px", selectize = FALSE),
-                                 downloadButton("polygon_download_btn", "Export Manually Drawn Polygon", class = "btn-success btn-sm", style = "padding: 4px 10px; font-size: 12px; line-height: 1.5; border-radius: 3px;",
-                                                title = "Available once you have drawn at least one polygon on the map using the drawing toolbar (left edge of the map). Downloads all drawn polygons in the format selected on the left."),
+                                 # Wrapper spans exist to carry the tooltip while the button inside is
+                                 # disabled: a disabled .btn anchor has pointer-events: none, so its own
+                                 # title never fires and the wrapper is what the pointer actually sees.
+                                 tags$span(id = "polygon_dl_wrap", style = "display: inline-flex;",
+                                   downloadButton("polygon_download_btn", "Export Drawn Polygons", class = "btn-success btn-sm", style = "padding: 4px 10px; font-size: 12px; line-height: 1.5; border-radius: 3px;",
+                                                  title = "Downloads all polygons drawn on the map, in the format selected on the left.")),
+                                 tags$span(id = "class_zone_dl_wrap", style = "display: inline-flex;",
+                                   downloadButton("class_zone_download_btn", "Export Class Zones", class = "btn-success btn-sm", style = "padding: 4px 10px; font-size: 12px; line-height: 1.5; border-radius: 3px;",
+                                                  title = "Downloads the class zones of the surface currently displayed as a GIS vector layer, in the format selected on the left. One dissolved polygon per class, carrying its label, its break limits and its area in hectares.")),
                                  downloadButton("export_updated_data", "Export Updated Dataset", class = "btn-success btn-sm", style = "padding: 4px 10px; font-size: 12px; line-height: 1.5; border-radius: 3px;",
                                                 title = "Use after modifying your dataset in the app - e.g. after drawing a polygon on the map and saving it as a new group ('Assign Locality / Analysis Group'). Downloads the current dataset as .xlsx, including the 'Assigned_Locality' column.")
                              )
@@ -144,7 +151,7 @@ ui_main_tabs <- mainPanel(width = 9,
                          # no DOM polling.
                          div(id = "distance_scale_container", style = "margin-top: 15px; display: flex; justify-content: center; min-height: 30px;")
                  )),
-        tabPanel("3. Scientific Analysis & Summary",
+        tabPanel("3. Scientific Analysis & Summary", value = "tab_analysis",
                  conditionalPanel(
                    condition = "output.model_ready == 'no'",
                    div(style = "text-align: center; padding: 120px 50px; color: #888;",
@@ -242,7 +249,14 @@ ui_main_tabs <- mainPanel(width = 9,
                                 h5("Regional Parameters (per locality)"), div(class="table-container", DT::dataTableOutput("regional_params_table")),
                                 hr(style="opacity: 0.3;")
                               ),
-                              h5("Model Performance"), uiOutput("cv_strategy_badge"), div(class="table-container", DT::dataTableOutput("metrics_table"))
+                              h5("Model Performance"), uiOutput("cv_strategy_badge"), div(class="table-container", DT::dataTableOutput("metrics_table")),
+                              # Only present when the run was launched with
+                              # repeated CV switched on (Spatial Engine panel).
+                              conditionalPanel(condition = "output.has_cv_repeats === true",
+                                hr(style="opacity: 0.3;"),
+                                h5(HTML(paste0("Fold-Realization Stability", info_tooltip("cv_repeats_info", "Repeated cross-validation: the same model re-scored under alternative fold assignments (the partition is the only thing that changes). Cells are mean ± SD across realizations. Treat the SD as the resolution of the comparison: two methods whose metrics differ by less than this are separated by fold luck, not skill. Leave-one-out folds are deterministic and never repeat. Moran's I is reported for realization 1 only, in the table above.")))),
+                                div(class="table-container", DT::dataTableOutput("cv_repeats_table"))
+                              )
                             ),
                             div(id = "prediction_performance_ui",
                               sci_card("Variable Prediction Statistics",
@@ -293,7 +307,7 @@ ui_main_tabs <- mainPanel(width = 9,
                  hr(),
                  uiOutput("run_config_display"),
                  verbatimTextOutput("log_output")),
-        tabPanel("4. Export Panel",
+        tabPanel("4. Export Panel", value = "tab_export",
                  div(style = "padding: 20px;",
                      h2("Unified Session Export Registry"),
                      p("Manage all maps and tables generated during this session. Select an item to customize and export."),
@@ -307,9 +321,10 @@ ui_main_tabs <- mainPanel(width = 9,
                                       actionButton("deselect_all_assets", "Deselect All", class = "btn-xs")
                                   ),
                                   uiOutput("export_registry_ui"),
-                                  div(style = "display: flex; gap: 10px; margin-top: 15px;",
+                                  div(style = "display: flex; gap: 10px; margin-top: 15px; flex-wrap: wrap;",
                                       actionButton("open_styler", "Open Export Styler", class = "btn-primary", icon = icon("palette")),
                                       downloadButton("batch_export", "Batch Export Selected", class = "btn-success", title = "Download all checked items as a ZIP archive."),
+                                      downloadButton("download_run_config", "Download Run Configuration (.json)", class = "btn-info", title = "Machine-readable record of the current run: every model setting, the per-locality tuning it used, and the app / R / package versions it ran under. Reproducibility and methods reporting."),
                                       actionButton("clear_registry", "Clear Session Registry", class = "btn-danger", icon = icon("trash"))
                                   )
                                   )
@@ -323,10 +338,14 @@ ui_main_tabs <- mainPanel(width = 9,
                          uiOutput("reset_archive_choice_ui")
                      )
                                   )),
-        tabPanel("Descriptive and Exploratory Suite",
+        # Every tab carries an explicit value=: without one the tab TITLE is the
+        # input$main_tabs value, so every renaming (including the numbering)
+        # would silently break the sidebar's conditionalPanels and the
+        # server-side reveal handlers that key on the tab id.
+        tabPanel("5. Descriptive and Exploratory Suite", value = "tab_desc",
                  desc_exploratory_ui("exploratory")
         ),
-        tabPanel("Classification Suite",
+        tabPanel("6. Classification Suite", value = "tab_classif",
                  classif_ui("classification")
         )      )
     )

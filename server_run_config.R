@@ -120,7 +120,8 @@
       easyClose = TRUE,
       footer = modalButton("Close"),
       div(style = "text-align: center; padding: 20px;",
-          img(src = "assets/banner.png", style = "max-width: 100%; height: auto; margin-bottom: 20px;"),
+          img(src = "assets/banner.png", alt = "Monolith - Spatial Analysis Dashboard",
+              style = "max-width: 100%; height: auto; margin-bottom: 20px;"),
           h4("Workbench for statistics and optimized mapping in life sciences."),
           p("Integrated geostatistical modeling, classification and statistical interpretation."),
           hr(),
@@ -128,7 +129,7 @@
           p("Supported with the Descriptive and Exploratory Suite with dynamic visualizations and statistics."),
           hr(),
           p(strong("A product of `that` couple of months following the loss of institutional e-mail address.")),
-          p(style = "color: #666; font-size: 0.9em;", "  by Recep Serdar Kara in cooperation with Antigravity CLI and Claude Code - 2026 (v1.0.5"),
+          p(style = "color: #666; font-size: 0.9em;", paste0("  by Recep Serdar Kara in cooperation with Antigravity CLI and Claude Code - 2026 (v", app_version, ")")),
           hr(),
           tags$details(
             tags$summary(style = "cursor: pointer; color: #007bff;", "Session Info (reproducibility)"),
@@ -202,6 +203,20 @@
   observeEvent(input$agro_apply, {
     live <- gather_agro_live()
     req(live)
+    # Committing the staged settings is instant, but what it triggers is not:
+    # classification_params() -> calc_class_breaks() -> the proxy restyler ->
+    # the class-area and kappa tables can take seconds, during which an idle
+    # button invites a second click. Re-enable on the next completed flush;
+    # that is the honest end point, because the work is spread over several
+    # independent reactives rather than one observable result.
+    shinyjs::disable("agro_apply")
+    updateActionButton(session, "agro_apply", label = "APPLYING...")
+    session$onFlushed(function() {
+      shinyjs::enable("agro_apply")
+      # Label must match ui_sidebar.R exactly: the button never comes back
+      # with different wording.
+      updateActionButton(session, "agro_apply", label = "APPLY TO MAPS & STATS")
+    }, once = TRUE)
     agro_applied(live)
   })
 

@@ -421,6 +421,9 @@
     cv_metrics_act = list(), cv_metrics_pre = list(),
     cv_data_act = list(), cv_data_pre = list(),
     cv_strategy_sel = "auto", # CV strategy applied in the last run (for labels)
+    cv_repeats_sel = 1L, # Fold realizations requested by the last run (1 = off)
+    cv_repeats_act = NULL, cv_repeats_pre = NULL, # Repeated-CV mean/SD report
+
     loc_resolutions = list(), # Track spatial resolutions per locality
     idw_factors = list(), tps_lambdas = list(), # Regional Parameters
     tps_gcv_data = list(), # GCV Diagnostic Data

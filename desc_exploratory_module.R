@@ -110,7 +110,7 @@ desc_exploratory_ui <- function(id) {
                 ),
                 shiny::column(9,
                   shiny::div(style = "position: relative;",
-                      shiny::tags$button(id = ns("desc_expand_plot_btn"), type = "button", class = "btn btn-default action-button expand-icon-btn", shiny::icon("expand")),
+                      shiny::tags$button(id = ns("desc_expand_plot_btn"), type = "button", class = "btn btn-default action-button expand-icon-btn", title = "Expand plot", "aria-label" = "Expand descriptive plot", shiny::icon("expand")),
                       shiny::plotOutput(ns("desc_main_plot"), height = "500px")
                   ),
                   shiny::hr(),
@@ -135,7 +135,7 @@ desc_exploratory_ui <- function(id) {
                 ),
                 shiny::column(9,
                   shiny::div(style = "position: relative;",
-                      shiny::tags$button(id = ns("corr_expand_plot_btn"), type = "button", class = "btn btn-default action-button expand-icon-btn", shiny::icon("expand")),
+                      shiny::tags$button(id = ns("corr_expand_plot_btn"), type = "button", class = "btn btn-default action-button expand-icon-btn", title = "Expand plot", "aria-label" = "Expand correlation plot", shiny::icon("expand")),
                       shiny::plotOutput(ns("corr_main_plot"), height = "500px")
                   ),
                   shiny::hr(),
@@ -170,7 +170,7 @@ desc_exploratory_ui <- function(id) {
                 shiny::column(9,
                   shiny::uiOutput(ns("pca_collinearity_warning_ui")),
                   shiny::div(style = "position: relative;",
-                      shiny::tags$button(id = ns("pca_expand_plot_btn"), type = "button", class = "btn btn-default action-button expand-icon-btn", shiny::icon("expand")),
+                      shiny::tags$button(id = ns("pca_expand_plot_btn"), type = "button", class = "btn btn-default action-button expand-icon-btn", title = "Expand plot", "aria-label" = "Expand PCA plot", shiny::icon("expand")),
                       shiny::uiOutput(ns("pca_main_plot_container"))
                   ),
                   shiny::hr(),
@@ -315,7 +315,7 @@ desc_exploratory_server <- function(id, data_reactive, vars_metadata_reactive,
         if (!(p_type %in% c("parallel", "radar"))) {
           shiny::div(style = "display: flex; align-items: center; gap: 5px;",
               shiny::selectInput(ns("desc_var_x"), "Primary Variable (X)", choices = valid_named, selected = sel_x, width = "calc(100% - 40px)"),
-              shiny::actionButton(ns("clear_desc_vars"), "", icon = shiny::icon("times"), class = "btn-danger btn-sm", style = "margin-top: 10px;", title = "Clear selections")
+              shiny::actionButton(ns("clear_desc_vars"), "", icon = shiny::icon("times"), class = "btn-danger btn-sm", style = "margin-top: 10px;", title = "Clear selections", "aria-label" = "Clear variable selections")
           )
         },
         if (p_type %in% c("boxplot", "violin", "sinaplot", "scatter", "density_heatmap", "xyz_surface")) {

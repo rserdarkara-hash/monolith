@@ -14,11 +14,12 @@ test_that("init_interpolation_res returns list with all expected names", {
   res <- init_interpolation_res()
   expected_names <- c("v_emp", "fit", "cv_metrics", "model_summary",
                       "rf_model", "gstat_obj", "res_sf", "log_msg",
-                      "cv_obj", "residuals")
+                      "cv_obj", "cv_obj_reps", "residuals")
   expect_setequal(names(res), expected_names)
   expect_equal(res$log_msg, "")
   expect_null(res$v_emp)
   expect_null(res$res_sf)
+  expect_null(res$cv_obj_reps)  # repeated CV is opt-in
 })
 
 # ── sanitize_spatial_predictions ───────────────────────────────────────────
@@ -331,6 +332,69 @@ test_that("apply_IDW reproduces observed values at data locations", {
   # Predict at the sample locations themselves: IDW must be exact there
   res <- apply_IDW(pts, "v", pts, list(idw_p = 2, idw_nmax = 12))
   expect_equal(res$res_sf$var1.pred, pts$v, tolerance = 1e-8)
+})
+
+# ── Repeated CV through the engines ───────────────────────────────────────
+
+test_that("repeated CV adds realizations without moving the reference run", {
+  # n > 50 so the Auto plan is a random 10-fold (a repeatable partition)
+  pts <- make_test_points(60)
+  grid <- make_test_grid_safe(pts, res = 200)
+  mp <- list(idw_p = 2, idw_nmax = 12, cv_strategy = "auto")
+
+  off <- apply_IDW(pts, "v", grid, mp)
+  on  <- apply_IDW(pts, "v", grid, c(mp, list(cv_repeats = 3)))
+
+  # Switching repeats on must not change ANY reported number: realization 1
+  # keeps CV_FOLD_SEED, and the surface never sees the CV at all.
+  expect_null(off$cv_obj_reps)
+  expect_equal(on$cv_metrics, off$cv_metrics)
+  expect_equal(on$res_sf$var1.pred, off$res_sf$var1.pred)
+  expect_equal(on$residuals, off$residuals)
+
+  expect_length(on$cv_obj_reps, 3)
+  # Realization 1 IS the reference run
+  expect_equal(perform_cv(on$cv_obj_reps[[1]], moran = FALSE)$rmse, off$cv_metrics$rmse)
+  # ... and the others are genuinely different partitions
+  rmses <- vapply(on$cv_obj_reps, function(x) perform_cv(x, moran = FALSE)$rmse, numeric(1))
+  expect_equal(length(unique(rmses)), 3)
+
+  summ <- summarise_cv_repeats(on$cv_obj_reps)
+  expect_equal(summ$n_repeats, 3L)
+  expect_true(summ$sd[["rmse"]] > 0)
+})
+
+test_that("repeated CV is skipped for deterministic LOOCV plans", {
+  # Small n under Auto degrades to LOOCV; explicit LOOCV does the same at any n
+  pts <- make_test_points(20)
+  grid <- make_test_grid_safe(pts, res = 200)
+  auto <- apply_IDW(pts, "v", grid, list(idw_p = 2, idw_nmax = 12,
+                                         cv_strategy = "auto", cv_repeats = 5))
+  loo <- apply_IDW(pts, "v", grid, list(idw_p = 2, idw_nmax = 12,
+                                        cv_strategy = "loocv", cv_repeats = 5))
+  expect_null(auto$cv_obj_reps)
+  expect_null(loo$cv_obj_reps)
+  expect_false(is.na(auto$cv_metrics$rmse))
+})
+
+test_that("repeated CV reaches the kriging engines too", {
+  pts <- make_test_points(60)
+  grid <- make_test_grid_safe(pts, res = 200)
+  lags <- calc_scientific_lags(pts)
+
+  ok_off <- suppressWarnings(apply_OK(pts, "v", grid, lags, list(cv_strategy = "auto")))
+  ok_on <- suppressWarnings(apply_OK(pts, "v", grid, lags,
+                                     list(cv_strategy = "auto", cv_repeats = 2)))
+  expect_null(ok_off$cv_obj_reps)
+  expect_length(ok_on$cv_obj_reps, 2)
+  expect_equal(ok_on$cv_metrics, ok_off$cv_metrics)
+  expect_equal(ok_on$res_sf$var1.pred, ok_off$res_sf$var1.pred)
+
+  rk_on <- suppressWarnings(apply_RK(pts, "v", grid, lags,
+                                     list(cv_strategy = "auto", cv_repeats = 2),
+                                     c("aux1", "aux2")))
+  expect_length(rk_on$cv_obj_reps, 2)
+  expect_equal(perform_cv(rk_on$cv_obj_reps[[1]], moran = FALSE)$rmse, rk_on$cv_metrics$rmse)
 })
 
 # ── apply_TPS exactness ───────────────────────────────────────────────────
@@ -646,6 +710,37 @@ test_that("raster_value_layer reads packed and live rasters identically", {
   expect_null(raster_value_layer("not a raster"))
 })
 
+# ── RNG sandbox (shared by every seeded helper) ────────────────────────────
+
+test_that("with_rng_sandbox is two-sided and with_seed is reproducible", {
+  had <- exists(".Random.seed", envir = globalenv(), inherits = FALSE)
+  keep <- if (had) get(".Random.seed", envir = globalenv(), inherits = FALSE) else NULL
+  on.exit({
+    if (!is.null(keep)) assign(".Random.seed", keep, envir = globalenv())
+    else if (exists(".Random.seed", envir = globalenv(), inherits = FALSE)) rm(".Random.seed", envir = globalenv())
+  }, add = TRUE)
+
+  # Restore branch: a seeded draw inside leaves the caller's stream untouched.
+  set.seed(4242); before <- .Random.seed
+  x1 <- with_seed(99, runif(3))
+  expect_identical(.Random.seed, before)
+  expect_equal(with_seed(99, runif(3)), x1)
+
+  # Remove branch: no .Random.seed before the call, none left behind after it
+  # (the half-sided version of this sandbox used to leak a seeded stream into
+  # whatever ran next in a fresh session or worker).
+  if (exists(".Random.seed", envir = globalenv(), inherits = FALSE)) rm(".Random.seed", envir = globalenv())
+  x2 <- with_seed(99, runif(3))
+  expect_false(exists(".Random.seed", envir = globalenv(), inherits = FALSE))
+  expect_equal(x2, x1)
+
+  # The block is a promise evaluated in the CALLER's frame: assignments land
+  # here, and the block's value is the wrapper's value.
+  val <- with_rng_sandbox({ marker <- 7; set.seed(5); marker + length(runif(2)) })
+  expect_equal(val, 9)
+  expect_equal(marker, 7)
+})
+
 # ── calc_class_breaks (seeded, sampled classification breaks) ─────────────
 
 test_that("calc_class_breaks is deterministic and seed-sandboxed", {
@@ -944,4 +1039,101 @@ test_that("a sole degenerate covariate is named in the run warnings", {
   expect_true(file.exists(wf))
   expect_match(paste(readLines(wf), collapse = " "), "covA")
   expect_match(paste(readLines(wf), collapse = " "), "constant")
+})
+
+# ── build_class_zone_sf ─────────────────────────────────────────────────────
+# Class-zone polygons are the GIS form of what the map shows, so they must be
+# the SAME classification and the SAME hectares the Area Coverage table reports.
+
+make_zone_test_raster <- function() {
+  r <- terra::rast(nrows = 10, ncols = 10,
+                   xmin = 450000, xmax = 451000,
+                   ymin = 5800000, ymax = 5801000,
+                   crs = "EPSG:32633")
+  # 30 cells below 40, 40 between 40 and 60, 30 above 60
+  terra::values(r) <- c(rep(20, 30), rep(50, 40), rep(80, 30))
+  r
+}
+
+make_zone_test_params <- function() {
+  brks <- c(-Inf, 40, 60, Inf)
+  list(
+    brks = brks,
+    rcl_mat = matrix(c(brks[1:3], brks[2:4], 1:3), ncol = 3),
+    colors = c("#d73027", "#fee08b", "#1a9850"),
+    labels = c("Low", "Med", "High"),
+    leg_labels = c("< 40", "40 - 60", "> 60"),
+    n_c = 3
+  )
+}
+
+test_that("build_class_zone_sf returns one dissolved polygon per class present", {
+  z <- build_class_zone_sf(make_zone_test_raster(), make_zone_test_params())
+  expect_s3_class(z, "sf")
+  expect_equal(nrow(z), 3)
+  expect_equal(z$class, c("Low", "Med", "High"))
+  expect_true(all(sf::st_geometry_type(z) %in% c("POLYGON", "MULTIPOLYGON")))
+})
+
+test_that("class zone areas equal the areas the Area Coverage table reports", {
+  r <- make_zone_test_raster()
+  z <- build_class_zone_sf(r, make_zone_test_params())
+
+  # Same call calc_area_df makes: classify, then expanse by value.
+  r_class <- terra::classify(r, make_zone_test_params()$rcl_mat, right = FALSE)
+  ref <- as.data.frame(terra::expanse(r_class, unit = "ha", byValue = TRUE))
+  ref <- ref[order(as.numeric(as.character(ref$value))), ]
+
+  expect_equal(z$area_ha, round(ref$area, 2))
+  # 100 x 100 m cells, so the three classes split the grid 30/40/30. terra
+  # measures on the ellipsoid rather than in grid units (expanse transforms a
+  # planar CRS for accuracy), which is why these are ~30.02 rather than 30.00 -
+  # the app's own area table carries the same correction.
+  expect_equal(z$area_ha, c(30, 40, 30), tolerance = 0.01)
+  expect_equal(sum(z$area_ha), 100, tolerance = 0.01)
+})
+
+test_that("build_class_zone_sf keeps the analysis CRS and carries provenance", {
+  z <- build_class_zone_sf(make_zone_test_raster(), make_zone_test_params(),
+                           labels = make_zone_test_params()$leg_labels,
+                           surface = "Predicted", variable = "pH", method = "OK")
+  expect_true(sf::st_crs(z) == sf::st_crs(32633))
+  expect_equal(z$class, c("< 40", "40 - 60", "> 60"))
+  expect_true(all(z$surface == "Predicted"))
+  expect_true(all(z$variable == "pH"))
+  expect_true(all(z$method == "OK"))
+})
+
+test_that("open outer breaks are written as NA, never as an infinity", {
+  # A GIS attribute field cannot hold -Inf/Inf, and the outer breaks always are.
+  z <- build_class_zone_sf(make_zone_test_raster(), make_zone_test_params())
+  expect_true(is.na(z$class_min[1]))
+  expect_true(is.na(z$class_max[3]))
+  expect_equal(z$class_max[1], 40)
+  expect_equal(z$class_min[3], 60)
+  expect_false(any(is.infinite(c(z$class_min, z$class_max)), na.rm = TRUE))
+})
+
+test_that("build_class_zone_sf accepts a packed raster and rejects junk", {
+  z <- build_class_zone_sf(terra::wrap(make_zone_test_raster()), make_zone_test_params())
+  expect_equal(nrow(z), 3)
+
+  expect_null(build_class_zone_sf(NULL, make_zone_test_params()))
+  expect_null(build_class_zone_sf(make_zone_test_raster(), NULL))
+  expect_null(build_class_zone_sf(make_zone_test_raster(), list(brks = c(0, 1))))
+})
+
+test_that("a surface holding only one class yields one zone, not an error", {
+  r <- make_zone_test_raster()
+  terra::values(r) <- rep(50, 100)
+  z <- build_class_zone_sf(r, make_zone_test_params())
+  expect_equal(nrow(z), 1)
+  expect_equal(z$class, "Med")
+  expect_equal(z$area_ha, 100, tolerance = 0.01)
+})
+
+test_that("an all-NA surface yields NULL rather than an empty layer", {
+  r <- make_zone_test_raster()
+  terra::values(r) <- NA_real_
+  expect_null(build_class_zone_sf(r, make_zone_test_params()))
 })

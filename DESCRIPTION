@@ -1,6 +1,6 @@
 Package: monolith
 Title: Spatial Analysis Dashboard
-Version: 1.0.5
+Version: 1.0.6
 Description: A Shiny application for spatial statistical analysis, geostatistical
     modeling, and mapping. Provides deterministic and geostatistical interpolation
     (IDW, TPS, OK, CK, RK, RFK), cross-validation diagnostics, descriptive

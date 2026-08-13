@@ -369,8 +369,8 @@
     }
   })
 
-  # North arrow
-  north_arrow_html <- "<div style='text-align: center; color: white; font-family: Arial, sans-serif; pointer-events: none;'><div style='font-size: 16px; font-weight: bold; line-height: 1; margin-bottom: 4px; text-shadow: 1px 1px 2px black;'>N</div><svg width='30' height='30' viewBox='0 0 24 24' style='filter: drop-shadow(1px 1px 2px black);'><polygon points='12,2 7,22 12,17 17,22' fill='#e74c3c' stroke='white' stroke-width='1.5'/><polygon points='12,2 7,22 12,17' fill='#c0392b' stroke='white' stroke-width='1.5'/></svg></div>"
+  # North arrow (markup shared with the Data Setup mini-map: ui_components.R)
+  north_arrow_html <- map_north_arrow_html()
   observe({
     map_overlay_rev()
     show <- isTRUE(input$show_north)
@@ -565,12 +565,79 @@
     pump_map_resize()
   }
 
-  # A map that initialized hidden must repair itself as soon as it becomes
-  # visible, even when the user never clicks Reveal Maps: returning to the Map
-  # Viewer tab, or switching view (which swaps which conditionalPanel is shown),
-  # are the two moments a stashed render can finally be flushed.
+  # Companion to pump_map_resize() for every OTHER htmlwidget, DT above all.
+  # DT stashes a payload delivered to a zero-size element and flushes it only
+  # from its own resize handler; the Scientific Analysis tables are pushed
+  # eagerly (suspendWhenHidden = FALSE) and the run observer switches to the Map
+  # Viewer at dispatch, so those tables are one run behind until something
+  # resizes them.
+  #
+  # Dispatching a window resize event is NOT enough: Shiny routes each output
+  # binding's resize through makeResizeFilter(), which drops the call when the
+  # element's box is unchanged since its last non-zero measurement - which is
+  # exactly the case when returning to a tab that was already visited once.
+  # (Shiny itself already calls the filtered onResize on shown.bs.tab, so a
+  # window event adds nothing.) Call the bindings directly instead: same work,
+  # without the filter. Each widget then decides what it owes - DT re-renders
+  # its stash, leaflet invalidates its size and flushes pendingRenderData - and
+  # anything unbound or still hidden is skipped. Fails closed: if Shiny's
+  # internals ever move, the guards make this a no-op rather than an error.
+  pump_widget_resize <- function() {
+    shinyjs::runjs("
+      (function() {
+        function flush() {
+          $('.html-widget-output').each(function() {
+            var el = this;
+            var r = el.getBoundingClientRect();
+            if (r.width === 0 || r.height === 0) return;
+            var adapter = $(el).data('shiny-output-binding');
+            if (!adapter || !adapter.binding ||
+                typeof adapter.binding.resize !== 'function') return;
+            try { adapter.binding.resize(el, r.width, r.height); } catch (e) {}
+          });
+        }
+        [0, 150, 400].forEach(function(d) { setTimeout(flush, d); });
+      })();
+    ")
+  }
+
+  # The Data Setup mini-map needs more than a flush. When it was rendered at a
+  # different container size (it re-renders on locality assignment and point
+  # restyling, both driven from the Map Viewer), invalidateSize repaints the
+  # full container but KEEPS the stale centre and zoom, leaving the samples
+  # outside the frame. So re-fit it to the stored sample bounds on reveal,
+  # after the size has been invalidated - repeated across the Bootstrap tab
+  # fade because a fit computed for a zero-size container is worthless.
+  refit_setup_minimap <- function() {
+    bb <- session_state$minimap_bbox
+    if (is.null(bb) || !all(is.finite(bb)) ||
+        !isTRUE(session_state$minimap_rendered)) return(invisible(NULL))
+    shinyjs::runjs(sprintf("
+      (function() {
+        function fit() {
+          var el = document.getElementById('setup_minimap');
+          if (!el || el.offsetWidth === 0 || el.offsetHeight === 0) return;
+          var w = HTMLWidgets.find('#setup_minimap');
+          var map = (w && w.getMap) ? w.getMap() : null;
+          if (!map) return;
+          map.invalidateSize();
+          map.fitBounds([[%s, %s], [%s, %s]], {animate: false});
+        }
+        [200, 500, 900].forEach(function(d) { setTimeout(fit, d); });
+      })();
+    ", format(bb[["ymin"]], digits = 15), format(bb[["xmin"]], digits = 15),
+       format(bb[["ymax"]], digits = 15), format(bb[["xmax"]], digits = 15)))
+  }
+
+  # A widget that initialized (or re-rendered) hidden must repair itself as soon
+  # as it becomes visible, even when the user never clicks Reveal Maps:
+  # returning to a tab, or switching view (which swaps which conditionalPanel is
+  # shown), are the moments a stashed render can finally be flushed.
   observeEvent(input$main_tabs, {
     if (identical(input$main_tabs, "tab_map")) pump_map_resize()
+    if (identical(input$main_tabs, "tab_data")) refit_setup_minimap()
+    # Every tab: the stale-widget failure mode is not specific to one of them.
+    pump_widget_resize()
   }, ignoreInit = TRUE)
 
   observeEvent(input$map_view, {

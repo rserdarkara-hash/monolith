@@ -19,16 +19,11 @@ resolve_selected_localities <- function(sel, user_data, loc_col) {
   sel
 }
 
-# A column counts as a coordinate column only when its whole (trimmed) name is
-# a recognised coordinate token. Substring matching ("lon"/"lat" anywhere in
-# the name) silently excluded legitimate variables like Precipitation_cumulative
-# ("lat" in cumulative), correlation_index, or along_slope from variable
-# mapping, grouping, and plotting choices. Shared by monolith.R and
-# desc_exploratory_module.R — keep the single definition here.
-is_coord_col <- function(x) {
-  grepl("^(x|y|lon|long|lng|lat|longitude|latitude|easting|northing)$",
-        trimws(x), ignore.case = TRUE)
-}
+# NOTE: is_coord_col() used to live here. It now sits in spatial_metrics.R
+# (with the .coord_names_x / .coord_names_y token lists it shares with
+# perform_cv's coordinate detection), because PSOCK workers source only
+# spatial_helpers.R and never the ui_*.R files. Both files are sourced at
+# startup in the main session, so every UI/server call site is unaffected.
 
 melt_cormat <- function(cormat, value_name = "Corr") {
   rn <- rownames(cormat)

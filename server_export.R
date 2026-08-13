@@ -49,9 +49,64 @@
       tags$span(paste0("Subset: ", cfg$subset, " | View: ", cfg$value_type, " | CRS: ", cfg$crs)),
       tags$br(),
       tags$span(paste0("Boundary: ", cfg$boundary_type, " | Buffer: ", if (is.null(cfg$buffer_mode) || cfg$buffer_mode == "fixed") paste0(cfg$buffer_dist, "m") else "Dynamic", " | Resolution: ", cfg$resolution, " (", cfg$res_mode, ")")),
+      # Method-agnostic settings that used to be invisible here even though they
+      # change the reported numbers; the method-specific ones print only where
+      # they apply (they are NA for the other engines).
+      tags$br(),
+      tags$span(paste0(
+        # An absent field means the entry predates this record (an archived run
+        # restored from an older session), so nothing is asserted about it.
+        if (!is.null(cfg$cv_strategy)) paste0("CV strategy: ", switch(cfg$cv_strategy,
+                                                                     "loocv" = "Standard LOOCV",
+                                                                     "block" = "Spatial Block CV",
+                                                                     "Auto")) else "CV strategy: not recorded",
+        if (!is.null(cfg$cv_repeats) && !is.na(cfg$cv_repeats) && cfg$cv_repeats > 1) paste0(" | Repeated CV: ", cfg$cv_repeats, " fold realizations") else "",
+        if (!is.null(cfg$vif_threshold) && !is.na(cfg$vif_threshold)) paste0(" | Collinearity gate: ", if (is.finite(cfg$vif_threshold)) paste0("VIF > ", cfg$vif_threshold, " dropped") else "Keep all (user override)") else "",
+        if (!is.null(cfg$rf_ntree) && !is.na(cfg$rf_ntree)) paste0(" | RF trees: ", cfg$rf_ntree) else "",
+        if (!is.null(cfg$rfk_uncertainty) && !is.na(cfg$rfk_uncertainty)) paste0(" | RFK uncertainty: ", cfg$rfk_uncertainty) else "",
+        if (!is.null(cfg$ck_nmax) && !is.na(cfg$ck_nmax)) paste0(" | CK nmax: ", cfg$ck_nmax) else ""
+      )),
       if (!is.null(cfg$method_params) && nzchar(cfg$method_params)) tagList(tags$br(), tags$span(cfg$method_params))
     )
   })
+
+  # Reproducibility record for the CURRENT run: the same summary the run-history
+  # entries store, plus the per-locality tuning actually consumed and the
+  # software versions it ran under. jsonlite is a hard dependency of shiny, so
+  # this adds no package to required_packages.
+  output$download_run_config <- downloadHandler(
+    filename = function() {
+      cfg <- rv$run_config_summary
+      paste0("monolith_run_", if (is.null(cfg)) "config" else cfg$run_id, "_",
+             format(Sys.time(), "%Y%m%d_%H%M%S"), ".json")
+    },
+    content = function(file) {
+      cfg <- rv$run_config_summary
+      req(cfg)
+      pkgs <- c("sf", "gstat", "automap", "fields", "randomForest", "terra")
+      pkg_versions <- setNames(
+        lapply(pkgs, function(p) tryCatch(as.character(utils::packageVersion(p)),
+                                          error = function(e) NA_character_)),
+        pkgs
+      )
+      payload <- list(
+        config = cfg,
+        regional_params = rv$disp$regional_params,
+        provenance = list(
+          app_version = cfg$app_version %||% app_version,
+          r_version = R.version.string,
+          platform = R.version$platform,
+          exported_at = format(Sys.time(), "%Y-%m-%d %H:%M:%S %Z"),
+          packages = pkg_versions
+        )
+      )
+      writeLines(
+        jsonlite::toJSON(payload, pretty = TRUE, auto_unbox = TRUE,
+                         null = "null", force = TRUE, POSIXt = "ISO8601"),
+        file
+      )
+    }
+  )
 
   output$run_config_display_map <- renderUI({
     cfg <- rv$run_config_summary
@@ -279,6 +334,17 @@
       }
     ")
     
+    # A GeoTIFF is the data rather than a picture of it, so it is offered only
+    # for items whose payload IS one raster surface, and every styling control
+    # switches off while it is selected.
+    styler_item <- tryCatch(rv$export_registry[[active_styler_item()]], error = function(e) NULL)
+    fmt_choices <- c("PNG" = "png", "TIFF (image)" = "tiff", "PDF" = "pdf", "JPEG" = "jpg")
+    if (!is.null(export_raster_payload(styler_item))) {
+      fmt_choices <- c(fmt_choices, "GeoTIFF (data)" = "gtiff")
+    }
+    image_only_map <- is.null(export_raster_payload(styler_item)) &&
+      !is.null(styler_item) && styler_item$type %in% c("map", "map_combined")
+
     showModal(modalDialog(
       title = "Monolith Export Styler",
       size = "l",
@@ -288,31 +354,53 @@
                tabsetPanel(
                  tabPanel("Basic",
                           wellPanel(
-                            h4("1. Typography Overrides"),
-                            textInput("styler_title", "Main Title", placeholder = "Auto-generated"),
-                            fluidRow(
-                              column(6, textInput("styler_x_title", "X-Axis Label", placeholder = "Default")),
-                              column(6, textInput("styler_y_title", "Y-Axis Label", placeholder = "Default"))
+                            h4("1. Output Quality"),
+                            selectInput("styler_format", "File Format", choices = fmt_choices),
+                            conditionalPanel(
+                              condition = "input.styler_format == 'gtiff'",
+                              tags$p(style = "font-size: 0.8em; color: #31708f; background: #d9edf7; border: 1px solid #bce8f1; padding: 8px; border-radius: 3px;",
+                                     icon("info-circle"),
+                                     " GeoTIFF writes the raster values, coordinate reference system and extent as computed, for use in QGIS or ArcGIS. Typography, palette, DPI and layout settings do not apply to it. Kriging surfaces are written as multi-band files (prediction, then variance).")
                             ),
-                            hr(),
-                            h4("2. Output Quality"),
-                            numericInput("styler_dpi", "Export DPI", value = 300, min = 72, max = 600),
-                            selectInput("styler_format", "File Format",
-                                        choices = c("PNG" = "png", "TIFF" = "tiff", "PDF" = "pdf", "JPEG" = "jpg")),
-                            hr(),
-                            h4("3. Residual / Error Maps"),
-                            selectInput("styler_resid_palette", "Diverging Palette",
-                                        choices = c("Red-Blue" = "RdBu", "Red-Yellow-Blue" = "RdYlBu",
-                                                    "Purple-Orange" = "PuOr", "Brown-Teal" = "BrBG",
-                                                    "Pink-Green" = "PiYG", "Purple-Green" = "PRGn",
-                                                    "Spectral" = "Spectral", "Red-Yellow-Green" = "RdYlGn",
-                                                    "Red-Grey" = "RdGy"),
-                                        selected = "RdBu"),
-                            tags$p(style = "font-size: 0.8em; color: #666; margin-top: -8px;",
-                                   "Applies to residual and point error maps only. Zero is always centered.")
+                            if (image_only_map) {
+                              tags$p(style = "font-size: 0.8em; color: #8a6d3b; background: #fcf8e3; border: 1px solid #faebcc; padding: 8px; border-radius: 3px;",
+                                     icon("exclamation-triangle"),
+                                     " This item is not a single raster surface (a paired comparison map, or point geometry), so it exports as an image only. For GIS layers of point and polygon geometry, use the Export Class Zones and Export Drawn Polygons buttons on the Map Viewer toolbar.")
+                            },
+                            conditionalPanel(
+                              condition = "input.styler_format != 'gtiff'",
+                              numericInput("styler_dpi", "Export DPI", value = 300, min = 72, max = 600),
+                              hr(),
+                              h4("2. Typography Overrides"),
+                              textInput("styler_title", "Main Title", placeholder = "Auto-generated"),
+                              fluidRow(
+                                column(6, textInput("styler_x_title", "X-Axis Label", placeholder = "Default")),
+                                column(6, textInput("styler_y_title", "Y-Axis Label", placeholder = "Default"))
+                              ),
+                              hr(),
+                              h4("3. Residual / Error Maps"),
+                              selectInput("styler_resid_palette", "Diverging Palette",
+                                          choices = c("Red-Blue" = "RdBu", "Red-Yellow-Blue" = "RdYlBu",
+                                                      "Purple-Orange" = "PuOr", "Brown-Teal" = "BrBG",
+                                                      "Pink-Green" = "PiYG", "Purple-Green" = "PRGn",
+                                                      "Spectral" = "Spectral", "Red-Yellow-Green" = "RdYlGn",
+                                                      "Red-Grey" = "RdGy"),
+                                          selected = "RdBu"),
+                              tags$p(style = "font-size: 0.8em; color: #666; margin-top: -8px;",
+                                     "Applies to residual and point error maps only. Zero is always centered.")
+                            )
                           )
                  ),
                  tabPanel("Advanced",
+                          conditionalPanel(
+                            condition = "input.styler_format == 'gtiff'",
+                            wellPanel(
+                              tags$p(style = "margin: 0; color: #666;",
+                                     "Styling does not apply to a GeoTIFF export. Choose an image format on the Basic tab to use these controls.")
+                            )
+                          ),
+                          conditionalPanel(
+                            condition = "input.styler_format != 'gtiff'",
                           wellPanel(
                             h4("Font Sizes (pt)"),
                             fluidRow(
@@ -358,15 +446,28 @@
                             ),
                             numericInput("styler_aspect_ratio", "Custom Aspect Ratio (Width/Height)", value = 1.25, step = 0.1)
                           )
+                          )
                  )
                )
         ),
         column(8,
-               div(style = "background-color: #f0f0f0; border: 1px solid #ccc; height: 600px; display: flex; justify-content: center; align-items: center; overflow: auto;",
-                   uiOutput("styler_preview_dynamic_ui")
+               conditionalPanel(
+                 condition = "input.styler_format != 'gtiff'",
+                 div(style = "background-color: #f0f0f0; border: 1px solid #ccc; height: 600px; display: flex; justify-content: center; align-items: center; overflow: auto;",
+                     uiOutput("styler_preview_dynamic_ui")
+                 ),
+                 tags$p(style="font-size: 0.85em; color: #666; margin-top: 5px;",
+                        "Preview aspect ratio and dimensions are now live. Final export uses 2.5x typographical density enhancement.")
                ),
-               tags$p(style="font-size: 0.85em; color: #666; margin-top: 5px;",
-                      "Preview aspect ratio and dimensions are now live. Final export uses 2.5x typographical density enhancement.")
+               conditionalPanel(
+                 condition = "input.styler_format == 'gtiff'",
+                 div(style = "background-color: #f0f0f0; border: 1px solid #ccc; height: 600px; display: flex; flex-direction: column; justify-content: center; align-items: center; text-align: center; padding: 40px; color: #555;",
+                     icon("layer-group", class = "fa-3x", style = "margin-bottom: 20px; color: #888;"),
+                     tags$h4("GeoTIFF export", style = "margin-top: 0;"),
+                     tags$p("There is nothing to preview: the file carries the raster values themselves, georeferenced in the run's analysis CRS, not a rendering of them."),
+                     tags$p(style = "font-size: 0.9em;", "Open it in a GIS to symbolise it there.")
+                 )
+               )
         )
       ),
       footer = tagList(
@@ -382,6 +483,16 @@
   
   observeEvent(input$styler_local_config, {
     cfg <- input$styler_local_config
+    # A remembered "GeoTIFF" choice must not be restored onto an item that has
+    # no raster payload: that choice is not in the select for such an item, so
+    # restoring it would leave the format blank.
+    if (identical(cfg$format, "gtiff") || identical(cfg$styler_format, "gtiff")) {
+      item <- tryCatch(rv$export_registry[[active_styler_item()]], error = function(e) NULL)
+      if (is.null(export_raster_payload(item))) {
+        cfg$format <- NULL
+        cfg$styler_format <- NULL
+      }
+    }
     sync_styler_config(cfg, session)
   })
 
@@ -433,22 +544,34 @@
     })
   })
   
+  # One place decides what a registry item is written as. "gtiff" only survives
+  # for items that actually hold a raster; anything else silently written as a
+  # GeoTIFF would be a corrupt file, so it falls back to PNG (and the batch
+  # handler says so in the run log).
+  export_ext_for <- function(item, fmt) {
+    if (!item$type %in% c("plot", "map", "map_combined")) return("xlsx")
+    if (identical(fmt, "gtiff") && is.null(export_raster_payload(item))) return("png")
+    styler_format_ext(fmt)
+  }
+
   output$confirm_export <- downloadHandler(
     filename = function() {
       req(active_styler_item())
       item <- rv$export_registry[[active_styler_item()]]
       timestamp <- format(Sys.time(), "%Y%m%d_%H%M%S")
-      ext <- if(item$type %in% c("plot", "map", "map_combined")) (input$styler_format %||% "png") else "xlsx"
+      ext <- export_ext_for(item, input$styler_format)
       sprintf("Export_%s_%s.%s", item$id, timestamp, ext)
     },
     content = function(file) {
       req(active_styler_item())
       item <- rv$export_registry[[active_styler_item()]]
-      ext <- if(item$type %in% c("plot", "map", "map_combined")) (input$styler_format %||% "png") else "xlsx"
-      
+      ext <- export_ext_for(item, input$styler_format)
+
       withProgress(message = paste("Exporting", item$type, "..."), {
         tryCatch({
-          if (item$type %in% c("plot", "map", "map_combined")) {
+          if (identical(ext, "tif")) {
+            write_geotiff(export_raster_payload(item), file)
+          } else if (item$type %in% c("plot", "map", "map_combined")) {
             p_obj <- generate_styled_plot(
               item, input, 
               calibration = 2.5, 
@@ -465,11 +588,15 @@
             } else {
               write.csv(item$obj, file, row.names = FALSE)
             }
+          } else {
+            stop(sprintf("No writer for export type '%s'.", item$type))
           }
-          
+
           removeModal()
         }, error = function(e) {
-          showNotification(paste("Export Failed:", e$message), type = "error")
+          # Swallowing this would return an unwritten file and land the browser
+          # on a dead download URL; raising it puts the reason on screen.
+          stop(safeError(paste("Export Failed:", conditionMessage(e))))
         })
       })
     }
@@ -534,20 +661,27 @@
           incProgress(1/total_steps, detail = paste("Exporting Plot:", item$label))
           
           timestamp <- format(Sys.time(), "%Y%m%d_%H%M%S")
-          ext <- if(item$type %in% c("plot", "map", "map_combined")) (input$styler_format %||% "png") else "png"
+          ext <- export_ext_for(item, input$styler_format)
           if(ext == "csv") ext <- "png" # Extra safety
-          
+          if (identical(input$styler_format, "gtiff") && !identical(ext, "tif")) {
+            rv$log <- paste0(rv$log, "\n[Batch] ", item$label,
+                             " is not a single raster surface; exported as PNG instead of GeoTIFF.")
+          }
+
           filename <- sprintf("Batch_%s_%s.%s", item$id, timestamp, ext)
           filepath <- file.path(temp_dir, filename)
-          
+
           tryCatch({
-            p <- generate_styled_plot(
-              item, input, 
-              calibration = 2.5, 
-              agro_params = tryCatch(agro_params(), error = function(e) NULL)
-            )
-            
-            export_plot_to_file(p, filepath, ext, input)
+            if (identical(ext, "tif")) {
+              write_geotiff(export_raster_payload(item), filepath)
+            } else {
+              p <- generate_styled_plot(
+                item, input,
+                calibration = 2.5,
+                agro_params = tryCatch(agro_params(), error = function(e) NULL)
+              )
+              export_plot_to_file(p, filepath, ext, input)
+            }
             files_to_zip <- c(files_to_zip, filename)
           }, error = function(e) {
             rv$log <- paste0(rv$log, "\n[Batch] Failed to export ", item$label, ": ", e$message)

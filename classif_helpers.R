@@ -28,25 +28,14 @@ if (FALSE) {
 }
 
 # ── Seed sandbox ────────────────────────────────────────────────────────────
-# Same two-sided convention as perform_kriging_loocv / make_cv_folds: seed the
+# Thin alias for the app-wide sandbox `with_seed()` (spatial_vgm.R): seed the
 # RNG, run `expr`, then restore the caller's .Random.seed (or remove it if the
 # caller had none) so classification folds are reproducible without perturbing
-# the global stream.
+# the global stream. The name and the ~40 call sites stay as they are; only the
+# implementation is shared now. Safe by load order: global.R and the
+# classification worker both source spatial_helpers.R BEFORE this file.
 .classif_with_seed <- function(seed, expr) {
-  old_seed <- if (exists(".Random.seed", envir = .GlobalEnv, inherits = FALSE)) {
-    get(".Random.seed", envir = .GlobalEnv, inherits = FALSE)
-  } else {
-    NULL
-  }
-  on.exit({
-    if (!is.null(old_seed)) {
-      assign(".Random.seed", old_seed, envir = .GlobalEnv)
-    } else if (exists(".Random.seed", envir = .GlobalEnv, inherits = FALSE)) {
-      rm(".Random.seed", envir = .GlobalEnv)
-    }
-  }, add = TRUE)
-  set.seed(seed)
-  force(expr)
+  with_seed(seed, expr)
 }
 
 # ── Method registry ─────────────────────────────────────────────────────────

@@ -1,3 +1,11 @@
+# Checked before anything is attached. The README states R >= 4.5.0 as a
+# requirement, and without this the requirement is only documentation: an older
+# session fails much later, with an error from whichever package breaks first
+# rather than one naming the actual cause.
+if (getRversion() < "4.5.0") {
+  stop("Monolith requires R 4.5.0 or higher; this session is R ", getRversion(),
+       ". See README, System Prerequisites.", call. = FALSE)
+}
 
 required_packages <- c(
   "shiny", "shinyjs", "shinyWidgets", "shinyFiles", "shinycssloaders", "DT",
@@ -88,6 +96,15 @@ library(hardhat)
 library(future)
 library(furrr)
 library(promises)
+
+# Single source of the app version for anything the UI displays. DESCRIPTION is
+# the authority (README/CHANGELOG are release documents maintained by hand), so
+# a release only has to touch the version in one place that the code reads.
+app_version <- tryCatch(
+  unname(read.dcf("DESCRIPTION", fields = "Version")[1, 1]),
+  error = function(e) "unknown"
+)
+if (is.na(app_version)) app_version <- "unknown"
 
 showtext_auto()
 

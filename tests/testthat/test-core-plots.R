@@ -251,6 +251,24 @@ test_that("sci_dt header tooltips attach title attributes to matching headers on
   # every Model Performance column except the escaped Moran spans has a tooltip
   tips <- sci_metric_tooltips()
   perf_cols <- c("Source", "RMSE", "R2 (Corr)", "R2 (NSE/Trad)", "Bias (ME)",
-                 "RPD (Prec)", "SMAPE (%)", "Moran's I")
+                 "RPD (Prec)", "SMAPE (%)", "Moran's I", "Moran p")
   expect_true(all(perf_cols %in% names(tips)))
+})
+
+test_that("sci_dt(NULL) renders an empty state and never a NULL payload", {
+  # DT's binding reads `data.lazyRender` BEFORE its own `data === null` branch,
+  # so a NULL payload arriving at a hidden table throws a TypeError inside
+  # Shiny's async message dispatch and every remaining output in that batch is
+  # dropped. The Scientific Analysis tables render eagerly into a hidden tab,
+  # which is exactly that situation, so sci_dt must never hand DT a NULL.
+  dt <- sci_dt(NULL)
+  expect_s3_class(dt, "datatables")
+  expect_equal(nrow(dt$x$data), 1)
+  expect_equal(unname(as.character(dt$x$data[[1]])), "No data for this selection.")
+
+  # Header tooltips are dropped with the data: the custom container is built
+  # from the caller's column names, which the empty state does not have.
+  dt_tips <- sci_dt(NULL, header_tooltips = c(RMSE = "Root mean square error."))
+  expect_s3_class(dt_tips, "datatables")
+  expect_equal(nrow(dt_tips$x$data), 1)
 })

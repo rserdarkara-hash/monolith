@@ -272,6 +272,24 @@ test_that("perform_cv computes Moran's I when coordinates are present", {
   )
   res <- suppressWarnings(perform_cv(cv_df))
   expect_true(is.na(res$moran_i) || is.numeric(res$moran_i))
+  # I travels with its null expectation and significance; the table cannot be
+  # read honestly without them (E[I] = -1/(n-1) is negative, not 0).
+  expect_true(all(c("moran_i", "moran_e", "moran_p") %in% names(res)))
+  if (!is.na(res$moran_i)) {
+    expect_equal(res$moran_e, round(-1 / (res$n - 1), 4))
+    expect_true(is.na(res$moran_p) || (res$moran_p >= 0 && res$moran_p <= 1))
+  }
+})
+
+test_that("perform_cv leaves every Moran field NA when coordinates are absent", {
+  cv_df <- data.frame(
+    var1.pred     = c(10, 20, 30, 40, 50),
+    var1.observed = c(11, 19, 31, 38, 52)
+  )
+  res <- suppressWarnings(perform_cv(cv_df))
+  expect_true(is.na(res$moran_i))
+  expect_true(is.na(res$moran_e))
+  expect_true(is.na(res$moran_p))
 })
 
 # ── get_cv_residuals ──────────────────────────────────────────────────────
@@ -367,6 +385,151 @@ test_that("make_cv_folds returns valid, reproducible, strategy-appropriate folds
   expect_identical(b1, b2)
   expect_equal(length(b1), 100)
   expect_equal(length(unique(b1)), 10)
+})
+
+
+# ── Repeated cross-validation (opt-in) ────────────────────────────────────
+
+test_that("make_cv_folds' default seed is the reference realization", {
+  set.seed(2)
+  coords <- cbind(runif(100, 0, 1000), runif(100, 0, 1000))
+
+  # The default MUST stay CV_FOLD_SEED: every reported single-realization
+  # metric in the app comes from this partition, so a repeat run can never
+  # move a number that was already displayed.
+  expect_identical(make_cv_folds(coords, "auto", 100),
+                   make_cv_folds(coords, "auto", 100, CV_FOLD_SEED))
+
+  # A different seed is a different partition of the same plan (same k, same
+  # balance) - the fold assignment is the ONLY thing a repeat varies.
+  r2 <- make_cv_folds(coords, "auto", 100, CV_FOLD_SEED + 1L)
+  expect_false(identical(make_cv_folds(coords, "auto", 100), r2))
+  expect_equal(sort(unique(r2)), 1:10)
+  expect_true(all(table(r2) == 10))
+  expect_identical(r2, make_cv_folds(coords, "auto", 100, CV_FOLD_SEED + 1L))
+
+  # LOOCV ignores the seed entirely: it is deterministic by construction.
+  expect_identical(make_cv_folds(coords, "loocv", 100, CV_FOLD_SEED + 7L),
+                   seq_len(100))
+})
+
+test_that("cv_repeat_count collapses to one realization for deterministic plans", {
+  # Off / nonsense input
+  expect_equal(cv_repeat_count(NULL, "auto", 100), 1L)
+  expect_equal(cv_repeat_count(1, "auto", 100), 1L)
+  expect_equal(cv_repeat_count(0, "auto", 100), 1L)
+  expect_equal(cv_repeat_count(NA, "auto", 100), 1L)
+  expect_equal(cv_repeat_count("5", "auto", 100), 5L)
+  # Sanity cap
+  expect_equal(cv_repeat_count(1000, "auto", 100), 25L)
+  # Every LOOCV plan repeats the identical partition, so repeats are pointless
+  expect_equal(cv_repeat_count(5, "loocv", 100), 1L)  # explicit LOOCV
+  expect_equal(cv_repeat_count(5, "auto", 40), 1L)    # Auto degrades below n=50
+  expect_equal(cv_repeat_count(5, "block", 20), 1L)   # Block degrades below n=30
+  # Live plans keep the request
+  expect_equal(cv_repeat_count(5, "auto", 100), 5L)
+  expect_equal(cv_repeat_count(3, "block", 100), 3L)
+})
+
+test_that("perform_cv(moran = FALSE) skips only the Moran block", {
+  cv_df <- data.frame(
+    var1.pred     = c(10, 20, 30, 40, 50),
+    var1.observed = c(11, 19, 31, 38, 52),
+    x = c(450000, 450100, 450200, 450300, 450400),
+    y = c(5800000, 5800100, 5800200, 5800300, 5800400)
+  )
+  with_moran <- suppressWarnings(perform_cv(cv_df))
+  no_moran <- suppressWarnings(perform_cv(cv_df, moran = FALSE))
+
+  expect_true(is.na(no_moran$moran_i))
+  expect_true(is.na(no_moran$moran_e))
+  expect_true(is.na(no_moran$moran_p))
+  # Everything else must be bit-identical - repeated CV reports these columns.
+  for (k in c("rmse", "mae", "r2", "nse", "me", "ccc", "nrmse_mean", "rpd", "rpiq", "smape", "n")) {
+    expect_equal(no_moran[[k]], with_moran[[k]], info = k)
+  }
+})
+
+test_that("cv_repeat_frame normalises engine CV objects to one shape", {
+  pts <- make_test_points(12)
+  # krige.cv-style names
+  a <- sf::st_as_sf(data.frame(observed = pts$v, var1.pred = pts$v + 1,
+                               x = sf::st_coordinates(pts)[, 1],
+                               y = sf::st_coordinates(pts)[, 2]),
+                    coords = c("x", "y"), crs = sf::st_crs(pts))
+  # gstat.cv-style names, plus columns nothing downstream needs
+  b <- sf::st_as_sf(data.frame(var1.observed = pts$v, var1.pred = pts$v - 1,
+                               zscore = 0, fold = 1,
+                               x = sf::st_coordinates(pts)[, 1],
+                               y = sf::st_coordinates(pts)[, 2]),
+                    coords = c("x", "y"), crs = sf::st_crs(pts))
+
+  fa <- cv_repeat_frame(a)
+  fb <- cv_repeat_frame(b)
+  expect_s3_class(fa, "sf")
+  expect_equal(setdiff(names(fa), attr(fa, "sf_column")), c("observed", "var1.pred"))
+  expect_identical(names(fa), names(fb))
+  # Identical column sets are what makes pool_cv_sf's rbind safe across
+  # localities whose engines produced different CV objects.
+  expect_s3_class(rbind(fa, fb), "sf")
+  # Metrics are unchanged by the trim
+  expect_equal(perform_cv(fa, moran = FALSE)$rmse, perform_cv(a, moran = FALSE)$rmse)
+
+  expect_null(cv_repeat_frame(NULL))
+  expect_null(cv_repeat_frame(sf::st_as_sf(data.frame(foo = 1, x = 1, y = 1),
+                                           coords = c("x", "y"), crs = 4326)))
+})
+
+test_that("summarise_cv_repeats reports mean and SD across realizations", {
+  pts <- make_test_points(15)
+  mk <- function(offset) {
+    sf::st_as_sf(data.frame(observed = pts$v, var1.pred = pts$v + offset,
+                            x = sf::st_coordinates(pts)[, 1],
+                            y = sf::st_coordinates(pts)[, 2]),
+                 coords = c("x", "y"), crs = sf::st_crs(pts))
+  }
+  reps <- list(mk(1), mk(2), mk(3))
+  summ <- summarise_cv_repeats(reps)
+
+  expect_equal(summ$n_repeats, 3L)
+  expect_equal(summ$n, 15L)
+  # ME is mean(obs - pred) = -offset, so the three realizations are -1, -2, -3
+  expect_equal(unname(summ$mean[["me"]]), -2)
+  expect_equal(unname(summ$sd[["me"]]), sd(c(-1, -2, -3)))
+  # RMSE for a constant offset is the offset itself
+  expect_equal(unname(summ$mean[["rmse"]]), 2)
+  expect_equal(names(summ$mean), names(CV_REPEAT_METRICS))
+
+  # Fewer than two realizations is not a spread; a NULL member poisons the set
+  expect_null(summarise_cv_repeats(list(mk(1))))
+  expect_null(summarise_cv_repeats(list(mk(1), NULL, mk(2))))
+})
+
+test_that("build_cv_repeat_summary pools localities and recycles deterministic ones", {
+  pts <- make_test_points(15, seed = 11)
+  mk <- function(offset) {
+    sf::st_as_sf(data.frame(observed = pts$v, var1.pred = pts$v + offset,
+                            x = sf::st_coordinates(pts)[, 1],
+                            y = sf::st_coordinates(pts)[, 2]),
+                 coords = c("x", "y"), crs = sf::st_crs(pts))
+  }
+  # Locality A repeated three times; locality B under a deterministic LOOCV
+  # plan, so it ships a single frame that must be reused in every pooled repeat.
+  out <- build_cv_repeat_summary(list(A = list(mk(1), mk(2), mk(3)), B = list(mk(2))))
+
+  expect_equal(out$n_repeats, 3L)
+  expect_equal(names(out$per_loc), "A")            # B has no spread of its own
+  expect_equal(unname(out$per_loc$A$mean[["me"]]), -2)
+  expect_false(is.null(out$total))
+  expect_equal(out$total$n, 30L)                   # both localities in every repeat
+  # Pooled ME per repeat: mean of (-1,-2), (-2,-2), (-3,-2) = -1.5, -2, -2.5
+  expect_equal(unname(out$total$mean[["me"]]), -2)
+  expect_equal(unname(out$total$sd[["me"]]), sd(c(-1.5, -2, -2.5)))
+
+  # Nothing to report when no locality produced more than one realization
+  expect_null(build_cv_repeat_summary(list(A = list(mk(1)))))
+  expect_null(build_cv_repeat_summary(list()))
+  expect_null(build_cv_repeat_summary(NULL))
 })
 
 test_that("make_cv_folds preserves the caller's RNG stream", {

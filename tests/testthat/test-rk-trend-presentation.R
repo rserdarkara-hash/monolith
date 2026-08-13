@@ -94,3 +94,25 @@ test_that("build_rk_trend_ui returns tags for summary.lm, NULL otherwise", {
 
   expect_null(build_rk_trend_ui(list(not = "a summary"), "a", "b"))
 })
+
+test_that("shiny::validate is never called unqualified (jsonlite masks it)", {
+  # global.R attaches shiny first and jsonlite later, so from that point on a
+  # bare validate() resolves to jsonlite::validate(), which is
+  # `function(txt) stopifnot(is.character(txt))`. In a renderer that means the
+  # panel dies with "ERROR: is.character(txt) is not TRUE" exactly when the
+  # object EXISTS (need() returns NULL), and silently renders nothing when it
+  # is missing (need() returns the message string, which jsonlite accepts).
+  # The same masking applies to the other jsonlite exports the app could
+  # plausibly call unqualified, so guard all three names.
+  root <- normalizePath(file.path(testthat::test_path(), "..", ".."),
+                        winslash = "/")
+  files <- list.files(root, pattern = "\\.R$", full.names = TRUE)
+  pattern <- "(^|[^:[:alnum:]._$])(validate|flatten|unbox)\\("
+  hits <- unlist(lapply(files, function(f) {
+    lines <- readLines(f, warn = FALSE)
+    idx <- grep(pattern, lines)
+    if (!length(idx)) return(NULL)
+    sprintf("%s:%d: %s", basename(f), idx, trimws(lines[idx]))
+  }))
+  expect_equal(as.character(hits), character(0))
+})

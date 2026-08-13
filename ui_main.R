@@ -95,7 +95,8 @@ ui <- fluidPage(
   ),
   
   div(class = "header-panel", style = "display: flex; justify-content: space-between; align-items: center; padding: 5px 20px;",
-      img(src = "assets/banner.png", class = "header-banner", style = "max-height: 50px; width: auto; object-fit: contain; float: left;"),
+      img(src = "assets/banner.png", class = "header-banner", alt = "Monolith - Spatial Analysis Dashboard",
+          style = "max-height: 50px; width: auto; object-fit: contain; float: left;"),
       div(style = "flex-grow: 1;"),
       div(class = "header-controls", style = "display: flex; align-items: center; gap: 10px; margin-left: auto;",
           tags$style(HTML("
@@ -152,10 +153,16 @@ ui <- fluidPage(
               display: inline-block !important;
             }
           ")),
-          uiOutput("run_status_chip", inline = TRUE),
+          # role/aria-live: the chip is the only place a running job announces
+          # itself outside the run tab, so screen readers should hear it change
+          # ("Running · 40%" -> "Run ready · OK") without moving focus.
+          uiOutput("run_status_chip", inline = TRUE,
+                   role = "status", "aria-live" = "polite"),
           theme_switcher_ui("theme_mod"),
-          actionButton("info_btn", "", icon = icon("info"), class = "btn-header-circle"),
-          actionButton("about_btn", "", icon = icon("question"), class = "btn-header-circle")
+          actionButton("info_btn", "", icon = icon("info"), class = "btn-header-circle",
+                       "aria-label" = "Session information"),
+          actionButton("about_btn", "", icon = icon("question"), class = "btn-header-circle",
+                       "aria-label" = "About Monolith")
       )
   ),
   sidebarLayout(

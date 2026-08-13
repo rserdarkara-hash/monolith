@@ -21,3 +21,10 @@ if (requireNamespace("showtext", quietly = TRUE)) {
 if (requireNamespace("future", quietly = TRUE)) {
   tryCatch(future::plan(future::sequential), error = function(e) NULL)
 }
+
+# estimate_run_duration() resolves its ETA log through monolith_history_file(),
+# which defaults to the user's real per-application data directory. Point it at
+# an empty temp dir for the whole suite so the estimator tests always see a cold
+# start (a developer's accumulated timings would otherwise decide their result)
+# and no test can append to the real history.
+options(monolith_history_dir = file.path(tempdir(), "monolith_test_run_history"))

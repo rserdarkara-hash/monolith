@@ -97,3 +97,38 @@ test_that("export_plot_to_file uses default dimensions when input fields missing
   expect_true(file.exists(tmp))
   expect_true(file.info(tmp)$size > 0)
 })
+
+# ── downloadHandler contract ───────────────────────────────────────────────
+
+test_that("no downloadHandler content function returns without writing its file", {
+  # A downloadHandler cannot decline a request: by the time `content` runs the
+  # browser has already opened the download URL. Returning early without
+  # writing `file` therefore leaves the user on a blank page at
+  # /session/<id>/download/<id>?w= with the app behind them, and a
+  # showNotification fired from there arrives on a page they have just left.
+  # The supported way to refuse is stop(safeError(msg)), which shiny turns into
+  # a readable text response. Guard the whole app: scan each downloadHandler(
+  # call's parenthesis-balanced body for a bare `return(NULL)`.
+  root <- normalizePath(file.path(testthat::test_path(), "..", ".."),
+                        winslash = "/")
+  files <- list.files(root, pattern = "\\.R$", full.names = TRUE)
+
+  hits <- unlist(lapply(files, function(f) {
+    lines <- readLines(f, warn = FALSE)
+    starts <- grep("downloadHandler(", lines, fixed = TRUE)
+    unlist(lapply(starts, function(s) {
+      depth <- 0
+      for (i in seq(s, length(lines))) {
+        depth <- depth +
+          lengths(regmatches(lines[i], gregexpr("(", lines[i], fixed = TRUE))) -
+          lengths(regmatches(lines[i], gregexpr(")", lines[i], fixed = TRUE)))
+        if (grepl("^[[:space:]]*return\\(NULL\\)[[:space:]]*$", lines[i])) {
+          return(sprintf("%s:%d", basename(f), i))
+        }
+        if (depth <= 0 && i > s) break
+      }
+      NULL
+    }))
+  }))
+  expect_equal(as.character(hits), character(0))
+})

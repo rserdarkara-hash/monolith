@@ -4,38 +4,35 @@
 # class-break utilities. Sourced via spatial_helpers.R.
 
 
-update_progress_file <- function(l, prefix, step, total) {
+# Workers cannot touch Shiny reactives, so run state travels to the main
+# session as small files under the session's progress directory. Both writers
+# share this body; `kind` is the file-name stem the pollers watch
+# ("progress_<sid>_<locality>_<prefix>.txt" / "warn_...").
+# Never let a status write break a run: the directory creation and the write
+# are both best-effort.
+.write_status_file <- function(l, prefix, kind, content) {
   clean_l <- gsub("[^a-zA-Z0-9_]", "_", as.character(l))
-  
   progress_dir <- getOption("monolith_progress_dir", tempdir())
   session_id <- getOption("monolith_session_id", "default")
-  
+
   if (!dir.exists(progress_dir)) {
     tryCatch(dir.create(progress_dir, recursive = TRUE, showWarnings = FALSE), error = function(e) NULL)
   }
-  
-  file_name <- file.path(progress_dir, paste0("progress_", session_id, "_", clean_l, "_", prefix, ".txt"))
-  pct <- round((step / total) * 100)
-  
+
+  file_name <- file.path(progress_dir, paste0(kind, "_", session_id, "_", clean_l, "_", prefix, ".txt"))
   tryCatch({
-    writeLines(as.character(pct), file_name)
-  }, error = function(e) {
-  })
+    writeLines(as.character(content), file_name)
+  }, error = function(e) NULL)
+}
+
+# Percent is rounded to whole numbers here; callers that need finer resolution
+# (the classification progress ladder) scale step/total themselves.
+update_progress_file <- function(l, prefix, step, total) {
+  .write_status_file(l, prefix, "progress", round((step / total) * 100))
 }
 
 write_warning_file <- function(l, prefix, message) {
-  clean_l <- gsub("[^a-zA-Z0-9_]", "_", as.character(l))
-  progress_dir <- getOption("monolith_progress_dir", tempdir())
-  session_id <- getOption("monolith_session_id", "default")
-  
-  if (!dir.exists(progress_dir)) {
-    tryCatch(dir.create(progress_dir, recursive = TRUE, showWarnings = FALSE), error = function(e) NULL)
-  }
-  
-  file_name <- file.path(progress_dir, paste0("warn_", session_id, "_", clean_l, "_", prefix, ".txt"))
-  tryCatch({
-    writeLines(as.character(message), file_name)
-  }, error = function(e) NULL)
+  .write_status_file(l, prefix, "warn", message)
 }
 
 get_joint_scale_values <- function(r1_packed, r2_packed, match_scales, is_uncertainty) {
@@ -69,124 +66,124 @@ compute_governing_factors <- function(df, target_col, predictors, n_permutations
   }
   check_cancel()
 
-  # Two-sided seed sandbox (same convention as perform_kriging_loocv):
-  # restore the caller's RNG state, or remove the state set.seed() created
-  old_seed <- if (exists(".Random.seed", envir = .GlobalEnv, inherits = FALSE)) get(".Random.seed", envir = .GlobalEnv, inherits = FALSE) else NULL
-  on.exit({
-    if (!is.null(old_seed)) assign(".Random.seed", old_seed, envir = .GlobalEnv)
-    else if (exists(".Random.seed", envir = .GlobalEnv, inherits = FALSE)) rm(".Random.seed", envir = .GlobalEnv)
-  }, add = TRUE)
-
   formula_str <- paste(target_col, "~ .")
-  set.seed(12345)
-  rf_model <- randomForest::randomForest(as.formula(formula_str), data = df_clean, ntree = rf_ntree, importance = TRUE)
+
+  # Everything that draws runs under the shared two-sided sandbox (with_seed,
+  # spatial_vgm.R). NOTE: the cluster-teardown on.exit() below is registered
+  # inside this block but belongs to THIS function's frame (the block is a
+  # promise evaluated in the caller's frame), so the cluster is still torn down
+  # at function exit, after the RNG state is restored - the same order as the
+  # hand-rolled sandbox this replaced.
+  with_seed(12345, {
+    rf_model <- randomForest::randomForest(as.formula(formula_str), data = df_clean, ntree = rf_ntree, importance = TRUE)
   
-  explainer_rf <- DALEX::explain(
-    model = rf_model, 
-    data = df_clean[, predictors, drop = FALSE], 
-    y = df_clean[[target_col]], 
-    label = "Random Forest",
-    verbose = FALSE
-  )
+    explainer_rf <- DALEX::explain(
+      model = rf_model, 
+      data = df_clean[, predictors, drop = FALSE], 
+      y = df_clean[[target_col]], 
+      label = "Random Forest",
+      verbose = FALSE
+    )
   
-  # model_parts runs `n_permutations` full permutation passes internally and
-  # cannot be interrupted mid-call, so this checkpoint bounds cancel latency at
-  # one importance run (as the tuning grid search does in the classifier).
-  check_cancel()
-  vip <- DALEX::model_parts(explainer_rf, B = n_permutations)
+    # model_parts runs `n_permutations` full permutation passes internally and
+    # cannot be interrupted mid-call, so this checkpoint bounds cancel latency at
+    # one importance run (as the tuning grid search does in the classifier).
+    check_cancel()
+    vip <- DALEX::model_parts(explainer_rf, B = n_permutations)
 
-  vip_df <- as.data.frame(vip)
-  vip_df <- vip_df[vip_df$variable != "_baseline_" & vip_df$variable != "_full_model_", ]
-  vip_agg <- aggregate(dropout_loss ~ variable, data = vip_df, FUN = mean)
-  top_var <- as.character(vip_agg$variable[which.max(vip_agg$dropout_loss)])
+    vip_df <- as.data.frame(vip)
+    vip_df <- vip_df[vip_df$variable != "_baseline_" & vip_df$variable != "_full_model_", ]
+    vip_agg <- aggregate(dropout_loss ~ variable, data = vip_df, FUN = mean)
+    top_var <- as.character(vip_agg$variable[which.max(vip_agg$dropout_loss)])
   
-  check_cancel()
-  ale_prof <- DALEX::model_profile(explainer_rf, variables = top_var, type = "accumulated")
-  ale_df <- as.data.frame(ale_prof$agr_profiles)
+    check_cancel()
+    ale_prof <- DALEX::model_profile(explainer_rf, variables = top_var, type = "accumulated")
+    ale_df <- as.data.frame(ale_prof$agr_profiles)
 
-  pdp_prof <- DALEX::model_profile(explainer_rf, variables = top_var, type = "partial")
-  pdp_df <- as.data.frame(pdp_prof$agr_profiles)
+    pdp_prof <- DALEX::model_profile(explainer_rf, variables = top_var, type = "partial")
+    pdp_df <- as.data.frame(pdp_prof$agr_profiles)
 
-  check_cancel()
-  set.seed(12345)
-  sample_idx <- sample(seq_len(nrow(df_clean)), min(shap_sample_size, nrow(df_clean)))
+    check_cancel()
+    set.seed(12345)
+    sample_idx <- sample(seq_len(nrow(df_clean)), min(shap_sample_size, nrow(df_clean)))
 
-  # Per-observation SHAP is embarrassingly parallel. This runs inside the
-  # gov-module future_promise worker, where the nested plan is sequential, so
-  # escalate only for workloads big enough to amortize worker startup.
-  # seed = TRUE gives each observation its own L'Ecuyer RNG stream, making
-  # results identical under any plan (sequential or parallel).
-  # A PSOCK worker reports availableCores() = 1 (the same constraint the run
-  # pipeline hits), so the caller passes the core count in from the main
-  # session (cores_hint); the in-process default keeps direct calls (tests,
-  # scripts) working. The cluster is owned explicitly and torn down on exit,
-  # with mc.cores restored for the reused promise worker.
-  if (is.null(cores_hint)) {
-    cores_hint <- tryCatch(as.integer(future::availableCores()), error = function(e) 1L)
-  }
-  n_shap_workers <- min(max(0L, cores_hint - 1L), 8L)
-  if (length(sample_idx) >= 50 && n_shap_workers >= 2L && future::nbrOfWorkers() == 1L) {
-    old_mc_cores <- getOption("mc.cores")
-    options(mc.cores = n_shap_workers)
-    shap_cl <- parallelly::makeClusterPSOCK(n_shap_workers)
-    old_plan <- future::plan(future::cluster, workers = shap_cl)
-    on.exit({
-      future::plan(old_plan)
-      parallel::stopCluster(shap_cl)
-      options(mc.cores = old_mc_cores)
-    }, add = TRUE)
-  }
-  # Per-observation cancel check. Deliberately an inline file.exists() on a
-  # PLAIN character path, not a call to check_cancel(): shipping that closure
-  # would drag its enclosing frame (df, df_clean, explainer_rf, ...) into every
-  # worker as an extra global, which is exactly the serialization blow-up the
-  # interpolation pipeline was bitten by. file.exists consumes no RNG, so the
-  # per-observation L'Ecuyer streams — and every SHAP value — are unchanged.
-  cancel_path <- cancel_file
-  shap_list <- furrr::future_map(sample_idx, function(i) {
-    if (!is.null(cancel_path) && file.exists(cancel_path)) {
-      stop("Analysis cancelled by user.", call. = FALSE)
+    # Per-observation SHAP is embarrassingly parallel. This runs inside the
+    # gov-module future_promise worker, where the nested plan is sequential, so
+    # escalate only for workloads big enough to amortize worker startup.
+    # seed = TRUE gives each observation its own L'Ecuyer RNG stream, making
+    # results identical under any plan (sequential or parallel).
+    # A PSOCK worker reports availableCores() = 1 (the same constraint the run
+    # pipeline hits), so the caller passes the core count in from the main
+    # session (cores_hint); the in-process default keeps direct calls (tests,
+    # scripts) working. The cluster is owned explicitly and torn down on exit,
+    # with mc.cores restored for the reused promise worker.
+    if (is.null(cores_hint)) {
+      cores_hint <- tryCatch(as.integer(future::availableCores()), error = function(e) 1L)
     }
-    sp <- DALEX::predict_parts(explainer_rf, new_observation = df_clean[i, predictors, drop = FALSE], type = "shap")
-    sp <- as.data.frame(sp)
-    sp$obs_id <- i
-    sp
-  }, .options = furrr::furrr_options(seed = TRUE, packages = c("DALEX", "randomForest")))
-  shap_df <- do.call(rbind, shap_list)
-  check_cancel()
+    n_shap_workers <- min(max(0L, cores_hint - 1L), 8L)
+    if (length(sample_idx) >= 50 && n_shap_workers >= 2L && future::nbrOfWorkers() == 1L) {
+      old_mc_cores <- getOption("mc.cores")
+      options(mc.cores = n_shap_workers)
+      shap_cl <- parallelly::makeClusterPSOCK(n_shap_workers)
+      old_plan <- future::plan(future::cluster, workers = shap_cl)
+      on.exit({
+        future::plan(old_plan)
+        parallel::stopCluster(shap_cl)
+        options(mc.cores = old_mc_cores)
+      }, add = TRUE)
+    }
+    # Per-observation cancel check. Deliberately an inline file.exists() on a
+    # PLAIN character path, not a call to check_cancel(): shipping that closure
+    # would drag its enclosing frame (df, df_clean, explainer_rf, ...) into every
+    # worker as an extra global, which is exactly the serialization blow-up the
+    # interpolation pipeline was bitten by. file.exists consumes no RNG, so the
+    # per-observation L'Ecuyer streams — and every SHAP value — are unchanged.
+    cancel_path <- cancel_file
+    shap_list <- furrr::future_map(sample_idx, function(i) {
+      if (!is.null(cancel_path) && file.exists(cancel_path)) {
+        stop("Analysis cancelled by user.", call. = FALSE)
+      }
+      sp <- DALEX::predict_parts(explainer_rf, new_observation = df_clean[i, predictors, drop = FALSE], type = "shap")
+      sp <- as.data.frame(sp)
+      sp$obs_id <- i
+      sp
+    }, .options = furrr::furrr_options(seed = TRUE, packages = c("DALEX", "randomForest")))
+    shap_df <- do.call(rbind, shap_list)
+    check_cancel()
 
-  # predict_parts(type = "shap") returns B+1 rows per variable: the aggregated
-  # attribution (B == 0) plus one row per permutation. Summing them inflates the
-  # value by a factor of B+1, so only the aggregated B == 0 row is used.
-  # ONE pass: the previous per-observation subset rescanned all
-  # shap_sample_size x (B+1) x n_predictors rows for each sampled observation
-  # (three full-length comparisons each). Filtering once and grouping by obs_id
-  # gives identical values (the per-observation mean of the same rows).
-  top_rows <- shap_df[shap_df$variable_name == top_var & shap_df$B == 0, , drop = FALSE]
-  contrib_by_obs <- if (nrow(top_rows) > 0) {
-    tapply(top_rows$contribution, as.character(top_rows$obs_id), mean)
-  } else {
-    numeric(0)
-  }
-  # as.numeric(): tapply returns a 1-d array, and the column must be plain
-  # numeric like the sapply() it replaces.
-  contribution <- as.numeric(contrib_by_obs[as.character(sample_idx)])
-  contribution[is.na(contribution)] <- 0
+    # predict_parts(type = "shap") returns B+1 rows per variable: the aggregated
+    # attribution (B == 0) plus one row per permutation. Summing them inflates the
+    # value by a factor of B+1, so only the aggregated B == 0 row is used.
+    # ONE pass: the previous per-observation subset rescanned all
+    # shap_sample_size x (B+1) x n_predictors rows for each sampled observation
+    # (three full-length comparisons each). Filtering once and grouping by obs_id
+    # gives identical values (the per-observation mean of the same rows).
+    top_rows <- shap_df[shap_df$variable_name == top_var & shap_df$B == 0, , drop = FALSE]
+    contrib_by_obs <- if (nrow(top_rows) > 0) {
+      tapply(top_rows$contribution, as.character(top_rows$obs_id), mean)
+    } else {
+      numeric(0)
+    }
+    # as.numeric(): tapply returns a 1-d array, and the column must be plain
+    # numeric like the sapply() it replaces.
+    contribution <- as.numeric(contrib_by_obs[as.character(sample_idx)])
+    contribution[is.na(contribution)] <- 0
 
-  shap_val_df <- data.frame(
-    feature_value = df_clean[[top_var]][sample_idx],
-    contribution = contribution
-  )
+    shap_val_df <- data.frame(
+      feature_value = df_clean[[top_var]][sample_idx],
+      contribution = contribution
+    )
 
-  list(
-    model = rf_model,
-    explainer = explainer_rf,
-    importance = vip_agg,
-    top_var = top_var,
-    ale = ale_df,
-    pdp = pdp_df,
-    shap = shap_val_df
-  )
+    list(
+      model = rf_model,
+      explainer = explainer_rf,
+      importance = vip_agg,
+      top_var = top_var,
+      ale = ale_df,
+      pdp = pdp_df,
+      shap = shap_val_df
+    )
+  })
 }
 
 merge_wrapped_rasters <- function(raster_list) {
@@ -254,9 +251,11 @@ run_regional_interpolation <- function(item, current_method, current_crs, aux_va
   pts_data <- item$pts_data
   m_params <- item$m_params        
   
-  res_out <- list(l = l, r_a = NULL, r_p = NULL, r_res = NULL, bound = NULL, pts = NULL, 
-                  v_emp_act = NULL, v_fit_act = NULL, cv_act = NULL, cv_obj_act = NULL, summ_act = NULL, rf_act = NULL, gstat_act = NULL,
-                  v_emp_pre = NULL, v_fit_pre = NULL, cv_pre = NULL, cv_obj_pre = NULL, summ_pre = NULL, rf_pre = NULL, gstat_pre = NULL, log_msg = "", actual_res = NULL)
+  # cv_reps_* carry the extra fold realizations of an opt-in repeated-CV run
+  # (NULL otherwise); the main session turns them into the mean +/- SD report.
+  res_out <- list(l = l, r_a = NULL, r_p = NULL, r_res = NULL, bound = NULL, pts = NULL,
+                  v_emp_act = NULL, v_fit_act = NULL, cv_act = NULL, cv_obj_act = NULL, cv_reps_act = NULL, summ_act = NULL, rf_act = NULL, gstat_act = NULL,
+                  v_emp_pre = NULL, v_fit_pre = NULL, cv_pre = NULL, cv_obj_pre = NULL, cv_reps_pre = NULL, summ_pre = NULL, rf_pre = NULL, gstat_pre = NULL, log_msg = "", actual_res = NULL)
   
   res_out <- tryCatch({
     if (!is.numeric(pts_data$x)) pts_data$x <- as.numeric(as.character(pts_data$x))
@@ -505,10 +504,11 @@ run_regional_interpolation <- function(item, current_method, current_crs, aux_va
 
     if(nrow(pts_a) >= 3) {
         lags_a <- calc_scientific_lags(pts_a)
-        mp_a <- list(idw_p = m_params$idw_p_act, idw_nmax = m_params$idw_nmax, tps_lambda = m_params$tps_lambda_act, pre_fit = m_params$pre_fit_act, grid_aux = grid_aux, cv_strategy = m_params$cv_strategy, rfk_uncertainty = m_params$rfk_uncertainty, ck_nmax = m_params$ck_nmax, aux_kept = aux_kept_a)
+        mp_a <- list(idw_p = m_params$idw_p_act, idw_nmax = m_params$idw_nmax, tps_lambda = m_params$tps_lambda_act, pre_fit = m_params$pre_fit_act, grid_aux = grid_aux, cv_strategy = m_params$cv_strategy, cv_repeats = m_params$cv_repeats, cancel_file = cancel_file_val, rfk_uncertainty = m_params$rfk_uncertainty, ck_nmax = m_params$ck_nmax, aux_kept = aux_kept_a)
         if (!is.null(cancel_file_val) && file.exists(cancel_file_val)) stop("Model generation cancelled by user.")
         res_a_list <- apply_interpolation(pts_a, "v", current_method, grid_p, aux_vars, lags_a, mp_a, l, "act", vif_threshold)
         res_out$v_emp_act <- res_a_list$v_emp; res_out$v_fit_act <- res_a_list$fit; res_out$cv_act <- res_a_list$cv_metrics; res_out$cv_obj_act <- res_a_list$cv_obj
+        res_out$cv_reps_act <- res_a_list$cv_obj_reps
         res_out$summ_act <- res_a_list$model_summary; res_out$rf_act <- res_a_list$rf_model; res_out$gstat_act <- res_a_list$gstat_obj
         res_out$log_msg <- paste0(res_out$log_msg, "\n", res_a_list$log_msg)
         if (cov_log_msg != "") res_out$log_msg <- paste0(res_out$log_msg, "\n", cov_log_msg)
@@ -523,10 +523,11 @@ run_regional_interpolation <- function(item, current_method, current_crs, aux_va
     if(run_pre) {
         if(nrow(pts_p) >= 3) {
             lags_p <- calc_scientific_lags(pts_p)
-            mp_p <- list(idw_p = m_params$idw_p_pre, idw_nmax = m_params$idw_nmax, tps_lambda = m_params$tps_lambda_pre, pre_fit = m_params$pre_fit_pre, grid_aux = grid_aux, cv_strategy = m_params$cv_strategy, rfk_uncertainty = m_params$rfk_uncertainty, ck_nmax = m_params$ck_nmax, aux_kept = aux_kept_p)
+            mp_p <- list(idw_p = m_params$idw_p_pre, idw_nmax = m_params$idw_nmax, tps_lambda = m_params$tps_lambda_pre, pre_fit = m_params$pre_fit_pre, grid_aux = grid_aux, cv_strategy = m_params$cv_strategy, cv_repeats = m_params$cv_repeats, cancel_file = cancel_file_val, rfk_uncertainty = m_params$rfk_uncertainty, ck_nmax = m_params$ck_nmax, aux_kept = aux_kept_p)
             if (!is.null(cancel_file_val) && file.exists(cancel_file_val)) stop("Model generation cancelled by user.")
             res_p_list <- apply_interpolation(pts_p, "pv", current_method, grid_p, aux_vars, lags_p, mp_p, l, "pre", vif_threshold)
             res_out$v_emp_pre <- res_p_list$v_emp; res_out$v_fit_pre <- res_p_list$fit; res_out$cv_pre <- res_p_list$cv_metrics; res_out$cv_obj_pre <- res_p_list$cv_obj
+            res_out$cv_reps_pre <- res_p_list$cv_obj_reps
             res_out$summ_pre <- res_p_list$model_summary; res_out$rf_pre <- res_p_list$rf_model; res_out$gstat_pre <- res_p_list$gstat_obj
             res_out$log_msg <- paste0(res_out$log_msg, "\n", res_p_list$log_msg)
             
@@ -679,27 +680,84 @@ calc_class_breaks <- function(vv, n_c, style, max_n = 5000L) {
   vv <- vv[is.finite(vv)]
   if (length(vv) < n_c) return(NULL)
 
-  old_seed <- if (exists(".Random.seed", envir = .GlobalEnv, inherits = FALSE)) get(".Random.seed", envir = .GlobalEnv, inherits = FALSE) else NULL
-  on.exit({
-    if (!is.null(old_seed)) assign(".Random.seed", old_seed, envir = .GlobalEnv)
-    else if (exists(".Random.seed", envir = .GlobalEnv, inherits = FALSE)) rm(".Random.seed", envir = .GlobalEnv)
-  }, add = TRUE)
-  set.seed(12345)
+  with_seed(12345, {
+    if (identical(style, "jenks") && length(vv) > max_n) {
+      vv <- sample(vv, max_n)
+    }
 
-  if (identical(style, "jenks") && length(vv) > max_n) {
-    vv <- sample(vv, max_n)
-  }
-
-  tryCatch({
-    # suppressMessages matters: classInt's jenks emits a message() condition
-    # ("Use fisher instead...") that suppressWarnings does not muffle. A stray
-    # message escaping a reactive gets caught by any consumer's tryCatch and
-    # aborts the reactive mid-evaluation, poisoning its cached state.
-    suppressMessages(suppressWarnings(
-      classInt::classIntervals(vv, n = n_c, style = style)$brks[2:n_c]))
-  }, error = function(e) {
-    seq(min(vv, na.rm = TRUE), max(vv, na.rm = TRUE), length.out = n_c + 1)[2:n_c]
+    tryCatch({
+      # suppressMessages matters: classInt's jenks emits a message() condition
+      # ("Use fisher instead...") that suppressWarnings does not muffle. A stray
+      # message escaping a reactive gets caught by any consumer's tryCatch and
+      # aborts the reactive mid-evaluation, poisoning its cached state.
+      suppressMessages(suppressWarnings(
+        classInt::classIntervals(vv, n = n_c, style = style)$brks[2:n_c]))
+    }, error = function(e) {
+      seq(min(vv, na.rm = TRUE), max(vv, na.rm = TRUE), length.out = n_c + 1)[2:n_c]
+    })
   })
+}
+
+# Dissolve a classified interpolation surface into class-zone polygons for GIS
+# export. The classification is the SAME call the map and the Area Coverage
+# table make (terra::classify on the params' rcl_mat with right = FALSE), and
+# the areas are taken from terra::expanse(byValue = TRUE) rather than from the
+# polygon geometry - both for the same reason: an exported zone layer that
+# disagreed with the on-screen map or with the reported hectares would be worse
+# than no export at all. Polygon boundaries are therefore cell boundaries and
+# inherit the grid resolution; they are not smoothed.
+# `params` is the classification_params() list (brks, rcl_mat, labels, n_c).
+# Returns one row per class PRESENT in the surface, or NULL when the surface
+# holds no classified cell.
+build_class_zone_sf <- function(r, params, labels = NULL,
+                                surface = NA_character_,
+                                variable = NA_character_,
+                                method = NA_character_) {
+  if (is.null(r) || is.null(params) || is.null(params$rcl_mat)) return(NULL)
+  if (inherits(r, "PackedSpatRaster")) r <- terra::unwrap(r)
+  if (!inherits(r, "SpatRaster")) return(NULL)
+
+  labs <- if (!is.null(labels)) labels else params$labels
+  if (length(labs) == 0) return(NULL)
+
+  zones <- tryCatch({
+    r_class <- terra::classify(r[[1]], params$rcl_mat, right = FALSE)
+    names(r_class) <- "class_id"
+
+    polys <- terra::as.polygons(r_class, dissolve = TRUE, na.rm = TRUE)
+    if (is.null(polys) || nrow(polys) == 0) return(NULL)
+
+    z <- sf::st_as_sf(polys)
+    ids <- suppressWarnings(as.integer(z$class_id))
+    keep <- !is.na(ids) & ids >= 1 & ids <= length(labs)
+    z <- z[keep, , drop = FALSE]
+    ids <- ids[keep]
+    if (nrow(z) == 0) return(NULL)
+
+    area_df <- as.data.frame(terra::expanse(r_class, unit = "ha", byValue = TRUE))
+    area_ha <- rep(NA_real_, length(ids))
+    if (all(c("value", "area") %in% names(area_df))) {
+      area_ha <- round(area_df$area[match(ids, as.numeric(as.character(area_df$value)))], 2)
+    }
+
+    # The outer breaks are -Inf / Inf by construction (every value falls in a
+    # class); a GIS field cannot hold an infinity, so open ends are written NA.
+    brks <- params$brks
+    fin <- function(x) ifelse(is.finite(x), x, NA_real_)
+
+    sf::st_sf(
+      class     = as.character(labs[ids]),
+      class_min = fin(brks[ids]),
+      class_max = fin(brks[ids + 1L]),
+      area_ha   = area_ha,
+      surface   = as.character(surface),
+      variable  = as.character(variable),
+      method    = as.character(method),
+      geometry  = sf::st_geometry(z)
+    )
+  }, error = function(e) NULL)
+
+  zones
 }
 
 # ── Top-level furrr worker entry points ─────────────────────────────────────

@@ -370,9 +370,24 @@
       "CK"  = paste0("Co-Kriging | Aux: ", paste(input$aux_vars, collapse=", "), " | Nmax: ", input$ck_nmax %||% 15)
     )
     method_params_str <- method_params_list[[input$method]] %||% ""
+    # The RFK trend forest has no sidebar control; it runs at randomForest's
+    # package default via apply_kriging_pipeline. Pinning it here makes the
+    # dispatch explicit and lets the run record state what was actually used
+    # (identical numerically - the engine falls back to this same 200).
+    rfk_ntree_val <- 200
+    # Repeated CV is opt-in (it costs one extra full CV pass per repeat) and
+    # collapses to 1 wherever the resolved plan is LOOCV, which is deterministic.
+    cv_repeats_val <- if (isTRUE(input$cv_repeat_on)) {
+      max(1L, min(25L, suppressWarnings(as.integer(input$cv_repeat_n %||% 5))))
+    } else 1L
+    if (is.na(cv_repeats_val)) cv_repeats_val <- 1L
+    # Everything an archived run needs to be told apart from another one, and
+    # everything a methods section has to state. Two runs that differ only in CV
+    # strategy or in the collinearity decision used to look identical here.
     rv$run_config_summary <- list(
       run_id = rv$run_counter,
       timestamp = Sys.time(),
+      app_version = app_version,
       variable = paste0(meta$label, " [", meta$actual, "]"),
       method = input$method,
       localities = paste(locs, collapse = ", "),
@@ -386,6 +401,15 @@
       res_mode = input$res_mode,
       comp_mode = input$comp_mode,
       sep_fit = input$sep_fit,
+      cv_strategy = input$cv_strategy %||% "auto",
+      cv_repeats = cv_repeats_val,
+      covariates = if (input$method %in% c("RK", "RFK", "CK")) paste(input$aux_vars, collapse = ", ") else NA,
+      # The RESOLVED gate the dispatch passes into run_params: Inf records the
+      # user's "Keep All (Not Recommended)" choice in the collinearity modal.
+      vif_threshold = if (input$method %in% c("RK", "RFK", "CK")) (rv$active_vif_thresh %||% 10) else NA,
+      rf_ntree = if (input$method == "RFK") rfk_ntree_val else NA,
+      rfk_uncertainty = if (input$method == "RFK") (input$rfk_uncertainty %||% "jackknife") else NA,
+      ck_nmax = if (input$method == "CK") (input$ck_nmax %||% 15) else NA,
       method_params = method_params_str
     )
 
@@ -410,7 +434,9 @@
     rv$model_summaries <- list(); rv$rf_models <- list(); rv$gstat_objs <- list()
     rv$cv_metrics_act <- list(); rv$cv_metrics_pre <- list() # Reset CV metrics
     rv$cv_data_act <- list(); rv$cv_data_pre <- list()
+    rv$cv_repeats_act <- NULL; rv$cv_repeats_pre <- NULL
     rv$cv_strategy_sel <- input$cv_strategy %||% "auto"
+    rv$cv_repeats_sel <- cv_repeats_val
     
     update_premium_progress(15, "Validating and Cleaning Spatial Input Data...")
     
@@ -473,7 +499,9 @@
         pre_fit_act = clean_gstat_env(rv$v_fit_list[[paste0(l, "_act")]]),
         pre_fit_pre = clean_gstat_env(if(sep_fit) rv$v_fit_list[[paste0(l, "_pre")]] else rv$v_fit_list[[paste0(l, "_act")]]),
         cv_strategy = input$cv_strategy %||% "auto",
+        cv_repeats = cv_repeats_val,
         rfk_uncertainty = input$rfk_uncertainty %||% "jackknife",
+        rf_ntree = rfk_ntree_val,
         ck_nmax = input$ck_nmax %||% 15
       )
 
@@ -487,6 +515,22 @@
       lapply(df_list, function(item) item$m_params[c("idw_p_act", "idw_p_pre", "tps_lambda_act", "tps_lambda_pre")]),
       vapply(df_list, function(item) item$l, character(1))
     )
+
+    # Manual variogram fits reach every engine in m_params, but only the OK
+    # branch consumes them: RK/RFK refit the RESIDUAL variogram once the trend
+    # is removed and CK fits an LMC (both correct - a value-scale model must not
+    # be imposed on residuals). Say so instead of ignoring the user's tuning in
+    # silence. Gated on Manual mode: stored fits also come from OPTIMIZE ALL
+    # VARIOGRAMS and from previous runs, where nothing was hand-tuned.
+    if (identical(input$vgm_mode, "manual") && current_method %in% c("RK", "RFK", "CK")) {
+      fit_keys <- c(paste0(locs, "_act"), paste0(locs, "_pre"))
+      if (any(fit_keys %in% names(rv$v_fit_list))) {
+        manual_note <- paste0("Manual variogram fits are consumed by Ordinary Kriging only. ",
+                              current_method, " fits its own variogram model (residual variogram for RK/RFK, linear model of coregionalization for CK), so the tuned fit will not be used in this run.")
+        showNotification(manual_note, type = "warning", duration = 12)
+        rv$log <- paste0(rv$log, "\n[Variogram] ", manual_note)
+      }
+    }
 
     update_premium_progress(50, "Executing Parallel Interpolation Algorithms...")
 
@@ -597,10 +641,11 @@
 
       tryCatch({
         batch_elapsed_sec <- as.numeric(difftime(Sys.time(), log_start_time, units = "secs"))
-        history_dir <- "run_history"
-        if (!dir.exists(history_dir)) dir.create(history_dir, recursive = TRUE, showWarnings = FALSE)
-        history_file <- file.path(history_dir, "run_history.csv")
-        
+        # Same resolver the estimator reads, so writer and reader can never
+        # disagree about where the history lives (user data dir, not the wd).
+        history_file <- monolith_history_file()
+        dir.create(dirname(history_file), recursive = TRUE, showWarnings = FALSE)
+
         total_samples <- sum(log_sample_counts)
         per_locality_share <- if (total_samples > 0) {
           batch_elapsed_sec * (log_sample_counts / total_samples)
@@ -632,6 +677,12 @@
       # failing regions the user saw only the last one (and the stacked
       # notifications auto-expire after 15s).
       failed_regions <- list()
+      # Repeated-CV frames, gathered per locality so the pooled ("Total
+      # (Combined)") repeat rows are built from the same locality set as the
+      # pooled row of the metrics table. Localities whose plan degraded to
+      # LOOCV contribute their single (deterministic) frame - see
+      # build_cv_repeat_summary.
+      reps_act <- list(); reps_pre <- list()
 
       for(res in res_all) {
           l <- res$l
@@ -653,6 +704,9 @@
           if(!is.null(res$v_fit_act)) rv$v_fit_list[[paste0(l, "_act")]] <- res$v_fit_act
           if(!is.null(res$cv_act)) rv$cv_metrics_act[[l]] <- res$cv_act
           if(!is.null(res$cv_obj_act)) rv$cv_data_act[[l]] <- res$cv_obj_act
+          if(cv_repeats_val > 1) {
+            reps_act[[l]] <- res$cv_reps_act %||% Filter(Negate(is.null), list(cv_repeat_frame(res$cv_obj_act)))
+          }
           if(!is.null(res$summ_act)) rv$model_summaries[[paste0(l, "_act")]] <- res$summ_act
           if(!is.null(res$rf_act)) rv$rf_models[[paste0(l, "_act")]] <- res$rf_act
           if(!is.null(res$gstat_act)) rv$gstat_objs[[paste0(l, "_act")]] <- res$gstat_act
@@ -661,9 +715,26 @@
           if(!is.null(res$v_fit_pre)) rv$v_fit_list[[paste0(l, "_pre")]] <- res$v_fit_pre
           if(!is.null(res$cv_pre)) rv$cv_metrics_pre[[l]] <- res$cv_pre
           if(!is.null(res$cv_obj_pre)) rv$cv_data_pre[[l]] <- res$cv_obj_pre
+          if(cv_repeats_val > 1) {
+            reps_pre[[l]] <- res$cv_reps_pre %||% Filter(Negate(is.null), list(cv_repeat_frame(res$cv_obj_pre)))
+          }
           if(!is.null(res$summ_pre)) rv$model_summaries[[paste0(l, "_pre")]] <- res$summ_pre
           if(!is.null(res$rf_pre)) rv$rf_models[[paste0(l, "_pre")]] <- res$rf_pre
           if(!is.null(res$gstat_pre)) rv$gstat_objs[[paste0(l, "_pre")]] <- res$gstat_pre
+      }
+
+      if (cv_repeats_val > 1) {
+        # Summarised once per run (not per render): the pooled rows reproject
+        # and pool every locality's frames, which is far too much work to
+        # repeat on each locality-filter change.
+        rv$cv_repeats_act <- build_cv_repeat_summary(reps_act)
+        # rv$has_predictions is only set further down this handler; the
+        # collected frames are the reliable signal that a predicted surface ran.
+        if (length(reps_pre) > 0) rv$cv_repeats_pre <- build_cv_repeat_summary(reps_pre)
+        if (is.null(rv$cv_repeats_act)) {
+          rv$log <- paste0(rv$log, "\n[Repeated CV] No locality produced more than one fold realization",
+                           " (leave-one-out plans are deterministic); reporting single-realization metrics.")
+        }
       }
 
       if (length(failed_regions) > 0) {

@@ -52,22 +52,51 @@ tuning_ui <- function(id, label,
   }
 }
 
+# North-arrow markup for leaflet addControl(). A constant string, so it belongs
+# with the UI builders: both the Map Viewer overlay observer (where it is
+# toggled by show_north) and the Data Setup mini-map (where it is permanent)
+# draw the same arrow.
+map_north_arrow_html <- function() {
+  "<div style='text-align: center; color: white; font-family: Arial, sans-serif; pointer-events: none;'><div style='font-size: 16px; font-weight: bold; line-height: 1; margin-bottom: 4px; text-shadow: 1px 1px 2px black;'>N</div><svg width='30' height='30' viewBox='0 0 24 24' style='filter: drop-shadow(1px 1px 2px black);'><polygon points='12,2 7,22 12,17 17,22' fill='#e74c3c' stroke='white' stroke-width='1.5'/><polygon points='12,2 7,22 12,17' fill='#c0392b' stroke='white' stroke-width='1.5'/></svg></div>"
+}
+
 # Header row (title + PNG download + expand-to-modal buttons) above a plot
 # output. Server side pairs with register_sci_plot() in monolith.R, which
 # wires <id>_expand (modal) and <id>_dl (300-dpi PNG) to the same builder
 # closure that feeds the in-page cached plot.
-sci_plot_card <- function(id, title, height = "350px") {
+#
+# Callers inside a Shiny module pass ids that are ALREADY namespaced, so
+# `expand_id` can be given explicitly instead of being derived from `id`
+# (the Classification Suite keeps its historical button ids that way).
+# `download = FALSE` drops the PNG button for panels with no export handler,
+# `info` takes an icon/tooltip tag shown next to the title, `click_id` wires
+# the plot's click input, and `head_min_height` reserves a constant header
+# height so a title that wraps cannot push its plot out of line with the
+# card beside it.
+sci_plot_card <- function(id, title, height = "350px",
+                          expand_id = paste0(id, "_expand"),
+                          download = TRUE, info = NULL, click_id = NULL,
+                          head_min_height = NULL) {
   div(class = "sci-plot-card",
       div(class = "sci-plot-card-head",
-          h4(title, style = "margin: 0; font-size: 17px;"),
+          style = if (!is.null(head_min_height)) paste0("min-height: ", head_min_height, ";"),
+          h4(title, info, style = "margin: 0; font-size: 17px;"),
           div(class = "sci-plot-card-tools",
-              downloadButton(paste0(id, "_dl"), label = "", icon = icon("download"),
-                             class = "btn-xs btn-light", title = "Download PNG (300 dpi)"),
-              actionButton(paste0(id, "_expand"), label = NULL, icon = icon("expand"),
-                           class = "btn-xs btn-light", title = "Expand (static / interactive)")
+              # Icon-only controls: the title tooltip is a sighted-user
+              # affordance, aria-label is what assistive tech reads.
+              if (isTRUE(download)) {
+                downloadButton(paste0(id, "_dl"), label = "", icon = icon("download"),
+                               class = "btn-xs btn-light", title = "Download PNG (300 dpi)",
+                               "aria-label" = paste0("Download ", title, " as PNG"))
+              },
+              if (!is.null(expand_id)) {
+                actionButton(expand_id, label = NULL, icon = icon("expand"),
+                             class = "btn-xs btn-light", title = "Expand (static / interactive)",
+                             "aria-label" = paste0("Expand ", title))
+              }
           )
       ),
-      plotOutput(id, height = height)
+      plotOutput(id, height = height, click = click_id)
   )
 }
 
@@ -91,12 +120,17 @@ sci_metric_tooltips <- function() {
   c(
     "Source" = "Model and cross-validation design that produced this row's metrics.",
     "RMSE" = "Root Mean Square Error of the cross-validation residuals, in the variable's units. Lower is better.",
+    "NRMSE (%)" = "RMSE expressed as a percentage of the observed mean. Scale-free, so it compares across variables; undefined (NA) when the observed mean is zero.",
+    "MAE" = "Mean Absolute Error of the cross-validation residuals, in the variable's units. Less sensitive to single large errors than RMSE.",
     "R2 (Corr)" = "Squared Pearson correlation between observed and CV-predicted values. Measures association only; insensitive to systematic bias.",
     "R2 (NSE/Trad)" = "Nash-Sutcliffe efficiency (traditional R2): 1 - SSE/SStot against the observed mean. 1 = perfect, 0 = no better than predicting the mean, negative = worse than the mean.",
     "Bias (ME)" = "Mean Error, mean(observed - predicted): positive = model underpredicts on average, negative = overpredicts.",
+    "Lin's CCC (Agree)" = "Lin's Concordance Correlation Coefficient: agreement with the 1:1 line, combining precision (correlation) and accuracy (bias/scale shift). 1 = perfect agreement. NA when either vector is constant.",
     "RPD (Prec)" = "Ratio of Performance to Deviation: SD(observed) / RMSE. Chemometrics convention: > 2 good, 1.4-2 fair, < 1.4 poor.",
+    "RPIQ" = "Ratio of Performance to Interquartile distance: IQR(observed) / RMSE. The RPD analogue for skewed distributions, where the SD is a poor spread measure. Higher is better.",
     "SMAPE (%)" = "Symmetric Mean Absolute Percentage Error: scale-free accuracy; 0% is perfect.",
-    "Moran's I" = "Spatial autocorrelation of the CV residuals (symmetric 8-nearest-neighbour weights). Near 0 = errors are spatially unstructured; clearly positive values signal unmodelled spatial pattern."
+    "Moran's I" = "Spatial autocorrelation of the CV residuals (symmetric 8-nearest-neighbour weights). Read it against its null expectation E[I] = -1/(n-1) (shown per row on hover), not against 0: values near E[I] mean spatially unstructured errors, clearly higher values signal unmodelled spatial pattern. NA* = the statistic could not be computed for this point set.",
+    "Moran p" = "Two-sided significance of Moran's I under the normality assumption (spdep::moran.test). Small p = the residual autocorrelation is unlikely under the no-structure null. NA* where no sampling distribution is available (the all-pairs fallback weighting) or where Moran's I itself could not be computed."
   )
 }
 build_rk_trend_ui <- function(lm_sum, dt_id, raw_id) {
@@ -208,7 +242,9 @@ render_docs_drawer <- function() {
     class = "docs-drawer",
     div(style = "display: flex; justify-content: space-between; align-items: center; border-bottom: 1px solid #eee; padding-bottom: 10px; margin-bottom: 15px;",
         h3("Documentation", style = "margin: 0;"),
-        actionButton("close_docs_btn", icon("times"), class = "btn-light btn-sm", style = "border: none; background: transparent; font-size: 20px;")
+        actionButton("close_docs_btn", icon("times"), class = "btn-light btn-sm",
+                     "aria-label" = "Close documentation",
+                     style = "border: none; background: transparent; font-size: 20px;")
     ),
     tabsetPanel(
       id = "docs_tabs",
@@ -218,7 +254,7 @@ render_docs_drawer <- function() {
       tabPanel("Scientific Guide",
                uiOutput("render_scientific_guide")
       ),
-      tabPanel("Descriptive & Exploratory Suite",
+      tabPanel("Descriptive and Exploratory Suite",
                uiOutput("render_desc_exploratory_guide")
       )
     ),
@@ -227,13 +263,13 @@ render_docs_drawer <- function() {
     # purpose - all behaviour is client-side, no server round-trip.
     div(class = "docs-nav-fab",
         tags$button(type = "button", id = "docs_nav_top", class = "btn",
-                    title = "Back to top", icon("angle-double-up")),
+                    title = "Back to top", "aria-label" = "Back to top", icon("angle-double-up")),
         tags$button(type = "button", id = "docs_nav_prev", class = "btn",
-                    title = "Previous section", icon("angle-up")),
+                    title = "Previous section", "aria-label" = "Previous section", icon("angle-up")),
         tags$button(type = "button", id = "docs_nav_next", class = "btn",
-                    title = "Next section", icon("angle-down")),
+                    title = "Next section", "aria-label" = "Next section", icon("angle-down")),
         tags$button(type = "button", id = "docs_nav_bottom", class = "btn",
-                    title = "Jump to end", icon("angle-double-down"))
+                    title = "Jump to end", "aria-label" = "Jump to end", icon("angle-double-down"))
     ),
     tags$script(HTML("
       (function() {
@@ -316,7 +352,17 @@ info_tooltip <- function(id, text) {
 # pageLength, rows beyond the first page would be silently unreachable in
 # variable-length tables (e.g. per-locality variogram parameters).
 sci_dt <- function(df, escape = TRUE, header_tooltips = NULL) {
-  if (is.null(df)) return(NULL)
+  # Never return NULL: DT's htmlwidgets binding reads `data.lazyRender` BEFORE
+  # its own `data === null` branch, so a NULL payload arriving at a table that
+  # is currently hidden (this tab renders eagerly, suspendWhenHidden = FALSE)
+  # throws a TypeError inside Shiny's async message dispatch and the remaining
+  # outputs in that batch are never applied. An explicit empty state is also a
+  # better answer for the reader than a blank slot.
+  if (is.null(df)) {
+    df <- data.frame(Status = "No data for this selection.")
+    header_tooltips <- NULL
+    escape <- TRUE
+  }
   opts <- list(dom = 't', paging = FALSE, scrollX = TRUE)
   if (!is.null(header_tooltips)) {
     ths <- lapply(names(df), function(nm) {

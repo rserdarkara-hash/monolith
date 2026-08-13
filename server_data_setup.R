@@ -448,7 +448,10 @@
     needed <- unique(needed)
 
     df_map <- rv$user_data %>% dplyr::select(dplyr::all_of(needed)) %>% na.omit()
-    if (nrow(df_map) == 0) return(NULL)
+    # req(), not return(NULL): leaflet's renderValue destroys the existing map
+    # BEFORE it dereferences the payload, so a NULL payload wipes the widget and
+    # then throws inside Shiny's message dispatch, dropping the rest of the batch.
+    req(nrow(df_map) > 0)
 
 
     pts <- tryCatch({
@@ -495,7 +498,28 @@
     } else {
       m <- m %>% addCircleMarkers(radius = input$pt_marker_size %||% 3, color = "cyan", opacity = 1)
     }
+
+    # Validation adornments, always on (this map exists to be checked against
+    # reality; the Map Viewer's checkboxes are there because those maps are
+    # exported, which this one is not). zoomControl is off, so topleft is free;
+    # the locality legend sits bottomright and the scale bar bottomleft.
+    m <- m %>%
+      leaflet::addScaleBar(position = "bottomleft",
+                           options = leaflet::scaleBarOptions(metric = TRUE, imperial = FALSE)) %>%
+      leaflet::addControl(html = map_north_arrow_html(), position = "topleft",
+                          layerId = "north_ctrl")
+
     session_state$minimap_rendered <- TRUE
+    # Remember the sample bounds (WGS84) so the reveal handler in chunk H can
+    # re-frame the map: Leaflet's auto-fit at creation is computed for whatever
+    # size the container had at render time, and this map is routinely rendered
+    # while its tab is hidden (a run re-renders it, and the run observer
+    # switches to the Map Viewer at dispatch).
+    session_state$minimap_bbox <- tryCatch({
+      bb <- sf::st_bbox(pts)
+      c(xmin = unname(bb[["xmin"]]), ymin = unname(bb[["ymin"]]),
+        xmax = unname(bb[["xmax"]]), ymax = unname(bb[["ymax"]]))
+    }, error = function(e) NULL)
     m
   })
 

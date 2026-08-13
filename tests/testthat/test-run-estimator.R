@@ -1,5 +1,66 @@
 # test-run-estimator.R — tests for estimate_run_duration from monolith.R.
 
+test_that("monolith_history_file resolves outside the working directory", {
+  # The ETA log used to be built RELATIVE to the process working directory, so
+  # it landed wherever the app happened to be started from: silently unwritable
+  # on a read-only deployment, and shared between concurrent sessions. It now
+  # resolves under the user's per-application data directory. setup.R points the
+  # override at a temp dir for the whole suite, so clear it to see the default.
+  default_path <- withr::with_options(
+    list(monolith_history_dir = NULL),
+    monolith_history_file()
+  )
+  norm <- function(p) normalizePath(p, winslash = "/", mustWork = FALSE)
+
+  expect_equal(basename(default_path), "run_history.csv")
+  expect_equal(norm(dirname(default_path)),
+               norm(tools::R_user_dir("monolith", which = "data")))
+  expect_false(identical(norm(dirname(default_path)),
+                         norm(file.path(getwd(), "run_history"))))
+
+  # The override is what a locked-down deployment (and this suite) relies on.
+  expect_equal(
+    withr::with_options(list(monolith_history_dir = file.path(tempdir(), "hist_opt")),
+                        monolith_history_file()),
+    file.path(tempdir(), "hist_opt", "run_history.csv")
+  )
+})
+
+test_that("a cold-start estimate is labelled rough and a history-fitted one is not", {
+  # Below five matching records the number comes from a formula calibrated on
+  # two hardware measurements, with unverified multipliers for OK/IDW/TPS, so it
+  # must not present itself with the confidence of a history-fitted estimate.
+  tmp_dir <- tempfile("run_estimator_rough_")
+  dir.create(tmp_dir)
+  old_hist <- getOption("monolith_history_dir")
+  options(monolith_history_dir = tmp_dir)
+  on.exit({
+    options(monolith_history_dir = old_hist)
+    unlink(tmp_dir, recursive = TRUE)
+  }, add = TRUE)
+
+  cold <- estimate_run_duration(c(100), "OK", comp_mode = FALSE, cores = 4)
+  expect_match(cold$est_time_str, "(rough estimate)", fixed = TRUE)
+
+  write.csv(
+    data.frame(
+      timestamp = rep("2026-08-13 12:00:00", 6),
+      method = rep("OK", 6),
+      comp_mode = rep(FALSE, 6),
+      n_locs_in_batch = rep(1, 6),
+      n_samples = rep(100, 6),
+      cores_used = rep(4, 6),
+      batch_elapsed_sec = rep(40, 6),
+      per_locality_share_sec = rep(40, 6),
+      stringsAsFactors = FALSE
+    ),
+    monolith_history_file(), row.names = FALSE
+  )
+
+  warm <- estimate_run_duration(c(100), "OK", comp_mode = FALSE, cores = 4)
+  expect_false(grepl("rough estimate", warm$est_time_str, fixed = TRUE))
+})
+
 test_that("estimate_run_duration returns list with expected names", {
   result <- estimate_run_duration(c(50, 100, 75), "OK", comp_mode = FALSE, cores = 4)
   expected_names <- c("est_time_sec", "est_time_str", "estimate_text",
@@ -90,17 +151,19 @@ test_that("estimate_run_duration distributed time benefits from more cores", {
 })
 
 test_that("estimate_run_duration prefers history with matching cores when enough records exist", {
-  old_wd <- getwd()
+  # The history file is resolved through monolith_history_file(); redirect the
+  # option rather than the working directory so the test never writes into the
+  # repo (or into the user's real data dir).
   tmp_dir <- tempfile("run_estimator_cores_")
   dir.create(tmp_dir)
-  setwd(tmp_dir)
+  old_hist <- getOption("monolith_history_dir")
+  options(monolith_history_dir = tmp_dir)
   on.exit({
-    setwd(old_wd)
+    options(monolith_history_dir = old_hist)
     unlink(tmp_dir, recursive = TRUE)
   }, add = TRUE)
 
-  dir.create("run_history")
-  history_file <- file.path("run_history", "run_history.csv")
+  history_file <- monolith_history_file()
 
   # Create mock run history data:
   # - method = "OK"
@@ -151,17 +214,16 @@ test_that("a malformed run history falls back to the cold-start formula, not a h
   # through the filter chain therefore left the partially-filtered frame in
   # place and the ETA lm was fitted on it. The whole block is now the tryCatch
   # value, so any failure yields NULL and the cold-start path.
-  old_wd <- getwd()
   tmp_dir <- tempfile("run_estimator_broken_")
   dir.create(tmp_dir)
-  setwd(tmp_dir)
+  old_hist <- getOption("monolith_history_dir")
+  options(monolith_history_dir = tmp_dir)
   on.exit({
-    setwd(old_wd)
+    options(monolith_history_dir = old_hist)
     unlink(tmp_dir, recursive = TRUE)
   }, add = TRUE)
 
-  dir.create("run_history")
-  history_file <- file.path("run_history", "run_history.csv")
+  history_file <- monolith_history_file()
 
   cold <- estimate_run_duration(c(100), "OK", comp_mode = FALSE, cores = 4)
 

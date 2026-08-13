@@ -1,7 +1,46 @@
 # spatial_vgm.R - variogram machinery: calc_scientific_lags, robust_vgm_fit
 # (candidate screening policy - see spatial-model-conventions), clean_gstat_env
-# and suggest_lmc_model. Sourced via spatial_helpers.R.
+# and suggest_lmc_model. Also hosts the shared RNG sandbox (below). Sourced via
+# spatial_helpers.R.
 
+
+# ── RNG sandbox ─────────────────────────────────────────────────────────────
+# ONE implementation of the app's seeding convention, shared by every helper
+# that draws random numbers (fold building, kriging LOOCV, the IDW power
+# search, Moran's duplicate jitter, class breaks, the governing-factors forest)
+# and by classif_helpers.R's .classif_with_seed. It lives at the top of the
+# FIRST fragment spatial_helpers.R sources, so every later fragment - and every
+# PSOCK worker that sources the master - sees it.
+#
+# Two-sided by contract: the caller's .Random.seed is restored on exit, or
+# REMOVED when the caller had none, so a helper never leaves a seeded stream
+# behind for the next computation to inherit.
+#
+# `expr` is a promise, so it is evaluated in the CALLER's frame: assignments,
+# on.exit() and return() inside the block behave exactly as they would without
+# the wrapper, and the block's value is the wrapper's value.
+with_rng_sandbox <- function(expr) {
+  old_seed <- if (exists(".Random.seed", envir = .GlobalEnv, inherits = FALSE)) {
+    get(".Random.seed", envir = .GlobalEnv, inherits = FALSE)
+  } else {
+    NULL
+  }
+  on.exit({
+    if (!is.null(old_seed)) assign(".Random.seed", old_seed, envir = .GlobalEnv)
+    else if (exists(".Random.seed", envir = .GlobalEnv, inherits = FALSE)) rm(".Random.seed", envir = .GlobalEnv)
+  }, add = TRUE)
+  force(expr)
+}
+
+# Sandboxed AND seeded - the common case (reproducible draws that leave the
+# caller's stream untouched). Sites that seed CONDITIONALLY (optimize_idw_p)
+# use with_rng_sandbox directly and keep their own set.seed inside the block.
+with_seed <- function(seed, expr) {
+  with_rng_sandbox({
+    set.seed(seed)
+    expr
+  })
+}
 
 
 suggest_lmc_model <- function(primary_vgm) {

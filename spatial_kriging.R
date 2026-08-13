@@ -11,36 +11,28 @@ optimize_idw_p <- function(pts, target_var, nmax = 12) {
   
   n_folds <- if(nrow(pts) > 50) 5 else nrow(pts)
 
-  # Two-sided seed sandbox: restore the caller's RNG state, or remove the
-  # state set.seed() created if none existed before (same pattern as
-  # perform_kriging_loocv)
-  old_seed <- if (exists(".Random.seed", envir = .GlobalEnv, inherits = FALSE)) get(".Random.seed", envir = .GlobalEnv, inherits = FALSE) else NULL
-  on.exit({
-    if (!is.null(old_seed)) assign(".Random.seed", old_seed, envir = .GlobalEnv)
-    else if (exists(".Random.seed", envir = .GlobalEnv, inherits = FALSE)) rm(".Random.seed", envir = .GlobalEnv)
-  }, add = TRUE)
-
-  if (n_folds == nrow(pts)) {
-    fold_assign <- 1:nrow(pts)
-  } else {
-    set.seed(12345)
-    fold_assign <- sample(rep(1:n_folds, length.out = nrow(pts)))
-  }
-
-  rmses <- sapply(factors, function(f) {
-    cv <- tryCatch({ krige.cv(form, pts, nmax = nmax, set = list(idp = f), nfold = fold_assign, debug.level = 0) }, error = function(e) NULL)
-    if(!is.null(cv)) {
-      return(sqrt(mean(cv$residual^2, na.rm = TRUE)))
+  # Seeding is CONDITIONAL here (the LOOCV branch needs no draws at all), so
+  # this uses the plain sandbox and keeps its own set.seed inside.
+  with_rng_sandbox({
+    if (n_folds == nrow(pts)) {
+      fold_assign <- 1:nrow(pts)
     } else {
-      return(Inf)
+      set.seed(12345)
+      fold_assign <- sample(rep(1:n_folds, length.out = nrow(pts)))
     }
+
+    rmses <- sapply(factors, function(f) {
+      cv <- tryCatch({ krige.cv(form, pts, nmax = nmax, set = list(idp = f), nfold = fold_assign, debug.level = 0) }, error = function(e) NULL)
+      if(!is.null(cv)) {
+        sqrt(mean(cv$residual^2, na.rm = TRUE))
+      } else {
+        Inf
+      }
+    })
+
+    best_idx <- which.min(rmses)
+    if(length(best_idx) > 0 && rmses[best_idx] != Inf) factors[best_idx] else 2.0
   })
-  
-  best_idx <- which.min(rmses)
-  if(length(best_idx) > 0 && rmses[best_idx] != Inf) {
-    return(factors[best_idx])
-  }
-  return(2.0)
 }
 
 # "Constant" is a relative property, not an absolute one. An absolute variance
@@ -155,7 +147,27 @@ detect_multicollinearity_engine <- function(df, vars = NULL, vif_threshold = 10,
         max_abs <- max(abs(cor_mat_no_diag), na.rm = TRUE)
         if (!is.finite(max_abs)) break
         max_idx <- which(abs(cor_mat_no_diag) == max_abs, arr.ind = TRUE)[1,]
-        var_to_drop <- kept[max_idx[1]]
+        pair <- kept[c(max_idx[1], max_idx[2])]
+        # Drop the more GLOBALLY redundant member of the maximally-correlated
+        # pair, measured as its mean |r| against every OTHER retained covariate.
+        # The previous rule took kept[max_idx[1]], i.e. whichever member came
+        # first in COLUMN order, so simply reordering the uploaded columns could
+        # change which covariate survived and therefore the fitted model. Ties
+        # break on the alphabetically later name (C collation) so the outcome is
+        # a property of the data, not of the file layout.
+        mean_abs_r <- vapply(pair, function(v) {
+          others <- setdiff(kept, v)
+          if (!length(others)) return(0)
+          m <- mean(abs(cor_mat[v, others]), na.rm = TRUE)
+          if (is.finite(m)) m else 0
+        }, numeric(1))
+        var_to_drop <- if (mean_abs_r[1] > mean_abs_r[2]) {
+          pair[1]
+        } else if (mean_abs_r[2] > mean_abs_r[1]) {
+          pair[2]
+        } else {
+          sort(pair, decreasing = TRUE, method = "radix")[1]
+        }
         dropped <- c(dropped, var_to_drop)
         kept <- setdiff(kept, var_to_drop)
         next
@@ -220,9 +232,12 @@ check_vif <- function(df, threshold = 10) {
     if (!length(vif_res$dropped)) return("")
     return(paste0(" [Covariate gate] Dropped: ", paste(vif_res$dropped, collapse = ", ")))
   }
+  # The bracketed prefixes are kept verbatim (they are what a user greps the run
+  # log for); the reason is appended so the line reads without knowing what the
+  # tag means.
   paste0(
-    if (length(vif_res$dropped_vif)) paste0(" [VIF] Dropped: ", paste(vif_res$dropped_vif, collapse = ", ")) else "",
-    if (length(vif_res$dropped_constant)) paste0(" [Constant] Dropped: ", paste(vif_res$dropped_constant, collapse = ", ")) else ""
+    if (length(vif_res$dropped_vif)) paste0(" [VIF] Dropped (variance inflation above threshold; collinear with retained covariates): ", paste(vif_res$dropped_vif, collapse = ", ")) else "",
+    if (length(vif_res$dropped_constant)) paste0(" [Constant] Dropped (no variance in this locality's data): ", paste(vif_res$dropped_constant, collapse = ", ")) else ""
   )
 }
 
@@ -264,8 +279,11 @@ krige_covariates <- function(data, grid_p, aux_vars, lags, method_params, on_var
 
 
 init_interpolation_res <- function() {
-  list(v_emp = NULL, fit = NULL, cv_metrics = NULL, model_summary = NULL, 
-       rf_model = NULL, gstat_obj = NULL, res_sf = NULL, log_msg = "", cv_obj = NULL, residuals = NULL)
+  # cv_obj_reps stays NULL unless the user asked for repeated CV: it holds one
+  # trimmed CV frame per fold realization (see add_cv_repeats).
+  list(v_emp = NULL, fit = NULL, cv_metrics = NULL, model_summary = NULL,
+       rf_model = NULL, gstat_obj = NULL, res_sf = NULL, log_msg = "", cv_obj = NULL,
+       cv_obj_reps = NULL, residuals = NULL)
 }
 
 safe_run_cv <- function(res, expr, label, n_data) {
@@ -293,6 +311,61 @@ safe_run_cv <- function(res, expr, label, n_data) {
     res$residuals <- NULL
   }
   return(res)
+}
+
+# ── Repeated cross-validation, engine side ──────────────────────────────────
+# `cv_fun(seed)` re-runs an engine's OWN cross-validation with the fold seed it
+# is handed; every engine already builds its folds through make_cv_folds, so a
+# repeat differs from the reference run in the PARTITION only (model seeds,
+# data, variogram policy and neighbourhood are untouched).
+#
+# Contract, deliberately strict: a locality either ships exactly `reps` frames
+# or none. A partial set would make "mean +/- SD over R repeats" mean different
+# things in different rows of the same table, and pooling would silently mix
+# repeat counts across localities. On any failure the run keeps its normal
+# single-realization metrics and says so in the log.
+add_cv_repeats <- function(res, cv_fun, method_params, n_data, label,
+                           l = "region", prefix = "act") {
+  reps <- cv_repeat_count(method_params$cv_repeats, method_params$cv_strategy, n_data)
+  if (reps < 2 || is.null(res$cv_obj)) return(res)
+
+  frames <- vector("list", reps)
+  frames[[1]] <- cv_repeat_frame(res$cv_obj)
+  cancel_file <- method_params$cancel_file
+  cancelled <- FALSE
+  for (r in 2:reps) {
+    # One cancel checkpoint per repeat: repeated CV is by construction the
+    # longest stretch of a run, and a single CV pass is the coarsest
+    # interruptible unit available (the engines are black boxes). BREAK rather
+    # than stop(): both callers wrap this in a tryCatch that turns any error
+    # into an engine fallback (OK for RK/RFK/CK, IDW for TPS), so raising here
+    # would silently convert a cancellation into a different model. The surface
+    # is already computed at this point; run_regional_interpolation's own
+    # checkpoints abort the run at the next surface or locality.
+    if (!is.null(cancel_file) && file.exists(cancel_file)) { cancelled <- TRUE; break }
+    frames[[r]] <- tryCatch(cv_repeat_frame(cv_fun(CV_FOLD_SEED + r - 1L)),
+                            error = function(e) NULL)
+    # 55 -> 90: keeps the per-locality progress bar moving through the repeats
+    # instead of parking it where the single-realization run used to finish.
+    update_progress_file(l, prefix, 55 + round(35 * (r / reps)), 100)
+  }
+
+  if (cancelled || any(vapply(frames, is.null, logical(1)))) {
+    res$log_msg <- paste0(res$log_msg, "\n[Repeated CV] ", label,
+                          if (cancelled) ": cancelled; reporting the single-realization metrics only."
+                          else ": a fold realization could not be evaluated; reporting the single-realization metrics only.")
+    return(res)
+  }
+  res$cv_obj_reps <- frames
+  res
+}
+
+# safe_run_cv for the reference realization (seed CV_FOLD_SEED - identical to a
+# run with repeats switched off), then the optional extra realizations.
+run_cv_with_repeats <- function(res, cv_fun, method_params, n_data, label,
+                                l = "region", prefix = "act") {
+  res <- safe_run_cv(res, cv_fun(CV_FOLD_SEED), label, n_data)
+  add_cv_repeats(res, cv_fun, method_params, n_data, label, l, prefix)
 }
 
 # Scrub non-finite prediction and variance cells (NaN/Inf produced by degenerate
@@ -346,6 +419,35 @@ rf_infinitesimal_jackknife_var <- function(pred_individual, inbag, chunk = 2000L
   out
 }
 
+# Shared "the covariate engine failed, fall back to Ordinary Kriging" tail,
+# used by apply_kriging_pipeline (RK/RFK) and apply_CK. Refits the variogram of
+# the MEASURED values (not residuals - there is no trend model left) and runs
+# the same seeded-fold CV as every other path.
+#   engine_label   : name used in the warning file ("RK", "RFK", "CK")
+#   cv_label       : label safe_run_cv puts on a CV failure in the run log
+#   tag_model_type : CK stamps the fallback surface; the RK/RFK path does not
+# The warning wording ("... using Ordinary Kriging fallback.") is matched by the
+# fallback-diagnostics UI and the tests - do not reword it here.
+.ok_fallback <- function(res, data, target_var, grid_p, lags, method_params,
+                         l, prefix, engine_label, cv_label, tag_model_type = FALSE) {
+  write_warning_file(l, prefix, paste0(engine_label, " failed, using Ordinary Kriging fallback."))
+  form_ok <- reformulate("1", response = target_var)
+  res$v_emp <- variogram(form_ok, data, width = lags$width, cutoff = lags$cutoff)
+  res$fit <- robust_vgm_fit(res$v_emp, data[[target_var]])
+  res$res_sf <- krige(form_ok, data, grid_p, model = res$fit, debug.level = 0)
+  if (tag_model_type) res$res_sf$model_type <- "Ordinary Kriging (Fallback)"
+  # Consistent with every other CV path: an explicit seeded fold vector
+  # (make_cv_folds) instead of a scalar nfold, so gstat never draws its own
+  # unseeded folds here. Also honours the user's CV strategy on this path.
+  coords_okfb <- sf::st_coordinates(data)
+  cv_okfb <- function(seed) {
+    krige.cv(form_ok, data, model = res$fit,
+             nfold = make_cv_folds(coords_okfb, method_params$cv_strategy, nrow(data), seed),
+             debug.level = 0)
+  }
+  run_cv_with_repeats(res, cv_okfb, method_params, nrow(data), cv_label, l, prefix)
+}
+
 apply_kriging_pipeline <- function(engine = c("OK", "RK", "RFK"), data, target_var, grid_p, lags, method_params, aux_vars = NULL, l = "region", prefix = "act", vif_threshold = 10) {
   engine <- match.arg(engine)
   res <- init_interpolation_res()
@@ -357,8 +459,13 @@ apply_kriging_pipeline <- function(engine = c("OK", "RK", "RFK"), data, target_v
     res$fit <- if(!is.null(method_params$pre_fit)) method_params$pre_fit else robust_vgm_fit(res$v_emp, data[[target_var]])
     
     update_progress_file(l, prefix, 50, 100)
-    folds_ok <- make_cv_folds(sf::st_coordinates(data), method_params$cv_strategy, nrow(data))
-    res <- safe_run_cv(res, krige.cv(form_ok, data, model = res$fit, nfold = folds_ok, debug.level = 0), "OK", nrow(data))
+    coords_ok <- sf::st_coordinates(data)
+    cv_ok <- function(seed) {
+      krige.cv(form_ok, data, model = res$fit,
+               nfold = make_cv_folds(coords_ok, method_params$cv_strategy, nrow(data), seed),
+               debug.level = 0)
+    }
+    res <- run_cv_with_repeats(res, cv_ok, method_params, nrow(data), "OK", l, prefix)
     res$res_sf <- krige(form_ok, data, grid_p, model = res$fit, debug.level = 0)
   } else {
     update_progress_file(l, prefix, 10, 100)
@@ -415,7 +522,12 @@ apply_kriging_pipeline <- function(engine = c("OK", "RK", "RFK"), data, target_v
           var1.pred = as.vector(pred_trend$fit + res_krig$var1.pred), 
           var1.var = as.vector(trend_var + res_krig$var1.var)
         )
-        res <- safe_run_cv(res, perform_kriging_loocv(data, target_var, aux_vars, calc_scientific_lags, robust_vgm_fit, model_type = "lm", l, prefix, cv_strategy = method_params$cv_strategy), "RK", nrow(data))
+        cv_rk <- function(seed) {
+          perform_kriging_loocv(data, target_var, aux_vars, calc_scientific_lags, robust_vgm_fit,
+                                model_type = "lm", l, prefix,
+                                cv_strategy = method_params$cv_strategy, fold_seed = seed)
+        }
+        res <- run_cv_with_repeats(res, cv_rk, method_params, nrow(data), "RK", l, prefix)
       } else if (engine == "RFK") {
         rf_ntree <- if (!is.null(method_params$rf_ntree)) method_params$rf_ntree else 200
         rf_mod <- randomForest::randomForest(form_reg, data = data, ntree = rf_ntree, importance = TRUE, keep.inbag = TRUE)
@@ -447,7 +559,12 @@ apply_kriging_pipeline <- function(engine = c("OK", "RK", "RFK"), data, target_v
           var1.pred = as.vector(pred_trend_all$aggregate + res_krig$var1.pred), 
           var1.var = as.vector(trend_var + res_krig$var1.var)
         )
-        res <- safe_run_cv(res, perform_kriging_loocv(data, target_var, aux_vars, calc_scientific_lags, robust_vgm_fit, model_type = "rf", l, prefix, rf_ntree = rf_ntree, cv_strategy = method_params$cv_strategy), "RFK", nrow(data))
+        cv_rfk <- function(seed) {
+          perform_kriging_loocv(data, target_var, aux_vars, calc_scientific_lags, robust_vgm_fit,
+                                model_type = "rf", l, prefix, rf_ntree = rf_ntree,
+                                cv_strategy = method_params$cv_strategy, fold_seed = seed)
+        }
+        res <- run_cv_with_repeats(res, cv_rfk, method_params, nrow(data), "RFK", l, prefix)
       }
       res
     }, error = function(e) {
@@ -458,16 +575,10 @@ apply_kriging_pipeline <- function(engine = c("OK", "RK", "RFK"), data, target_v
     res <- krig_res
     
     if (is.null(res$res_sf)) {
-      write_warning_file(l, prefix, paste0(engine, " failed, using Ordinary Kriging fallback."))
-      form_ok <- reformulate("1", response = target_var)
-      res$v_emp <- variogram(form_ok, data, width = lags$width, cutoff = lags$cutoff)
-      res$fit <- robust_vgm_fit(res$v_emp, data[[target_var]])
-      res$res_sf <- krige(form_ok, data, grid_p, model = res$fit, debug.level = 0)
-      # Consistent with every other CV path: an explicit seeded fold vector
-      # (make_cv_folds) instead of a scalar nfold, so gstat never draws its own
-      # unseeded folds here. Also honours the user's CV strategy on this path.
-      folds_okfb <- make_cv_folds(sf::st_coordinates(data), method_params$cv_strategy, nrow(data))
-      res <- safe_run_cv(res, krige.cv(form_ok, data, model = res$fit, nfold = folds_okfb, debug.level = 0), paste0(engine, " OK Fallback"), nrow(data))
+      res <- .ok_fallback(res, data, target_var, grid_p, lags, method_params,
+                          l, prefix,
+                          engine_label = engine,
+                          cv_label = paste0(engine, " OK Fallback"))
     }
   }
   
@@ -588,8 +699,9 @@ apply_CK <- function(data, target_var, grid_p, lags, method_params, aux_vars, l 
     
     if(!is.null(g)) {
       res$gstat_obj <- g
-      res <- safe_run_cv(res, {
-        folds_ck <- make_cv_folds(sf::st_coordinates(data), method_params$cv_strategy, nrow(data))
+      coords_ck <- sf::st_coordinates(data)
+      cv_ck <- function(seed) {
+        folds_ck <- make_cv_folds(coords_ck, method_params$cv_strategy, nrow(data), seed)
         # remove.all = TRUE: covariates here are co-sampled lab measurements, so
         # at real prediction locations CK has no covariate observations either -
         # each fold must remove the ENTIRE held-out row (all LMC variables), not
@@ -611,8 +723,9 @@ apply_CK <- function(data, target_var, grid_p, lags, method_params, aux_vars, l 
           }
         }
         cv_val
-      }, "CK", nrow(data))
-      
+      }
+      res <- run_cv_with_repeats(res, cv_ck, method_params, nrow(data), "CK", l, prefix)
+
       res_sf_or_err <- tryCatch({
         pred_obj <- predict(g, grid_p, debug.level = 0) %>% st_as_sf()
         pred_col <- paste0(target_var, ".pred")
@@ -642,16 +755,11 @@ apply_CK <- function(data, target_var, grid_p, lags, method_params, aux_vars, l 
   }
   
   if(is.null(res$res_sf)) {
-    write_warning_file(l, prefix, "CK failed, using Ordinary Kriging fallback.")
-    form_ok <- reformulate("1", response = target_var)
-    v_emp_ok <- variogram(form_ok, data, width = lags$width, cutoff = lags$cutoff)
-    fit_ok <- robust_vgm_fit(v_emp_ok, data[[target_var]])
-    res$v_emp <- v_emp_ok
-    res$fit <- fit_ok
-    res$res_sf <- krige(form_ok, data, grid_p, model = fit_ok, debug.level = 0)
-    res$res_sf$model_type <- "Ordinary Kriging (Fallback)"
-    folds_okfb <- make_cv_folds(sf::st_coordinates(data), method_params$cv_strategy, nrow(data))
-    res <- safe_run_cv(res, krige.cv(form_ok, data, model = fit_ok, nfold = folds_okfb, debug.level = 0), "OK Fallback", nrow(data))
+    res <- .ok_fallback(res, data, target_var, grid_p, lags, method_params,
+                        l, prefix,
+                        engine_label = "CK",
+                        cv_label = "OK Fallback",
+                        tag_model_type = TRUE)
   }
   
   res$res_sf <- sanitize_spatial_predictions(res$res_sf)
@@ -670,8 +778,13 @@ apply_IDW <- function(data, target_var, grid_p, method_params, l = "region", pre
   # (see the comment there); default to the same values krige_covariates uses.
   idw_nmax <- method_params$idw_nmax %||% 12
   idw_p <- method_params$idw_p %||% 2
-  folds_idw <- make_cv_folds(sf::st_coordinates(data), method_params$cv_strategy, nrow(data))
-  res <- safe_run_cv(res, krige.cv(form_ok, data, nmax = idw_nmax, set = list(idp = idw_p), nfold = folds_idw, debug.level = 0), "IDW", nrow(data))
+  coords_idw <- sf::st_coordinates(data)
+  cv_idw <- function(seed) {
+    krige.cv(form_ok, data, nmax = idw_nmax, set = list(idp = idw_p),
+             nfold = make_cv_folds(coords_idw, method_params$cv_strategy, nrow(data), seed),
+             debug.level = 0)
+  }
+  res <- run_cv_with_repeats(res, cv_idw, method_params, nrow(data), "IDW", l, prefix)
 
   res$res_sf <- idw(form_ok, data, grid_p, nmax = idw_nmax, idp = idw_p, debug.level = 0)
   res$res_sf <- sanitize_spatial_predictions(res$res_sf)
@@ -708,30 +821,34 @@ apply_TPS <- function(data, target_var, grid_p, method_params, l = "region", pre
     update_progress_file(l, prefix, 40, 100)
     # make_cv_folds seeds itself and restores the caller's RNG; LOOCV collapses
     # to one point per fold, so a single loop covers every strategy.
-    tps_folds <- make_cv_folds(raw_pts, method_params$cv_strategy, n_pts)
-    cv_vals <- rep(NA_real_, n_pts)
-    for (i in sort(unique(tps_folds))) {
-      test_idx <- which(tps_folds == i)
-      tmp_mod <- tryCatch({
-        fit_tps(pts_sc[-test_idx, , drop=FALSE], data[[target_var]][-test_idx])
-      }, error = function(e) NULL)
+    tps_cv <- function(seed) {
+      tps_folds <- make_cv_folds(raw_pts, method_params$cv_strategy, n_pts, seed)
+      cv_vals <- rep(NA_real_, n_pts)
+      for (i in sort(unique(tps_folds))) {
+        test_idx <- which(tps_folds == i)
+        tmp_mod <- tryCatch({
+          fit_tps(pts_sc[-test_idx, , drop=FALSE], data[[target_var]][-test_idx])
+        }, error = function(e) NULL)
 
-      if (!is.null(tmp_mod)) {
-        cv_vals[test_idx] <- as.numeric(fields::predict.Krig(tmp_mod, pts_sc[test_idx, , drop=FALSE]))
-      } else {
-        cv_vals[test_idx] <- NA_real_
+        if (!is.null(tmp_mod)) {
+          cv_vals[test_idx] <- as.numeric(fields::predict.Krig(tmp_mod, pts_sc[test_idx, , drop=FALSE]))
+        } else {
+          cv_vals[test_idx] <- NA_real_
+        }
       }
+
+      sf::st_as_sf(
+        data.frame(observed = data[[target_var]], var1.pred = cv_vals, x = raw_pts[,1], y = raw_pts[,2]),
+        coords = c("x", "y"), crs = sf::st_crs(data), remove = FALSE
+      )
     }
 
-    
-    cv_res <- sf::st_as_sf(
-      data.frame(observed = data[[target_var]], var1.pred = cv_vals, x = raw_pts[,1], y = raw_pts[,2]),
-      coords = c("x", "y"), crs = sf::st_crs(data), remove = FALSE
-    )
+    cv_res <- tps_cv(CV_FOLD_SEED)
     res$cv_obj <- cv_res
     res$cv_metrics <- perform_cv(cv_res)
     res$residuals <- get_cv_residuals(cv_res, nrow(data))
-    
+    res <- add_cv_repeats(res, tps_cv, method_params, n_pts, "TPS", l, prefix)
+
     grid_p %>% mutate(var1.pred = as.vector(p_v))
   }, error = function(e) {
     # The fallback result travels back as an attribute rather than four <<-
@@ -744,7 +861,8 @@ apply_TPS <- function(data, target_var, grid_p, method_params, l = "region", pre
     fb <- apply_IDW(data, target_var, grid_p, method_params, l, prefix)
     out <- fb$res_sf
     attr(out, "tps_fallback") <- list(cv_obj = fb$cv_obj, cv_metrics = fb$cv_metrics,
-                                      residuals = fb$residuals, err = e$message)
+                                      residuals = fb$residuals, cv_obj_reps = fb$cv_obj_reps,
+                                      err = e$message)
     out
   })
 
@@ -753,6 +871,7 @@ apply_TPS <- function(data, target_var, grid_p, method_params, l = "region", pre
     res$cv_obj <- fb$cv_obj
     res$cv_metrics <- fb$cv_metrics
     res$residuals <- fb$residuals
+    res$cv_obj_reps <- fb$cv_obj_reps
     res$log_msg <- paste0(res$log_msg, "\nTPS failed: ", fb$err, ". Falling back to IDW.")
     attr(res$res_sf, "tps_fallback") <- NULL
   }
