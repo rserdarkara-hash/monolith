@@ -1053,6 +1053,110 @@ test_that("pooling fold importances equals a size-weighted mean", {
   expect_null(.classif_pool_fold_importance(list(), c("a", "b")))
 })
 
+test_that("the baked-block fast path reproduces the re-bake-per-shuffle deltas", {
+  # Identity pin for the permutation-importance fast path. The reference below
+  # IS the pre-2026-08-14 implementation (permute the raw column, predict through
+  # the workflow, which re-bakes the recipe on every shuffle). The fast path
+  # bakes once and permutes the baked block; it must return the same numbers from
+  # the same seed, or the equivalence argument in .classif_perm_fast_path is
+  # wrong for this recipe. The fixture carries a nominal predictor (dummy block)
+  # and NAs (imputation) so both non-trivial steps are exercised.
+  perm_delta_reference <- function(wf, df, target, predictors, n_rep) {
+    truth <- as.factor(df[[target]])
+    log_loss_of <- function(newdata) {
+      prob <- as.matrix(predict(wf, newdata, type = "prob"))
+      colnames(prob) <- sub("^\\.pred_", "", colnames(prob))
+      absent <- setdiff(levels(truth), colnames(prob))
+      if (length(absent)) {
+        prob <- cbind(prob, matrix(0, nrow(prob), length(absent),
+                                   dimnames = list(NULL, absent)))
+      }
+      p_true <- prob[cbind(seq_len(nrow(prob)), match(as.character(truth), colnames(prob)))]
+      -mean(log(pmax(p_true, 1e-15)))
+    }
+    base_ll <- log_loss_of(df)
+    delta <- vapply(seq_along(predictors), function(j) {
+      p <- predictors[j]
+      lls <- vapply(seq_len(n_rep), function(r) {
+        d2 <- df
+        d2[[p]] <- d2[[p]][sample.int(nrow(d2))]
+        log_loss_of(d2)
+      }, numeric(1))
+      mean(lls) - base_ll
+    }, numeric(1))
+    list(delta = delta, baseline = base_ll, n = nrow(df))
+  }
+
+  pts <- make_classif_points(70)
+  df <- as.data.frame(sf::st_drop_geometry(pts))
+  df$slope[c(3, 11, 25)] <- NA_real_          # median imputation
+  df$parent[c(5, 19)] <- NA                   # mode imputation + dummy block
+  preds <- c("elev", "slope", "parent")
+  mod <- suppressWarnings(fit_classification_model(
+    pts, "soil", preds, method = "rf", depth = "none"))
+
+  set.seed(4242)
+  ref <- perm_delta_reference(mod$workflow, df, "soil", preds, n_rep = 3L)
+  set.seed(4242)
+  got <- .classif_perm_delta(mod$workflow, df, "soil", preds, n_rep = 3L)
+
+  expect_equal(got$delta, ref$delta, tolerance = 1e-12)
+  expect_equal(got$baseline, ref$baseline, tolerance = 1e-12)
+  expect_equal(got$n, ref$n)
+
+  # ... and the fast path was actually taken for every predictor (otherwise the
+  # equality above would only prove the fallback still works).
+  fp <- .classif_perm_fast_path(mod$workflow, df, preds)
+  expect_false(is.null(fp))
+  expect_true(all(fp$ok))
+  expect_equal(fp$blocks$elev, "elev")
+  expect_true(all(startsWith(fp$blocks$parent, "parent_")))
+})
+
+test_that("a predictor whose baked block cannot be identified falls back, not wrong", {
+  # The block mapping is a name guess (`<var>` or `<var>_<level>`), so a nominal
+  # predictor whose dummy names collide with another predictor's name would
+  # permute two variables at once. The probe must catch it and mark that
+  # predictor for the slow path.
+  set.seed(11)
+  n <- 60
+  df <- data.frame(
+    soil = factor(sample(c("Low", "High"), n, replace = TRUE)),
+    ph = factor(sample(c("field", "lab"), n, replace = TRUE)),
+    ph_field = runif(n, 4, 8)
+  )
+  pts <- sf::st_as_sf(
+    cbind(df, x = runif(n, 450000, 451000), y = runif(n, 5800000, 5801000)),
+    coords = c("x", "y"), crs = 32633)
+  preds <- c("ph", "ph_field")
+  mod <- suppressWarnings(fit_classification_model(
+    pts, "soil", preds, method = "rf", depth = "none"))
+
+  fp <- .classif_perm_fast_path(mod$workflow, df, preds)
+  # `ph`'s candidate block wrongly swallows the `ph_field` column, so its probe
+  # must fail; `ph_field` maps to itself and is fine.
+  expect_false(fp$ok[["ph"]])
+  expect_true(fp$ok[["ph_field"]])
+
+  # and the delta is still the slow-path answer for the colliding predictor
+  perm_ref <- function(p, seed) {
+    set.seed(seed)
+    truth <- as.factor(df$soil)
+    ll <- function(nd) {
+      prob <- as.matrix(predict(mod$workflow, nd, type = "prob"))
+      colnames(prob) <- sub("^\\.pred_", "", colnames(prob))
+      pt <- prob[cbind(seq_len(nrow(prob)), match(as.character(truth), colnames(prob)))]
+      -mean(log(pmax(pt, 1e-15)))
+    }
+    base <- ll(df)
+    d2 <- df; d2[[p]] <- d2[[p]][sample.int(nrow(df))]
+    ll(d2) - base
+  }
+  set.seed(7)
+  got <- .classif_perm_delta(mod$workflow, df, "soil", "ph", n_rep = 1L)
+  expect_equal(got$delta[[1]], perm_ref("ph", 7), tolerance = 1e-12)
+})
+
 test_that("training-row importance keeps its own label", {
   pts <- make_classif_points(60)
   mod <- suppressWarnings(fit_classification_model(
@@ -1061,4 +1165,57 @@ test_that("training-row importance keeps its own label", {
                                         "soil", c("elev", "slope"), n_rep = 2L)
   expect_true(all(imp$evaluated_on == "training"))
   expect_setequal(imp$predictor, c("elev", "slope"))
+})
+
+test_that("classif_build_grid flags a strict buffer below half the cell diagonal", {
+  pts <- make_classif_points(n = 50)
+
+  g_bad <- classif_build_grid(pts, res = 350, boundary = "strict",
+                              buffer_dist = 175)
+  expect_match(g_bad$strict_warning, "Strict Measured buffer")
+  expect_match(g_bad$strict_warning, "248 m or more")
+
+  # 300 m clears the 247.5 m half-diagonal of a 350 m cell.
+  g_ok <- classif_build_grid(pts, res = 350, boundary = "strict",
+                             buffer_dist = 300)
+  expect_null(g_ok$strict_warning)
+
+  # Hull styles are never flagged: a hull surrounds every interior sample, so
+  # only its perimeter is exposed, unlike strict where every isolated sample is.
+  expect_null(classif_build_grid(pts, res = 350, boundary = "concave")$strict_warning)
+  expect_null(classif_build_grid(pts, res = 350, boundary = "wrapped",
+                                 buffer_dist = 175)$strict_warning)
+
+  # Polygons-only scoping replaces the hull with the user's polygons, so the
+  # Boundary Type control is inert and the advisory must stay silent even
+  # though the style still reads "strict".
+  expect_null(classif_build_grid(pts, res = 350, boundary = "strict",
+                                 buffer_dist = 175,
+                                 strict_scope = FALSE)$strict_warning)
+})
+
+test_that("classif_auto_res reproduces the grid builder's Auto resolution", {
+  # The module's pre-run advisory computes the effective cell size from the
+  # scope's area and bbox; it must be the number the run will actually use.
+  pts <- make_classif_points(n = 50)
+  bnd <- sf::st_as_sf(sf::st_sfc(.classif_scope_hulls(pts, style = "concave"),
+                                 crs = sf::st_crs(pts)))
+  gr <- classif_build_grid(pts, res = NULL, boundary_sf = bnd)
+  expect_equal(gr$res,
+               classif_auto_res(sum(as.numeric(sf::st_area(bnd))), sf::st_bbox(bnd)))
+})
+
+test_that("classif_resolve_scope reports the boundary area and bbox", {
+  d <- make_classif_scope_df()
+  sc <- classif_resolve_scope(d, "x", "y", 32633, "EPSG:32633",
+                              loc_col = "loc", localities = "ALL")
+  bnd <- sf::st_as_sfc(sc$boundary_wkt, crs = 32633)
+  expect_equal(sc$boundary_area_m2, sum(as.numeric(sf::st_area(bnd))))
+  expect_equal(as.numeric(sc$boundary_bbox), as.numeric(sf::st_bbox(bnd)))
+
+  # An empty scope carries no boundary geometry at all.
+  sc_none <- classif_resolve_scope(d, "x", "y", 32633, "EPSG:32633",
+                                   loc_col = "loc", localities = "nonexistent")
+  expect_null(sc_none$boundary_area_m2)
+  expect_null(sc_none$boundary_bbox)
 })

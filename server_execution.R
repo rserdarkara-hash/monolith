@@ -112,6 +112,13 @@
       showNotification("A model run is already in progress.", type = "warning")
       return()
     }
+    # Cross-feature guard (mirror of run_optimizer_async's model_running check):
+    # both paths spawn their own nested PSOCK cluster of cores - 1 workers, so
+    # running them concurrently oversubscribes the machine ~2x.
+    if (isTRUE(rv$opt_running)) {
+      showNotification("An optimization is running; start the interpolation after it finishes.", type = "warning")
+      return()
+    }
     req(rv$user_data, input$locality, rv$mapping$x, rv$mapping$y)
     
     if (input$method %in% c("RK", "RFK", "CK") && (is.null(input$aux_vars) || length(input$aux_vars) == 0)) {
@@ -253,6 +260,13 @@
       showNotification("A model run is already in progress.", type = "warning")
       return()
     }
+    # Re-checked here, not only at input$run: the archive/estimate confirmation
+    # modal sits between the two observers, and an optimizer can be started
+    # while it is open.
+    if (isTRUE(rv$opt_running)) {
+      showNotification("An optimization is running; start the interpolation after it finishes.", type = "warning")
+      return()
+    }
     req(rv$user_data, input$locality, rv$mapping$x, rv$mapping$y);
     meta <- get_current_meta()
     req(meta)
@@ -354,7 +368,11 @@
 
     cancel_file <- file.path(session_progress_dir, "cancel_flag.txt")
     if (file.exists(cancel_file)) tryCatch(file.remove(cancel_file), error = function(e) NULL)
-    old_files <- list.files(path = session_progress_dir, pattern = paste0("^progress_", session_id, "_.*_.*\\.txt$"), full.names = TRUE)
+    # Clear the previous run's status files, WARNINGS INCLUDED: the progress
+    # panel simply lists every warn_ file it finds, so a warning left behind by
+    # the last run is shown against this one - stating a strict buffer/cell-size
+    # mismatch, or an engine fallback, that the user may have just fixed.
+    old_files <- list.files(path = session_progress_dir, pattern = paste0("^(progress|warn)_", session_id, "_.*_.*\\.txt$"), full.names = TRUE)
     if (length(old_files) > 0) tryCatch(file.remove(old_files), error = function(e) NULL)
     rv$model_running <- TRUE
     rv$run_pct <- 0
@@ -423,7 +441,12 @@
       method = input$method,
       value_type = input$value_type,
       comp_mode = isTRUE(input$comp_mode),
-      localities = locs
+      localities = locs,
+      # The CRS this run was computed in. The Map Viewer's ruler reports its
+      # projected figure against it, so that figure keeps naming the system the
+      # displayed surface, its variogram lags and its grid resolution live in
+      # even after the sidebar has been retargeted for the next run.
+      crs_sel = input$crs_selection
     ))
 
     tryCatch({
@@ -461,7 +484,13 @@
     grid_res <- input$grid_res
     crs_sel <- input$crs_selection
     
-    safe_crs <- validate_crs(crs_sel, "CRS Validation Error:", duration = 15)
+    # require_metric: every distance this pipeline accepts or reports (grid
+    # resolution, buffer radius, variogram range, the ruler's projected column)
+    # is stated in metres while the engines work on the CRS's own axis units, so
+    # a projected Target Mapping CRS on any other linear unit is refused here
+    # rather than allowed to mean something else throughout the run.
+    safe_crs <- validate_crs(crs_sel, "CRS Validation Error:", duration = 15,
+                             require_metric = TRUE)
     req(safe_crs)
     # The Input Data CRS is free-typed (selectize create = TRUE); catch an
     # unparseable value here with a clear notification instead of letting
@@ -762,8 +791,12 @@
       rv$rast <- merge_wrapped_rasters(valid_a)
       register_export_item("map_actual", paste(meta$label, "- Actual Map"), "map", rv$rast, meta$category)
       
+      # Uncertainty products exist for the kriging engines only. IDW's var1.var
+      # is all NA and TPS has none at all, so registering these for those
+      # methods shipped two blank rasters into the export panel (the map
+      # viewer's uncertainty toggle already carried this guard).
       temp_rast_a <- terra::unwrap(rv$rast)
-      if ("var1.var" %in% names(temp_rast_a)) {
+      if (method_has_variance(current_method) && "var1.var" %in% names(temp_rast_a)) {
         uncert_var_a <- temp_rast_a[["var1.var"]]
         register_export_item("map_uncert_var_act", paste(meta$label, "- Uncertainty Map (Variance - Actual)"), "map", terra::wrap(uncert_var_a), meta$category, kind = "uncertainty")
         register_export_item("map_uncert_se_act", paste(meta$label, "- Uncertainty Map (SE - Actual)"), "map", terra::wrap(sqrt(uncert_var_a)), meta$category, kind = "uncertainty")
@@ -775,7 +808,7 @@
       register_export_item("map_predicted", paste(meta$label, "- Predicted Map"), "map", rv$rast_pred, meta$category)
       
       temp_rast_p <- terra::unwrap(rv$rast_pred)
-      if ("var1.var" %in% names(temp_rast_p)) {
+      if (method_has_variance(current_method) && "var1.var" %in% names(temp_rast_p)) {
         uncert_var_p <- temp_rast_p[["var1.var"]]
         register_export_item("map_uncert_var_pre", paste(meta$label, "- Uncertainty Map (Variance - Predicted)"), "map", terra::wrap(uncert_var_p), meta$category, kind = "uncertainty")
         register_export_item("map_uncert_se_pre", paste(meta$label, "- Uncertainty Map (SE - Predicted)"), "map", terra::wrap(sqrt(uncert_var_p)), meta$category, kind = "uncertainty")

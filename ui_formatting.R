@@ -25,6 +25,19 @@ resolve_selected_localities <- function(sel, user_data, loc_col) {
 # spatial_helpers.R and never the ui_*.R files. Both files are sourced at
 # startup in the main session, so every UI/server call site is unaffected.
 
+#' Which column should an axis dropdown default to after an upload?
+#' Whole-name matching on the same token lists is_coord_col() uses. Substring
+#' matching ("^lon" / "^lat") pre-selected variables such as Longevity_index or
+#' Lateral_flow as a coordinate, which the user then had to notice and undo.
+#' Returns NULL when nothing matches, which leaves the first column selected.
+pick_coord_column <- function(cols, axis = c("x", "y")) {
+  axis <- match.arg(axis)
+  tokens <- if (axis == "x") .coord_names_x else .coord_names_y
+  if (is.null(cols) || !length(cols)) return(NULL)
+  hit <- cols[tolower(trimws(cols)) %in% tokens]
+  if (length(hit)) hit[1] else NULL
+}
+
 melt_cormat <- function(cormat, value_name = "Corr") {
   rn <- rownames(cormat)
   cn <- colnames(cormat)
@@ -176,6 +189,33 @@ build_regional_params_df <- function(type, loc, regional_params, has_pre) {
 # Structured replacement for the raw print(summary.lm) dump on the Scientific
 # Analysis tab: compact fit-statistic chips + a publication-style coefficient
 # table. Display-only: exports keep the raw numeric coefficient table.
+
+# --- Ruler readouts -----------------------------------------------------------
+# Length and area formatting for the Map Viewer ruler. Metres and hectares are
+# the app's units everywhere else (grid resolution, buffer radii, class areas),
+# so the ruler stays on them and adds the larger unit in brackets rather than
+# switching to it: a reader comparing a measured separation against a variogram
+# range needs the metres, not a rounded kilometre.
+format_measure_length <- function(m) {
+  if (is.null(m) || length(m) != 1 || !is.finite(m)) return("n/a")
+  if (m >= 1000) {
+    sprintf("%s m (%.3f km)", formatC(m, format = "f", digits = 1, big.mark = ","), m / 1000)
+  } else if (m >= 1) {
+    sprintf("%.1f m", m)
+  } else {
+    sprintf("%.2f m", m)
+  }
+}
+
+format_measure_area <- function(m2) {
+  if (is.null(m2) || length(m2) != 1 || !is.finite(m2)) return("n/a")
+  if (m2 >= 10000) {
+    sprintf("%.2f ha (%s m²)", m2 / 10000,
+            formatC(m2, format = "f", digits = 0, big.mark = ","))
+  } else {
+    sprintf("%.1f m² (%.4f ha)", m2, m2 / 10000)
+  }
+}
 
 format_p_value <- function(p) {
   if (is.null(p) || length(p) == 0 || is.na(p)) return("NA")
@@ -358,15 +398,17 @@ match_metadata_columns <- function(m_df, user_cols) {
   col_cat <- if (length(grep("cat|group|type", cols, ignore.case=TRUE)) > 0) grep("cat|group|type", cols, ignore.case=TRUE, value=TRUE)[1] else NA
 
   new_vars <- list()
-  for (i in 1:nrow(m_df)) {
+  # seq_len, not 1:nrow: a headers-only metadata upload (0 rows) must yield an
+  # empty mapping, not an iteration over the phantom row 1:0 produces. The NA
+  # check runs BEFORE the fuzzy match so an NA name never reaches adist().
+  for (i in seq_len(nrow(m_df))) {
     act_name <- as.character(m_df[i, col_act])
+    if (is.na(act_name) || act_name == "") next
     matched_col <- fuzzy_match_column(act_name, user_cols)
 
     if (!is.null(matched_col)) {
       cat_val <- if (!is.na(col_cat)) as.character(m_df[i, col_cat]) else "Uploaded Data"
       lab_val <- if (!is.na(col_lab)) as.character(m_df[i, col_lab]) else act_name
-
-      if (is.na(act_name) || act_name == "") next
 
       already_mapped <- sapply(new_vars, function(x) x$actual)
       if (length(already_mapped) > 0 && matched_col %in% already_mapped) next

@@ -204,21 +204,29 @@
     }
   }, ignoreNULL = FALSE)
   
-  observeEvent(active_styler_item(), {
-    req(active_styler_item(), rv$export_registry)
-    item <- rv$export_registry[[active_styler_item()]]
-    req(item)
-    if (item$type == "map_combined") {
-      updateSelectInput(session, "styler_legend_pos", selected = "bottom")
-      updateSelectInput(session, "styler_legend_dir", selected = "horizontal")
-      updateSelectInput(session, "styler_legend_text_angle", selected = 90)
-    } else {
-      updateSelectInput(session, "styler_legend_pos", selected = "right")
-      updateSelectInput(session, "styler_legend_dir", selected = "auto")
-      updateSelectInput(session, "styler_legend_text_angle", selected = 0)
-    }
-  }, ignoreInit = TRUE)
-  
+  # Legend placement follows the item's shape, not whatever was styled last: a
+  # paired comparison map is two panels side by side with no room for a
+  # right-hand legend, so it takes a horizontal legend underneath; everything
+  # else keeps the right-hand default. The styler's controls are built with
+  # these already selected; this re-applies them after the remembered config
+  # has been replayed over the freshly built modal.
+  item_legend_defaults <- function(item) {
+    combined <- identical(item$type, "map_combined")
+    list(pos = if (combined) "bottom" else "right",
+         dir = if (combined) "horizontal" else "auto",
+         angle = if (combined) "90" else "0")
+  }
+
+  apply_item_legend_defaults <- function() {
+    item <- tryCatch(rv$export_registry[[active_styler_item()]], error = function(e) NULL)
+    if (is.null(item)) return(invisible(NULL))
+    d <- item_legend_defaults(item)
+    updateSelectInput(session, "styler_legend_pos", selected = d$pos)
+    updateSelectInput(session, "styler_legend_dir", selected = d$dir)
+    updateSelectInput(session, "styler_legend_text_angle", selected = d$angle)
+    invisible(NULL)
+  }
+
   base_preview_plot <- reactive({
     req(active_styler_item(), rv$export_registry)
     item <- rv$export_registry[[active_styler_item()]]
@@ -242,32 +250,61 @@
     apply_styler_theme(
       p = base_p,
       input = input,
-      calibration = 1,
       item_label = item$label,
       item_type = item$type
     )
   })
-  
-  styled_preview_obj_d <- styled_preview_obj %>% debounce(500)
-  
-  output$styler_preview_dynamic_ui <- renderUI({
-    req(input$styler_width, input$styler_height)
-    w_px <- (if(isTruthy(input$styler_width)) input$styler_width else 10) * 96
-    h_px <- (if(isTruthy(input$styler_height)) input$styler_height else 8) * 96
-    
-    scale <- min(1, 800 / w_px, 600 / h_px)
-    w_disp <- w_px * scale
-    h_disp <- h_px * scale
-    
-    div(style = sprintf("width: %fpx; height: %fpx; background-color: white; box-shadow: 0 4px 8px rgba(0,0,0,0.2);", w_disp, h_disp),
-        plotOutput("styler_preview_plot", height = "100%", width = "100%")
-    )
-  })
 
-  output$styler_preview_plot <- renderPlot({
-    req(styled_preview_obj_d())
-    styled_preview_obj_d()
-  }, res = 96)
+  styled_preview_obj_d <- styled_preview_obj %>% debounce(500)
+
+  # The preview is drawn on a canvas of the EXPORT's physical size and only
+  # rasterised coarser, so its layout is the file's layout. Shrinking the canvas
+  # instead (the former behaviour) leaves point-sized text and millimetre
+  # margins competing for less room, which crowded and clipped axis labels the
+  # export had space for - worst on wide areas and on two-panel comparisons.
+  #
+  # The rasterised canvas is then fitted to the pane the browser actually
+  # reports rather than to a fixed guess. A guess wider than the pane overflows
+  # it, and the pane centres its content, so that overflow goes off the LEFT
+  # edge where no scrollbar reaches it: the file was complete but the preview
+  # lost its title, y-axis labels and grid numbers.
+  preview_geom <- reactive({
+    w_in <- if (isTruthy(input$styler_width)) input$styler_width else 10
+    h_in <- if (isTruthy(input$styler_height)) input$styler_height else 8
+    pane_h <- 578  # the 600px pane less its 10px padding and 1px border
+    avail_w <- session$clientData$output_styler_preview_plot_width
+    # 0 while the output is hidden (GeoTIFF selected) or not yet bound.
+    if (!isTruthy(avail_w) || avail_w < 100) avail_w <- 520
+    fit <- min(1, avail_w / (w_in * 96), pane_h / (h_in * 96))
+    list(w_in = w_in, h_in = h_in,
+         w_disp = round(w_in * 96 * fit), h_disp = round(h_in * 96 * fit),
+         # 2x supersample: same layout, crisp on high-density displays. The
+         # floor keeps type renderable when a very large canvas is fitted into
+         # the pane; surplus pixels are just scaled down by the browser.
+         res = max(48, 96 * fit * 2))
+  })
+  # Window resizes arrive as a stream of widths; re-rendering the figure on each
+  # one would redraw the whole plot dozens of times per drag.
+  preview_geom_d <- preview_geom %>% debounce(300)
+
+  # renderImage, not renderPlot: the preview goes through the very writer the
+  # download uses, so the two cannot drift apart.
+  output$styler_preview_plot <- renderImage({
+    p <- styled_preview_obj_d()
+    req(p)
+    g <- preview_geom_d()
+    f <- tempfile(fileext = ".png")
+    export_plot_to_file(p, f, "png", input,
+                        width = g$w_in, height = g$h_in, dpi = g$res)
+    list(src = f, contentType = "image/png",
+         width = g$w_disp, height = g$h_disp,
+         # Belt and braces: even if the reported pane width is stale, the image
+         # scales into the pane instead of spilling out of it. Scaling keeps the
+         # layout exact - only the pixel count changes.
+         style = paste0("max-width: 100%; height: auto; display: block; margin: 0 auto;",
+                        " background-color: #ffffff; box-shadow: 0 4px 8px rgba(0,0,0,0.2);"),
+         alt = "Preview of the figure as it will be exported")
+  }, deleteFile = TRUE)
   
   observeEvent(input$select_all_assets, {
     req(rv$export_registry)
@@ -344,6 +381,7 @@
     }
     image_only_map <- is.null(export_raster_payload(styler_item)) &&
       !is.null(styler_item) && styler_item$type %in% c("map", "map_combined")
+    legend_defaults <- item_legend_defaults(styler_item)
 
     showModal(modalDialog(
       title = "Monolith Export Styler",
@@ -424,12 +462,15 @@
                                         choices = c("Vertical" = 90, "Horizontal" = 0, "Angled (45)" = 45)),
                             hr(),
                             h4("Layout & Spacing"),
-                            selectInput("styler_legend_pos", "Legend Position", 
-                                        choices = c("Right" = "right", "Bottom" = "bottom", "Left" = "left", "Top" = "top", "None" = "none")),
-                            selectInput("styler_legend_dir", "Legend Orientation", 
-                                        choices = c("Automatic" = "auto", "Horizontal" = "horizontal", "Vertical" = "vertical")),
-                            selectInput("styler_legend_text_angle", "Legend Text Orientation", 
-                                        choices = c("Horizontal" = 0, "Vertical" = 90, "Angled (45)" = 45)),
+                            selectInput("styler_legend_pos", "Legend Position",
+                                        choices = c("Right" = "right", "Bottom" = "bottom", "Left" = "left", "Top" = "top", "None" = "none"),
+                                        selected = legend_defaults$pos),
+                            selectInput("styler_legend_dir", "Legend Orientation",
+                                        choices = c("Automatic" = "auto", "Horizontal" = "horizontal", "Vertical" = "vertical"),
+                                        selected = legend_defaults$dir),
+                            selectInput("styler_legend_text_angle", "Legend Text Orientation",
+                                        choices = c("Horizontal" = 0, "Vertical" = 90, "Angled (45)" = 45),
+                                        selected = legend_defaults$angle),
                             fluidRow(
                               column(3, numericInput("styler_margin_t", "Top", value = 10)),
                               column(3, numericInput("styler_margin_r", "Right", value = 10)),
@@ -453,11 +494,18 @@
         column(8,
                conditionalPanel(
                  condition = "input.styler_format != 'gtiff'",
-                 div(style = "background-color: #f0f0f0; border: 1px solid #ccc; height: 600px; display: flex; justify-content: center; align-items: center; overflow: auto;",
-                     uiOutput("styler_preview_dynamic_ui")
+                 # min-width: 0 on the image output lets it report (and take)
+                 # the pane's real width; overflow: hidden is a guard, nothing
+                 # should reach it now that the canvas is fitted to the pane.
+                 div(style = paste0("background-color: #f0f0f0; border: 1px solid #ccc; height: 600px;",
+                                    " padding: 10px; display: flex; justify-content: center;",
+                                    " align-items: center; overflow: hidden;"),
+                     div(style = "width: 100%; min-width: 0;",
+                         imageOutput("styler_preview_plot", height = "auto", width = "100%")
+                     )
                  ),
                  tags$p(style="font-size: 0.85em; color: #666; margin-top: 5px;",
-                        "Preview aspect ratio and dimensions are now live. Final export uses 2.5x typographical density enhancement.")
+                        "The preview is the export figure at screen resolution: same size, typography and margins. Only the pixel count differs.")
                ),
                conditionalPanel(
                  condition = "input.styler_format == 'gtiff'",
@@ -480,7 +528,7 @@
       )
     ))
   })
-  
+
   observeEvent(input$styler_local_config, {
     cfg <- input$styler_local_config
     # A remembered "GeoTIFF" choice must not be restored onto an item that has
@@ -494,6 +542,10 @@
       }
     }
     sync_styler_config(cfg, session)
+    # The remembered config is whatever item was styled last, so it must not
+    # carry that item's legend layout onto a differently shaped one. An
+    # explicitly uploaded config still wins: that is a deliberate user action.
+    apply_item_legend_defaults()
   })
 
   observeEvent(input$styler_width, {
@@ -573,8 +625,7 @@
             write_geotiff(export_raster_payload(item), file)
           } else if (item$type %in% c("plot", "map", "map_combined")) {
             p_obj <- generate_styled_plot(
-              item, input, 
-              calibration = 2.5, 
+              item, input,
               agro_params = tryCatch(agro_params(), error = function(e) NULL)
             )
 
@@ -677,7 +728,6 @@
             } else {
               p <- generate_styled_plot(
                 item, input,
-                calibration = 2.5,
                 agro_params = tryCatch(agro_params(), error = function(e) NULL)
               )
               export_plot_to_file(p, filepath, ext, input)

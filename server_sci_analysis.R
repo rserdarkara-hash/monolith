@@ -613,6 +613,20 @@
       tags$span(style = "color: #868e96;",
                 sprintf(" Repeated CV is on (%d fold realizations); the values here are realization 1, the spread is in the table below.", n_rep))
     }
+    # What a fold refits is engine-dependent: RK/RFK re-estimate the trend AND
+    # the residual variogram inside every fold, while gstat::krige.cv /
+    # gstat.cv (OK, CK, IDW) re-solve the kriging system per fold but reuse the
+    # variogram/LMC fitted on the FULL point set. The bias is small but
+    # systematic and one-directional, and it lands in exactly the table users
+    # pick an engine from. Message only.
+    refit_note <- if (method_has_variance(rv$disp$method) && !(rv$disp$method %in% c("RK", "RFK"))) {
+      tags$div(
+        style = "font-size: 0.82em; color: #495057; margin: -4px 0 8px 0;",
+        tags$span(style = "color: #868e96;",
+                  paste0(get_method_label(rv$disp$method),
+                         " is cross-validated against a variogram fitted on the full point set (the held-out point contributed to it), whereas RK/RFK refit inside every fold. These metrics are therefore mildly optimistic relative to RK/RFK on the same data; see Scientific Guide §5."))
+      )
+    }
     tagList(
       tags$div(
         style = "font-size: 0.82em; color: #495057; margin: -4px 0 8px 0;",
@@ -621,6 +635,7 @@
         tags$span(style = "color: #868e96;", " (applies to these metrics only, not the map)."),
         repeat_note
       ),
+      refit_note,
       pooled_note
     )
   })
@@ -900,6 +915,11 @@
   }
 
   last_notified_warnings <- reactiveVal(character(0))
+  # The tally exists to stop one warning being re-notified as the log grows
+  # WITHIN a run; a new run rebuilds rv$log from scratch, so carrying it over
+  # would silence a warning that is still true the second time round (e.g. an
+  # unchanged strict buffer/resolution pair).
+  observeEvent(rv$run_counter, last_notified_warnings(character(0)))
   observeEvent(rv$log, {
     req(rv$log)
     log_lines <- unlist(strsplit(rv$log, "\n", fixed = TRUE))

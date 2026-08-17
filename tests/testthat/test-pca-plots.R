@@ -72,6 +72,40 @@ test_that("generate_pca_cos2 returns ggplot", {
   expect_s3_class(p, "ggplot")
 })
 
+test_that("cos2 is a bounded quality of representation in BOTH PCA modes", {
+  # cos2 = share of a variable's own variance captured by the selected PCs, so
+  # it must sit in [0, 1] and reach exactly 1 across all components. Before
+  # 2026-08-14 the unscaled branch plotted an unnormalised absolute variance
+  # (Var(x_j) in the variable's own squared units) on an axis labelled cos2.
+  df <- make_test_df(40, seed = 7)[, c("a", "b", "c", "d", "e")]
+  # give the variables wildly different scales — the case that made it visible
+  df$a <- df$a * 1000
+  df$b <- df$b / 500
+
+  for (scaled in c(TRUE, FALSE)) {
+    pca <- prcomp(df, scale. = scaled, center = TRUE)
+    v2 <- generate_pca_cos2(pca, axes = 1:2)$data$Value
+    expect_true(all(v2 >= 0 & v2 <= 1),
+                info = paste("axes 1:2, scale. =", scaled))
+    # all components together represent every variable perfectly
+    v_all <- generate_pca_cos2(pca, axes = seq_along(pca$sdev))$data$Value
+    expect_equal(unname(v_all), rep(1, ncol(df)), tolerance = 1e-8)
+  }
+})
+
+test_that("cos2 for a scaled PCA is unchanged by the normalisation", {
+  # For scale. = TRUE the denominator is 1 for every variable, so the panel that
+  # users have been reading is numerically where it was.
+  pca <- make_pca()
+  axes <- 1:2
+  coord <- sweep(pca$rotation[, axes, drop = FALSE], 2, pca$sdev[axes], "*")
+  legacy <- rowSums(coord^2)
+  # generate_pca_bar_plot sorts its bars by value, so compare by variable name
+  got <- generate_pca_cos2(pca, axes = axes)$data
+  expect_equal(setNames(as.numeric(got$Value), got$Variable)[names(legacy)],
+               legacy, tolerance = 1e-10)
+})
+
 # ── generate_pca_cumvar ───────────────────────────────────────────────────
 
 test_that("generate_pca_cumvar returns ggplot approaching 1.0", {

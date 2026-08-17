@@ -4,6 +4,21 @@
 # optimize_idw_p, rf_infinitesimal_jackknife_var, prediction sanitizers.
 # Sourced via spatial_helpers.R.
 
+#' Which engines produce a genuine prediction variance?
+#'
+#' Only the kriging family does. `gstat::idw()` still returns a `var1.var`
+#' column, but it is all NA (an inverse-distance weighting is a deterministic
+#' exact interpolator with no variance model behind it), and apply_TPS's IDW
+#' fallback inherits that column too — so a bare `"var1.var" %in% names()` test
+#' is not enough to decide whether an uncertainty product exists. Single source
+#' of truth for the pipeline's rasterization, the export registry and the map
+#' viewer's uncertainty toggle.
+METHODS_WITH_VARIANCE <- c("OK", "RK", "RFK", "CK")
+
+method_has_variance <- function(method) {
+  !is.null(method) && length(method) == 1L && !is.na(method) &&
+    method %in% METHODS_WITH_VARIANCE
+}
 
 optimize_idw_p <- function(pts, target_var, nmax = 12) {
   factors <- seq(0.5, 5.0, by = 0.5)
@@ -93,6 +108,9 @@ detect_multicollinearity_engine <- function(df, vars = NULL, vif_threshold = 10,
       valid_vars <- kept[!degen]
       
       if (length(valid_vars) >= 2) {
+        # Pairwise deletion is right here: each cell is read on its own against
+        # the threshold, nothing inverts this matrix, and a covariate measured
+        # on a subset of the samples should still be screened on what it has.
         cormat <- cor(df_clean[, valid_vars], use = "pairwise.complete.obs")
         
         for (i in 1:(length(valid_vars) - 1)) {
@@ -138,7 +156,10 @@ detect_multicollinearity_engine <- function(df, vars = NULL, vif_threshold = 10,
       df_clean_vif <- na.omit(df[, kept, drop = FALSE])
       if (nrow(df_clean_vif) < 3) break
 
-      cor_mat <- cor(df_clean_vif, use = "pairwise.complete.obs")
+      # Complete cases (na.omit above), not pairwise: this matrix gets inverted,
+      # and cells estimated on different subsamples need not form a positive
+      # semi-definite matrix, which can hand solve() negative VIFs.
+      cor_mat <- cor(df_clean_vif)
       vif_vals <- tryCatch({ diag(solve(cor_mat)) }, error = function(e) { NULL })
 
       if (is.null(vif_vals)) {
@@ -480,8 +501,18 @@ apply_kriging_pipeline <- function(engine = c("OK", "RK", "RFK"), data, target_v
           res$log_msg <- paste0(res$log_msg, .vif_drop_log(vif_res))
           aux_vars <- vif_res$kept
         }
+        # An empty kept set builds "`v` ~ " and as.formula() dies with
+        # "attempt to use zero-length variable name" — the tryCatch reports that
+        # as "RK/RFK failed", naming the symptom instead of the cause. Say what
+        # actually happened; the locality still routes to the named OK fallback.
+        if (length(aux_vars) == 0) {
+          stop("The covariate screen removed every covariate for this surface ",
+               "(constant and/or collinear within this locality), so ", engine,
+               " has no trend model left. Select different covariates, or answer ",
+               "\"Keep All\" in the collinearity dialog.")
+        }
       }
-      
+
       if (!is.null(method_params$grid_aux)) {
         grid_aux <- method_params$grid_aux
       } else {
@@ -630,6 +661,18 @@ apply_CK <- function(data, target_var, grid_p, lags, method_params, aux_vars, l 
       if (length(vif_res$dropped) > 0) {
         res$log_msg <- paste0(res$log_msg, .vif_drop_log(vif_res))
         aux_vars <- vif_res$kept
+      }
+      # CK does not die on an empty set the way RK does — gstat() with only the
+      # primary variable still fits (verified: fit.lmc succeeds on a single
+      # variable) and returns ordinary kriging under a 15-point neighbourhood,
+      # labelled and logged as Co-Kriging. Co-kriging with no secondary variable
+      # is not co-kriging, so send it to the named OK fallback instead of
+      # shipping a mislabelled surface.
+      if (length(aux_vars) == 0) {
+        stop("The covariate screen removed every covariate for this surface ",
+             "(constant and/or collinear within this locality), so Co-Kriging ",
+             "has no secondary variable left. Select different covariates, or ",
+             "answer \"Keep All\" in the collinearity dialog.")
       }
     }
 

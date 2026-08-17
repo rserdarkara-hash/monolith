@@ -378,16 +378,20 @@ generate_base_plot <- function(item, input, agro_params = NULL) {
   }
 }
 
-apply_styler_theme <- function(p_obj, input, calibration = 1, item_label = "", item_type = "plot") {
+# Apply the Export Styler's controls to a base plot. Sizes are points and
+# margins are millimetres, both physical: the figure therefore looks the same
+# whether it is rasterised for the preview or written at 300/600 dpi, provided
+# the device's resolution reaches showtext (with_showtext_dpi, global_utils.R).
+apply_styler_theme <- function(p_obj, input, item_label = "", item_type = "plot") {
   req(p_obj)
-  
-  s_title <- (input$styler_title_size %||% 16) * calibration
-  s_base  <- (input$styler_base_size %||% 12) * calibration
-  s_x     <- (input$styler_x_size %||% 12) * calibration
-  s_y     <- (input$styler_y_size %||% 12) * calibration
-  s_lab   <- (input$styler_label_size %||% 10) * calibration
-  s_leg   <- (input$styler_legend_size %||% 10) * calibration
-  
+
+  s_title <- input$styler_title_size %||% 16
+  s_base  <- input$styler_base_size %||% 12
+  s_x     <- input$styler_x_size %||% 12
+  s_y     <- input$styler_y_size %||% 12
+  s_lab   <- input$styler_label_size %||% 10
+  s_leg   <- input$styler_legend_size %||% 10
+
   font_f <- input$styler_font_family %||% "sans"
   
   is_combined <- identical(item_type, "map_combined")
@@ -404,10 +408,10 @@ apply_styler_theme <- function(p_obj, input, calibration = 1, item_label = "", i
     f_y <- if(isTruthy(input$styler_y_title)) input$styler_y_title else NULL
     
     key_size <- input$styler_legend_key_size %||% 1.0
-    margin_t <- (input$styler_margin_t %||% 10) * calibration
-    margin_r <- (input$styler_margin_r %||% 10) * calibration
-    margin_b <- (input$styler_margin_b %||% 10) * calibration
-    margin_l <- (input$styler_margin_l %||% 15) * calibration
+    margin_t <- input$styler_margin_t %||% 10
+    margin_r <- input$styler_margin_r %||% 10
+    margin_b <- input$styler_margin_b %||% 10
+    margin_l <- input$styler_margin_l %||% 15
     
     if (is_combined_pane) {
       key_size <- key_size * 0.6
@@ -500,12 +504,16 @@ apply_styler_theme <- function(p_obj, input, calibration = 1, item_label = "", i
   }
 }
 
-generate_styled_plot <- function(item, input, calibration = 1, agro_params = NULL) {
+generate_styled_plot <- function(item, input, agro_params = NULL) {
   base_p <- generate_base_plot(item, input, agro_params)
-  apply_styler_theme(base_p, input, calibration, item_label = item$label, item_type = item$type)
+  apply_styler_theme(base_p, input, item_label = item$label, item_type = item$type)
 }
 
 get_stat_letters <- function(df, var_name, group_col, test_type) {
+  # "" is the control's None choice. It must return before the if-chain below,
+  # because the ANOVA branch also fires on `n_groups == 2` regardless of
+  # test_type - so without this guard, "None" still annotated a two-group plot.
+  if (is.null(test_type) || length(test_type) != 1 || is.na(test_type) || !nzchar(test_type)) return(NULL)
   df_proc <- df[!is.na(df[[var_name]]) & !is.na(df[[group_col]]), ]
   if (nrow(df_proc) < 3) return(NULL)
   
@@ -524,6 +532,11 @@ get_stat_letters <- function(df, var_name, group_col, test_type) {
       colnames(df_let)[1] <- group_col
       return(df_let)
     } else if (test_type == "duncan" && n_groups > 2 && requireNamespace("agricolae", quietly = TRUE)) {
+      # Duncan's MRT controls the COMPARISON-wise error rate only; its
+      # family-wise rate grows toward 1 with k. Offered because older agronomy
+      # literature reports it, labelled "(liberal)" in the control, and flagged
+      # in scientific_guide's post-hoc section. Tukey's HSD is the conservative
+      # default - do not present the two as interchangeable.
       res <- agricolae::duncan.test(aov_res, group_col, console = FALSE)
       df_let <- data.frame(group = rownames(res$groups), letter = as.character(res$groups$groups))
       colnames(df_let)[1] <- group_col
@@ -555,7 +568,9 @@ get_stat_letters <- function(df, var_name, group_col, test_type) {
 }
 
 add_stat_layer <- function(p, df, var_name, group_col, stat_test, stat_letter_pos, facet_var = NULL) {
+   # NULL/empty = no control rendered; "" = the control's None choice.
    if (is.null(stat_test) || length(stat_test) == 0) return(p)
+   if (is.na(stat_test[1]) || !nzchar(stat_test[1])) return(p)
    if (!group_col %in% colnames(df)) return(p)
    
    if (!is.null(facet_var)) {
@@ -918,6 +933,25 @@ generate_advanced_plot <- function(df, vars, group_col = NULL, plot_type = "qq",
 }
 
 
+#' Align a caller-supplied correlation matrix to the plotted variable set.
+#' Both correlation panels index the matrix POSITIONALLY (`cormat[i, j]` against
+#' `vars[i]`, plus `vars[hc$order]`), which is only correct while the caller
+#' happens to build it over the same variables in the same order. Subset by name
+#' so a superset or a re-ordered matrix cannot mislabel a cell; a matrix with no
+#' usable dimnames is left alone (positional is then the only contract there is).
+align_cormat <- function(cormat, vars) {
+  if (is.null(cormat) || is.null(rownames(cormat)) || is.null(colnames(cormat))) return(cormat)
+  if (!all(vars %in% rownames(cormat)) || !all(vars %in% colnames(cormat))) return(cormat)
+  cormat[vars, vars, drop = FALSE]
+}
+
+constant_var_plot <- function() {
+  ggplot() +
+    annotate("text", x = 0, y = 0,
+             label = "A selected variable is constant;\ncorrelation is undefined for it.") +
+    theme_void()
+}
+
 generate_correlation_heatmap <- function(df, vars, method = "pearson", cormat = NULL) {
 
   if (length(vars) < 2) return(ggplot() + annotate("text", x=0, y=0, label="Need >=2 variables"))
@@ -928,7 +962,12 @@ generate_correlation_heatmap <- function(df, vars, method = "pearson", cormat = 
   if (is.null(cormat)) {
     cormat <- cor(df_clean, method = method)
   }
-  
+  cormat <- align_cormat(cormat, vars)
+  # A constant variable makes cor() return an NA row and column; as.dist() then
+  # hands those NAs to hclust, which errors out ("NA/NaN/Inf in foreign function
+  # call") and the panel goes blank with no explanation.
+  if (anyNA(cormat)) return(constant_var_plot())
+
   distmat <- as.dist(1 - abs(cormat))
   hc <- hclust(distmat)
   ordered_vars <- vars[hc$order]
@@ -958,7 +997,12 @@ generate_correlation_network <- function(df, vars, threshold = 0.3, method = "pe
   if (is.null(cormat)) {
     cormat <- cor(df_clean, method = method)
   }
-  
+  cormat <- align_cormat(cormat, vars)
+  # An NA correlation (constant variable) would reach `if (abs(w) >= threshold)`
+  # as a missing value and abort the plot with "missing value where TRUE/FALSE
+  # needed"; name the cause instead.
+  if (anyNA(cormat)) return(constant_var_plot())
+
   n <- length(vars)
   angles <- seq(0, 2*pi, length.out = n + 1)[1:n]
   nodes <- data.frame(
@@ -1313,9 +1357,23 @@ generate_pca_contribution <- function(pca_res, pc = 1) {
   generate_pca_bar_plot(contrib, "Contribution", paste("Variable Contribution to PC", pc), "Contribution (%)", "coral", 100 / length(contrib))
 }
 
+# cos2 = the SHARE of a variable's variance captured by the selected PCs, so
+# the denominator has to be that variable's total variance across ALL retained
+# components: rowSums((V S)^2) = (V S^2 V')_jj = Var(x_j). For a correlation
+# PCA (scale. = TRUE) that denominator is 1 for every variable, which is why
+# summing the selected axes alone was correct there — but the module also
+# offers a covariance PCA (scale. = FALSE), where the unnormalised sum is an
+# absolute variance in the variable's own squared units. Plotting mg/kg next to
+# a 0-1 fraction on an axis labelled cos2 is not a cos2; normalising makes the
+# quantity mean the same thing (bounded [0, 1], factoextra's definition) in
+# both modes and leaves the scaled branch numerically where it was.
 generate_pca_cos2 <- function(pca_res, axes = 1:2) {
-  coord <- sweep(pca_res$rotation[, axes, drop=FALSE], 2, pca_res$sdev[axes], "*")
-  cos2 <- rowSums(coord^2)
+  coord <- sweep(pca_res$rotation, 2, pca_res$sdev, "*")
+  total_var <- rowSums(coord^2)
+  cos2 <- rowSums(coord[, axes, drop = FALSE]^2) / total_var
+  # A variable with no variance (or a rank-deficient rotation that carries no
+  # component for it) has no representation to report - NA, never 0/0 = NaN.
+  cos2[!is.finite(cos2)] <- NA_real_
   generate_pca_bar_plot(cos2, "Cos2", paste("Quality of Representation (cos2) on PC", paste(axes, collapse=" & ")), "cos2", "mediumseagreen")
 }
 
@@ -1397,6 +1455,154 @@ generate_pca_biplot_3d <- function(pca_res, df, pc_x=1, pc_y=2, pc_z=3, group_co
                 zaxis = list(title = paste0("PC", pc_z, " (", var_exp[pc_z], "%)"))
               ))
   return(p)
+}
+
+# Distance ruler for the Map Viewer's leaflet widgets.
+#
+# addMeasure ships with leaflet (the leaflet-measure plugin and its CSS are
+# bundled), so this costs no dependency and no external asset. draw_map applies
+# it to EVERY widget it builds, which is what puts the tool on the single map
+# and on both comparison maps without a per-map code path.
+#
+# Bottom-left keeps the control clear of the top-left drawing stack.
+#
+# The plugin's own popup reports SPHERICAL figures (mean-Earth radius) and knows
+# nothing about the analysis CRS, so the readout is taken over: on finish the
+# clicked vertices go to R, measure_path_metrics() recomputes them on the WGS84
+# ellipsoid and in the Target Mapping CRS, and map_ruler_popup_html() comes back
+# to REPLACE that shape's popup contents. The numbers therefore travel with the
+# shape - clicking a measurement made ten minutes ago reopens its own figures -
+# where a single control in the corner could only ever hold the latest one.
+# Coordinates travel as two flat arrays rather than a list of pairs, so the R
+# side receives plain numeric vectors whatever Shiny's JSON simplification does.
+#
+# Cancel calls the same _finishMeasure() the Finish link does, so measurefinish
+# alone cannot tell a completed shape from an abandoned one; only a real finish
+# adds the result layer on the same tick, which is why the layeradd that follows
+# is what actually triggers the round trip. The record lives in a page-level
+# store because the reply arrives through one custom message handler shared by
+# all three map widgets.
+add_map_ruler <- function(map, position = "bottomleft") {
+  map %>%
+    leaflet::addMeasure(
+      position = position,
+      primaryLengthUnit = "meters", secondaryLengthUnit = "kilometers",
+      primaryAreaUnit = "hectares", secondaryAreaUnit = "sqmeters",
+      activeColor = "#fab005", completedColor = "#e74c3c"
+    ) %>%
+    htmlwidgets::onRender("
+      function(el, x) {
+        var map = this;
+        var store = window.__monolithRuler = window.__monolithRuler || {};
+        if (!window.__monolithRulerInit) {
+          window.__monolithRulerInit = true;
+          Shiny.addCustomMessageHandler('monolith_ruler_result', function(msg) {
+            var rec = store[msg.token];
+            if (rec) { rec.filled = true; rec.render(msg.html); }
+          });
+        }
+        // A re-rendered widget takes its shapes with it: those records name a
+        // map instance that no longer exists and can never be reached again.
+        Object.keys(store).forEach(function(k) {
+          if (store[k].mapId === el.id) delete store[k];
+        });
+
+        // map_ruler_css() hides the Cancel / Finish label text so the two sit
+        // in the panel as their icons alone. Hidden text is not an accessible
+        // name, so give them a real one; re-applied on measurestart because
+        // that is the moment they become visible.
+        var label = function() {
+          [['.js-cancel', 'Cancel measurement'],
+           ['.js-finish', 'Finish measurement']].forEach(function(p) {
+            var a = el.querySelector('.leaflet-control-measure ' + p[0]);
+            if (a) { a.setAttribute('title', p[1]); a.setAttribute('aria-label', p[1]); }
+          });
+        };
+        label();
+
+        // The tile provider's attribution runs along the bottom of the map and
+        // wraps to two or three lines when the provider is wordy (Esri's imagery
+        // credit does) or the map is narrow, and it then covers a control pinned
+        // to the bottom corner - the ruler button and its panel both disappeared
+        // behind it. Lift the control clear of whatever height the attribution
+        // currently has: the basemap is switchable, so the offset is measured
+        // rather than assumed, and re-measured whenever the map resizes or a
+        // layer (a new basemap) arrives with its own credit line.
+        var lift = function() {
+          var ctrl = el.querySelector('.leaflet-control-measure');
+          if (!ctrl) return;
+          var attr = el.querySelector('.leaflet-control-attribution');
+          var h = attr ? attr.getBoundingClientRect().height : 0;
+          ctrl.style.marginBottom = (h > 0 ? Math.round(h) + 4 : 0) + 'px';
+        };
+        lift();
+        setTimeout(lift, 300);
+        map.on('resize layeradd baselayerchange', lift);
+
+        // Built as a live DOM node, not a string: the two task links are wired
+        // here, so they keep working after the popup is closed and reopened.
+        var content = function(html, layer) {
+          var div = document.createElement('div');
+          div.innerHTML = html;
+          var wire = function(sel, fn) {
+            var a = div.querySelector(sel);
+            if (a) L.DomEvent.on(a, 'click', function(ev) { L.DomEvent.stop(ev); fn(); });
+          };
+          wire('.mono-ruler-zoom', function() {
+            if (layer.getBounds) map.fitBounds(layer.getBounds(), { padding: [20, 20], maxZoom: 17 });
+            else if (layer.getLatLng) map.panTo(layer.getLatLng());
+          });
+          wire('.mono-ruler-delete', function() { map.removeLayer(layer); });
+          return div;
+        };
+
+        var pending = null;
+        map.on('measurestart', function() { label(); });
+        map.on('measurefinish', function(e) {
+          // Copied, not referenced: e.points IS the plugin's own vertex array,
+          // and it pushes the closing vertex into it after this event to build
+          // the polygon. Holding the reference would report one point too many
+          // (the shape's first vertex, repeated) once the layer arrives.
+          pending = (e.points || []).map(function(p) { return { lng: p.lng, lat: p.lat }; });
+          setTimeout(function() { pending = null; }, 0);
+        });
+        map.on('layeradd', function(e) {
+          if (pending === null) return;
+          var pts = pending, layer = e.layer;
+          pending = null;
+          // A single point has no length to report; the plugin's own
+          // coordinate popup is left alone.
+          if (pts.length < 2) return;
+          var token = 'mr' + Date.now() + Math.random().toString(36).slice(2, 8);
+          var rec = store[token] = {
+            mapId: el.id, layer: layer, filled: false,
+            render: function(html) { layer.setPopupContent(content(html, layer)); }
+          };
+          // The plugin binds and opens its popup immediately after this event,
+          // so the placeholder can only be written on the next tick - and only
+          // if the round trip has not already beaten it there.
+          setTimeout(function() {
+            if (!rec.filled) {
+              layer.setPopupContent(
+                '<div class=\"monolith-ruler-popup\"><h3>Measurement</h3>' +
+                '<p style=\"color:#999;\">Computing...</p></div>');
+            }
+          }, 0);
+          Shiny.setInputValue(
+            el.id + '_ruler',
+            { lng: pts.map(function(p) { return p.lng; }),
+              lat: pts.map(function(p) { return p.lat; }),
+              token: token },
+            { priority: 'event' }
+          );
+        });
+        map.on('layerremove', function(e) {
+          Object.keys(store).forEach(function(k) {
+            if (store[k].layer === e.layer) delete store[k];
+          });
+        });
+      }
+    ")
 }
 
 add_styled_points <- function(map, pts_sf, color_by = "none", custom_colors = NULL,

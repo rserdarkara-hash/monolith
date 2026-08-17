@@ -46,6 +46,31 @@
     df
   }, striped = TRUE, hover = TRUE, bordered = TRUE, width = "100%")
 
+  # Live advisory for a Strict Measured buffer that is narrower than half the
+  # grid cell diagonal, which drops the cells of isolated samples (see
+  # strict_buffer_gap, spatial_pipeline.R). Shown for Fixed resolution only:
+  # in Auto modes rv$loc_resolutions holds a density-based SUGGESTION, while
+  # the run derives the real cell size from each locality's boundary area, so
+  # a pre-run figure here would be a guess. Those modes are covered by the
+  # authoritative run-time warning instead.
+  output$strict_buffer_note <- renderUI({
+    if (!identical(input$boundary_type, "strict")) return(NULL)
+    if (!identical(input$res_mode %||% "local", "fixed")) return(NULL)
+    msg <- strict_buffer_message(input$buff_dist %||% 250, input$grid_res %||% 50)
+    if (is.null(msg)) return(NULL)
+    p(style = paste("font-size: 0.78em; margin-top: 8px; border-left: 3px solid #f59e0b;",
+                    "padding-left: 8px; color: #fcd34d; line-height: 1.35;"),
+      msg,
+      # An uploaded boundary shapefile replaces the point buffers for every
+      # locality it matches, and the run-time check stays silent for those. It
+      # is matched per locality though, so the ones it misses do fall back to
+      # the point-buffer boundary and are still exposed - hence a qualifier
+      # rather than hiding the advisory.
+      if (!is.null(rv$shp_bound)) {
+        span(" This applies to localities your uploaded boundary shapefile does not cover, which fall back to the point buffers.")
+      })
+  })
+
   # Normalise a raster / packed raster / list-of-rasters argument into a
   # plain list with NULL entries dropped (shared by draw_map and the proxy
   # restyler).
@@ -96,7 +121,7 @@
     img_id <- function(i) paste0("rast_img_", i)
     legend_id <- "rast_legend"
     select_active_layer <- function(r_w) {
-      is_uncertainty <- isTruthy(input$show_uncertainty) && meta$method %in% c("OK", "RK", "RFK", "CK") && "var1.var" %in% names(r_w)
+      is_uncertainty <- isTruthy(input$show_uncertainty) && method_has_variance(meta$method) && "var1.var" %in% names(r_w)
       if (is_uncertainty) {
         al <- r_w[["var1.var"]]
         if (input$uncertainty_type == "se") sqrt(al) else al
@@ -119,7 +144,7 @@
     }
 
     is_viridis <- meta$palette == "viridis"
-    is_uncert_view <- isTruthy(input$show_uncertainty) && meta$method %in% c("OK", "RK", "RFK", "CK")
+    is_uncert_view <- isTruthy(input$show_uncertainty) && method_has_variance(meta$method)
     legend_title <- if (is_uncert_view) {
       if (input$uncertainty_type == "se") {
         paste0("SE: ", meta$label, if (nzchar(meta$unit)) paste0(" ", meta$unit) else "")
@@ -197,7 +222,9 @@
       # without layers has no auto-fit limits, and a map that never receives a
       # view never loads tiles - it stays solid gray. Always give it one.
       if (!is.null(map_id) && exists(map_id, envir = map_style_sig)) rm(list = map_id, envir = map_style_sig)
-      m0 <- leaflet(options = leafletOptions(zoomControl = FALSE)) %>% addProviderTiles(current_tiles, layerId="base_tiles")
+      m0 <- leaflet(options = leafletOptions(zoomControl = FALSE)) %>%
+        addProviderTiles(current_tiles, layerId="base_tiles") %>%
+        add_map_ruler()
       bb <- run_area_bbox()
       m0 <- if (!is.null(bb)) {
         m0 %>% fitBounds(as.numeric(bb$xmin), as.numeric(bb$ymin), as.numeric(bb$xmax), as.numeric(bb$ymax))
@@ -217,7 +244,8 @@
         markerOptions = drawMarkerOptions(),
         circleMarkerOptions = FALSE,
         editOptions = editToolbarOptions(selectedPathOptions = selectedPathOptions())
-      )
+      ) %>%
+      add_map_ruler()
     meta <- isolate(get_display_meta())
     req(meta)
 
@@ -391,6 +419,39 @@
       proxy <- leafletProxy(map_id) %>% removeControl("res_overlay_ctrl")
       if (!is.null(res_html)) proxy %>% addControl(html = res_html, position = "bottomright", layerId = "res_overlay_ctrl")
     }
+  })
+
+  # Ruler readout, one observer per map: the three widgets carry separate input
+  # ids even though draw_map builds them all. `local()` is what captures each id
+  # - a bare `for` binding would leave every observer reading the last one.
+  # Deliberately NOT keyed on map_overlay_rev: this answers a user gesture, not
+  # an overlay refresh. The answer goes back to the token add_map_ruler() minted
+  # for the shape, which is what makes it land in that measurement's own popup
+  # instead of a corner box that only ever holds the newest figure.
+  for (rid in overlay_map_ids) local({
+    map_id <- rid
+    input_id <- paste0(map_id, "_ruler")
+    observeEvent(input[[input_id]], {
+      val <- input[[input_id]]
+      token <- as.character(val$token %||% "")
+      if (length(token) != 1 || !nzchar(token)) return(invisible(NULL))
+      lon <- suppressWarnings(as.numeric(val$lng))
+      lat <- suppressWarnings(as.numeric(val$lat))
+      if (length(lon) < 2 || length(lon) != length(lat)) return(invisible(NULL))
+      # The CRS of the run ON SCREEN, not whatever the sidebar now holds: the
+      # projected figure exists to be compared with this surface's variogram
+      # range and grid resolution, so it must name the system those were
+      # computed in. Falls back to the live selection only before a first run
+      # has committed one (rv$disp is the same snapshot get_display_meta reads).
+      ruler_crs <- rv$disp$crs_sel %||% input$crs_selection
+      res <- tryCatch(measure_path_metrics(cbind(lon, lat), ruler_crs),
+                      error = function(e) NULL)
+      html <- map_ruler_popup_html(res)
+      if (!is.null(html)) {
+        session$sendCustomMessage("monolith_ruler_result",
+                                  list(token = token, html = html))
+      }
+    }, ignoreInit = TRUE)
   })
 
   # Distance scale. The control lives in the external #distance_scale_container:
@@ -769,20 +830,11 @@
            showNotification("This plot is not available to download yet.", type = "warning")
            req(FALSE)
          }
-         # Screen builders use theme_minimal(base_size = 12), which is far too
-         # small on a 9 x 7 in canvas at 300 dpi; rescale the text to the
-         # export-registry convention (~16 pt body, bold 19 pt title).
-         p <- p + ggplot2::theme(
-           text = ggplot2::element_text(size = 16),
-           plot.title = ggplot2::element_text(size = 19, face = "bold"),
-           plot.subtitle = ggplot2::element_text(size = 14),
-           axis.title = ggplot2::element_text(size = 16),
-           axis.text = ggplot2::element_text(size = 14),
-           legend.title = ggplot2::element_text(size = 14),
-           legend.text = ggplot2::element_text(size = 13),
-           strip.text = ggplot2::element_text(size = 13)
-         )
-         suppressWarnings(ggsave(file, plot = p, width = 9, height = 7, dpi = 300, bg = "white"))
+         # The builders size their text in points; with showtext told the
+         # device's resolution those points land on the page as written, so the
+         # 12 pt screen theme reads as a 12 pt figure on the 9 x 7 in canvas.
+         with_showtext_dpi(300, suppressWarnings(
+           ggsave(file, plot = p, width = 9, height = 7, dpi = 300, bg = "white")))
        }
      )
    }

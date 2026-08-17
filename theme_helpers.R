@@ -565,32 +565,43 @@ theme_switcher_server <- function(id) {
   })
 }
 
-export_plot_to_file <- function(p, filepath, ext, input) {
-  width <- input$styler_width %||% 10
-  height <- if(isTruthy(input$styler_height)) input$styler_height else 8
-  dpi <- input$styler_dpi %||% 300
-  
-  if (inherits(p, "trellis")) {
-    if (ext == "png") {
-      png(filepath, width = width, height = height, units = "in", res = dpi)
-    } else if (ext == "tiff") {
-      tiff(filepath, width = width, height = height, units = "in", res = dpi)
-    } else if (ext == "pdf") {
-      pdf(filepath, width = width, height = height)
+#' Write a styled plot to disk at the Export Styler's dimensions.
+#'
+#' `width`/`height`/`dpi` default to the styler controls; the preview passes the
+#' same figure at a screen resolution so that what it shows is this writer's
+#' output, not a separate rendering of it.
+export_plot_to_file <- function(p, filepath, ext, input,
+                                width = NULL, height = NULL, dpi = NULL) {
+  if (is.null(width))  width  <- input$styler_width %||% 10
+  if (is.null(height)) height <- if(isTruthy(input$styler_height)) input$styler_height else 8
+  if (is.null(dpi))    dpi    <- input$styler_dpi %||% 300
+
+  # PDF is a vector device measured in points; the raster devices carry the
+  # requested resolution. Either way showtext has to be told which, or the point
+  # sizes in the theme are not the point sizes on the page (see with_showtext_dpi).
+  with_showtext_dpi(if (ext == "pdf") 72 else dpi, {
+    if (inherits(p, "trellis")) {
+      if (ext == "png") {
+        png(filepath, width = width, height = height, units = "in", res = dpi)
+      } else if (ext == "tiff") {
+        tiff(filepath, width = width, height = height, units = "in", res = dpi)
+      } else if (ext == "pdf") {
+        pdf(filepath, width = width, height = height)
+      } else {
+        jpeg(filepath, width = width, height = height, units = "in", res = dpi)
+      }
+      print(p)
+      dev.off()
     } else {
-      jpeg(filepath, width = width, height = height, units = "in", res = dpi)
+      ggplot2::ggsave(
+        filename = filepath,
+        plot = p,
+        device = if(ext == "pdf") "pdf" else (if(ext == "tiff") "tiff" else NULL),
+        dpi = dpi,
+        width = width,
+        height = height,
+        units = "in"
+      )
     }
-    print(p)
-    dev.off()
-  } else {
-    ggplot2::ggsave(
-      filename = filepath,
-      plot = p,
-      device = if(ext == "pdf") "pdf" else (if(ext == "tiff") "tiff" else NULL),
-      dpi = dpi,
-      width = width,
-      height = height,
-      units = "in"
-    )
-  }
+  })
 }

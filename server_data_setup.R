@@ -38,8 +38,13 @@
     req(df); rv$user_data <- df
     
     cols <- colnames(df)
-    updateSelectInput(session, "map_x", choices = cols, selected = grep("\\bx\\b|^lon|^longitude", cols, ignore.case=TRUE, value=TRUE)[1])
-    updateSelectInput(session, "map_y", choices = cols, selected = grep("\\by\\b|^lat|^latitude", cols, ignore.case=TRUE, value=TRUE)[1])
+    # Whole-name matching (pick_coord_column, ui_formatting.R) on the same token
+    # lists is_coord_col() uses: six other call sites already moved to that
+    # policy, this one kept substring matching and pre-selected columns like
+    # Longevity_index or Lateral_flow as X or Y. NULL when nothing matches
+    # leaves the first column selected, exactly as the old NA did.
+    updateSelectInput(session, "map_x", choices = cols, selected = pick_coord_column(cols, "x"))
+    updateSelectInput(session, "map_y", choices = cols, selected = pick_coord_column(cols, "y"))
     loc_guess <- grep("loc|site|farm|id|group", cols, ignore.case=TRUE, value=TRUE)[1]
     if (is.na(loc_guess)) loc_guess <- cols[1]
     updateSelectInput(session, "map_loc", choices = cols, selected = loc_guess)
@@ -184,6 +189,22 @@
 
   observeEvent(input$crs_selection, {
     req(input$crs_selection)
+
+    # Metric-axis advisory for the Target Mapping CRS, raised at selection time
+    # so the rule is met before a whole run is configured; the run gate
+    # (validate_crs(require_metric = TRUE), server_execution.R) is what actually
+    # enforces it. Silent for a geographic CRS, which the pipeline projects to a
+    # metric UTM zone itself.
+    unit_factor <- crs_metre_factor(input$crs_selection)
+    if (!is.na(unit_factor) && abs(unit_factor - 1) > 1e-9) {
+      showNotification(
+        paste0("Target Mapping CRS '", input$crs_selection, "' has axis units of '",
+               as.character(sf::st_crs(input$crs_selection)$units),
+               "', not metres. Resolution, buffer distance, variogram ranges and on-map measurements are all expressed in metres, so a run with this CRS is refused. Choose a metric projected CRS for the area (e.g. its UTM zone)."),
+        type = "error", duration = 15, id = "crs_unit_guard")
+    } else {
+      removeNotification("crs_unit_guard")
+    }
 
     # In fixed mode the user chose the value deliberately, so only refresh the
     # slider frame; in auto modes the suggestion observer overwrites the value

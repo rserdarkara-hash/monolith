@@ -27,6 +27,45 @@ test_that("generate_correlation_heatmap returns ggplot for single var", {
   expect_s3_class(p, "ggplot")
 })
 
+test_that("a supplied correlation matrix is aligned to the plotted variables", {
+  # Both panels index the matrix POSITIONALLY (cormat[i, j] against vars[i], and
+  # vars[hc$order]), which was only correct because the caller happened to build
+  # it over the same variables in the same order. A superset or a re-ordered
+  # matrix would have mislabelled every cell.
+  df <- make_test_df(20)
+  vars <- c("c", "a")
+  full <- cor(df[, c("a", "b", "c", "d")])
+  aligned <- align_cormat(full, vars)
+  expect_identical(rownames(aligned), vars)
+  expect_identical(colnames(aligned), vars)
+  expect_equal(aligned["c", "a"], full["c", "a"])
+  # A matrix without usable dimnames is left alone (positional is all there is).
+  bare <- unname(full)
+  expect_identical(align_cormat(bare, vars), bare)
+
+  expect_s3_class(generate_correlation_heatmap(df, vars, cormat = full), "ggplot")
+  expect_s3_class(generate_correlation_network(df, vars, threshold = 0.1, cormat = full), "ggplot")
+})
+
+test_that("a constant variable is named instead of blanking the panel", {
+  # cor() returns an NA row/column for a zero-variance column. as.dist() then
+  # feeds those NAs to hclust ("NA/NaN/Inf in foreign function call") and the
+  # network's `if (abs(w) >= threshold)` gets a missing value — both abort the
+  # render, so the panel vanishes with no message.
+  df <- make_test_df(20)
+  df$flat <- 1
+  vars <- c("a", "b", "flat")
+
+  # cor() itself warns ("the standard deviation is zero") before returning the
+  # NA row; that is stats' business, the point here is what the panel does with it.
+  p_heat <- suppressWarnings(generate_correlation_heatmap(df, vars))
+  p_net  <- suppressWarnings(generate_correlation_network(df, vars, threshold = 0.1))
+  expect_s3_class(p_heat, "ggplot")
+  expect_s3_class(p_net, "ggplot")
+  expect_match(as.character(p_heat$layers[[1]]$aes_params$label %||% ""), "constant")
+  expect_match(as.character(p_net$layers[[1]]$aes_params$label %||% ""), "constant")
+})
+
 # ── generate_correlation_network ───────────────────────────────────────────
 
 test_that("generate_correlation_network returns ggplot for valid data", {
@@ -220,4 +259,22 @@ test_that("check_collinearity returns no collinearity for independent vars", {
   df <- make_test_df(20)
   result <- check_collinearity(df, c("a", "b", "c"))
   expect_false(result$has_collinearity)
+})
+
+test_that("desc_empty_dt returns a renderable placeholder, never NULL", {
+  # The desc module's DT outputs used to return NULL on their empty states,
+  # against the app-wide "never hand a widget output NULL" convention (the
+  # reason sci_dt(NULL) renders a placeholder), and a silent blank table also
+  # hid WHY there was nothing to show.
+  w <- desc_empty_dt("nothing here")
+  expect_s3_class(w, "datatables")
+  expect_true(any(grepl("nothing here", unlist(w$x$data))))
+})
+
+# ── complete-case reporting ────────────────────────────────────────────────
+
+test_that("complete_case_note states the sample and the rows it dropped", {
+  expect_equal(complete_case_note(50, 50), "Complete cases: n = 50 of 50 rows.")
+  expect_equal(complete_case_note(37, 50),
+               "Complete cases: n = 37 of 50 rows (13 dropped for missing values).")
 })

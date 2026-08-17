@@ -238,7 +238,7 @@
   })
 
   joint_vv <- reactive({
-    is_uncertainty <- isTruthy(input$show_uncertainty) && isTruthy((rv$disp$method %||% "") %in% c("OK", "RK", "RFK", "CK"))
+    is_uncertainty <- isTruthy(input$show_uncertainty) && method_has_variance(rv$disp$method %||% "")
     get_joint_scale_values(rv$rast, rv$rast_pred, input$match_scales, is_uncertainty)
   })
 
@@ -589,10 +589,20 @@
           return()
         }
         
+        # Each rank is an independent bivariate screen, so it uses every sample
+        # that has both values (pairwise deletion) rather than the rows complete
+        # across all candidates. The n therefore differs between predictors and
+        # is reported per row. Selecting the pair explicitly - cor.test drops
+        # incomplete pairs itself, and its `use` argument does not exist - lets a
+        # pair with too few shared samples be skipped instead of erroring into
+        # the tryCatch and vanishing without explanation.
         res_list <- lapply(setdiff(colnames(df), target), function(v) {
-          test <- tryCatch(cor.test(df[[target]], df[[v]], use = "pairwise.complete.obs"), error = function(e) NULL)
+          ok <- stats::complete.cases(df[[target]], df[[v]])
+          if (sum(ok) < 3) return(NULL)
+          test <- tryCatch(cor.test(df[[target]][ok], df[[v]][ok]), error = function(e) NULL)
           if(!is.null(test)) {
-             data.frame(Variable = v, Corr = test$estimate, Pval = test$p.value, stringsAsFactors = FALSE)
+             data.frame(Variable = v, Corr = unname(test$estimate), Pval = test$p.value,
+                        N = sum(ok), stringsAsFactors = FALSE)
           } else {
              NULL
           }
@@ -605,7 +615,9 @@
         }
         
         rv$full_cor_matrix <- res_df # Re-using variable name but storing dataframe instead of matrix
-        rv$cor_scope_label <- sprintf("%s, n = %d", scope_lbl, nrow(df_base))
+        # The scope's sample count is not the n behind any one coefficient: each
+        # rank carries its own n, shown alongside it.
+        rv$cor_scope_label <- sprintf("%s, %d samples", scope_lbl, nrow(df_base))
         rv$show_corr_panel <- TRUE
       })
     
@@ -650,7 +662,8 @@
         tabs[[1]] <- tabPanel("All",
           tags$ul(style="font-size: 0.85em; padding-left: 15px; margin-top: 5px; list-style-type: none;",
             lapply(seq_len(nrow(res_all)), function(i) {
-              tags$li(sprintf("%s: %.3f (p=%.3f)", res_all$Label[i], res_all$Corr[i], res_all$Pval[i]))
+              tags$li(sprintf("%s: %.3f (p=%.3f, n=%d)", res_all$Label[i], res_all$Corr[i],
+                              res_all$Pval[i], res_all$N[i]))
             })
           )
         )
@@ -664,7 +677,8 @@
           tabPanel(cat,
             tags$ul(style="font-size: 0.85em; padding-left: 15px; margin-top: 5px; list-style-type: none;",
               lapply(seq_len(nrow(res_cat)), function(i) {
-                tags$li(sprintf("%s: %.3f (p=%.3f)", res_cat$Label[i], res_cat$Corr[i], res_cat$Pval[i]))
+                tags$li(sprintf("%s: %.3f (p=%.3f, n=%d)", res_cat$Label[i], res_cat$Corr[i],
+                                res_cat$Pval[i], res_cat$N[i]))
               })
             )
           )

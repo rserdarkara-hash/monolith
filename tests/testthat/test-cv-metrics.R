@@ -246,6 +246,32 @@ test_that("perform_cv detects non-standard column names via fallback", {
   expect_true(res$rmse > 0)
 })
 
+test_that("perform_cv returns NA R2 on a constant vector without warning", {
+  # cor() already returns NA for a zero-variance vector, but it emits "the
+  # standard deviation is zero" on the way, and inside a PSOCK worker that
+  # warning lands in the user's run log with nothing explaining it.
+  # augment_metrics() and calc_ccc() guard the same degenerate case explicitly.
+  cv_df <- data.frame(
+    var1.pred     = c(10, 20, 30, 40, 50),
+    var1.observed = rep(30, 5),
+    x = 1:5, y = 1:5
+  )
+  res <- expect_no_warning(perform_cv(cv_df, moran = FALSE))
+  expect_true(is.na(res$r2))
+  # The metrics that remain defined are still reported.
+  expect_false(is.na(res$rmse))
+  expect_equal(res$n, 5)
+
+  # ...and the same when the PREDICTIONS are constant (a flat surface).
+  cv_flat <- data.frame(
+    var1.pred     = rep(30, 5),
+    var1.observed = c(10, 20, 30, 40, 50),
+    x = 1:5, y = 1:5
+  )
+  res_flat <- expect_no_warning(perform_cv(cv_flat, moran = FALSE))
+  expect_true(is.na(res_flat$r2))
+})
+
 test_that("perform_cv returns NA metrics when column detection fails", {
   cv_df <- data.frame(foo = 1:5, bar = 6:10)
   res <- perform_cv(cv_df)
@@ -580,4 +606,20 @@ test_that("pool_cv_sf skips CRS-less entries and returns NULL when nothing is po
   expect_null(pool_cv_sf(list(A = bad)))
   expect_null(pool_cv_sf(list()))
   expect_null(pool_cv_sf(NULL))
+})
+
+test_that("NRMSE normalises by the absolute mean, so negative-mean variables report a positive value", {
+  # rmse / mean(obs) with a signed mean gave centred/anomaly variables (or
+  # sub-zero temperatures) a NEGATIVE NRMSE%, a nonsensical sign for a
+  # normalised error. Positive-mean data are byte-identical under abs().
+  obs <- c(-10, -12, -8, -11, -9)
+  pre <- c(-9.5, -12.5, -8.2, -10.4, -9.3)
+  neg <- augment_metrics(obs, pre)
+  rmse <- sqrt(mean((obs - pre)^2))
+  expect_gt(neg$nrmse_mean, 0)
+  expect_equal(neg$nrmse_mean, round(rmse / abs(mean(obs)) * 100, 2))
+  # Sign-flip symmetry: negating both vectors changes neither the error nor
+  # the scale, so the sign-flipped twin must report the identical NRMSE.
+  pos <- augment_metrics(-obs, -pre)
+  expect_equal(neg$nrmse_mean, pos$nrmse_mean)
 })

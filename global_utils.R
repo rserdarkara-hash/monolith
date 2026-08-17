@@ -19,6 +19,25 @@ monolith_history_file <- function() {
   )
 }
 
+#' Evaluate a plot write with showtext's assumed resolution matched to the device.
+#'
+#' `showtext_auto()` (global.R) routes every glyph through showtext, which sizes
+#' text against its OWN dpi option (96) instead of the resolution of the device
+#' being drawn on. On a 300-dpi export that renders every point size at 96/300 of
+#' the value the theme asked for, and raising the DPI shrinks the text further.
+#' Setting the option to the device's resolution for the duration of a write
+#' makes a point mean a point on the page, at any DPI.
+#'
+#' @param dpi Resolution of the device `expr` draws on. Vector devices (pdf, svg)
+#'   are defined in points, so they take 72.
+#' @param expr Write to perform; evaluated once, with the option in force.
+with_showtext_dpi <- function(dpi, expr) {
+  if (!requireNamespace("showtext", quietly = TRUE)) return(force(expr))
+  old <- showtext::showtext_opts(dpi = dpi)
+  on.exit(showtext::showtext_opts(old), add = TRUE)
+  force(expr)
+}
+
 estimate_run_duration <- function(loc_sample_counts, method, comp_mode, cores) {
   # History aware run duration estimator
   history_file <- monolith_history_file()
@@ -122,14 +141,50 @@ estimate_run_duration <- function(loc_sample_counts, method, comp_mode, cores) {
 }
 
 
-validate_crs <- function(crs_selection, error_prefix = "Invalid CRS provided", duration = NULL) {
+#' Metres per linear axis unit of a PROJECTED CRS.
+#'
+#' Monolith states every length in metres: the resolution slider, the buffer
+#' distance, the nearest-neighbour spacing rule and the ruler's projected column
+#' all label their numbers "m", while the engines operate on the CRS's own axis
+#' units. That identity holds only while the Target Mapping CRS is metric, and
+#' nothing in a CRS string forces it to be - a State Plane zone in US survey
+#' feet would turn a "50 m" grid into 15 m, a "250 m" buffer into 76 m and a
+#' variogram range into a number 3.28x its stated size, all without an error.
+#'
+#' Returns NA when the question does not apply or cannot be answered: a
+#' geographic CRS (no linear axis unit), an unparseable CRS, or a projected CRS
+#' whose unit udunits cannot resolve. Callers treat NA as "do not block", so an
+#' exotic but valid CRS is never refused merely for being unrecognised.
+crs_metre_factor <- function(crs) {
+  co <- tryCatch(sf::st_crs(crs), error = function(e) NULL)
+  if (is.null(co) || is.na(co) || isTRUE(sf::st_is_longlat(co))) return(NA_real_)
+  f <- tryCatch(as.numeric(units::set_units(co$ud_unit, "m")), error = function(e) NA_real_)
+  if (length(f) == 1 && is.finite(f) && f > 0) f else NA_real_
+}
+
+#' @param require_metric Enforce the metric-axis rule above. Reserved for the
+#'   Target Mapping CRS: the Input Data CRS may use any unit, because the
+#'   pipeline projects out of it before measuring anything.
+validate_crs <- function(crs_selection, error_prefix = "Invalid CRS provided", duration = NULL,
+                         require_metric = FALSE) {
   tryCatch({
     c_obj <- sf::st_crs(crs_selection)
     if (is.na(c_obj)) stop("Invalid CRS format.")
-    
+
     t_obj <- terra::crs(crs_selection)
     if (t_obj == "") stop("Invalid CRS for terra.")
-    
+
+    # Only a POSITIVELY non-metric unit blocks. A geographic CRS passes (the
+    # pipeline projects it to a metric UTM zone itself) and so does one whose
+    # unit could not be resolved.
+    if (isTRUE(require_metric)) {
+      f <- crs_metre_factor(c_obj)
+      if (!is.na(f) && abs(f - 1) > 1e-9) {
+        stop(sprintf("axis unit is '%s', not metres. Resolution, buffer distance, variogram ranges and on-map measurements are all expressed in metres, so this CRS would report every distance %.4gx its true size. Choose a metric projected CRS for the area (e.g. its UTM zone).",
+                     as.character(c_obj$units), 1 / f))
+      }
+    }
+
     c_obj
   }, error = function(e) {
     showNotification(paste(error_prefix, e$message), type = "error", duration = duration)
@@ -256,6 +311,146 @@ write_geotiff <- function(r, file) {
     }
   }
   invisible(file)
+}
+
+#' Measure a path drawn with the Map Viewer's ruler.
+#'
+#' The Leaflet measure control computes on a SPHERE (its own calc module, radius
+#' 6371000 m), which is up to ~0.5% off the ellipsoid in length, and it knows
+#' nothing about the coordinate system the models run in. Both numbers this app
+#' owes the user are therefore recomputed here from the clicked WGS84 vertices:
+#'
+#'   - the GEODESIC length on the WGS84 ellipsoid, via terra (GeographicLib):
+#'     the ground distance, independent of any projection;
+#'   - the PLANAR length in the Target Mapping CRS: the metric every engine
+#'     actually works in (variogram lags, IDW separation distances, TPS
+#'     coordinates, grid resolution, buffer radii), so it is the number to
+#'     compare against a variogram range or a cell size.
+#'
+#' The two differ by the projection's distance distortion, small at field scale
+#' (~0.003% over 2.5 km in UTM) and worth showing rather than hiding: a wide gap
+#' means the selected CRS is a poor fit for the area being measured. A
+#' GEOGRAPHIC Target Mapping CRS yields no planar figure at all - a length in
+#' degrees is meaningless, the same rule `validate_and_project_sf()` enforces
+#' before interpolation.
+#'
+#' Area is reported on the same two bases once the path has three vertices,
+#' which is where the measure control itself switches to area. `terra::expanse`
+#' is the ellipsoidal area, the same call the class-zone export uses. From that
+#' third vertex on the length CLOSES with the shape and becomes a perimeter, so
+#' the two figures describe one and the same ring: an open path reported beside
+#' the area of a closed one differs from it by the closing leg and invites the
+#' reader to add a boundary that was never measured.
+#'
+#' A ring that crosses itself has no area worth printing: GEOS and terra both
+#' integrate around the ring in traversal order (the planar shoelace sum and its
+#' geodesic counterpart), so a figure-eight's oppositely-traversed lobes return
+#' their DIFFERENCE, not the area drawn on the screen - a symmetric bowtie
+#' evaluates to zero. The perimeter is unaffected by the crossing and stays
+#' exact, so it is still reported; the area is withheld rather than invented.
+#'
+#' @param lonlat Two-column matrix of clicked vertices, longitude then latitude,
+#'   in WGS84.
+#' @param proj_crs Target Mapping CRS (anything `sf::st_crs` accepts). NULL or a
+#'   geographic CRS leaves the projected fields NA.
+#' @return List with `n_points`, `closed` (TRUE once the shape is a ring, which
+#'   makes the lengths perimeters), `self_intersecting`, `length_geodesic`,
+#'   `length_projected` (metres), `area_geodesic`, `area_projected` (square
+#'   metres) and `crs_label`. Un-measurable quantities are NA, never 0.
+measure_path_metrics <- function(lonlat, proj_crs = NULL) {
+  out <- list(n_points = 0L, closed = FALSE, self_intersecting = FALSE,
+              length_geodesic = NA_real_, length_projected = NA_real_,
+              area_geodesic = NA_real_, area_projected = NA_real_,
+              crs_label = NA_character_)
+  if (is.null(lonlat)) return(out)
+  lonlat <- suppressWarnings(matrix(as.numeric(as.matrix(lonlat)), ncol = 2))
+  lonlat <- lonlat[stats::complete.cases(lonlat), , drop = FALSE]
+  # A vertex placed on top of its predecessor contributes nothing to the path
+  # and would hand terra a zero-length segment; dropping it keeps the vertex
+  # count honest as well.
+  if (nrow(lonlat) > 1) {
+    lonlat <- lonlat[c(TRUE, rowSums(abs(diff(lonlat))) > 0), , drop = FALSE]
+  }
+  # An already-closed ring is counted by its corners: the repeated first vertex
+  # is the closure this function applies itself below, not a place the user
+  # clicked, and leaving it in would overstate the count by one.
+  if (nrow(lonlat) > 2 && all(lonlat[1, ] == lonlat[nrow(lonlat), ])) {
+    lonlat <- lonlat[-nrow(lonlat), , drop = FALSE]
+  }
+  out$n_points <- nrow(lonlat)
+  if (out$n_points < 2) return(out)
+
+  out$closed <- out$n_points >= 3
+  out$self_intersecting <- out$closed && ring_self_intersects(lonlat)
+  path <- if (out$closed) rbind(lonlat, lonlat[1, ]) else lonlat
+  report_area <- out$closed && !out$self_intersecting
+
+  out$length_geodesic <- tryCatch(
+    sum(terra::perim(terra::vect(path, type = "lines", crs = "EPSG:4326"))),
+    error = function(e) NA_real_
+  )
+  if (report_area) {
+    out$area_geodesic <- tryCatch(
+      sum(terra::expanse(terra::vect(path, type = "polygons", crs = "EPSG:4326"),
+                         unit = "m")),
+      error = function(e) NA_real_
+    )
+  }
+
+  crs_obj <- if (is.null(proj_crs) || identical(proj_crs, "")) NULL else {
+    tryCatch(sf::st_crs(proj_crs), error = function(e) NULL)
+  }
+  if (is.null(crs_obj) || is.na(crs_obj) || isTRUE(sf::st_is_longlat(crs_obj))) return(out)
+
+  lab <- crs_obj$input
+  if (is.null(lab) || is.na(lab) || nchar(lab) > 30) lab <- crs_obj$Name
+  out$crs_label <- if (is.null(lab) || is.na(lab)) "projected CRS" else lab
+
+  out$length_projected <- tryCatch(
+    as.numeric(sf::st_length(sf::st_transform(
+      sf::st_sfc(sf::st_linestring(path), crs = 4326), crs_obj))),
+    error = function(e) NA_real_
+  )
+  if (report_area) {
+    out$area_projected <- tryCatch(
+      as.numeric(sf::st_area(sf::st_transform(
+        sf::st_sfc(sf::st_polygon(list(path)), crs = 4326), crs_obj))),
+      error = function(e) NA_real_
+    )
+  }
+  out
+}
+
+#' Does a closed ring cross itself?
+#'
+#' Tested combinatorially on the clicked longitude/latitude pairs rather than
+#' through `st_is_valid()`: over a measurement-sized shape the planar and the
+#' projected topologies are identical, and this stays a plain predicate whether
+#' or not a Target Mapping CRS is set and whichever way `sf_use_s2()` happens to
+#' be switched. Only PROPER crossings count (edges passing through each other,
+#' strict sign change on both orientation tests); a ring whose edges merely
+#' touch at a vertex still has the area its shoelace sum reports.
+#'
+#' @param xy Two-column matrix of the ring's corners, WITHOUT the repeated
+#'   closing vertex; edges wrap from the last corner back to the first.
+ring_self_intersects <- function(xy) {
+  n <- nrow(xy)
+  if (is.null(n) || n < 4) return(FALSE)  # a triangle cannot cross itself
+  nxt <- function(i) if (i == n) 1L else i + 1L
+  side <- function(o, a, b) (a[1] - o[1]) * (b[2] - o[2]) - (a[2] - o[2]) * (b[1] - o[1])
+  for (i in seq_len(n - 1L)) {
+    for (j in seq(i + 1L, n)) {
+      # Consecutive edges share a vertex by construction, as do the first and
+      # the last once the ring wraps; neither is a self-intersection.
+      if (j == i + 1L || (i == 1L && j == n)) next
+      p1 <- xy[i, ]; p2 <- xy[nxt(i), ]
+      q1 <- xy[j, ]; q2 <- xy[nxt(j), ]
+      d1 <- side(p1, p2, q1); d2 <- side(p1, p2, q2)
+      d3 <- side(q1, q2, p1); d4 <- side(q1, q2, p2)
+      if (d1 * d2 < 0 && d3 * d4 < 0) return(TRUE)
+    }
+  }
+  FALSE
 }
 
 #' Fold an sf layer's attribute table into the two fields KML can carry.

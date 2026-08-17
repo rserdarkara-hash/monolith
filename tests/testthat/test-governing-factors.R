@@ -11,8 +11,20 @@ test_that("compute_governing_factors returns expected list structure", {
   result <- compute_governing_factors(df, "a", c("b", "c", "d", "e"))
   expect_type(result, "list")
   expected_names <- c("model", "explainer", "importance", "top_var",
-                      "ale", "pdp", "shap")
+                      "ale", "pdp", "shap", "n_used", "n_total")
   expect_setequal(names(result), expected_names)
+})
+
+test_that("compute_governing_factors reports the complete-case sample it fitted", {
+  df <- make_test_df(40)
+  df$b[1:6] <- NA         # missing in a predictor
+  df$a[7:9] <- NA         # missing in the target
+  result <- compute_governing_factors(df, "a", c("b", "c", "d"))
+  expect_equal(result$n_total, 40)
+  # The forest is fitted on complete cases across target + predictors, and the
+  # panel prints that sample, so the two must agree by construction.
+  expect_equal(result$n_used, sum(stats::complete.cases(df[, c("a", "b", "c", "d")])))
+  expect_lt(result$n_used, result$n_total)
 })
 
 test_that("compute_governing_factors model is class randomForest", {

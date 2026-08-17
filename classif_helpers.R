@@ -260,6 +260,12 @@ classif_build_recipe <- function(train_df, target, predictors, weight_col = NULL
   form <- stats::as.formula(paste0("`", target, "` ~ ",
                                    paste(sprintf("`%s`", c(predictors, weight_col)), collapse = " + ")))
 
+  # EVERY step here must stay TRAINED and ROW-INDEPENDENT. Two things depend on
+  # it: `predict_classification_surface` predicts the grid in blocks and relies
+  # on block == whole-grid identity, and `.classif_perm_fast_path` permutes baked
+  # columns instead of raw ones. A step that mixes rows (step_pca, an
+  # interaction, a spatial lag) breaks the first outright; the second detects it
+  # at runtime and falls back, but the surface path does not.
   recipes::recipe(form, data = train_df) |>
     recipes::step_novel(recipes::all_nominal_predictors()) |>
     recipes::step_impute_median(recipes::all_numeric_predictors()) |>
@@ -868,19 +874,27 @@ classif_covariate_lift <- function(pred_df, target) {
 #' per-predictor increase in multiclass log-loss under permutation, plus the
 #' unpermuted baseline and the row count (the caller needs `n` to pool folds).
 #' Callers are responsible for the seed sandbox — the shuffles happen here.
+#'
+#' Predicting through the workflow re-bakes the whole recipe on every shuffle
+#' (n_rep x n_predictors bakes per evaluation frame, inside the CV loop under
+#' the out-of-fold design). The fast path below bakes ONCE and permutes the
+#' baked block instead — see `.classif_perm_fast_path` for why that is exact and
+#' how it is verified. It is a pure efficiency change: same draws, same order,
+#' same numbers, and any frame where the equivalence cannot be demonstrated
+#' falls back to the original path per predictor.
 .classif_perm_delta <- function(wf, df, target, predictors, n_rep = 5L,
                                 cancel_file = NULL, progress = NULL) {
   truth <- as.factor(df[[target]])
 
-  log_loss_of <- function(newdata) {
-    prob <- as.matrix(predict(wf, newdata, type = "prob"))
+  # Out-of-fold design: this fold's model may have been fitted without one of
+  # the classes and so emits no column for it (see .classif_align_prob_cols).
+  # Without the pad, match() returns NA, p_true is NA, and the WHOLE importance
+  # frame collapses to NA. Padding at 0 keeps the baseline and the permuted
+  # scores on the same footing, so their difference — which is all the
+  # importance measure uses — stays meaningful.
+  score <- function(prob) {
+    prob <- as.matrix(prob)
     colnames(prob) <- sub("^\\.pred_", "", colnames(prob))
-    # Out-of-fold design: this fold's model may have been fitted without one of
-    # the classes and so emits no column for it (see .classif_align_prob_cols).
-    # Without the pad, match() returns NA, p_true is NA, and the WHOLE
-    # importance frame collapses to NA. Padding at 0 keeps the baseline and the
-    # permuted scores on the same footing, so their difference — which is all
-    # the importance measure uses — stays meaningful.
     absent <- setdiff(levels(truth), colnames(prob))
     if (length(absent)) {
       prob <- cbind(prob, matrix(0, nrow(prob), length(absent),
@@ -889,24 +903,113 @@ classif_covariate_lift <- function(pred_df, target) {
     p_true <- prob[cbind(seq_len(nrow(prob)), match(as.character(truth), colnames(prob)))]
     -mean(log(pmax(p_true, 1e-15)))
   }
+  log_loss_of <- function(newdata) score(predict(wf, newdata, type = "prob"))
 
   base_ll <- log_loss_of(df)
+
+  # SETUP RUNS IN AN RNG SANDBOX, and that is load-bearing, not defensive:
+  # `predict()` itself consumes random numbers for some engines (measured:
+  # ranger's does), so the verification predict below would otherwise shift the
+  # stream every later sample.int() draws from and move the importances. Inside
+  # the sandbox the ambient state is restored, so the shuffle sequence is exactly
+  # the one the re-bake-per-shuffle implementation produced. What keeps the loop
+  # itself aligned is that both branches make the SAME number of predict calls
+  # (one per repeat) — keep it that way.
+  fast <- with_rng_sandbox({
+    fp <- .classif_perm_fast_path(wf, df, predictors)
+    # Second half of the runtime proof: the baked frame must reproduce the
+    # workflow's OWN baseline prediction. If it does not (an engine whose
+    # predict method expects something forge() supplies), the fast path is
+    # discarded wholesale rather than trusted.
+    if (!is.null(fp)) {
+      base_fast <- tryCatch(score(predict(fp$model, fp$baked, type = "prob")),
+                            error = function(e) NA_real_)
+      if (!isTRUE(all.equal(base_fast, base_ll))) fp <- NULL
+    }
+    fp
+  })
+  ll_baked <- if (is.null(fast)) NULL else {
+    function(b) score(predict(fast$model, b, type = "prob"))
+  }
+
   n_pred <- length(predictors)
-  # The cancel check and the progress tick consume no RNG, so the shuffle
-  # sequence (and therefore every importance value) is unchanged.
+  # The cancel check, the progress tick and the fast/slow branch consume no RNG:
+  # exactly one sample.int(n) per (predictor, repeat), in the same nesting order
+  # as before, so the shuffle sequence and every importance value are unchanged.
   delta <- vapply(seq_len(n_pred), function(j) {
     p <- predictors[j]
     .classif_check_cancel(cancel_file)
+    use_fast <- !is.null(fast) && isTRUE(fast$ok[[p]])
+    cols <- if (use_fast) fast$blocks[[p]] else NULL
     lls <- vapply(seq_len(n_rep), function(r) {
-      d2 <- df
-      d2[[p]] <- d2[[p]][sample.int(nrow(d2))]
-      log_loss_of(d2)
+      idx <- sample.int(nrow(df))
+      if (use_fast) {
+        b2 <- fast$baked
+        if (length(cols)) b2[cols] <- fast$baked[idx, cols, drop = FALSE]
+        ll_baked(b2)
+      } else {
+        d2 <- df
+        d2[[p]] <- d2[[p]][idx]
+        log_loss_of(d2)
+      }
     }, numeric(1))
     if (is.function(progress)) progress(j / n_pred)
     mean(lls) - base_ll
   }, numeric(1))
 
   list(delta = delta, baseline = base_ll, n = nrow(df))
+}
+
+#' Fast-path setup for `.classif_perm_delta`: bake the evaluation frame once and
+#' map each raw predictor to the baked column block it owns.
+#'
+#' Why permuting the baked block is the same thing as permuting the raw column:
+#' every step in `classif_build_recipe` is TRAINED at prep time and applied
+#' ROW-WISE at bake time (novel-level absorption, median/mode imputation, dummy
+#' expansion, zero-variance column removal, normalisation), and each baked column
+#' is a function of exactly one raw predictor. A row permutation therefore
+#' commutes with baking — including the NA case, where permute-then-impute and
+#' impute-then-permute both put the trained median wherever the NA landed.
+#'
+#' That is an argument about the recipe as it stands today, so it is checked
+#' rather than assumed: each predictor is probed with one fixed non-identity
+#' permutation and the fast result must reproduce a real bake exactly. A step
+#' that is not row-independent (a future step_pca, an interaction term, a spatial
+#' lag) or a block-mapping collision (a nominal `ph` with level `field` sitting
+#' beside a numeric `ph_field`) fails the probe and that predictor silently
+#' reverts to the slow path instead of returning a wrong importance.
+#'
+#' @return list(model, baked, blocks, ok) or NULL if the workflow cannot be split.
+.classif_perm_fast_path <- function(wf, df, predictors) {
+  tryCatch({
+    rec <- workflows::extract_recipe(wf)
+    mdl <- workflows::extract_fit_parsnip(wf)
+    baked <- recipes::bake(rec, new_data = df, recipes::all_predictors())
+    nms <- names(baked)
+
+    # A numeric predictor keeps its own name through the recipe; a nominal one is
+    # replaced by its step_dummy block. Both are candidates only — the probe is
+    # what makes them safe.
+    blocks <- lapply(predictors, function(p) {
+      if (p %in% nms) p else nms[startsWith(nms, paste0(p, "_"))]
+    })
+    names(blocks) <- predictors
+
+    idx <- rev(seq_len(nrow(df)))
+    ok <- vapply(predictors, function(p) {
+      d2 <- df
+      d2[[p]] <- d2[[p]][idx]
+      probe <- recipes::bake(rec, new_data = d2, recipes::all_predictors())
+      fast <- baked
+      cols <- blocks[[p]]
+      if (length(cols)) fast[cols] <- baked[idx, cols, drop = FALSE]
+      isTRUE(all.equal(as.data.frame(probe), as.data.frame(fast),
+                       check.attributes = FALSE))
+    }, logical(1))
+    names(ok) <- predictors
+
+    list(model = mdl, baked = baked, blocks = blocks, ok = ok)
+  }, error = function(e) NULL)
 }
 
 #' Shared presentation frame for both importance designs. `share_pct`
@@ -1104,7 +1207,12 @@ predict_classification_surface <- function(model, newdata, chunk_size = NULL,
   cls[!stats::complete.cases(prob_mat)] <- NA
 
   out <- cbind(nd, .pred_class = cls, prob)
-  out$.entropy <- classif_shannon_entropy(prob)
+  # Entropy comes from prob_mat, the frame validated against the trained level
+  # set three lines above — not from the raw predict() output. Identical today
+  # (every learner returns exactly the level columns), but an engine that ever
+  # returned an extra column would silently rescale the whole uncertainty
+  # surface instead of tripping the missing-column guard.
+  out$.entropy <- classif_shannon_entropy(prob_mat)
   out
 }
 
@@ -1193,12 +1301,33 @@ classif_surface_to_rasters <- function(grid_sf, res, crs_wkt, levels_order = NUL
 #' A pre-resolved scope boundary (sf/sfc in the points' CRS, e.g. from
 #' classif_resolve_scope) can be supplied via `boundary_sf` and then replaces
 #' the hull construction entirely.
+#' Auto grid resolution for a classification scope: ~50k cells inside the
+#' domain, clamped to [5, 1000] m. A multi-part boundary (distant localities)
+#' can cover a bounding box far larger than its own area, and the raster
+#' template spans the full bbox before clipping, so the resolution is
+#' additionally floored to keep the candidate grid below ~4M cells.
+#' Shared by classif_build_grid and the module's pre-run resolution advisory so
+#' the number the user is shown is the number the run will use.
+classif_auto_res <- function(area_m2, bbox) {
+  res <- max(5, min(1000, sqrt(area_m2 / 50000)))
+  dx <- as.numeric(bbox["xmax"] - bbox["xmin"])
+  dy <- as.numeric(bbox["ymax"] - bbox["ymin"])
+  max(res, sqrt(dx * dy / 4e6))
+}
+
 #' Resolution defaults to ~50k cells inside the domain, clamped to [5, 1000] m.
+#' `strict_scope` says whether the domain in force really is a union of
+#' per-point buffers, which is what the buffer/cell-size advisory below is
+#' about. It defaults to the boundary style, but a caller that supplies its own
+#' `boundary_sf` can override it: polygons-only scoping, for instance, hands
+#' over the user's polygons and the Boundary Type control is then inert.
 classif_build_grid <- function(pts_proj, res = NULL,
                                boundary = c("concave", "convex", "bbox", "wrapped", "strict"),
                                boundary_sf = NULL,
-                               buffer_mode = "fixed", buffer_dist = 250) {
+                               buffer_mode = "fixed", buffer_dist = 250,
+                               strict_scope = NULL) {
   boundary <- match.arg(boundary)
+  if (is.null(strict_scope)) strict_scope <- identical(boundary, "strict")
   bnd <- if (!is.null(boundary_sf)) {
     g <- sf::st_geometry(boundary_sf)
     if (is.na(sf::st_crs(g))) sf::st_crs(g) <- sf::st_crs(pts_proj)
@@ -1212,17 +1341,14 @@ classif_build_grid <- function(pts_proj, res = NULL,
   bnd <- sf::st_as_sf(sf::st_sfc(sf::st_geometry(bnd), crs = sf::st_crs(pts_proj)))
 
   bbox <- sf::st_bbox(bnd)
-  if (is.null(res)) {
-    area_m2 <- sum(as.numeric(sf::st_area(bnd)))
-    res <- max(5, min(1000, sqrt(area_m2 / 50000)))
-    # A multi-part boundary (distant localities) can cover a bounding box far
-    # larger than its own area; the raster template spans the full bbox before
-    # clipping, so additionally cap the auto resolution to keep the candidate
-    # grid below ~4M cells. User-supplied resolutions are respected as-is.
-    dx <- as.numeric(bbox["xmax"] - bbox["xmin"])
-    dy <- as.numeric(bbox["ymax"] - bbox["ymin"])
-    res <- max(res, sqrt(dx * dy / 4e6))
-  }
+  if (is.null(res)) res <- classif_auto_res(sum(as.numeric(sf::st_area(bnd))), bbox)
+  # A Strict Measured boundary narrower than half the cell diagonal discards
+  # the cells of isolated samples (see strict_buffer_gap, spatial_pipeline.R).
+  # Reported here because this is the only place the effective resolution is
+  # known in Auto mode; advisory only, the grid is still built as asked.
+  strict_warning <- if (isTRUE(strict_scope)) {
+    strict_buffer_message(buffer_dist, res)
+  } else NULL
   grid_r <- terra::rast(terra::ext(bbox), resolution = res, crs = sf::st_crs(pts_proj)$wkt)
   grid_p <- terra::as.points(grid_r, values = FALSE) |> sf::st_as_sf()
   inside <- sf::st_within(grid_p, bnd, sparse = FALSE)[, 1]
@@ -1235,7 +1361,8 @@ classif_build_grid <- function(pts_proj, res = NULL,
   grid_p <- grid_p[inside, ]
   coords <- sf::st_coordinates(grid_p)
   grid_p$x <- coords[, 1]; grid_p$y <- coords[, 2]
-  list(grid_p = grid_p, res = res, crs_wkt = sf::st_crs(pts_proj)$wkt)
+  list(grid_p = grid_p, res = res, crs_wkt = sf::st_crs(pts_proj)$wkt,
+       strict_warning = strict_warning)
 }
 
 #' Populate a prediction grid with covariate values. Numeric covariates are
@@ -1454,6 +1581,7 @@ classif_resolve_scope <- function(df, x_col, y_col, src_crs, proj_crs,
   pts <- pts[keep, , drop = FALSE]
   if (nrow(d) == 0) {
     return(list(df = d, group = character(0), boundary_wkt = NULL,
+                boundary_area_m2 = NULL, boundary_bbox = NULL,
                 n_input = n_input, n_scoped = 0L))
   }
 
@@ -1489,8 +1617,13 @@ classif_resolve_scope <- function(df, x_col, y_col, src_crs, proj_crs,
   # Full-precision WKT: the default writer truncates to 7 significant digits,
   # which at UTM northing magnitudes shifts the boundary by up to ~0.5 m and
   # can push boundary samples outside the reconstructed domain.
+  bnd_u <- sf::st_union(boundary)
+  # Area + bbox travel with the scope so the module can reproduce the run's
+  # Auto resolution (classif_auto_res) without re-parsing the WKT.
   list(df = d, group = group,
-       boundary_wkt = sf::st_as_text(sf::st_union(boundary), digits = 15),
+       boundary_wkt = sf::st_as_text(bnd_u, digits = 15),
+       boundary_area_m2 = sum(as.numeric(sf::st_area(bnd_u))),
+       boundary_bbox = sf::st_bbox(bnd_u),
        n_input = n_input, n_scoped = nrow(d))
 }
 
@@ -1548,6 +1681,7 @@ run_classification_pipeline <- function(df, target, predictors,
                                         depth = "none", v = 10L,
                                         grid_res = NULL, boundary = "concave",
                                         buffer_mode = "fixed", buffer_dist = 250,
+                                        strict_scope = NULL,
                                         make_surface = TRUE, seed = 12345L,
                                         group_col = NULL, boundary_wkt = NULL,
                                         class_weights = FALSE,
@@ -1691,7 +1825,8 @@ run_classification_pipeline <- function(df, target, predictors,
     report("grid", 0, "Building the prediction grid...")
     bnd_sf <- if (is.null(boundary_wkt)) NULL else sf::st_as_sfc(boundary_wkt, crs = proj_crs)
     gr <- classif_build_grid(pts, res = grid_res, boundary = boundary, boundary_sf = bnd_sf,
-                             buffer_mode = buffer_mode, buffer_dist = buffer_dist)
+                             buffer_mode = buffer_mode, buffer_dist = buffer_dist,
+                             strict_scope = strict_scope)
     report("grid", 1)
     n_cell_lab <- format(nrow(gr$grid_p), big.mark = ",")
 
@@ -1712,6 +1847,10 @@ run_classification_pipeline <- function(df, target, predictors,
     out$surface_df <- surf
     out$res <- gr$res
     out$crs_wkt <- gr$crs_wkt
+    # Advisory carried back to the main session (the module raises it as a
+    # notification): a strict boundary too narrow for the cell size leaves
+    # isolated samples with no mapped cell.
+    out$grid_warning <- gr$strict_warning
     # No area table here: the MAIN session rasterises surface_df through
     # classif_surface_to_rasters(), whose table is the one the UI and the
     # exports read (it alone knows the live confidence threshold and its

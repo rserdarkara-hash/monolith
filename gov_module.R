@@ -279,7 +279,11 @@ gov_factors_server <- function(id, data_reactive, vars_metadata_reactive) {
         ggplot2::ggplot(vip_df, ggplot2::aes(x = variable_label, y = dropout_loss)) + 
           ggplot2::geom_bar(stat = "identity", fill = "steelblue") +
           ggplot2::coord_flip() + 
-          ggplot2::labs(title = "Global Variable Importance", x = "Variable", y = "Dropout Loss (RMSE increase)") + 
+          ggplot2::labs(title = "Global Variable Importance",
+                        subtitle = if (!is.null(gov_rv$res$n_used)) {
+                          complete_case_note(gov_rv$res$n_used, gov_rv$res$n_total)
+                        },
+                        x = "Variable", y = "Dropout Loss (RMSE increase)") +
           ggplot2::theme_minimal(base_size = base_size)
       } else if (plot_type == "interaction_a") {
         shap_df <- gov_rv$res$shap

@@ -1,5 +1,29 @@
 # test-stat-tests.R — tests for get_stat_letters (ANOVA, Tukey HSD, Duncan).
 
+test_that("the None choice draws nothing, including for two groups", {
+  # The test control became radioButtons with a "None" = "" choice (2026-08-14).
+  # get_stat_letters' if-chain ends in `test_type == "anova" || n_groups == 2`,
+  # so without an explicit guard "None" still annotated every two-group plot.
+  set.seed(42)
+  df <- data.frame(
+    value = c(rnorm(10, 10, 2), rnorm(10, 15, 2)),
+    group = factor(rep(c("A", "B"), each = 10))
+  )
+  expect_null(get_stat_letters(df, "value", "group", ""))
+  expect_null(get_stat_letters(df, "value", "group", NULL))
+
+  df3 <- data.frame(
+    value = c(rnorm(10, 10, 2), rnorm(10, 15, 2), rnorm(10, 20, 2)),
+    group = factor(rep(c("A", "B", "C"), each = 10))
+  )
+  expect_null(get_stat_letters(df3, "value", "group", ""))
+
+  # add_stat_layer must likewise return the plot untouched
+  p <- ggplot2::ggplot(df, ggplot2::aes(x = group, y = value)) + ggplot2::geom_boxplot()
+  expect_identical(add_stat_layer(p, df, "value", "group", "", "above"), p)
+  expect_identical(add_stat_layer(p, df, "value", "group", character(0), "above"), p)
+})
+
 test_that("get_stat_letters returns NULL for fewer than 2 groups", {
   df <- data.frame(
     value = rnorm(9),

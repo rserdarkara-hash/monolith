@@ -226,7 +226,7 @@ test_that("apply_styler_theme returns a ggplot with full input", {
   p <- ggplot2::ggplot(mtcars, ggplot2::aes(wt, mpg)) +
     ggplot2::geom_point() +
     ggplot2::labs(title = "Test Plot")
-  result <- apply_styler_theme(p, mock_input_full, calibration = 1,
+  result <- apply_styler_theme(p, mock_input_full,
                                 item_label = "Test Label", item_type = "plot")
   expect_s3_class(result, "ggplot")
 })
@@ -234,21 +234,22 @@ test_that("apply_styler_theme returns a ggplot with full input", {
 test_that("apply_styler_theme returns a ggplot with minimal input", {
   p <- ggplot2::ggplot(mtcars, ggplot2::aes(wt, mpg)) +
     ggplot2::geom_point()
-  result <- apply_styler_theme(p, mock_input_minimal, calibration = 1,
+  result <- apply_styler_theme(p, mock_input_minimal,
                                 item_label = "", item_type = "plot")
   expect_s3_class(result, "ggplot")
 })
 
-test_that("apply_styler_theme applies calibration scaling", {
+test_that("apply_styler_theme uses the slider point sizes verbatim", {
+  # No export-time rescaling: a point in the styler is a point on the page, so
+  # the theme must carry the slider values themselves (the former `calibration`
+  # multiplier existed only to offset showtext's fixed-dpi text rendering).
   p <- ggplot2::ggplot(mtcars, ggplot2::aes(wt, mpg)) +
     ggplot2::geom_point()
-  result <- apply_styler_theme(p, mock_input_full, calibration = 2,
+  result <- apply_styler_theme(p, mock_input_full,
                                 item_label = "", item_type = "plot")
-  expect_s3_class(result, "ggplot")
-
-  result_half <- apply_styler_theme(p, mock_input_full, calibration = 0.5,
-                                     item_label = "", item_type = "plot")
-  expect_s3_class(result_half, "ggplot")
+  expect_equal(result$theme$plot.title$size, mock_input_full$styler_title_size)
+  expect_equal(result$theme$axis.title.x$size, mock_input_full$styler_x_size)
+  expect_equal(result$theme$axis.text$size, mock_input_full$styler_label_size)
 })
 
 test_that("apply_styler_theme handles map_combined item_type", {
@@ -257,7 +258,7 @@ test_that("apply_styler_theme handles map_combined item_type", {
   p2 <- ggplot2::ggplot(mtcars, ggplot2::aes(hp, qsec)) +
     ggplot2::geom_point()
   p_obj <- list(p1 = p1, p2 = p2)
-  result <- apply_styler_theme(p_obj, mock_input_full, calibration = 1,
+  result <- apply_styler_theme(p_obj, mock_input_full,
                                 item_label = "Combined", item_type = "map_combined")
   # Patchwork-assembled result is a ggplot
   expect_s3_class(result, "ggplot")
@@ -268,7 +269,7 @@ test_that("apply_styler_theme handles legend position bottom", {
   input_bottom$styler_legend_pos <- "bottom"
   p <- ggplot2::ggplot(mtcars, ggplot2::aes(wt, mpg)) +
     ggplot2::geom_point()
-  result <- apply_styler_theme(p, input_bottom, calibration = 1,
+  result <- apply_styler_theme(p, input_bottom,
                                 item_label = "", item_type = "plot")
   expect_s3_class(result, "ggplot")
 })
@@ -276,7 +277,7 @@ test_that("apply_styler_theme handles legend position bottom", {
 test_that("apply_styler_theme handles NULL font overrides", {
   p <- ggplot2::ggplot(mtcars, ggplot2::aes(wt, mpg)) +
     ggplot2::geom_point()
-  result <- apply_styler_theme(p, mock_input_full, calibration = 1,
+  result <- apply_styler_theme(p, mock_input_full,
                                 item_label = "With Label", item_type = "plot")
   expect_s3_class(result, "ggplot")
 })
@@ -286,7 +287,7 @@ test_that("apply_styler_theme handles legend direction horizontal", {
   input_horiz$styler_legend_dir <- "horizontal"
   p <- ggplot2::ggplot(mtcars, ggplot2::aes(wt, mpg, color = factor(cyl))) +
     ggplot2::geom_point()
-  result <- apply_styler_theme(p, input_horiz, calibration = 1,
+  result <- apply_styler_theme(p, input_horiz,
                                 item_label = "", item_type = "plot")
   expect_s3_class(result, "ggplot")
 })
@@ -296,7 +297,7 @@ test_that("apply_styler_theme handles high_contrast input switch", {
   input_hc$styler_high_contrast <- TRUE
   p <- ggplot2::ggplot(mtcars, ggplot2::aes(wt, mpg)) +
     ggplot2::geom_point()
-  result <- apply_styler_theme(p, input_hc, calibration = 1,
+  result <- apply_styler_theme(p, input_hc,
                                 item_label = "", item_type = "plot")
   expect_s3_class(result, "ggplot")
 })
@@ -306,7 +307,7 @@ test_that("apply_styler_theme sets legend text angle", {
   input_angle$styler_legend_text_angle <- 90
   p <- ggplot2::ggplot(mtcars, ggplot2::aes(wt, mpg, color = factor(cyl))) +
     ggplot2::geom_point()
-  result <- apply_styler_theme(p, input_angle, calibration = 1,
+  result <- apply_styler_theme(p, input_angle,
                                 item_label = "", item_type = "plot")
   expect_s3_class(result, "ggplot")
 })

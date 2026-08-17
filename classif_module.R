@@ -634,8 +634,44 @@ classif_server <- function(id, data_reactive, vars_metadata_reactive, spatial_re
       sc <- current_scope()
       if (is.null(sc)) return(NULL)
       col <- if (sc$n_scoped < 20) "#dc3545" else "#888"
-      shiny::tags$small(style = paste0("color:", col, ";"),
-        sprintf("In scope: %d of %d georeferenced points.", sc$n_scoped, sc$n_input))
+      shiny::tagList(
+        shiny::tags$small(style = paste0("color:", col, ";"),
+          sprintf("In scope: %d of %d georeferenced points.", sc$n_scoped, sc$n_input)),
+        strict_note()
+      )
+    })
+
+    # Live advisory: a Strict Measured buffer narrower than half the grid cell
+    # diagonal discards the cells of isolated samples, so sampled points end up
+    # over blank map (see strict_buffer_gap, spatial_pipeline.R). The scope
+    # carries the boundary area and bbox, so the Auto resolution the run will
+    # actually pick is reproduced exactly via classif_auto_res rather than
+    # guessed. The run itself re-checks and reports through res$grid_warning.
+    # Is the domain actually a union of per-point buffers? Polygons-only
+    # scoping replaces the hull entirely with the user's polygons, so the
+    # Boundary Type control (and this advisory) is inert there.
+    strict_scope_active <- shiny::reactive({
+      identical(bset()$type, "strict") &&
+        !identical(input$scope_poly %||% "ignore", "only")
+    })
+
+    strict_note <- shiny::reactive({
+      bs <- bset()
+      if (!strict_scope_active()) return(NULL)
+      sc <- current_scope()
+      if (is.null(sc)) return(NULL)
+      res_eff <- if (identical(bs$res_mode, "fixed")) {
+        bs$res
+      } else if (!is.null(sc$boundary_area_m2) && !is.null(sc$boundary_bbox)) {
+        classif_auto_res(sc$boundary_area_m2, sc$boundary_bbox)
+      } else NULL
+      if (is.null(res_eff)) return(NULL)
+      msg <- strict_buffer_message(bs$buff_dist, res_eff)
+      if (is.null(msg)) return(NULL)
+      shiny::tags$p(style = paste("font-size: 0.78em; margin-top: 8px;",
+                                  "border-left: 3px solid #f59e0b; padding-left: 8px;",
+                                  "color: #b45309; line-height: 1.35;"),
+                    msg)
     })
 
     # ── Column choice helpers ────────────────────────────────────────────────
@@ -825,6 +861,7 @@ classif_server <- function(id, data_reactive, vars_metadata_reactive, spatial_re
       # area.
       bs_v <- bset()
       gres <- if (identical(bs_v$res_mode, "fixed")) bs_v$res else NULL
+      strict_scope_v <- strict_scope_active()
       weights_v <- isTRUE(input$class_weights)
       imp_mode_v <- input$importance_mode %||% "oof"
       x_v <- sp$x; y_v <- sp$y; src_v <- sp$src_crs; proj_v <- sp$proj_crs
@@ -853,6 +890,7 @@ classif_server <- function(id, data_reactive, vars_metadata_reactive, spatial_re
           method = method_v, strategy = strategy_v, depth = depth_v,
           v = 10L, grid_res = gres, boundary = bs_v$type,
           buffer_mode = bs_v$buff_mode, buffer_dist = bs_v$buff_dist,
+          strict_scope = strict_scope_v,
           make_surface = make_surf,
           group_col = ".scope_group", boundary_wkt = boundary_wkt_v,
           class_weights = weights_v, model_rds_path = model_path_ship,
@@ -898,6 +936,12 @@ classif_server <- function(id, data_reactive, vars_metadata_reactive, spatial_re
                     paste(dropped, collapse = ", ")), type = "message")
         } else {
           shiny::showNotification("Classification completed.", type = "message")
+        }
+        # Grid-geometry caveat raised by classif_build_grid: the strict boundary
+        # was narrower than half a cell diagonal, so isolated samples have no
+        # mapped cell. The maps are valid, the support is just under-resolved.
+        if (!is.null(res$grid_warning)) {
+          shiny::showNotification(res$grid_warning, type = "warning", duration = 15)
         }
         # CV-design caveat, not a failure: some fold's training rows held none of
         # these classes, so that fold could not predict them and their held-out
@@ -1370,9 +1414,11 @@ classif_server <- function(id, data_reactive, vars_metadata_reactive, spatial_re
         on.exit(unlink(tmp, recursive = TRUE), add = TRUE)
         paths <- file.path(tmp, c("predicted_class.png", "prediction_entropy.png",
                                   sprintf("probability_%s.png", gsub("[^A-Za-z0-9._-]+", "_", cls))))
-        ggplot2::ggsave(paths[1], plot_class_map(rl, export = TRUE), width = 9, height = 7, dpi = 300)
-        ggplot2::ggsave(paths[2], plot_entropy_map(rl, export = TRUE), width = 9, height = 7, dpi = 300)
-        ggplot2::ggsave(paths[3], plot_prob_map(rl, lyr, cls, export = TRUE), width = 9, height = 7, dpi = 300)
+        with_showtext_dpi(300, {
+          ggplot2::ggsave(paths[1], plot_class_map(rl, export = TRUE), width = 9, height = 7, dpi = 300)
+          ggplot2::ggsave(paths[2], plot_entropy_map(rl, export = TRUE), width = 9, height = 7, dpi = 300)
+          ggplot2::ggsave(paths[3], plot_prob_map(rl, lyr, cls, export = TRUE), width = 9, height = 7, dpi = 300)
+        })
         zip::zip(zipfile = file, files = basename(paths), root = tmp, mode = "cherry-pick")
       }
     )

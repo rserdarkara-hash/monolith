@@ -38,7 +38,7 @@ calc_ccc <- function(observed, predicted) {
   sd_obs <- sqrt(var_obs)
   sd_pred <- sqrt(var_pred)
   
-  cov_op <- cov(observed, predicted, use = "pairwise.complete.obs")
+  cov_op <- cov(observed, predicted)
   rho <- cov_op / (sd_obs * sd_pred)
   
   numerator <- 2 * rho * sd_obs * sd_pred
@@ -72,7 +72,11 @@ augment_metrics <- function(obs, pre) {
   res$nse <- if (is.finite(sst) && sst > 0) round(1 - (sse / sst), 4) else NA
 
   # Relative RMSE is undefined for a zero-mean variable (centred/anomaly data).
-  res$nrmse_mean <- if (is.finite(mean_obs) && abs(mean_obs) > 0) round((rmse / mean_obs) * 100, 2) else NA
+  # Normalised by |mean|, not the signed mean: RMSE is non-negative, so a
+  # negative-mean variable (anomalies, sub-zero temperatures, redox potential)
+  # would otherwise report a negative NRMSE%, a nonsensical sign for a
+  # normalised error. Identical for every positive-mean variable.
+  res$nrmse_mean <- if (is.finite(mean_obs) && abs(mean_obs) > 0) round((rmse / abs(mean_obs)) * 100, 2) else NA
 
   # RPD / RPIQ are spread-to-error ratios (Chang et al. 2001): undefined at
   # zero error, so both guard on rmse > 0, not just RPIQ's spread term.
@@ -259,7 +263,13 @@ perform_cv <- function(cv_obj, moran = TRUE) {
   res$rmse <- round(sqrt(mean(residuals^2, na.rm = TRUE)), 4)
   res$me <- round(mean(residuals, na.rm = TRUE), 4)
   res$mae <- round(mean(abs(residuals), na.rm = TRUE), 4)
-  r2_val <- tryCatch(cor(obs, pre)^2, error = function(e) NA)
+  # cor() on a constant vector already returns NA, but it emits "the standard
+  # deviation is zero" on the way — and inside a PSOCK worker that warning
+  # surfaces in the run log as an unexplained condition. Guard explicitly, the
+  # way augment_metrics() and calc_ccc() do for the same degenerate case.
+  r2_val <- if (isTRUE(stats::sd(obs) > 0) && isTRUE(stats::sd(pre) > 0)) {
+    tryCatch(cor(obs, pre)^2, error = function(e) NA_real_)
+  } else NA_real_
   res$r2 <- round(r2_val, 4)
   res$n <- length(obs)
   

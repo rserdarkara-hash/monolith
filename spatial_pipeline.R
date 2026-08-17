@@ -35,6 +35,90 @@ write_warning_file <- function(l, prefix, message) {
   .write_status_file(l, prefix, "warn", message)
 }
 
+# ── Strict-boundary vs grid-resolution coherence ────────────────────────────
+# Every surface here is a raster of `res` metre cells, and a cell survives the
+# boundary clip only when its CENTRE falls inside the boundary (st_intersects
+# in run_regional_interpolation, st_within in classif_build_grid, and
+# terra::mask's default centre rule on the rasterised output). Under a Strict
+# Measured boundary the domain IS the union of `buffer` metre circles around
+# the samples, so an isolated sample paints a cell only when its own cell
+# centre lies within `buffer` of it.
+#
+# A sample sits anywhere in its cell, and on a square grid the centre of the
+# cell containing it is also the NEAREST cell centre (cells are the Voronoi
+# regions of their centres), so an isolated sample paints no cell at all
+# exactly when its own cell's centre escapes the buffer. That distance runs
+# from 0 to res/sqrt(2), hence coverage is guaranteed only when
+# buffer >= res / sqrt(2) (half the cell diagonal).
+#
+# Below that, the share of in-cell positions that lose their cell is the cell
+# area outside a disc of radius `buffer` centred on the cell centre. The disc
+# is inscribed only while buffer <= res/2; beyond that it spills over the cell
+# edges and four circular segments must come off, or the loss is understated
+# (and 1 - pi*buffer^2/res^2 even turns negative from buffer = res/sqrt(pi)
+# upwards, which would report a 0% gap inside the range this very function
+# flags). With the segments subtracted the covered area reaches the full cell
+# exactly at buffer = res/sqrt(2), so `fraction > 0` and `short` agree by
+# construction. Verified against Monte-Carlo sampling of the unit cell.
+#
+# The result is the expected fraction of ISOLATED samples left with no
+# coloured cell; samples in dense clusters are rescued by their neighbours'
+# buffers, so it is an upper bound on the visible gaps, not a prediction.
+#
+# Returns NULL when the inputs are unusable, otherwise a list carrying the
+# required buffer, the required resolution, the uncovered fraction, and
+# whether the pair is incoherent (`short`).
+strict_buffer_gap <- function(buffer, res) {
+  buffer <- suppressWarnings(as.numeric(buffer)[1])
+  res <- suppressWarnings(as.numeric(res)[1])
+  if (!isTRUE(is.finite(buffer)) || !isTRUE(is.finite(res)) ||
+      res <= 0 || buffer < 0) return(NULL)
+  # Disc-in-square overlap, as a fraction of the cell, at t = buffer / res.
+  t <- buffer / res
+  covered <- if (t <= 0.5) {
+    pi * t^2
+  } else if (t < 1 / sqrt(2)) {
+    pi * t^2 - 4 * (t^2 * acos(0.5 / t) - 0.5 * sqrt(t^2 - 0.25))
+  } else {
+    1
+  }
+  list(
+    buffer     = buffer,
+    res        = res,
+    req_buffer = res / sqrt(2),
+    req_res    = buffer * sqrt(2),
+    fraction   = min(1, max(0, 1 - covered)),
+    short      = buffer < res / sqrt(2)
+  )
+}
+
+# Plain-text advisory for an incoherent strict buffer/resolution pair; NULL
+# when the pair is fine (or unusable). `label` prefixes the locality/scope
+# name when there is one.
+strict_buffer_message <- function(buffer, res, label = NULL) {
+  g <- strict_buffer_gap(buffer, res)
+  if (is.null(g) || !g$short) return(NULL)
+  # Both suites' manual-resolution sliders stop at 5 m and the Auto rules clamp
+  # there as well, so a corrective cell size below that is not something the
+  # user could actually set; widening the buffer is then the only real fix.
+  res_arm <- if (floor(g$req_res) < 5) "" else sprintf(
+    ", or lower the resolution to %s m or less", format(floor(g$req_res), trim = TRUE))
+  sprintf(paste0(
+    "%sStrict Measured buffer (%s m) is smaller than half the diagonal of a ",
+    "%s m grid cell (%s m). Cells are kept only when their centre falls inside ",
+    "the buffer, so %s of isolated samples will have no mapped cell beneath ",
+    "them. Raise the buffer to %s m or more%s."),
+    if (is.null(label) || !nzchar(label)) "" else paste0(label, ": "),
+    format(round(g$buffer, 1), trim = TRUE),
+    format(round(g$res, 1), trim = TRUE),
+    format(round(g$req_buffer, 1), trim = TRUE),
+    # Near the threshold the true loss is genuinely a fraction of a percent;
+    # rounding it to "0%" would contradict the warning it sits inside.
+    if (g$fraction < 0.01) "under 1%" else sprintf("up to %.0f%%", 100 * g$fraction),
+    format(ceiling(g$req_buffer), trim = TRUE),
+    res_arm)
+}
+
 get_joint_scale_values <- function(r1_packed, r2_packed, match_scales, is_uncertainty) {
   if(match_scales && !is_uncertainty) {
     res <- c(raster_value_layer(r1_packed), raster_value_layer(r2_packed))
@@ -44,6 +128,26 @@ get_joint_scale_values <- function(r1_packed, r2_packed, match_scales, is_uncert
   return(NULL)
 }
 
+
+# Per-observation worker for the governing-factors SHAP loop. TOP-LEVEL for the
+# same reason as interp_run_item / autofit_vgm_item / tps_gcv_item /
+# idw_opt_item: an inline lambda inside compute_governing_factors would close
+# over that function's frame, so future would serialize df, df_clean, rf_model,
+# explainer_rf, vip, vip_df, ale_prof, pdp_prof, old_plan AND shap_cl (the live
+# PSOCK cluster handle) to every SHAP worker, on top of the model copy already
+# inside the explainer. cancel_path is a PLAIN character path, never a closure,
+# and file.exists() consumes no RNG - so the per-observation L'Ecuyer streams,
+# and every SHAP value, are unchanged.
+gov_shap_item <- function(i, explainer, newdata, cancel_path = NULL) {
+  if (!is.null(cancel_path) && file.exists(cancel_path)) {
+    stop("Analysis cancelled by user.", call. = FALSE)
+  }
+  sp <- DALEX::predict_parts(explainer, new_observation = newdata[i, , drop = FALSE],
+                             type = "shap")
+  sp <- as.data.frame(sp)
+  sp$obs_id <- i
+  sp
+}
 
 compute_governing_factors <- function(df, target_col, predictors, n_permutations = 10, rf_ntree = 100, shap_sample_size = 100, cores_hint = NULL, cancel_file = NULL) {
   req_cols <- c(target_col, predictors)
@@ -132,22 +236,16 @@ compute_governing_factors <- function(df, target_col, predictors, n_permutations
         options(mc.cores = old_mc_cores)
       }, add = TRUE)
     }
-    # Per-observation cancel check. Deliberately an inline file.exists() on a
-    # PLAIN character path, not a call to check_cancel(): shipping that closure
-    # would drag its enclosing frame (df, df_clean, explainer_rf, ...) into every
-    # worker as an extra global, which is exactly the serialization blow-up the
-    # interpolation pipeline was bitten by. file.exists consumes no RNG, so the
-    # per-observation L'Ecuyer streams — and every SHAP value — are unchanged.
-    cancel_path <- cancel_file
-    shap_list <- furrr::future_map(sample_idx, function(i) {
-      if (!is.null(cancel_path) && file.exists(cancel_path)) {
-        stop("Analysis cancelled by user.", call. = FALSE)
-      }
-      sp <- DALEX::predict_parts(explainer_rf, new_observation = df_clean[i, predictors, drop = FALSE], type = "shap")
-      sp <- as.data.frame(sp)
-      sp$obs_id <- i
-      sp
-    }, .options = furrr::furrr_options(seed = TRUE, packages = c("DALEX", "randomForest")))
+    # gov_shap_item is TOP-LEVEL (see its note above): plain-data arguments only,
+    # so nothing from this frame is serialized to the SHAP workers. Subsetting
+    # the predictor columns once here is identical to the old per-observation
+    # df_clean[i, predictors, ] (column-then-row and row-then-column subsetting
+    # of a data.frame agree, row names included) and hands each worker a frame
+    # without the target column.
+    shap_nd <- df_clean[, predictors, drop = FALSE]
+    shap_list <- furrr::future_map(sample_idx, gov_shap_item,
+      explainer = explainer_rf, newdata = shap_nd, cancel_path = cancel_file,
+      .options = furrr::furrr_options(seed = TRUE, packages = c("DALEX", "randomForest")))
     shap_df <- do.call(rbind, shap_list)
     check_cancel()
 
@@ -181,7 +279,11 @@ compute_governing_factors <- function(df, target_col, predictors, n_permutations
       top_var = top_var,
       ale = ale_df,
       pdp = pdp_df,
-      shap = shap_val_df
+      shap = shap_val_df,
+      # The forest is fitted on the rows complete across the target and every
+      # predictor; report that sample so a silent drop cannot pass unnoticed.
+      n_used = nrow(df_clean),
+      n_total = nrow(df)
     )
   })
 }
@@ -406,6 +508,28 @@ run_regional_interpolation <- function(item, current_method, current_crs, aux_va
       actual_res <- max(5, min(1000, actual_res))
     }
 
+    # Authoritative strict-boundary coherence check: only here is the effective
+    # resolution known for every mode (Auto derives it from this locality's own
+    # boundary area, so no pre-run UI advisory can be exact). A buffer below
+    # half the cell diagonal silently drops the cells of isolated samples, which
+    # reads as sampled points sitting on blank map. Advisory only - the run is
+    # scientifically valid, the support is just under-resolved.
+    if (identical(b_type, "strict") && is.null(local_shp)) {
+      sb_msg <- strict_buffer_message(b_dist_local, actual_res)
+      if (!is.null(sb_msg)) {
+        # Two channels, because neither alone reaches the user reliably. The
+        # progress panel holds ONE warning per locality/prefix (.write_status_file
+        # truncates), so a later engine fallback or VIF note overwrites this one
+        # mid-run. The [WARN] tag makes the durable log line double as a
+        # notification through the rv$log observer in server_sci_analysis.R,
+        # which is what gives the Auto resolution modes - the ones the sidebar
+        # advisory cannot cover - the same visibility the Classification Suite
+        # gets from its own showNotification.
+        write_warning_file(l, "act", sb_msg)
+        res_out$log_msg <- paste0(res_out$log_msg, "\n[WARN] ", l, ": ", sb_msg)
+      }
+    }
+
     grid_r <- terra::rast(terra::ext(bbox), resolution = actual_res, crs = sf::st_crs(pts)$wkt)
     grid_p <- terra::as.points(grid_r, values=FALSE) %>% sf::st_as_sf()
     # One st_coordinates pass, not two: this grid reaches ~1e6 nodes and each
@@ -419,7 +543,23 @@ run_regional_interpolation <- function(item, current_method, current_crs, aux_va
     # cuts kriging cost substantially for concave/multi-part boundaries with
     # zero change to within-boundary values.
     inside <- tryCatch(sf::st_intersects(grid_p, bound, sparse = FALSE)[, 1], error = function(e) NULL)
-    if (!is.null(inside) && any(inside)) grid_p <- grid_p[inside, ]
+    if (!is.null(inside)) {
+      if (!any(inside)) {
+        # A coarse fixed resolution over a small boundary can leave NO grid node
+        # inside it. The engines would then krige the full bbox and the mask
+        # would discard every cell — a blank locality with no message, after
+        # paying for the whole interpolation. Name the cause and skip instead
+        # (the surface was all-NA in this state before; nothing displayable is
+        # lost). classif_build_grid stops loudly in the same situation.
+        write_warning_file(l, "act", sprintf(
+          "No grid node falls inside this locality's boundary at %.1f m resolution; the surface would be empty. Reduce the fixed grid resolution or widen the boundary/buffer.",
+          actual_res))
+        res_out$log_msg <- paste0(res_out$log_msg, "\nWarning in ", l,
+          ": no grid cells fall inside the boundary at this resolution; locality skipped.")
+        return(res_out)
+      }
+      grid_p <- grid_p[inside, ]
+    }
 
     r_a <- NULL; r_p <- NULL
 
@@ -503,6 +643,17 @@ run_regional_interpolation <- function(item, current_method, current_crs, aux_va
     }
 
     if(nrow(pts_a) >= 3) {
+        # A target with no variance in this locality produces a flat surface, an
+        # is_fallback variogram and all-NA R2/NSE/CCC/RPD/RPIQ (those metrics are
+        # ratios against the observed variance, i.e. UNDEFINED here, not zero).
+        # Without this the user only sees the amber "fallback model" banner,
+        # which names the symptom rather than the cause. Message only.
+        if (.is_degenerate_covariate(pts_a$v)) {
+          write_warning_file(l, "act", paste0(
+            "Target has no usable variance in this locality (all values equal or ",
+            "differing only in noise digits); the surface will be constant and ",
+            "R2 / NSE / CCC / RPD / RPIQ are undefined."))
+        }
         lags_a <- calc_scientific_lags(pts_a)
         mp_a <- list(idw_p = m_params$idw_p_act, idw_nmax = m_params$idw_nmax, tps_lambda = m_params$tps_lambda_act, pre_fit = m_params$pre_fit_act, grid_aux = grid_aux, cv_strategy = m_params$cv_strategy, cv_repeats = m_params$cv_repeats, cancel_file = cancel_file_val, rfk_uncertainty = m_params$rfk_uncertainty, ck_nmax = m_params$ck_nmax, aux_kept = aux_kept_a)
         if (!is.null(cancel_file_val) && file.exists(cancel_file_val)) stop("Model generation cancelled by user.")
@@ -514,14 +665,35 @@ run_regional_interpolation <- function(item, current_method, current_crs, aux_va
         if (cov_log_msg != "") res_out$log_msg <- paste0(res_out$log_msg, "\n", cov_log_msg)
         
         if(!is.null(res_a_list$res_sf)) {
-            fields_a <- if("var1.var" %in% colnames(res_a_list$res_sf)) c("var1.pred", "var1.var") else "var1.pred"
+            # gstat::idw() returns an all-NA `var1.var` alongside var1.pred (IDW
+            # is an exact deterministic weighting; it has no prediction variance
+            # to report). Rasterizing it doubled the size of every IDW surface
+            # and shipped a blank second band into the GeoTIFF export. Gate on
+            # the METHOD, not just on the column: apply_TPS's IDW fallback also
+            # returns a gstat idw object, and only the kriging engines produce a
+            # meaningful variance. Mirrors the map viewer's own guard.
+            fields_a <- if(method_has_variance(current_method) && "var1.var" %in% colnames(res_a_list$res_sf)) c("var1.pred", "var1.var") else "var1.pred"
             r_a <- terra::rasterize(res_a_list$res_sf, grid_r, field=fields_a) %>% terra::mask(terra::vect(bound)) %>% terra::project(crs_sel)
+            # terra names a SINGLE-field rasterization "last", which then travels
+            # into the exported GeoTIFF as the band description (TPS surfaces
+            # always shipped that way). Name it after the field it holds; every
+            # consumer already prefers "var1.pred" when it is there. The
+            # multi-field case is left alone -- terra names those from the
+            # fields, and renaming blind could mislabel the variance band.
+            if (length(fields_a) == 1L) names(r_a) <- fields_a
             res_out$r_a <- terra::wrap(r_a)
         }
     }
     
     if(run_pre) {
         if(nrow(pts_p) >= 3) {
+            # Same constant-target check for the predicted surface.
+            if (.is_degenerate_covariate(pts_p$pv)) {
+              write_warning_file(l, "pre", paste0(
+                "Target has no usable variance in this locality (all values equal or ",
+                "differing only in noise digits); the surface will be constant and ",
+                "R2 / NSE / CCC / RPD / RPIQ are undefined."))
+            }
             lags_p <- calc_scientific_lags(pts_p)
             mp_p <- list(idw_p = m_params$idw_p_pre, idw_nmax = m_params$idw_nmax, tps_lambda = m_params$tps_lambda_pre, pre_fit = m_params$pre_fit_pre, grid_aux = grid_aux, cv_strategy = m_params$cv_strategy, cv_repeats = m_params$cv_repeats, cancel_file = cancel_file_val, rfk_uncertainty = m_params$rfk_uncertainty, ck_nmax = m_params$ck_nmax, aux_kept = aux_kept_p)
             if (!is.null(cancel_file_val) && file.exists(cancel_file_val)) stop("Model generation cancelled by user.")
@@ -532,8 +704,10 @@ run_regional_interpolation <- function(item, current_method, current_crs, aux_va
             res_out$log_msg <- paste0(res_out$log_msg, "\n", res_p_list$log_msg)
             
             if(!is.null(res_p_list$res_sf)) {
-                fields_p <- if("var1.var" %in% colnames(res_p_list$res_sf)) c("var1.pred", "var1.var") else "var1.pred"
+                # Same method gate as the actual surface above.
+                fields_p <- if(method_has_variance(current_method) && "var1.var" %in% colnames(res_p_list$res_sf)) c("var1.pred", "var1.var") else "var1.pred"
                 r_p <- terra::rasterize(res_p_list$res_sf, grid_r, field=fields_p) %>% terra::mask(terra::vect(bound)) %>% terra::project(crs_sel)
+                if (length(fields_p) == 1L) names(r_p) <- fields_p
                 res_out$r_p <- terra::wrap(r_p)
             }
         }
@@ -563,6 +737,10 @@ run_regional_interpolation <- function(item, current_method, current_crs, aux_va
         pts_err <- sf::st_as_sf(pts_err_raw, coords=c("x","y"), crs=current_crs) %>%
                    sf::st_transform(utm_crs) %>%
                    dplyr::mutate(err = v - pv)
+        # Deliberate asymmetries with the model point sets: this diagnostic
+        # surface keeps co-located twins (gstat's idw tolerates them; each row
+        # is a real ML error) and uses a FIXED idp = 2 rather than the run's
+        # optimized power, so error surfaces stay comparable across methods.
         err_mod <- gstat::idw(err ~ 1, pts_err, grid_p, nmax = m_params$idw_nmax, idp = 2, debug.level = 0)
         r_err <- terra::rasterize(err_mod, grid_r, field="var1.pred") %>% terra::mask(terra::vect(bound)) %>% terra::project(crs_sel)
         res_out$r_point_err <- terra::wrap(r_err)

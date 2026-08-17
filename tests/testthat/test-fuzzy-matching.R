@@ -186,3 +186,39 @@ test_that("is_coord_col matches only whole-name coordinate tokens", {
                                   "latent_heat", "longevity", "along_slope",
                                   "Platinum", "x_offset", "pH"))))
 })
+
+# ── pick_coord_column ─────────────────────────────────────────────────────
+
+test_that("pick_coord_column pre-selects only whole-name coordinate columns", {
+  # The upload observer used substring matching ("^lon" / "^lat") long after
+  # every other call site moved to is_coord_col()'s exact-name policy, so a
+  # variable like Longevity_index was pre-selected as the X coordinate.
+  cols <- c("Longevity_index", "Lateral_flow", "pH", "Longitude", "Latitude")
+  expect_identical(pick_coord_column(cols, "x"), "Longitude")
+  expect_identical(pick_coord_column(cols, "y"), "Latitude")
+
+  # No coordinate column at all: NULL leaves the first column selected, which
+  # is what the old NA-valued grep result did.
+  expect_null(pick_coord_column(c("Longevity_index", "Lateral_flow", "pH"), "x"))
+  expect_null(pick_coord_column(c("Longevity_index", "Lateral_flow", "pH"), "y"))
+  expect_null(pick_coord_column(character(0), "x"))
+
+  # Case and surrounding whitespace are ignored; the first hit wins.
+  expect_identical(pick_coord_column(c("pH", " EASTING ", "x"), "x"), " EASTING ")
+  expect_identical(pick_coord_column(c("pH", "NORTHING", "y"), "y"), "NORTHING")
+})
+
+test_that("match_metadata_columns tolerates empty and blank metadata rows", {
+  # 1:nrow(m_df) iterated c(1, 0) on a headers-only sheet, feeding an NA name
+  # into the fuzzy matcher before the NA check ran. seq_len + the hoisted
+  # check make an empty sheet yield an empty mapping and skip NA/blank names
+  # before they reach adist().
+  empty <- data.frame(Variable = character(0), Label = character(0))
+  expect_identical(match_metadata_columns(empty, c("pH", "EC")), list())
+
+  m_df <- data.frame(Variable = c("pH", NA, ""), Label = c("Soil pH", "x", "y"))
+  res <- match_metadata_columns(m_df, c("pH", "EC"))
+  expect_length(res, 1)
+  expect_identical(res[[1]]$actual, "pH")
+  expect_identical(res[[1]]$label, "Soil pH")
+})

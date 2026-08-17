@@ -60,6 +60,116 @@ map_north_arrow_html <- function() {
   "<div style='text-align: center; color: white; font-family: Arial, sans-serif; pointer-events: none;'><div style='font-size: 16px; font-weight: bold; line-height: 1; margin-bottom: 4px; text-shadow: 1px 1px 2px black;'>N</div><svg width='30' height='30' viewBox='0 0 24 24' style='filter: drop-shadow(1px 1px 2px black);'><polygon points='12,2 7,22 12,17 17,22' fill='#e74c3c' stroke='white' stroke-width='1.5'/><polygon points='12,2 7,22 12,17' fill='#c0392b' stroke='white' stroke-width='1.5'/></svg></div>"
 }
 
+# Stylesheet for the leaflet measure control (the Map Viewer ruler), injected
+# once in ui_main.R's head. Kept here as a function rather than inline so the
+# exact shipped rules can be loaded into a test page and measured.
+#
+# Every selector carries an element qualifier (`a.leaflet-control-measure-...`)
+# or an extra class so it outranks the plugin's own stylesheet on SPECIFICITY
+# rather than on order: that stylesheet arrives as an htmlwidget dependency and
+# is therefore appended to <head> AFTER this block, so an equal-specificity
+# rule here would lose.
+#
+# Two things are corrected. (1) Geometry: the plugin ships a 36px button (44px
+# once Leaflet flags the container `leaflet-touch`, which it does on any
+# touch-capable machine), while every other button on the map (the drawing
+# toolbar) is 26/30px inside leaflet's standard `leaflet-bar` chrome. The
+# control is restyled to that same chrome so the map has one button size
+# whatever corner a control sits in. (2) Footprint: the
+# expanded panel is trimmed to what the map cannot already tell the user. The
+# heading repeats the button's own tooltip, and the last-point latitude and
+# longitude readout answers a question the ruler is not being asked; both are
+# hidden, and Cancel / Finish keep their icons without the label text. The
+# plugin's own images are used, so the icons stay the x and the tick it draws
+# elsewhere. Their accessible names are set in add_map_ruler(), because hidden
+# text is not an accessible name.
+map_ruler_css <- function() {
+  paste(
+    ".leaflet-control-measure { border-radius: 4px; box-shadow: 0 1px 5px rgba(0,0,0,0.65); }",
+    ".leaflet-touch .leaflet-control-measure { border: 2px solid rgba(0,0,0,0.2); background-clip: padding-box; }",
+    ".leaflet-control-measure a.leaflet-control-measure-toggle,",
+    ".leaflet-control-measure a.leaflet-control-measure-toggle:hover { width: 26px; height: 26px; border-radius: 2px; }",
+    ".leaflet-touch .leaflet-control-measure a.leaflet-control-measure-toggle,",
+    ".leaflet-touch .leaflet-control-measure a.leaflet-control-measure-toggle:hover { width: 30px; height: 30px; }",
+    ".leaflet-control-measure h3 { display: none; }",
+    # The coordinate readout is the first .group the results template emits
+    # (it opens with <p class='lastpoint heading'>); the distance and area
+    # groups follow it, so they are untouched.
+    ".leaflet-control-measure .js-results .group:first-child { display: none; }",
+    ".leaflet-control-measure .js-measuretasks { margin-top: 8px; padding-top: 8px; }",
+    ".leaflet-control-measure .js-measuretasks a.cancel,",
+    ".leaflet-control-measure .js-measuretasks a.finish { display: inline-block; width: 0; height: 14px; padding-left: 18px; overflow: hidden; text-indent: 100%; white-space: nowrap; vertical-align: middle; }",
+    sep = "\n"
+  )
+}
+
+# Contents of a measurement's own popup, built from measure_path_metrics()
+# (global_utils.R), which recomputes the drawn shape in R. It REPLACES the text
+# the measure plugin writes: the plugin computes on a sphere (radius 6371000 m)
+# and knows nothing about the Target Mapping CRS, so leaving its text beside
+# this one would put two answers to the same question on the screen. Attaching
+# the authoritative numbers to the shape itself is also what keeps them true
+# when an older measurement is clicked again - a single box in the corner can
+# only ever describe the most recent one.
+#
+# The markup deliberately reuses the plugin's own classes (h3, p, ul.tasks,
+# a.zoomto, a.deletemarkup): its stylesheet is already loaded, so the popup
+# keeps the familiar heading rule, spacing and task icons for free. The
+# mono-ruler-* classes are the handles add_map_ruler() wires the two links to.
+# NULL for a shape with fewer than two vertices - there is nothing to report,
+# and the plugin's single-point coordinate popup stands.
+map_ruler_popup_html <- function(res) {
+  if (is.null(res) || !is.list(res) || (res$n_points %||% 0) < 2) return(NULL)
+
+  closed <- isTRUE(res$closed)
+  crossed <- closed && isTRUE(res$self_intersecting)
+  row <- function(label, value) {
+    sprintf("<p><span style='color:#999;'>%s:</span> <b>%s</b></p>", label, value)
+  }
+  proj_lab <- paste0("projected (", res$crs_label, ")")
+  # Three vertices or more is a ring, so the figure is a perimeter and says so.
+  len_lab <- if (closed) "Perimeter" else "Length"
+  lines <- row(paste0(len_lab, ", ground (WGS84)"),
+               format_measure_length(res$length_geodesic))
+  if (!is.null(res$length_projected) && is.finite(res$length_projected)) {
+    lines <- paste0(lines, row(paste0(len_lab, ", ", proj_lab),
+                               format_measure_length(res$length_projected)))
+  }
+  # Area is shown on both bases for the same reason lengths are: terra's
+  # ellipsoidal area (the app's own convention, shared with the class-zone
+  # export) and the planimetric area in the analysis CRS differ by the
+  # projection's area distortion, and reporting only one invites the reader to
+  # assume a GIS would re-measure the same figure.
+  if (!is.null(res$area_geodesic) && is.finite(res$area_geodesic)) {
+    lines <- paste0(lines, row("Area, ground (WGS84)", format_measure_area(res$area_geodesic)))
+    if (!is.null(res$area_projected) && is.finite(res$area_projected)) {
+      lines <- paste0(lines, row(paste0("Area, ", proj_lab),
+                                 format_measure_area(res$area_projected)))
+    }
+  }
+  # measure_path_metrics() withholds the area of a ring that crosses itself:
+  # both engines integrate around the ring in traversal order, so a figure
+  # eight's oppositely-traversed lobes return their DIFFERENCE rather than the
+  # area drawn. Say so, or the missing rows read as a failure of the tool.
+  if (crossed) {
+    lines <- paste0(lines,
+      "<p style='color:#b3541e;'>Area not reported: the path crosses itself. ",
+      "The perimeter above is exact.</p>")
+  }
+
+  paste0(
+    "<div class='monolith-ruler-popup'>",
+    "<h3>", if (crossed) "Closed path" else if (closed) "Area measurement" else "Linear measurement",
+    " <span style='color:#999;font-size:0.85em;'>(", res$n_points, " points)</span></h3>",
+    lines,
+    "<ul class='tasks'>",
+    "<li><a href='#' class='mono-ruler-zoom zoomto'>Center on this ",
+    if (crossed) "shape" else if (closed) "area" else "line", "</a></li>",
+    "<li><a href='#' class='mono-ruler-delete deletemarkup'>Delete</a></li>",
+    "</ul></div>"
+  )
+}
+
 # Header row (title + PNG download + expand-to-modal buttons) above a plot
 # output. Server side pairs with register_sci_plot() in monolith.R, which
 # wires <id>_expand (modal) and <id>_dl (300-dpi PNG) to the same builder
@@ -345,6 +455,16 @@ info_tooltip <- function(id, text) {
   )
 }
 
+
+# One-line statement of the sample a matrix-valued panel was estimated on.
+# Correlation matrices, partial correlations, PCA and the collinearity screen
+# all use the rows complete across EVERY selected variable, so their n is not
+# the row count of the active selection and has to be said out loud.
+complete_case_note <- function(n_used, n_total) {
+  dropped <- max(0, n_total - n_used)
+  sprintf("Complete cases: n = %d of %d rows%s.", n_used, n_total,
+          if (dropped > 0) sprintf(" (%d dropped for missing values)", dropped) else "")
+}
 
 # Shared DT wrapper for the compact summary tables on the Scientific Analysis
 # tab, matching the Classification Suite look (dom = 't', scrollX). Paging is

@@ -1,12 +1,27 @@
 
 # Caveat shown with the Contribution / cos2 controls when the PCA was run
-# without scaling: both diagnostics implicitly assume unit-variance inputs,
-# so unscaled results are dominated by the high-variance variables.
-unscaled_pca_note <- function() {
+# without scaling. The two panels need DIFFERENT wording: contribution is a
+# share of a COMPONENT, so an unscaled run makes it a ranking of raw variances;
+# cos2 is normalised per variable (see generate_pca_cos2) and so stays a true
+# quality-of-representation in both modes - what carries over there is that the
+# components themselves are driven by the high-variance variables.
+unscaled_pca_note <- function(panel = c("contrib", "cos2")) {
+  panel <- match.arg(panel)
   shiny::helpText(
     shiny::icon("info-circle"),
-    "PCA was run without scaling: contribution and cos2 values are dominated by high-variance variables and are not comparable across variables measured on different scales."
+    if (panel == "contrib") {
+      "PCA was run without scaling: contribution values are dominated by high-variance variables and are not comparable across variables measured on different scales."
+    } else {
+      "PCA was run without scaling: cos2 is still each variable's own explained share (0-1), but the components it is measured against are dominated by the high-variance variables."
+    }
   )
+}
+
+# Empty-state table for the module's DT outputs. Never hand a widget output
+# NULL (the app-wide convention behind sci_dt's placeholder, ui_components.R);
+# a silent blank table also hides WHY there is nothing to show.
+desc_empty_dt <- function(msg = "No data for this selection.") {
+  DT::datatable(data.frame(Message = msg), options = list(dom = "t"), rownames = FALSE)
 }
 
 compute_normality <- function(x) {
@@ -329,9 +344,17 @@ desc_exploratory_server <- function(id, data_reactive, vars_metadata_reactive,
                   "Statistical Significance Tests",
                   shiny::uiOutput(ns("desc_normality_indicator"), inline = TRUE)
               ),
-              shiny::checkboxGroupInput(ns("desc_stat_tests"), 
-                                 shiny::HTML("Select Test (Choose One) <span title='For non-normal data distributions, non-parametric Kruskal-Wallis is highly recommended.'>\u2139\uFE0F</span>:"), 
-                                 choices = c("ANOVA" = "anova", "Duncan's" = "duncan", "Tukey's HSD" = "tukey", "Kruskal-Wallis" = "kruskal"), inline = TRUE),
+              # radioButtons, not a checkbox group: only ONE test is ever used
+              # (add_stat_layer takes stat_test[1], which is CHOICE order, not
+              # click order), so a multi-select control silently discarded the
+              # user's second pick - and it did so in the direction that
+              # matters, substituting a parametric post-hoc for a deliberately
+              # chosen Kruskal-Wallis. "None" is the empty string, which
+              # add_stat_layer/get_stat_letters treat as "draw nothing".
+              shiny::radioButtons(ns("desc_stat_tests"),
+                                 shiny::HTML("Group comparison test <span title='For non-normal data distributions, non-parametric Kruskal-Wallis is highly recommended. Duncan is liberal: it controls the comparison-wise, not the family-wise, error rate.'>\u2139\uFE0F</span>:"),
+                                 choices = c("None" = "", "ANOVA" = "anova", "Duncan's (liberal)" = "duncan", "Tukey's HSD" = "tukey", "Kruskal-Wallis" = "kruskal"),
+                                 selected = "", inline = TRUE),
               shiny::radioButtons(ns("desc_stat_letter_pos"), "Letter Placement:", choices = c("Above Data" = "above", "Top of Plot" = "top"), inline = TRUE)
           )
         },
@@ -552,9 +575,9 @@ desc_exploratory_server <- function(id, data_reactive, vars_metadata_reactive,
         req(input$desc_var_x)
       }
       df <- rv_filtered_analytics_data()
-      
-      if (nrow(df) == 0) return(NULL)
-      
+
+      if (nrow(df) == 0) return(desc_empty_dt("No data selected."))
+
       if (p_type %in% c("parallel", "radar")) {
           return(data.frame(Message="Summary statistics table is not available for multi-variable plots."))
       }
@@ -725,7 +748,8 @@ desc_exploratory_server <- function(id, data_reactive, vars_metadata_reactive,
         
         df <- apply_labels_to_df(df, vars, vmeta())
         vars_lab <- get_var_labels(vars, vmeta())
-        
+        cc_vars <- vars_lab
+
         if (p_type == "heatmap") {
           p <- generate_correlation_heatmap(df, vars_lab, method = method, cormat = corr_matrix_reactive())
         } else if (p_type == "network") {
@@ -735,12 +759,20 @@ desc_exploratory_server <- function(id, data_reactive, vars_metadata_reactive,
           if(!is.null(c_vars) && length(c_vars) > 0) {
              df <- apply_labels_to_df(df, c_vars, vmeta())
              c_vars_lab <- get_var_labels(c_vars, vmeta())
+             cc_vars <- unique(c(vars_lab, c_vars_lab))
           } else {
              c_vars_lab <- NULL
           }
           p <- generate_partial_correlation(df, vars_lab, control_vars = c_vars_lab, method = method)
         } else if (p_type == "correlogram") {
           p <- generate_correlogram(df, vars_lab, method = method, cormat = corr_matrix_reactive())
+        }
+        # These four panels are one matrix, estimated on the rows complete across
+        # every variable involved (controls included). Carrying that n on the
+        # figure keeps it with the plot when the plot is exported.
+        if (inherits(p, "ggplot") && all(cc_vars %in% colnames(df))) {
+          p <- p + labs(caption = complete_case_note(
+            sum(stats::complete.cases(df[, cc_vars, drop = FALSE])), nrow(df)))
         }
       }
       return(p)
@@ -753,9 +785,9 @@ desc_exploratory_server <- function(id, data_reactive, vars_metadata_reactive,
     output$corr_summary_table <- DT::renderDataTable({
       req(rv_analytics_data())
       df <- rv_filtered_analytics_data()
-      
-      if (nrow(df) < 3) return(NULL)
-      
+
+      if (nrow(df) < 3) return(desc_empty_dt("Insufficient data (fewer than 3 rows in the active groups)."))
+
       p_type <- input$corr_plot_type
       method <- input$corr_method %||% "pearson"
       
@@ -771,7 +803,9 @@ desc_exploratory_server <- function(id, data_reactive, vars_metadata_reactive,
           df, v1, v2, x_col = sp$x, y_col = sp$y,
           src_crs = sp$src_crs, proj_crs = sp$proj_crs,
           n_bins = input$corr_n_bins %||% 15, method = method)
-        if (is.null(res$bins)) return(NULL)
+        # The plot names the reason it cannot be computed; the table used to
+        # just vanish. Show the same reason instead.
+        if (is.null(res$bins)) return(desc_empty_dt(gsub("\n", " ", res$message %||% "Cross-correlogram not computable for this selection.")))
         res_df <- data.frame(
           Lag = round(res$bins$dist, 1),
           Pairs = res$bins$np,
@@ -784,8 +818,8 @@ desc_exploratory_server <- function(id, data_reactive, vars_metadata_reactive,
       } else {
         req(input$corr_vars_multi)
         vars <- input$corr_vars_multi
-        if (length(vars) < 2) return(NULL)
-        
+        if (length(vars) < 2) return(desc_empty_dt("Select at least two variables."))
+
         df <- apply_labels_to_df(df, vars, vmeta())
         vars_lab <- get_var_labels(vars, vmeta())
         
@@ -808,10 +842,12 @@ desc_exploratory_server <- function(id, data_reactive, vars_metadata_reactive,
                    showNotification(paste0("Partial correlation table aborted: could not partial out the control variables for ",
                                            paste(pcor$failed, collapse = ", "), "."),
                                     type = "error", duration = 8)
+                   return(desc_empty_dt(paste0("Could not partial out the control variables for ",
+                                               paste(pcor$failed, collapse = ", "), ".")))
                  }
-                 return(NULL)
+                 return(desc_empty_dt("Partial correlation could not be computed for this selection."))
              }
-             if (pcor$n < 5) return(NULL)
+             if (pcor$n < 5) return(desc_empty_dt("Insufficient complete observations for partial correlation (n < 5)."))
              if (pcor$k == 0) {
                # Every named control is also one of the correlated variables, so
                # nothing is left to partial out (a variable never controls for
@@ -829,7 +865,7 @@ desc_exploratory_server <- function(id, data_reactive, vars_metadata_reactive,
           df_clean <- na.omit(df[, vars_lab, drop=FALSE])
         }
 
-        if(nrow(df_clean) < 3) return(NULL)
+        if(nrow(df_clean) < 3) return(desc_empty_dt("Insufficient complete observations (fewer than 3 rows without missing values)."))
 
         if (p_type %in% c("heatmap", "network", "correlogram", "partial")) {
            pair_vars <- if (!is.null(pcor)) vars_lab else colnames(df_clean)
@@ -884,16 +920,18 @@ desc_exploratory_server <- function(id, data_reactive, vars_metadata_reactive,
               res_df$P_Adj <- format.pval(p.adjust(res_df$p_raw, method = "BH"), digits = 3, eps = 0.001)
               res_df$p_raw <- NULL
               colnames(res_df) <- c("Variable 1", "Variable 2", "Correlation", "P Value", "P Value (BH-adj.)")
-              return(DT::datatable(res_df, options = list(pageLength = 10, dom = 'tip', scrollX = TRUE)))
+              return(DT::datatable(res_df, options = list(pageLength = 10, dom = 'tip', scrollX = TRUE),
+                                   caption = complete_case_note(nrow(df_clean), nrow(df))))
            }
         }
-        
+
         cormat <- corr_matrix_reactive()
         req(cormat)
         cormat <- round(cormat, 3)
         cormat_df <- as.data.frame(cormat)
-        
-        return(DT::datatable(cormat_df, options = list(pageLength = 10, dom = 't', scrollX = TRUE)))
+
+        return(DT::datatable(cormat_df, options = list(pageLength = 10, dom = 't', scrollX = TRUE),
+                             caption = complete_case_note(nrow(df_clean), nrow(df))))
       }
     })
     
@@ -1017,12 +1055,12 @@ desc_exploratory_server <- function(id, data_reactive, vars_metadata_reactive,
        } else if (p_type %in% c("loadings", "contrib")) {
           shiny::tagList(
              shiny::numericInput(ns("pca_pc_single"), "Select PC", value = 1, min = 1, max = n_pcs),
-             if (p_type == "contrib" && !isTRUE(pca_rv$scaled)) unscaled_pca_note()
+             if (p_type == "contrib" && !isTRUE(pca_rv$scaled)) unscaled_pca_note("contrib")
           )
        } else if (p_type == "cos2") {
           shiny::tagList(
              shiny::selectInput(ns("pca_cos2_axes"), "Select PCs to evaluate", choices = 1:n_pcs, multiple = TRUE, selected = 1:min(2, n_pcs)),
-             if (!isTRUE(pca_rv$scaled)) unscaled_pca_note()
+             if (!isTRUE(pca_rv$scaled)) unscaled_pca_note("cos2")
           )
        } else {
           NULL

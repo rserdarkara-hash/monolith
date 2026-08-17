@@ -445,6 +445,7 @@
     pt_style_palette = "Set1", # F2: Current qualitative palette name
     auto_archive_choice = "none", # "none", "archive", or "discard"
     model_running = FALSE, # True when parallel model calculations are active
+    opt_running = FALSE, # True while a sidebar optimizer promise is in flight
     run_token = 0L # Incremental run token for async cancellation
   )
   

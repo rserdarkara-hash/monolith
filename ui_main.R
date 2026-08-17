@@ -66,6 +66,10 @@ ui <- fluidPage(
       details.sidebar-section[open] > summary::after { transform: rotate(90deg); }
       details.sidebar-section > summary + * { margin-top: 10px; }
     ")),
+    # Map ruler: sizes the measure control to match the drawing toolbar and
+    # trims its expanded panel. Kept in ui_components.R so the shipped rules
+    # are testable; see map_ruler_css() for why each selector is qualified.
+    tags$style(HTML(map_ruler_css())),
     # Collapsible sidebar sections remember their open state per section key in
     # localStorage; the resize trigger makes Shiny re-render outputs that were
     # hidden inside a collapsed section when it opens.

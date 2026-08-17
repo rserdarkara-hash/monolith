@@ -1001,6 +1001,111 @@ test_that("residual (Delta) raster carries only the prediction layer", {
   expect_true("var1.var" %in% names(terra::unwrap(res$r_a)))
 })
 
+test_that("IDW and TPS surfaces carry no phantom variance band", {
+  # gstat::idw() returns an all-NA `var1.var` next to var1.pred (verified under
+  # the project's installed gstat), so rasterizing every returned field doubled
+  # the size of every IDW surface and wrote a blank second band into the
+  # exported GeoTIFF; the main session then registered two blank "Uncertainty
+  # Map" export items off the same layer. Gate on the METHOD: apply_TPS's IDW
+  # fallback returns a gstat idw object too.
+  pts <- make_test_points(20)
+  coords <- sf::st_coordinates(pts)
+  pts_data <- data.frame(x = coords[, 1], y = coords[, 2],
+                         v = pts$v, pv = pts$pv, Locality = "LocA")
+  item <- list(l = "LocA", pts_data = pts_data,
+               m_params = list(idw_p_act = 2, idw_p_pre = 2, idw_nmax = 12,
+                               tps_lambda_act = -1, tps_lambda_pre = -1,
+                               pre_fit_act = NULL, pre_fit_pre = NULL,
+                               cv_strategy = "auto", rfk_uncertainty = "jackknife"))
+
+  for (mth in c("IDW", "TPS")) {
+    res <- suppressWarnings(run_regional_interpolation(
+      item, mth, 32633, character(0), NULL, "wrapped", "dynamic", 250,
+      "fixed", 200, "EPSG:4326", FALSE, "actual"))
+    ra <- terra::unwrap(res$r_a)
+    expect_equal(terra::nlyr(ra), 1)
+    expect_identical(names(ra), "var1.pred")
+  }
+
+  # The single source of truth the pipeline, the export registry and the map
+  # viewer all key on.
+  expect_true(all(vapply(c("OK", "RK", "RFK", "CK"), method_has_variance, logical(1))))
+  expect_false(method_has_variance("IDW"))
+  expect_false(method_has_variance("TPS"))
+  expect_false(method_has_variance(NULL))
+  expect_false(method_has_variance(NA_character_))
+  expect_false(method_has_variance(""))
+})
+
+test_that("a constant target names itself in the run warnings", {
+  # A locality whose target has no variance produces a flat surface, an
+  # is_fallback variogram and all-NA R2/NSE/CCC/RPD/RPIQ (those metrics are
+  # ratios against the observed variance, so they are UNDEFINED here, not zero).
+  # Without this the only signal was the amber "fallback model" banner, which
+  # names the symptom. Message only: the run must still complete.
+  pts <- make_test_points(20)
+  coords <- sf::st_coordinates(pts)
+  pts_data <- data.frame(x = coords[, 1], y = coords[, 2],
+                         v = 7.5, pv = pts$pv, Locality = "LocA")
+  item <- list(l = "LocA", pts_data = pts_data,
+               m_params = list(idw_p_act = 2, idw_p_pre = 2, idw_nmax = 12,
+                               tps_lambda_act = -1, tps_lambda_pre = -1,
+                               pre_fit_act = NULL, pre_fit_pre = NULL,
+                               cv_strategy = "auto", rfk_uncertainty = "jackknife"))
+
+  tmp <- tempfile("const_tgt_")
+  dir.create(tmp)
+  old_progress_dir <- getOption("monolith_progress_dir")
+  old_session_id  <- getOption("monolith_session_id")
+  on.exit({
+    options(monolith_progress_dir = old_progress_dir,
+            monolith_session_id  = old_session_id)
+    unlink(tmp, recursive = TRUE)
+  }, add = TRUE)
+
+  res <- suppressWarnings(run_regional_interpolation(
+    item, "OK", 32633, character(0), NULL, "wrapped", "dynamic", 250,
+    "fixed", 200, "EPSG:4326", FALSE, "actual",
+    progress_dir_val = tmp, session_id_val = "const_tgt"))
+
+  expect_false(is.null(res$r_a))
+  wf <- file.path(tmp, "warn_const_tgt_LocA_act.txt")
+  expect_true(file.exists(wf))
+  warn_txt <- paste(readLines(wf), collapse = " ")
+  expect_match(warn_txt, "no usable variance")
+  expect_match(warn_txt, "undefined")
+})
+
+test_that("an emptied covariate screen names the cause instead of failing as RK", {
+  # When the gate drops every covariate, aux_vars becomes character(0) and the
+  # trend formula built from it is "`v` ~ ", which as.formula() rejects with
+  # "attempt to use zero-length variable name" -- reported by the tryCatch as a
+  # bare "RK failed". The locality still routes to the named OK fallback; only
+  # the message changes.
+  pts <- make_test_points(20)
+  pts$covA <- 1.0   # both constant, so the gate's constant prune empties the set
+  pts$covB <- 3.0
+  grid <- make_test_grid_safe(pts, res = 200)
+  lags <- calc_scientific_lags(pts)
+
+  res <- suppressWarnings(apply_RK(pts, "v", grid, lags,
+                                   list(cv_strategy = "loocv"),
+                                   c("covA", "covB")))
+
+  expect_false(is.null(res$res_sf))          # OK fallback produced a surface
+  expect_match(res$log_msg, "covariate screen")
+  expect_false(grepl("zero-length variable name", res$log_msg))
+
+  # Co-Kriging does not die on an empty set (gstat fits a single-variable LMC
+  # happily) -- it silently returns ordinary kriging labelled as Co-Kriging, so
+  # it needs the same guard for a different reason.
+  res_ck <- suppressWarnings(apply_CK(pts, "v", grid, lags,
+                                      list(cv_strategy = "loocv"),
+                                      c("covA", "covB")))
+  expect_false(is.null(res_ck$res_sf))
+  expect_match(res_ck$log_msg, "covariate screen")
+})
+
 test_that("a sole degenerate covariate is named in the run warnings", {
   # The multicollinearity gate needs >= 2 covariates, so a single constant
   # covariate reaches the engines ungated: RK aliases its coefficient and fits
@@ -1136,4 +1241,134 @@ test_that("an all-NA surface yields NULL rather than an empty layer", {
   r <- make_zone_test_raster()
   terra::values(r) <- NA_real_
   expect_null(build_class_zone_sf(r, make_zone_test_params()))
+})
+
+test_that("a boundary that encloses no grid node skips the locality with a named warning", {
+  # A coarse fixed resolution over a tight strict boundary can leave NO
+  # candidate node inside it; the engines then kriged the full bbox and the
+  # mask discarded every cell -- a blank locality with no message, after
+  # paying for the whole interpolation. The run now names the cause and skips
+  # (classif_build_grid already stops loudly in the same situation).
+  pts_data <- data.frame(x = c(0, 100, 200), y = c(0, 100, 0),
+                         v = c(1.2, 3.4, 2.1), pv = NA, Locality = "LocA")
+  item <- list(l = "LocA", pts_data = pts_data,
+               m_params = list(idw_p_act = 2, idw_p_pre = 2, idw_nmax = 12,
+                               tps_lambda_act = -1, tps_lambda_pre = -1,
+                               pre_fit_act = NULL, pre_fit_pre = NULL,
+                               cv_strategy = "auto", rfk_uncertainty = "jackknife"))
+
+  # 1 m point buffers, 500 m fixed grid: every node centre sits tens of metres
+  # from the nearest sample, so nothing intersects the boundary.
+  res <- suppressWarnings(run_regional_interpolation(
+    item, "IDW", 32633, character(0), NULL, "strict", "fixed", 1,
+    "fixed", 500, "EPSG:4326", FALSE, "actual"))
+  expect_null(res$r_a)
+  expect_true(grepl("no grid cells fall inside the boundary", res$log_msg))
+  expect_false(grepl("Error in", res$log_msg))
+
+  # Positive control: a 100 m buffer guarantees a node within reach of
+  # (100, 100) at 50 m spacing under ANY grid alignment (nearest node centre
+  # is at most ~36 m away), so the guard must not trip on ordinary runs.
+  res_ok <- suppressWarnings(run_regional_interpolation(
+    item, "IDW", 32633, character(0), NULL, "strict", "fixed", 100,
+    "fixed", 50, "EPSG:4326", FALSE, "actual"))
+  expect_false(is.null(res_ok$r_a))
+  expect_false(grepl("no grid cells fall inside the boundary", res_ok$log_msg))
+})
+
+# ── Strict boundary vs grid resolution coherence ─────────────────────────────
+
+test_that("strict_buffer_gap quantifies a buffer below half the cell diagonal", {
+  # A sample sits anywhere in its cell, so it is up to res/sqrt(2) from that
+  # cell's CENTRE -- the only point the boundary clip tests. A 175 m buffer on
+  # a 350 m grid therefore needs 247.5 m to guarantee coverage, and the share
+  # of in-cell positions that lose their cell is the cell area outside the
+  # inscribed circle: 1 - pi/4.
+  g <- strict_buffer_gap(175, 350)
+  expect_true(g$short)
+  expect_equal(g$req_buffer, 350 / sqrt(2))
+  expect_equal(g$req_res, 175 * sqrt(2))
+  expect_equal(g$fraction, 1 - pi / 4)
+
+  # Above res/2 the buffer disc spills over the cell edges, so the inscribed
+  # -circle area overstates coverage: 1 - pi*b^2/res^2 would report NO loss
+  # from b = res/sqrt(pi) = 197.5 m upwards, inside the flagged range. The
+  # references below match Monte-Carlo sampling of a uniformly placed sample
+  # (4e6 draws) to within its standard error.
+  expect_equal(strict_buffer_gap(190, 350)$fraction, 0.1229089, tolerance = 1e-5)
+  expect_equal(strict_buffer_gap(200, 350)$fraction, 0.0809532, tolerance = 1e-5)
+  expect_equal(strict_buffer_gap(240, 350)$fraction, 0.0018500, tolerance = 1e-4)
+  # Continuous and strictly decreasing, reaching zero exactly at the threshold:
+  # a flagged pair therefore always carries a non-zero loss.
+  fr <- vapply(seq(1, 247, by = 2), function(b) strict_buffer_gap(b, 350)$fraction,
+               numeric(1))
+  expect_true(all(diff(fr) < 0))
+  expect_true(all(fr > 0))
+  expect_equal(strict_buffer_gap(350 / sqrt(2), 350)$fraction, 0, tolerance = 1e-6)
+
+  # Exactly half the diagonal is coherent; anything wider loses nothing.
+  expect_false(strict_buffer_gap(350 / sqrt(2), 350)$short)
+  expect_false(strict_buffer_gap(400, 350)$short)
+  expect_equal(strict_buffer_gap(400, 350)$fraction, 0)
+
+  # A zero buffer loses every cell; unusable inputs stay silent.
+  expect_equal(strict_buffer_gap(0, 350)$fraction, 1)
+  expect_null(strict_buffer_gap(175, 0))
+  expect_null(strict_buffer_gap(NA, 350))
+  expect_null(strict_buffer_gap(175, NULL))
+})
+
+test_that("strict_buffer_message speaks only for an incoherent pair", {
+  msg <- strict_buffer_message(175, 350, label = "Yorga")
+  expect_match(msg, "^Yorga: Strict Measured buffer")
+  expect_match(msg, "248 m or more")   # ceiling(350 / sqrt(2))
+  expect_match(msg, "247 m or less")   # floor(175 * sqrt(2))
+  expect_match(msg, "21%")             # 100 * (1 - pi/4)
+  expect_false(grepl(": ", strict_buffer_message(175, 350), fixed = TRUE))
+
+  # Just inside the threshold the loss is a genuine fraction of a percent;
+  # rounding it to "0%" would contradict the warning carrying it.
+  expect_match(strict_buffer_message(240, 350), "under 1% of isolated samples",
+               fixed = TRUE)
+
+  # Both manual-resolution sliders stop at 5 m, so a corrective cell size the
+  # user could not set is left out and only the buffer arm remains.
+  expect_match(strict_buffer_message(3, 5), "Raise the buffer to 4 m or more\\.$")
+  expect_false(grepl("lower the resolution", strict_buffer_message(3, 5),
+                     fixed = TRUE))
+
+  expect_null(strict_buffer_message(250, 350))
+  expect_null(strict_buffer_message(175, NA))
+})
+
+test_that("run_regional_interpolation names an incoherent strict buffer", {
+  pts_data <- data.frame(x = c(0, 100, 200, 300, 150), y = c(0, 100, 0, 150, 250),
+                         v = c(1.2, 3.4, 2.1, 2.8, 1.9), pv = NA, Locality = "LocA")
+  item <- list(l = "LocA", pts_data = pts_data,
+               m_params = list(idw_p_act = 2, idw_p_pre = 2, idw_nmax = 12,
+                               tps_lambda_act = -1, tps_lambda_pre = -1,
+                               pre_fit_act = NULL, pre_fit_pre = NULL,
+                               cv_strategy = "auto", rfk_uncertainty = "jackknife"))
+
+  # 100 m point buffers on a 350 m grid: below the 247.5 m half-diagonal, so
+  # isolated samples lose their own cell. Advisory only -- the run proceeds.
+  res <- suppressWarnings(run_regional_interpolation(
+    item, "IDW", 32633, character(0), NULL, "strict", "fixed", 100,
+    "fixed", 350, "EPSG:4326", FALSE, "actual"))
+  expect_match(res$log_msg, "Strict Measured buffer")
+  expect_false(grepl("Error in", res$log_msg))
+
+  # A coherent pair (100 m buffer, 50 m grid) must stay silent.
+  res_ok <- suppressWarnings(run_regional_interpolation(
+    item, "IDW", 32633, character(0), NULL, "strict", "fixed", 100,
+    "fixed", 50, "EPSG:4326", FALSE, "actual"))
+  expect_false(grepl("Strict Measured buffer", res_ok$log_msg))
+
+  # Non-strict boundaries are never flagged: a hull covers the neighbourhood of
+  # every interior sample, so only its perimeter is exposed - and a dynamic
+  # wrapped buffer is 1-3x the cell size, always past the half-diagonal.
+  res_wrap <- suppressWarnings(run_regional_interpolation(
+    item, "IDW", 32633, character(0), NULL, "wrapped", "fixed", 100,
+    "fixed", 350, "EPSG:4326", FALSE, "actual"))
+  expect_false(grepl("Strict Measured buffer", res_wrap$log_msg))
 })
