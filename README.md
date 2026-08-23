@@ -125,7 +125,7 @@ Deterministic and geostatistical interpolation models for continuous and classif
 
 ### Automated and Manual Optimization of Model Fittings
 
-Automated least-squares fitting for variograms for four different models, Generalized Cross-Validation (GCV) for TPS, and cross-validated power optimization for IDW (LOOCV up to n = 50, seeded 5-fold above). Interactive variogram fitting and manual tuning overrides are available for expert calibration. Once an interpolation run completes, each result is instantly available for batch export.
+Automated least-squares fitting for variograms for four different models, Generalized Cross-Validation (GCV) for TPS, and cross-validated power optimization for IDW (folds built by the same authority as the reported metrics, so the search follows the selected cross-validation strategy). Interactive variogram fitting and manual tuning overrides are available for expert calibration. Once an interpolation run completes, each result is instantly available for batch export.
 
 ![Manual variogram tuning panel and the TPS GCV curve](assets/3.png)
 
@@ -253,12 +253,13 @@ The full dependency suite, grouped by function:
 | Category | Packages |
 |---|---|
 | **Core App / UI** | `shiny`, `shinyjs`, `shinyWidgets`, `shinyFiles`, `shinycssloaders`, `DT` |
-| **Spatial / GIS** | `sf`, `terra`, `tidyterra`, `leaflet`, `leaflet.extras`, `ggspatial`, `fields`, `classInt`, `gstat`, `automap`, `concaveman`, `spdep`, `FNN` |
+| **Spatial / GIS** | `sf`, `terra`, `tidyterra`, `leaflet`, `leaflet.extras`, `ggspatial`, `fields`, `classInt`, `gstat`, `concaveman`, `spdep`, `FNN` |
 | **Data Wrangling & I/O** | `dplyr`, `tidyr`, `data.table`, `jsonlite`, `readxl`, `openxlsx`, `officer`, `zip`, `fs` |
-| **Visualization & Theming** | `ggplot2`, `ggpubr`, `plotly`, `RColorBrewer`, `viridis`, `latticeExtra`, `patchwork`, `fresh`, `showtext`, `scales`, `commonmark`, `glue` |
+| **Visualization & Theming** | `ggplot2`, `ggpubr`, `plotly`, `RColorBrewer`, `viridis`, `patchwork`, `fresh`, `showtext`, `scales`, `commonmark`, `glue` |
 | **Statistics & Machine Learning** | `randomForest`, `DALEX`, `yardstick`, `agricolae`, `mgcv`, `nortest` |
 | **Classification (tidymodels)** | `parsnip`, `recipes`, `workflows`, `tune`, `rsample`, `dials`, `spatialsample`, `hardhat`, `ranger`, `xgboost`, `nnet` |
 | **Parallelization / Async** | `future`, `furrr`, `promises` |
+| **CRS catalogue** | `DBI`, `RSQLite` |
 
 <details>
 <summary><strong>Tested version matrix</strong>: the exact package versions Monolith 1.0.6 is developed and validated against (click to expand)</summary>
@@ -283,12 +284,12 @@ Newer CRAN releases are expected to work; if you encounter an inconsistency, mat
 | `ggspatial` | 1.1.10 | `plotly` | 4.12.0 | `showtext` | 0.9-7 |
 | `fields` | 17.1 | `RColorBrewer` | 1.1-3 | `scales` | 1.4.0 |
 | `classInt` | 0.4-11 | `viridis` | 0.6.5 | `commonmark` | 2.0.0 |
-| `gstat` | 2.1-5 | `latticeExtra` | 0.6-31 | `glue` | 1.8.0 |
-| `automap` | 1.1-20 | `concaveman` | 1.2.0 | `spdep` | 1.4-2 |
-| `FNN` | 1.1.4 | `parsnip` | 1.4.1 | `recipes` | 1.3.1 |
-| `workflows` | 1.3.0 | `tune` | 2.0.1 | `rsample` | 1.3.2 |
-| `dials` | 1.4.2 | `spatialsample` | 0.6.1 | `hardhat` | 1.4.2 |
-| `ranger` | 0.18.0 | `xgboost` | 3.2.0.1 | `nnet` | 7.3.20 |
+| `gstat` | 2.1-5 | `concaveman` | 1.2.0 | `glue` | 1.8.0 |
+| `FNN` | 1.1.4 | `parsnip` | 1.4.1 | `spdep` | 1.4-2 |
+| `workflows` | 1.3.0 | `tune` | 2.0.1 | `recipes` | 1.3.1 |
+| `dials` | 1.4.2 | `spatialsample` | 0.6.1 | `rsample` | 1.3.2 |
+| `ranger` | 0.18.0 | `xgboost` | 3.2.0.1 | `hardhat` | 1.4.2 |
+| `DBI` | 1.3.0 | `RSQLite` | 2.4.1 | `nnet` | 7.3.20 |
 
 **Runtime environment:** R 4.5.2 (ucrt) · GDAL 3.11.4 · GEOS 3.13.1 · PROJ 9.7.0 · Windows 11 (also runs on macOS and Linux).
 

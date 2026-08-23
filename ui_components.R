@@ -266,6 +266,23 @@ build_rk_trend_ui <- function(lm_sum, dt_id, raw_id) {
     div(class = "table-container", DT::dataTableOutput(dt_id)),
     tags$p(style = "font-size: 0.72em; opacity: 0.65; margin-top: 6px;",
            "Signif. codes: *** p ≤ 0.001, ** p ≤ 0.01, * p ≤ 0.05, . p ≤ 0.1. CI = 95% confidence interval (t-based)."),
+    # The trend is fitted by OLS and its residuals are then kriged BECAUSE they
+    # are spatially autocorrelated - precisely the condition under which OLS
+    # standard errors are biased low. Reporting the coefficients without this
+    # note invites over-declaring covariate significance. The estimates
+    # themselves are unbiased; only their uncertainty is understated. The fix
+    # is the caveat, not a different estimator: a GLS refit under the fitted
+    # residual variogram would be Universal Kriging, a different method.
+    tags$p(style = "font-size: 0.72em; opacity: 0.65; margin-top: 2px;",
+           tags$b("Read the p-values with care: "),
+           "these standard errors, t statistics, confidence intervals and the F test ",
+           "assume independent residuals. Regression Kriging kriges these residuals ",
+           "precisely because they are spatially autocorrelated, which lowers the ",
+           "effective sample size and biases the standard errors downward, so ",
+           "significance is overstated. Check the residual Moran's I in the Model ",
+           "Performance table: the further it sits above its expectation ",
+           "E[I] = -1/(n-1), the more optimistic this table is. The coefficient ",
+           "estimates themselves remain unbiased."),
     tags$details(style = "margin-top: 4px;",
       tags$summary("Raw R model summary", style = "cursor: pointer; font-size: 0.8em; opacity: 0.7;"),
       verbatimTextOutput(raw_id)

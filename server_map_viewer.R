@@ -1,6 +1,37 @@
 # server_map_viewer.R (sourced with local = TRUE inside server) - draw_map,
 # proxy-managed overlays (keyed on map_overlay_rev), view switcher and the
 # main/comparison renderLeaflet blocks.
+
+  # Stale-results banner. Every layer on this tab is a snapshot of the last
+  # run: rv$sf / rv$bound / rv$disp are written only by the run pipeline, so
+  # retargeting the Input Data CRS or the X/Y columns on the Data Setup tab
+  # moves nothing here until Generate is pressed again. Without this the
+  # controls read as inert - which is exactly how a wrong zone survives a
+  # user's trial and error. The results are NOT cleared: the archive and the
+  # export registry depend on them.
+  output$map_crs_stale_note <- renderUI({
+    d <- rv$disp
+    req(d)
+    fmt <- function(x) if (isTruthy(x)) as.character(x) else "not set"
+    diffs <- list(
+      if (!identical(d$map_crs, rv$mapping$crs))
+        sprintf("Input Data CRS %s -> %s", fmt(d$map_crs), fmt(rv$mapping$crs)),
+      if (!identical(d$map_x, rv$mapping$x))
+        sprintf("X column %s -> %s", fmt(d$map_x), fmt(rv$mapping$x)),
+      if (!identical(d$map_y, rv$mapping$y))
+        sprintf("Y column %s -> %s", fmt(d$map_y), fmt(rv$mapping$y))
+    )
+    diffs <- unlist(Filter(Negate(is.null), diffs))
+    if (!length(diffs)) return(NULL)
+    div(style = "margin-bottom: 10px; padding: 10px 14px; border-radius: 5px; border: 1px solid #f0c36d; background-color: #fdf6e3; color: #7d5a00;",
+        tags$b("These maps are out of date. "),
+        "They were computed under ", tags$b(fmt(d$map_crs)),
+        ", and the Data Setup tab has changed since: ",
+        tags$b(paste(diffs, collapse = "; ")),
+        ". Nothing on this tab moves until you press ", tags$b("Run Interpolation"),
+        " again. The existing results are kept for the archive and the Export Registry.")
+  })
+
   output$loc_res_table <- renderTable({
     req(rv$loc_resolutions)
     res_list <- rv$loc_resolutions
@@ -86,6 +117,12 @@
   # completes, when the widgets have just re-rendered) costs nothing.
   map_style_sig <- new.env(parent = emptyenv())
 
+  # How many raster image layers each map widget currently carries. Leaflet
+  # replaces a layer whose id matches but never drops one the new pass does
+  # not re-add, so a restyle that paints fewer images than the last one has
+  # to retire the surplus explicitly (remove_surplus_raster_images).
+  map_raster_count <- new.env(parent = emptyenv())
+
   current_style_sig <- function(lab, class_params) {
     # Effective style: agro/bin without computable class params renders the
     # continuous fallback, so it must share the continuous signature (e.g.
@@ -109,7 +146,7 @@
   # REPLACE the previous images/legend instead of stacking, so a styling
   # change costs one PNG encode per layer - never a widget rebuild (tile
   # refetch, toolbar, overlay re-adds).
-  style_map_rasters <- function(m, r_list, lab) {
+  style_map_rasters <- function(m, r_list, lab, map_id = NULL) {
     meta <- get_display_meta()
     if (is.null(meta) || length(r_list) == 0) return(m)
 
@@ -118,7 +155,15 @@
       r_name <- if (!is.null(r_names) && length(r_names) >= i && !is.na(r_names[i]) && r_names[i] != "") r_names[i] else as.character(i)
       paste0(rv$run_counter, "_", lab, "_", r_name)
     }
-    img_id <- function(i) paste0("rast_img_", i)
+    # Image ids are positional, so they must be handed out as the images are
+    # actually added: a locality whose raster fails to project is skipped, and
+    # an id derived from the loop index would leave a hole in the sequence.
+    n_img <- 0L
+    add_img <- function(m, r, pal) {
+      n_img <<- n_img + 1L
+      m %>% addRasterImage(r, colors = pal, opacity = 0.8, project = FALSE,
+                           layerId = raster_img_layer_id(n_img))
+    }
     legend_id <- "rast_legend"
     select_active_layer <- function(r_w) {
       is_uncertainty <- isTruthy(input$show_uncertainty) && method_has_variance(meta$method) && "var1.var" %in% names(r_w)
@@ -169,7 +214,7 @@
       pal <- colorNumeric("RdBu", domain = c(-abs_max, abs_max), na.color = "transparent")
 
       for (i in seq_along(resid_layers)) {
-        m <- m %>% addRasterImage(resid_layers[[i]], colors = pal, opacity = 0.8, project = FALSE, layerId = img_id(i))
+        m <- add_img(m, resid_layers[[i]], pal)
       }
       m <- m %>% leaflet::addLegend(pal = pal, values = c(-abs_max, abs_max), title = paste("Resid:", meta$label), layerId = legend_id)
     } else {
@@ -186,7 +231,7 @@
         for (i in seq_along(r_list)) {
           r_w <- get_projected_raster(r_list[[i]], layer_key(i))
           if (is.null(r_w)) next
-          m <- m %>% addRasterImage(select_active_layer(r_w), colors = pal, opacity = 0.8, project = FALSE, layerId = img_id(i))
+          m <- add_img(m, select_active_layer(r_w), pal)
         }
         m <- m %>% leaflet::addLegend(colors = class_params$colors, labels = class_params$leg_labels, opacity = 0.8, title = paste(meta$label, meta$unit), layerId = legend_id)
       } else {
@@ -197,13 +242,18 @@
         for (i in seq_along(r_list)) {
           r_w <- get_projected_raster(r_list[[i]], layer_key(i))
           if (is.null(r_w)) next
-          m <- m %>% addRasterImage(select_active_layer(r_w), colors = pal, opacity = 0.8, project = FALSE, layerId = img_id(i))
+          m <- add_img(m, select_active_layer(r_w), pal)
         }
 
         v_range <- diff(range(vv_scale, na.rm=TRUE))
         d_format <- if(is.na(v_range)) 2 else if(v_range < 0.01) 6 else if(v_range < 0.1) 4 else 2
         m <- m %>% leaflet::addLegend(pal = pal, values = vv_scale, title = legend_title, labFormat = labelFormat(digits = d_format), layerId = legend_id)
       }
+    }
+
+    if (!is.null(map_id)) {
+      m <- remove_surplus_raster_images(m, n_img, get0(map_id, envir = map_raster_count, ifnotfound = 0L))
+      assign(map_id, n_img, envir = map_raster_count)
     }
     m
   }
@@ -221,9 +271,12 @@
       # Placeholder map (no raster layers yet, e.g. mid-run): a Leaflet widget
       # without layers has no auto-fit limits, and a map that never receives a
       # view never loads tiles - it stays solid gray. Always give it one.
-      if (!is.null(map_id) && exists(map_id, envir = map_style_sig)) rm(list = map_id, envir = map_style_sig)
+      if (!is.null(map_id)) {
+        if (exists(map_id, envir = map_style_sig)) rm(list = map_id, envir = map_style_sig)
+        assign(map_id, 0L, envir = map_raster_count)
+      }
       m0 <- leaflet(options = leafletOptions(zoomControl = FALSE)) %>%
-        addProviderTiles(current_tiles, layerId="base_tiles") %>%
+        add_base_tiles(current_tiles) %>%
         add_map_ruler()
       bb <- run_area_bbox()
       m0 <- if (!is.null(bb)) {
@@ -234,7 +287,7 @@
       return(m0)
     }
     
-    m <- leaflet(options = leafletOptions(zoomControl = FALSE)) %>% addProviderTiles(current_tiles, layerId="base_tiles") %>%
+    m <- leaflet(options = leafletOptions(zoomControl = FALSE)) %>% add_base_tiles(current_tiles) %>%
       leaflet.extras::addDrawToolbar(
         targetGroup = "drawn_features",
         polylineOptions = FALSE,
@@ -264,7 +317,7 @@
         # isolated: a styling tick must invalidate only the proxy restyler,
         # never this full widget build.
         isolate({
-          m <- style_map_rasters(m, r_list, lab)
+          m <- style_map_rasters(m, r_list, lab, map_id)
           if (!is.null(map_id)) {
             cp <- if ((input$color_style %||% "cont") %in% c("agro", "bin")) {
               tryCatch(classification_params(), error = function(e) NULL)
@@ -331,7 +384,7 @@
       if (length(r_list) == 0) next
       sig <- current_style_sig(tgt$lab, cp)
       if (identical(get0(map_id, envir = map_style_sig), sig)) next
-      style_map_rasters(leafletProxy(map_id), r_list, tgt$lab)
+      style_map_rasters(leafletProxy(map_id), r_list, tgt$lab, map_id)
       assign(map_id, sig, envir = map_style_sig)
     }
   }, priority = -10)
@@ -553,7 +606,7 @@
     for (map_id in overlay_map_ids) {
       leafletProxy(map_id) %>%
         clearTiles() %>%
-        addProviderTiles(input$base_map_layer, layerId="base_tiles", options = providerTileOptions(zIndex = -10))
+        add_base_tiles(input$base_map_layer)
     }
   })
 
@@ -564,7 +617,11 @@
       bb <- tryCatch(sf::st_bbox(sf::st_transform(sf::st_as_sf(rv$bound), 4326)), error = function(e) NULL)
       if (!is.null(bb)) return(bb)
     }
-    if (!is.null(rv$user_data) && !is.null(rv$mapping$x) && !is.null(rv$mapping$y)) {
+    # The CRS is checked alongside the columns: since the column mapping is no
+    # longer gated behind it, x/y can be set while the Input Data CRS is not,
+    # and st_transform() of an NA-CRS point set errors rather than degrading.
+    if (!is.null(rv$user_data) && !is.null(rv$mapping$x) && !is.null(rv$mapping$y) &&
+        isTruthy(rv$mapping$crs)) {
       return(tryCatch({
         df_map <- rv$user_data %>%
           dplyr::select(x = !!sym(rv$mapping$x), y = !!sym(rv$mapping$y)) %>%
@@ -709,15 +766,15 @@
     req(input$base_map_layer)
     leafletProxy("main_map") %>%
       clearTiles() %>%
-      addProviderTiles(input$base_map_layer, layerId="base_tiles", options = providerTileOptions(zIndex = -10))
+      add_base_tiles(input$base_map_layer)
 
     leafletProxy("comp_map_left") %>%
       clearTiles() %>%
-      addProviderTiles(input$base_map_layer, layerId="base_tiles", options = providerTileOptions(zIndex = -10))
+      add_base_tiles(input$base_map_layer)
 
     leafletProxy("comp_map_right") %>%
       clearTiles() %>%
-      addProviderTiles(input$base_map_layer, layerId="base_tiles", options = providerTileOptions(zIndex = -10))
+      add_base_tiles(input$base_map_layer)
 
     fit_maps_to_data()
   })

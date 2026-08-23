@@ -819,9 +819,10 @@ classif_spatial_baseline <- function(coords, y, fold_id) {
 #' - `baseline_acc` / `baseline_kap` score the spatial 1-NN baseline on the
 #'   same folds, so the comparison shares the identical validation design.
 #' - `lift_abs` is the accuracy gain in points over the spatial baseline;
-#'   `mcnemar_p` is the exact-paired McNemar test (continuity-corrected) on the
-#'   discordant correct/incorrect pairs — the standard significance test for
-#'   comparing two classifiers on the same samples (Dietterich 1998).
+#'   `mcnemar_p` is McNemar's paired test on the discordant correct/incorrect
+#'   pairs (exact binomial below 25 discordant pairs, continuity-corrected
+#'   chi-square above) — the standard significance test for comparing two
+#'   classifiers on the same samples (Dietterich 1998).
 classif_covariate_lift <- function(pred_df, target) {
   truth <- as.factor(pred_df[[target]])
   mod_ok  <- as.character(pred_df$.pred_class) == as.character(truth)
@@ -837,9 +838,22 @@ classif_covariate_lift <- function(pred_df, target) {
 
   b <- sum(!mod_ok & base_ok)   # baseline right, model wrong
   c_ <- sum(mod_ok & !base_ok)  # model right, baseline wrong
+  # Exact binomial below 25 discordant pairs, continuity-corrected chi-square
+  # above it (Edwards 1948; the usual switch point). mcnemar.test() is the
+  # chi-square APPROXIMATION to the binomial, and it is unreliable exactly
+  # where this statistic usually lands: b + c_ counts only the samples where
+  # the covariate model and the spatial 1-NN baseline disagree in correctness,
+  # which on a few hundred well-separated points is routinely under 25. Under
+  # the null both discordant cells are equally likely, so the exact test is
+  # binom.test(c_, b + c_, p = 0.5).
   mcnemar_p <- if ((b + c_) > 0) {
-    tryCatch(stats::mcnemar.test(matrix(c(0, b, c_, 0), nrow = 2))$p.value,
-             error = function(e) NA_real_)
+    tryCatch({
+      if ((b + c_) < 25L) {
+        stats::binom.test(c_, b + c_, p = 0.5)$p.value
+      } else {
+        stats::mcnemar.test(matrix(c(0, b, c_, 0), nrow = 2))$p.value
+      }
+    }, error = function(e) NA_real_)
   } else {
     NA_real_
   }

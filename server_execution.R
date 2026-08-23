@@ -88,44 +88,71 @@
     }
   }
 
-  observeEvent(input$vif_drop_btn, {
-    removeModal()
-    rv$vif_choice_made <- 10
-    rv$proceed_vif <- runif(1)
-  })
+  # Neither CRS selector has a default, so "not set yet" is the state every
+  # user is in immediately after an upload. It has to REFUSE VISIBLY: a bare
+  # req() on rv$mapping$crs made the Run button look broken, with no
+  # notification, no modal and no run-log line. One closure, called from both
+  # gates, so the message cannot exist only on a path that is never reached.
+  crs_selection_gate <- function() {
+    if (isTruthy(rv$mapping$crs) && isTruthy(input$crs_selection)) return(TRUE)
+    missing <- if (!isTruthy(rv$mapping$crs)) "Input Data CRS" else "Target Mapping CRS"
+    showModal(modalDialog(
+      title = tags$div(style = "color: #d9534f; font-weight: bold;", icon("exclamation-triangle"), paste(missing, "Not Set")),
+      tags$p(paste0("Set the ", missing, " on the Data Setup tab before running. Neither selector has a default: the Input Data CRS is the one your X/Y columns were recorded in and cannot be inferred from the coordinates alone, and the Target Mapping CRS is the one every exported raster and shapefile is written in.")),
+      tags$p("Check the position printed under the mini-map once the Input Data CRS is selected: if it is not your study area, the CRS is wrong."),
+      easyClose = TRUE,
+      footer = modalButton("Dismiss")
+    ))
+    FALSE
+  }
 
-  observeEvent(input$vif_keep_btn, {
-    removeModal()
-    rv$vif_choice_made <- Inf
-    rv$proceed_vif <- runif(1)
-  })
+  # Identity of a suitability verdict the user has already been shown, so an
+  # override cannot silently carry over to a different CRS, or to data that has
+  # moved since. A change to either invalidates the acknowledgement.
+  crs_gate_key <- function(crs, dev) paste0(as.character(crs)[1], "|", signif(dev, 6))
 
-  # Locality is part of the reset list because the VIF screen below runs on
-  # the SELECTED localities' data: a drop/keep decision made for one spatial
-  # context must not silently carry over to another.
-  observeEvent(list(input$method, input$aux_vars, input$locality), {
-    rv$vif_choice_made <- NULL
-  })
+  # Target Mapping CRS suitability gate. Deliberately mirrors the collinearity
+  # gate below: a refusal the user can overrule, with the decision recorded in
+  # the run config. Returns TRUE when the run may proceed, FALSE when a modal
+  # has been raised and control passes to its buttons.
+  crs_suitability_gate <- function() {
+    rv$crs_gate_state <- NULL
+    pos <- crs_sample_positions(rv$user_data, rv$mapping$x, rv$mapping$y, rv$mapping$crs)
+    if (is.null(pos)) return(TRUE)
+    suit <- crs_target_suitability(input$crs_selection, pos$lon, pos$lat)
+    rv$crs_gate_state <- suit
+    if (!identical(suit$level, "block")) return(TRUE)
+    if (identical(rv$crs_gate_ack, crs_gate_key(input$crs_selection, suit$dev))) return(TRUE)
+    showModal(modalDialog(
+      title = tags$div(style = "color: #d9534f; font-weight: bold;",
+                       icon("exclamation-triangle"), suit$title),
+      tags$p(suit$msg),
+      tags$p(suit$detail),
+      # Name the CRS that IS right rather than describing it, and name it here
+      # too: a user who reaches the run gate without having read the Data Setup
+      # advisory must not be sent back to work the answer out for themselves.
+      local({
+        rec <- crs_recommend_target(pos$lon, pos$lat)
+        if (is.null(rec)) {
+          tags$p("Choose the UTM zone or national grid the study area belongs to, or continue and accept that every distance this run reports carries that error.")
+        } else {
+          tags$p("Set the Target Mapping CRS to ", tags$b(sprintf("%s (%s)", rec$crs, rec$label)),
+                 " on the Data Setup tab, or continue and accept that every distance this run reports carries that error.")
+        }
+      }),
+      footer = tagList(
+        actionButton("crs_gate_override_btn", "Use Anyway (Not Recommended)", class = "btn-warning"),
+        modalButton("Cancel")
+      ),
+      easyClose = FALSE
+    ))
+    FALSE
+  }
 
-  observeEvent(input$run, {
-    if (isTRUE(rv$model_running)) {
-      showNotification("A model run is already in progress.", type = "warning")
-      return()
-    }
-    # Cross-feature guard (mirror of run_optimizer_async's model_running check):
-    # both paths spawn their own nested PSOCK cluster of cores - 1 workers, so
-    # running them concurrently oversubscribes the machine ~2x.
-    if (isTRUE(rv$opt_running)) {
-      showNotification("An optimization is running; start the interpolation after it finishes.", type = "warning")
-      return()
-    }
-    req(rv$user_data, input$locality, rv$mapping$x, rv$mapping$y)
-    
-    if (input$method %in% c("RK", "RFK", "CK") && (is.null(input$aux_vars) || length(input$aux_vars) == 0)) {
-      showNotification("Please select at least one auxiliary variable for RK/RFK/CK model generation.", type = "error")
-      return()
-    }
-
+  # The covariate-collinearity screen, factored out of observeEvent(input$run)
+  # so the CRS gate in front of it can hand control back here after an override
+  # without the screen being written twice.
+  run_collinearity_gate <- function() {
     if (input$method %in% c("RK", "RFK", "CK") && length(input$aux_vars) > 1 && is.null(rv$vif_choice_made)) {
        # Screen multicollinearity on the data the run will actually fit (the
        # selected localities), not the full table: covariates can be collinear
@@ -151,11 +178,68 @@
             ),
             easyClose = FALSE
           ))
-          return()
+          return(invisible(FALSE))
        }
     }
-    
+
     rv$proceed_vif <- runif(1)
+    invisible(TRUE)
+  }
+
+  observeEvent(input$crs_gate_override_btn, {
+    removeModal()
+    suit <- rv$crs_gate_state
+    if (is.null(suit)) return()
+    rv$crs_gate_ack <- crs_gate_key(input$crs_selection, suit$dev)
+    run_collinearity_gate()
+  })
+
+  observeEvent(input$vif_drop_btn, {
+    removeModal()
+    rv$vif_choice_made <- 10
+    rv$proceed_vif <- runif(1)
+  })
+
+  observeEvent(input$vif_keep_btn, {
+    removeModal()
+    rv$vif_choice_made <- Inf
+    rv$proceed_vif <- runif(1)
+  })
+
+  # Locality is part of the reset list because the VIF screen in
+  # run_collinearity_gate() runs on the SELECTED localities' data: a drop/keep
+  # decision made for one spatial context must not silently carry over to
+  # another.
+  observeEvent(list(input$method, input$aux_vars, input$locality), {
+    rv$vif_choice_made <- NULL
+  })
+
+  observeEvent(input$run, {
+    if (isTRUE(rv$model_running)) {
+      showNotification("A model run is already in progress.", type = "warning")
+      return()
+    }
+    # Cross-feature guard (mirror of run_optimizer_async's model_running check):
+    # both paths spawn their own nested PSOCK cluster of cores - 1 workers, so
+    # running them concurrently oversubscribes the machine ~2x.
+    if (isTRUE(rv$opt_running)) {
+      showNotification("An optimization is running; start the interpolation after it finishes.", type = "warning")
+      return()
+    }
+    req(rv$user_data, input$locality, rv$mapping$x, rv$mapping$y)
+    if (!crs_selection_gate()) return()
+
+    if (input$method %in% c("RK", "RFK", "CK") && (is.null(input$aux_vars) || length(input$aux_vars) == 0)) {
+      showNotification("Please select at least one auxiliary variable for RK/RFK/CK model generation.", type = "error")
+      return()
+    }
+
+    # Suitability of the Target Mapping CRS is asked FIRST: there is no point
+    # settling a collinearity decision for a run that will not be allowed to
+    # measure anything correctly, and only one modal is ever open at a time.
+    if (!crs_suitability_gate()) return()
+
+    run_collinearity_gate()
   })
 
   observeEvent(rv$proceed_vif, {
@@ -268,6 +352,10 @@
       return()
     }
     req(rv$user_data, input$locality, rv$mapping$x, rv$mapping$y);
+
+    # Re-asked here, not only at input$run: the archive/estimate confirmation
+    # modal sits between the two observers.
+    if (!crs_selection_gate()) return()
     meta <- get_current_meta()
     req(meta)
 
@@ -338,6 +426,46 @@
       }
     }
 
+    # ── Every CRS refusal happens HERE, before a single piece of state moves ──
+    # This is the last block of the observer's validation half. Everything
+    # below it - the run counter, the raster caches, rv$disp, the export
+    # registry, the CV lists - is COMMITTED, so an early return past this point
+    # leaves the session with the previous run's results destroyed and a
+    # run-config panel describing a run that never happened. There is no unwind
+    # path on purpose: refuse before committing, and nothing needs unwinding.
+
+    # require_metric: every distance this pipeline accepts or reports (grid
+    # resolution, buffer radius, variogram range, the ruler's projected column)
+    # is stated in metres while the engines work on the CRS's own axis units, so
+    # a projected Target Mapping CRS on any other linear unit is refused here
+    # rather than allowed to mean something else throughout the run.
+    safe_crs <- validate_crs(input$crs_selection, "CRS Validation Error:", duration = 15,
+                             require_metric = TRUE)
+    if (is.null(safe_crs)) return()
+    # Both selectors are free-typed (selectize create = TRUE), so an
+    # unparseable entry reaches this point having passed every selection-time
+    # advisory silently; catch it with a clear notification instead of letting
+    # st_as_sf() fail deep inside the interpolation worker.
+    safe_src_crs <- validate_crs(rv$mapping$crs, "Input Data CRS Validation Error:", duration = 15)
+    if (is.null(safe_src_crs)) return()
+
+    # Suitability enforcement. The gate at input$run is where the user is
+    # asked; this is the check no path can bypass, re-measured here rather than
+    # trusted. A "block" verdict stops the run unless that exact verdict was
+    # explicitly overridden, and a verdict that cannot be reached ("cannot
+    # answer") never stops anything.
+    crs_suit_pos <- crs_sample_positions(rv$user_data, x_col_name, y_col_name, rv$mapping$crs)
+    crs_suit <- if (is.null(crs_suit_pos)) NULL else
+      crs_target_suitability(input$crs_selection, crs_suit_pos$lon, crs_suit_pos$lat)
+    crs_override <- FALSE
+    if (!is.null(crs_suit) && identical(crs_suit$level, "block")) {
+      if (!identical(rv$crs_gate_ack, crs_gate_key(input$crs_selection, crs_suit$dev))) {
+        showNotification(paste0(crs_suit$title, ". ", crs_suit$msg), type = "error", duration = 20)
+        return()
+      }
+      crs_override <- TRUE
+    }
+
     locs <- resolve_selected_localities(input$locality, rv$user_data, rv$mapping$loc)
 
     if (!is.null(rv$run_config_summary) && rv$run_config_summary$method != input$method) {
@@ -366,7 +494,13 @@
     shinyjs::html("map_processing_title", "Processing...")
     update_premium_progress(5, "Initializing Spatial Analysis Engine...")
 
-    cancel_file <- file.path(session_progress_dir, "cancel_flag.txt")
+    # Per-RUN flag, not per-session: clearing one shared flag at the start of run
+    # N+1 revoked the cancellation of run N's still-in-flight workers, which then
+    # ran to completion alongside the new batch (their results discarded by the
+    # run_token guard, their cores not). rv$run_counter is bumped a few lines
+    # below, so the id for THIS run is the next value.
+    cancel_file <- file.path(session_progress_dir,
+                             paste0("cancel_flag_", rv$run_counter + 1L, ".txt"))
     if (file.exists(cancel_file)) tryCatch(file.remove(cancel_file), error = function(e) NULL)
     # Clear the previous run's status files, WARNINGS INCLUDED: the progress
     # panel simply lists every warn_ file it finds, so a warning left behind by
@@ -446,7 +580,16 @@
       # projected figure against it, so that figure keeps naming the system the
       # displayed surface, its variogram lags and its grid resolution live in
       # even after the sidebar has been retargeted for the next run.
-      crs_sel = input$crs_selection
+      crs_sel = input$crs_selection,
+      # The INPUT-side mapping this run was computed from. Every layer on the
+      # Map Viewer is a snapshot of the last run, so changing the Input Data
+      # CRS or the X/Y columns afterwards moves nothing there until Generate
+      # is pressed again. Recording the mapping is what lets that divergence
+      # be reported (map_crs_stale_note, server_map_viewer.R) instead of
+      # leaving the control looking inert.
+      map_crs = rv$mapping$crs,
+      map_x = rv$mapping$x,
+      map_y = rv$mapping$y
     ))
 
     tryCatch({
@@ -484,20 +627,9 @@
     grid_res <- input$grid_res
     crs_sel <- input$crs_selection
     
-    # require_metric: every distance this pipeline accepts or reports (grid
-    # resolution, buffer radius, variogram range, the ruler's projected column)
-    # is stated in metres while the engines work on the CRS's own axis units, so
-    # a projected Target Mapping CRS on any other linear unit is refused here
-    # rather than allowed to mean something else throughout the run.
-    safe_crs <- validate_crs(crs_sel, "CRS Validation Error:", duration = 15,
-                             require_metric = TRUE)
-    req(safe_crs)
-    # The Input Data CRS is free-typed (selectize create = TRUE); catch an
-    # unparseable value here with a clear notification instead of letting
-    # st_as_sf() fail deep inside the interpolation worker.
-    safe_src_crs <- validate_crs(current_crs, "Input Data CRS Validation Error:", duration = 15)
-    req(safe_src_crs)
-    
+    rv$run_config_summary$crs_scale_factor <- if (is.null(crs_suit)) NA_real_ else crs_suit$k
+    rv$run_config_summary$crs_gate_override <- crs_override
+
     comp_mode <- input$comp_mode
     sep_fit <- input$sep_fit
     idw_p_val <- input$idw_p
@@ -568,7 +700,8 @@
     main_wd <- getwd()
     progress_dir_val <- session_progress_dir
     session_id_val <- session_id
-    cancel_file_val <- file.path(session_progress_dir, "cancel_flag.txt")
+    cancel_file_val <- file.path(session_progress_dir,
+                                 paste0("cancel_flag_", rv$run_counter, ".txt"))
 
     rv$run_token <- rv$run_token + 1L
     this_token <- rv$run_token
@@ -1162,7 +1295,10 @@
   })
 
   observeEvent(input$cancel_model_btn, {
-    cancel_file <- file.path(session_progress_dir, "cancel_flag.txt")
+    # Flags the run actually in flight; the next run gets its own file, so this
+    # cancellation cannot be revoked by starting another run.
+    cancel_file <- file.path(session_progress_dir,
+                             paste0("cancel_flag_", rv$run_counter, ".txt"))
     file.create(cancel_file)
     rv$model_running <- FALSE
     rv$run_token <- rv$run_token + 1L

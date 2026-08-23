@@ -531,6 +531,72 @@ test_that("summarise_cv_repeats reports mean and SD across realizations", {
   expect_null(summarise_cv_repeats(list(mk(1), NULL, mk(2))))
 })
 
+# ── Display rounding must not reach the repeated-CV aggregation ────────────
+# 2026-08-23 audit, Tier 2: mean/SD across fold realizations were taken over
+# values perform_cv had already rounded for display, so the SD reported the
+# rounding lattice (RPD 0.01, RMSE 1e-4) instead of fold-assignment variance.
+
+test_that("perform_cv(round_values = FALSE) returns full precision, TRUE is the default", {
+  cv_df <- data.frame(
+    var1.pred     = c(10.00013, 20.00027, 30.00041, 40.00019, 50.00033),
+    var1.observed = c(10, 20, 30, 40, 50)
+  )
+  rounded <- perform_cv(cv_df, moran = FALSE)
+  raw <- perform_cv(cv_df, moran = FALSE, round_values = FALSE)
+
+  # Default is unchanged: the reference Model Performance table still rounds.
+  expect_identical(rounded, perform_cv(cv_df, moran = FALSE, round_values = TRUE))
+  for (k in c("rmse", "me", "mae", "r2", "ccc")) {
+    expect_equal(rounded[[k]], round(raw[[k]], 4), info = k)
+  }
+  for (k in c("nrmse_mean", "rpd", "rpiq", "smape")) {
+    expect_equal(rounded[[k]], round(raw[[k]], 2), info = k)
+  }
+  # The raw RMSE here is well below the 1e-4 display lattice, so rounding it
+  # destroys the value entirely - the exact failure mode the flag exists for.
+  expect_gt(raw$rmse, 0)
+  expect_equal(rounded$rmse, 3e-4)
+  expect_false(isTRUE(all.equal(raw$rmse, rounded$rmse)))
+})
+
+test_that("augment_metrics(round_values = FALSE) leaves its ratios unrounded", {
+  obs <- c(1, 2, 3, 4, 5, 6, 7, 8)
+  pre <- obs + c(0.0031, -0.0027, 0.0044, -0.0019, 0.0038, -0.0022, 0.0029, -0.0035)
+  raw <- augment_metrics(obs, pre, round_values = FALSE)
+  rounded <- augment_metrics(obs, pre)
+
+  expect_identical(rounded, augment_metrics(obs, pre, round_values = TRUE))
+  expect_equal(rounded$rpd, round(raw$rpd, 2))
+  expect_equal(rounded$nse, round(raw$nse, 4))
+  # RPD on a near-perfect fit is large, so the 0.01 display lattice discards
+  # real variation between realizations.
+  expect_false(isTRUE(all.equal(raw$rpd, rounded$rpd)))
+})
+
+test_that("summarise_cv_repeats aggregates raw metrics, not the display lattice", {
+  pts <- make_test_points(15, seed = 4)
+  # Offsets separated by far less than the RPD/RMSE display rounding: on the
+  # rounded values the three realizations collapse onto one lattice point and
+  # the SD reads 0, which would claim perfect stability across folds.
+  mk <- function(offset) {
+    sf::st_as_sf(data.frame(observed = pts$v, var1.pred = pts$v + offset,
+                            x = sf::st_coordinates(pts)[, 1],
+                            y = sf::st_coordinates(pts)[, 2]),
+                 coords = c("x", "y"), crs = sf::st_crs(pts))
+  }
+  offsets <- c(1.000011, 1.000022, 1.000033)
+  reps <- lapply(offsets, mk)
+  summ <- summarise_cv_repeats(reps)
+
+  # RMSE for a constant offset is the offset, so the SD is known exactly.
+  expect_equal(unname(summ$sd[["rmse"]]), sd(offsets))
+  expect_gt(unname(summ$sd[["rmse"]]), 0)
+  expect_gt(unname(summ$sd[["rpd"]]), 0)
+  # The old behaviour: aggregating the rounded values reports zero spread.
+  rounded_rmse <- vapply(reps, function(r) perform_cv(r, moran = FALSE)$rmse, numeric(1))
+  expect_equal(sd(rounded_rmse), 0)
+})
+
 test_that("build_cv_repeat_summary pools localities and recycles deterministic ones", {
   pts <- make_test_points(15, seed = 11)
   mk <- function(offset) {

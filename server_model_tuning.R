@@ -21,9 +21,9 @@
   # the finally block returns the reused promise worker to single-threaded
   # state. Numerics are plan-independent: furrr's fixed seed assigns one
   # L'Ecuyer stream per job whatever the topology, and none of the three workers
-  # draws from the stream it is handed (optimize_idw_p seeds itself inside
-  # with_rng_sandbox and its LOOCV branch draws nothing, krige.cv with an
-  # explicit nfold vector draws nothing, fields::Tps and fit.variogram are
+  # draws from the stream it is handed (optimize_idw_p builds its folds through
+  # make_cv_folds, which is seeded inside a two-sided RNG sandbox, krige.cv with
+  # an explicit nfold vector draws nothing, fields::Tps and fit.variogram are
   # deterministic).
   optimizer_button_labels <- list(
     opt_idw  = "OPTIMIZE IDW FACTORS",
@@ -136,7 +136,7 @@
 
   tps_opt_vals <- reactiveVal(NULL)
   observeEvent(input$opt_tps, {
-    req(rv$user_data, input$var_id, input$method == "TPS")
+    req(rv$user_data, input$var_id, input$method == "TPS", rv$mapping$crs)
     locs <- resolve_selected_localities(input$locality, rv$user_data, rv$mapping$loc)
     meta <- get_current_meta(); req(meta)
 
@@ -232,7 +232,7 @@
 
   idw_opt_vals <- reactiveVal(NULL)
   observeEvent(input$opt_idw, {
-    req(rv$user_data, input$var_id, input$method == "IDW", input$locality)
+    req(rv$user_data, input$var_id, input$method == "IDW", input$locality, rv$mapping$crs)
 
     locs <- resolve_selected_localities(input$locality, rv$user_data, rv$mapping$loc)
     meta <- get_current_meta(); req(meta)
@@ -243,6 +243,10 @@
     # list, `target` carried per job.
     current_crs <- rv$mapping$crs
     idw_nmax_val <- input$idw_nmax
+    # The power search shares the run's fold authority, so the strategy the
+    # user selected has to be captured here (plain value) and shipped to the
+    # worker like every other parameter.
+    cv_strategy_val <- input$cv_strategy %||% "auto"
     user_data <- rv$user_data
     loc_col <- rv$mapping$loc; x_col <- rv$mapping$x; y_col <- rv$mapping$y
     value_type <- input$value_type
@@ -260,7 +264,8 @@
 
     run_optimizer_async(
       btn_id = "opt_idw", jobs = jobs, worker_name = "idw_opt_item",
-      worker_args = list(current_crs = current_crs, idw_nmax_val = idw_nmax_val),
+      worker_args = list(current_crs = current_crs, idw_nmax_val = idw_nmax_val,
+                         cv_strategy = cv_strategy_val),
       packages = c("sf", "gstat"),
       busy_msg = "Calculating optimal IDW factors per region in the background; the dashboard stays usable.",
       on_success = function(res_list) {
@@ -405,7 +410,7 @@
   })
 
   observeEvent(input$auto_fit, {
-    req(rv$user_data, input$locality, rv$mapping$x, rv$mapping$y)
+    req(rv$user_data, input$locality, rv$mapping$x, rv$mapping$y, rv$mapping$crs)
     locs <- resolve_selected_localities(input$locality, rv$user_data, rv$mapping$loc)
     meta <- get_current_meta()
     req(meta)

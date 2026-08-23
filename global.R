@@ -10,14 +10,19 @@ if (getRversion() < "4.5.0") {
 required_packages <- c(
   "shiny", "shinyjs", "shinyWidgets", "shinyFiles", "shinycssloaders", "DT",
   "sf", "terra", "tidyterra", "leaflet", "leaflet.extras", "ggspatial", "fields",
-  "classInt", "gstat", "automap", "concaveman", "spdep", "FNN",
+  "classInt", "gstat", "concaveman", "spdep", "FNN",
   "dplyr", "tidyr", "jsonlite", "readxl", "openxlsx", "officer", "zip",
-  "ggplot2", "ggpubr", "plotly", "RColorBrewer", "viridis", "latticeExtra",
+  "ggplot2", "ggpubr", "plotly", "RColorBrewer", "viridis",
   "patchwork", "fresh", "showtext", "scales", "commonmark", "glue",
   "randomForest", "DALEX", "yardstick", "agricolae", "mgcv",
   "parsnip", "recipes", "workflows", "tune", "rsample", "dials",
   "spatialsample", "hardhat", "ranger", "xgboost", "nnet",
-  "future", "furrr", "promises", "nortest", "data.table", "fs"
+  "future", "furrr", "promises", "nortest", "data.table", "fs",
+  # DBI + RSQLite read PROJ's own proj.db catalogue (crs_registry(),
+  # global_utils.R) to shortlist candidate CRS by area of use. Called through
+  # ::, never attached; their absence degrades Tier 3 to the zone family
+  # instead of failing.
+  "DBI", "RSQLite"
 )
 
 missing_packages <- required_packages[!(required_packages %in% installed.packages()[, "Package"])]
@@ -48,7 +53,6 @@ library(ggspatial)
 library(fields)
 library(classInt)
 library(gstat)
-library(automap)
 library(concaveman)
 library(spdep)
 library(FNN)
@@ -66,7 +70,6 @@ library(ggpubr)
 library(plotly)
 library(RColorBrewer)
 library(viridis)
-library(latticeExtra)
 library(patchwork)
 library(fresh)
 library(showtext)

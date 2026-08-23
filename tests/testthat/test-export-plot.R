@@ -57,31 +57,6 @@ test_that("export_plot_to_file creates a TIFF file for ggplot", {
   expect_true(file.info(tmp)$size > 0)
 })
 
-# ── trellis export ─────────────────────────────────────────────────────────
-
-test_that("export_plot_to_file creates a PNG file for trellis/lattice plot", {
-  skip_if_not_installed("latticeExtra")
-  tmp <- tempfile(fileext = ".png")
-  on.exit(unlink(tmp), add = TRUE)
-
-  p <- lattice::xyplot(mpg ~ wt, data = mtcars)
-
-  export_plot_to_file(p, tmp, "png", mock_input)
-  expect_true(file.exists(tmp))
-  expect_true(file.info(tmp)$size > 0)
-})
-
-test_that("export_plot_to_file creates a PDF for trellis plot", {
-  skip_if_not_installed("latticeExtra")
-  tmp <- tempfile(fileext = ".pdf")
-  on.exit(unlink(tmp), add = TRUE)
-
-  p <- lattice::xyplot(mpg ~ wt, data = mtcars)
-  export_plot_to_file(p, tmp, "pdf", mock_input)
-  expect_true(file.exists(tmp))
-  expect_true(file.info(tmp)$size > 0)
-})
-
 # ── Edge cases ─────────────────────────────────────────────────────────────
 
 test_that("export_plot_to_file uses default dimensions when input fields missing", {

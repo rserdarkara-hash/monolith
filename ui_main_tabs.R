@@ -32,11 +32,19 @@ ui_main_tabs <- mainPanel(width = 9,
                                 selectInput("map_loc", "Locality/Grouping Column", choices = NULL)
                             ),
                             div(class = "setup-grid",
-                                selectizeInput("map_crs", "Input Data CRS", choices = common_crs, selected = "EPSG:32635", options = list(create = TRUE)),
-                                selectizeInput("crs_selection", "Target Mapping CRS", choices = common_crs, selected = "EPSG:32635", options = list(create = TRUE)),
+                                selectizeInput("map_crs", "Input Data CRS", choices = common_crs_input, selected = "",
+                                               options = list(create = TRUE,
+                                                              placeholder = "Select the CRS your coordinates were recorded in",
+                                                              onInitialize = I('function() { this.setValue(""); }'))),
+                                selectizeInput("crs_selection", "Target Mapping CRS", choices = common_crs_target, selected = "",
+                                               options = list(create = TRUE,
+                                                              placeholder = "Select the CRS for output maps and exports",
+                                                              onInitialize = I('function() { this.setValue(""); }'))),
                                 p(class = "setup-hint", style = "align-self: center;",
                                   tags$b("Instructions:"), "Please wait for the sampling coordinates to render and verify their accuracy on the mini-map below. Optionally, upload a variable list to enable automated data categorization.")
-                            )
+                            ),
+                            uiOutput("crs_target_note"),
+                            uiOutput("crs_picker_ui")
                         ),
                         div(class = "setup-card",
                             div(class = "setup-card-header",
@@ -44,7 +52,8 @@ ui_main_tabs <- mainPanel(width = 9,
                                 span(class = "setup-card-title", "Mini-Map Validation")
                             ),
                             p(class = "setup-card-sub", "Verify that the sampling points land where you expect them before fitting any model."),
-                            div(style = "border-radius: 8px; overflow: hidden;", leafletOutput("setup_minimap", height = "400px"))
+                            div(style = "border-radius: 8px; overflow: hidden;", leafletOutput("setup_minimap", height = "400px")),
+                            uiOutput("crs_landing_note")
                         ),
                         div(class = "setup-card",
                             div(class = "setup-card-header",
@@ -139,6 +148,7 @@ ui_main_tabs <- mainPanel(width = 9,
                              )
                            )
                          ),
+                         uiOutput("map_crs_stale_note"),
                          uiOutput("run_config_display_map"),
                          conditionalPanel(condition = "!input.map_view || ['view_act', 'view_pred'].includes(input.map_view)",
                                           h4(textOutput("main_map_title")),

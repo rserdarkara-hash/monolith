@@ -15,39 +15,46 @@
 #' viewer's uncertainty toggle.
 METHODS_WITH_VARIANCE <- c("OK", "RK", "RFK", "CK")
 
+# Rows per block for the RFK grid trend prediction, expressed in matrix CELLS:
+# predict.all materialises an n_rows x ntree double matrix, so 4e6 cells is ~32 MB
+# regardless of the tree count. A forest predicts each row independently, so
+# blocking is exact - this is a memory budget, never a numeric knob.
+.RFK_PREDICT_BLOCK_CELLS <- 4e6
+
 method_has_variance <- function(method) {
   !is.null(method) && length(method) == 1L && !is.na(method) &&
     method %in% METHODS_WITH_VARIANCE
 }
 
-optimize_idw_p <- function(pts, target_var, nmax = 12) {
+# The power search uses the SAME fold authority as every reported CV
+# (make_cv_folds / resolve_cv_plan), so the power that builds the surface and
+# the metrics that score it share one validation design. It matters most under
+# Spatial Block CV: a random split leaves each held-out point's near neighbours
+# in the training set, which favours a steeper decay, so a power tuned on
+# random folds is optimistic for the blocked estimate the table reports.
+# make_cv_folds seeds itself under a two-sided RNG sandbox, so no local
+# set.seed and no outer with_rng_sandbox are needed here; krige.cv with an
+# explicit nfold vector draws nothing. One fold vector is shared across all
+# candidate powers, so the comparison stays paired.
+optimize_idw_p <- function(pts, target_var, nmax = 12, cv_strategy = "auto") {
   factors <- seq(0.5, 5.0, by = 0.5)
   form <- as.formula(paste0("`", target_var, "` ~ 1"))
-  
-  n_folds <- if(nrow(pts) > 50) 5 else nrow(pts)
+  n <- nrow(pts)
 
-  # Seeding is CONDITIONAL here (the LOOCV branch needs no draws at all), so
-  # this uses the plain sandbox and keeps its own set.seed inside.
-  with_rng_sandbox({
-    if (n_folds == nrow(pts)) {
-      fold_assign <- 1:nrow(pts)
-    } else {
-      set.seed(12345)
-      fold_assign <- sample(rep(1:n_folds, length.out = nrow(pts)))
-    }
+  fold_assign <- make_cv_folds(sf::st_coordinates(pts), cv_strategy, n, CV_FOLD_SEED)
 
-    rmses <- sapply(factors, function(f) {
-      cv <- tryCatch({ krige.cv(form, pts, nmax = nmax, set = list(idp = f), nfold = fold_assign, debug.level = 0) }, error = function(e) NULL)
-      if(!is.null(cv)) {
-        sqrt(mean(cv$residual^2, na.rm = TRUE))
-      } else {
-        Inf
-      }
-    })
+  rmses <- vapply(factors, function(f) {
+    cv <- tryCatch(
+      krige.cv(form, pts, nmax = nmax, set = list(idp = f),
+               nfold = fold_assign, debug.level = 0),
+      error = function(e) NULL)
+    if (is.null(cv)) return(Inf)
+    val <- sqrt(mean(cv$residual^2, na.rm = TRUE))
+    if (is.finite(val)) val else Inf
+  }, numeric(1))
 
-    best_idx <- which.min(rmses)
-    if(length(best_idx) > 0 && rmses[best_idx] != Inf) factors[best_idx] else 2.0
-  })
+  best_idx <- which.min(rmses)
+  if (length(best_idx) > 0 && is.finite(rmses[best_idx])) factors[best_idx] else 2.0
 }
 
 # "Constant" is a relative property, not an absolute one. An absolute variance
@@ -572,22 +579,46 @@ apply_kriging_pipeline <- function(engine = c("OK", "RK", "RFK"), data, target_v
         res$fit <- robust_vgm_fit(res$v_emp, data$residuals)
         res_krig <- krige(residuals ~ 1, data, grid_p, model = res$fit, debug.level = 0)
         
-        pred_trend_all <- predict(rf_mod, grid_aux, predict.all = TRUE)
-        M <- pred_trend_all$individual
         rfk_unc <- if (!is.null(method_params$rfk_uncertainty)) method_params$rfk_uncertainty else "jackknife"
-        if (identical(rfk_unc, "jackknife") && !is.null(rf_mod$inbag)) {
-          # Calibrated trend variance: infinitesimal jackknife of the ensemble
-          # mean (Wager et al. 2014): the RF analogue of RK's lm se.fit^2.
-          trend_var <- rf_infinitesimal_jackknife_var(M, rf_mod$inbag)
-          res$log_msg <- paste0(res$log_msg, " [RFK uncertainty: infinitesimal jackknife]")
-        } else {
-          # Ensemble spread (between-tree variance): fast stability heuristic
-          # that understates predictive uncertainty (scientific_guide 7.3).
-          trend_var <- rowSums((M - rowMeans(M))^2) / (ncol(M) - 1)
+        use_ij <- identical(rfk_unc, "jackknife") && !is.null(rf_mod$inbag)
+        # predict.all returns an n_grid x ntree matrix in ONE allocation; at a fine
+        # fixed resolution (the grid is capped at ~4M cells) that is multi-GB inside
+        # a PSOCK worker, and the OOM surfaces only as "Parallel Interpolation
+        # Failed". A random forest predicts each row independently, and both variance
+        # estimators are row-independent too, so a row block yields exactly the values
+        # the full grid would: memory only, bit-identical output
+        # (.RFK_PREDICT_BLOCK_CELLS).
+        grid_aux_df <- if (inherits(grid_aux, "sf")) sf::st_drop_geometry(grid_aux) else as.data.frame(grid_aux)
+        n_grid <- nrow(grid_aux_df)
+        blk <- max(1L, min(n_grid, as.integer(ceiling(.RFK_PREDICT_BLOCK_CELLS / max(1L, rf_ntree)))))
+        pred_mean <- numeric(n_grid)
+        trend_var <- numeric(n_grid)
+        for (s in seq.int(1L, n_grid, by = blk)) {
+          e <- min(s + blk - 1L, n_grid)
+          pa <- predict(rf_mod, grid_aux_df[s:e, , drop = FALSE], predict.all = TRUE)
+          Mb <- pa$individual
+          # Keep the old loud failure: predict.randomForest drops rows carrying NA
+          # covariates, which used to break the length check in mutate() below.
+          if (length(pa$aggregate) != (e - s + 1L)) {
+            stop("RFK trend prediction returned ", length(pa$aggregate), " values for ",
+                 e - s + 1L, " grid cells - the covariate grid holds missing values.")
+          }
+          pred_mean[s:e] <- as.numeric(pa$aggregate)
+          trend_var[s:e] <- if (use_ij) {
+            # Calibrated trend variance: infinitesimal jackknife of the ensemble
+            # mean (Wager et al. 2014): the RF analogue of RK's lm se.fit^2.
+            rf_infinitesimal_jackknife_var(Mb, rf_mod$inbag)
+          } else {
+            # Ensemble spread (between-tree variance): fast stability heuristic
+            # that understates predictive uncertainty (scientific_guide 7.3).
+            rowSums((Mb - rowMeans(Mb))^2) / (ncol(Mb) - 1)
+          }
+          rm(pa, Mb)
         }
+        if (use_ij) res$log_msg <- paste0(res$log_msg, " [RFK uncertainty: infinitesimal jackknife]")
         
         res$res_sf <- grid_p %>% mutate(
-          var1.pred = as.vector(pred_trend_all$aggregate + res_krig$var1.pred), 
+          var1.pred = as.vector(pred_mean + res_krig$var1.pred), 
           var1.var = as.vector(trend_var + res_krig$var1.var)
         )
         cv_rfk <- function(seed) {

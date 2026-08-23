@@ -7,6 +7,12 @@
   session_progress_dir <- file.path(tempdir(), "monolith_progress", session_id)
   
   dir.create(session_progress_dir, recursive = TRUE, showWarnings = FALSE)
+  # One directory per session, and nothing removed it: on a multi-user
+  # deployment they accumulate for the lifetime of the R process. Same idiom the
+  # shapefile upload already uses (server_data_setup.R).
+  session$onSessionEnded(function() {
+    unlink(session_progress_dir, recursive = TRUE)
+  })
 
   leaflet_proj_cache <- new.env(parent = emptyenv())
   area_calc_cache <- new.env(parent = emptyenv())
@@ -347,7 +353,9 @@
     # classif_server): it bins point pairs by projected ground distance.
     spatial_reactive = reactive(list(
       x = rv$mapping$x, y = rv$mapping$y,
-      src_crs = rv$mapping$crs, proj_crs = input$crs_selection
+      # "" (neither selector has a default) has to reach the modules as NULL:
+      # that is the value their guards test for.
+      src_crs = rv$mapping$crs, proj_crs = if (isTruthy(input$crs_selection)) input$crs_selection else NULL
     ))
   )
 
@@ -357,7 +365,8 @@
     vars_metadata_reactive = reactive(rv$mapping$vars),
     spatial_reactive = reactive(list(
       x = rv$mapping$x, y = rv$mapping$y,
-      src_crs = rv$mapping$crs, proj_crs = input$crs_selection,
+      src_crs = rv$mapping$crs,
+      proj_crs = if (isTruthy(input$crs_selection)) input$crs_selection else NULL,
       loc = rv$mapping$loc
     )),
     # Polygons (map-drawn + uploaded shapefile) enable the module's polygon
@@ -396,6 +405,10 @@
   session_state$main_map_rendered <- FALSE
   session_state$comp_maps_rendered <- FALSE
   session_state$minimap_rendered <- FALSE
+  # Every value the app itself has written into either CRS selector, so an
+  # automatic fill can tell "the user chose this" from "we chose this"
+  # (crs_user_chose / crs_has_value, server_data_setup.R).
+  session_state$crs_auto <- list(map_crs = character(0), crs_selection = character(0))
 
   # Bumped by every map renderLeaflet. Overlay observers depend on it so
   # proxy-managed layers (points, borders, controls) are re-applied after each
@@ -411,7 +424,10 @@
     drawn_polygons = list(), # Stores drawn polygons from Leaflet
     shp_bound = NULL, # Custom shapefile boundary
     mapping = list(
-      x = NULL, y = NULL, loc = NULL, crs = "EPSG:32635",
+      # crs stays NULL until the user confirms one (or it is identified from
+      # evidence in the file): a default zone would silently georeference
+      # everyone else's data into the wrong country.
+      x = NULL, y = NULL, loc = NULL, crs = NULL,
       vars = list() # List of actual/pred pairs
     ),
     rast = NULL, rast_pred = NULL, rast_res = NULL, rast_point_res = NULL, sf = NULL, bound = NULL, 

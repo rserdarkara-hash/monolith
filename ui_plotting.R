@@ -483,21 +483,6 @@ apply_styler_theme <- function(p_obj, input, item_label = "", item_type = "plot"
                  )) & 
            plot_annotation(title = main_t, theme = theme(plot.title = element_text(size = s_title, face = "bold", family = font_f))))
            
-  } else if (inherits(p_obj, "trellis")) {
-    f_title <- if(isTruthy(input$styler_title)) input$styler_title else item_label
-    f_x <- if(isTruthy(input$styler_x_title)) input$styler_x_title else "Distance"
-    f_y <- if(isTruthy(input$styler_y_title)) input$styler_y_title else "Semivariance"
-    
-    return(update(p_obj, 
-           par.settings = list(
-             fontsize = list(text = s_base),
-             fontfamily = font_f
-           ),
-           scales = list(x = list(rot = as.numeric(input$styler_label_orient %||% 0))),
-           main = list(label = f_title, fontfamily = font_f, cex = s_title/s_base),
-           xlab = list(label = f_x, fontfamily = font_f, cex = s_x/s_base),
-           ylab = list(label = f_y, fontfamily = font_f, cex = s_y/s_base)))
-           
   } else {
     t <- if(isTruthy(input$styler_title)) input$styler_title else item_label
     return(style_pane(p_obj, t))
@@ -1482,6 +1467,55 @@ generate_pca_biplot_3d <- function(pca_res, df, pc_x=1, pc_y=2, pc_z=3, group_co
 # is what actually triggers the round trip. The record lives in a page-level
 # store because the reply arrives through one custom message handler shared by
 # all three map widgets.
+# Basemap tiles for every interactive map in the app: the Map Viewer's three
+# widgets, their proxy swap when the toolbar dropdown changes, and the Data
+# Setup mini-map. One entry point because the widget build and the proxy swap
+# have to add the layer on identical terms - a basemap that behaves differently
+# from the one the map was born with is a bug by construction.
+#
+# zIndex = 0 is load-bearing. leaflet::addRasterImage() does not use an image
+# overlay: it paints the surface as a canvas GridLayer, so the interpolated
+# raster and the basemap are siblings in the same Leaflet tile pane, both on
+# the GridLayer default z-index of 1, and only DOM insertion order keeps the
+# surface on top. That order holds when the widget is built (basemap first,
+# rasters after) and inverts on a proxy swap, which appends the new basemap
+# last and paints it straight over the surface. Pinning the basemap one level
+# below the rasters makes the stacking explicit instead of incidental. It has
+# to be 0 rather than a negative level: a negative z-index drops the layer
+# behind the tile pane's own painted ground in some browsers, which is a map
+# that answers a basemap switch with a bare grey rectangle.
+#
+# The five providers stop at different native zooms. Left to Leaflet, adding a
+# shallower layer to a map already zoomed past its limit drops the map's zoom
+# to that layer's maximum, and the drop is permanent: switching back to a
+# deeper provider does not raise it again. A layer whose maximum sits below the
+# current zoom draws no tiles at all. Declaring the provider's depth as
+# `maxNativeZoom` instead makes Leaflet upscale the deepest tiles it has, so
+# all five cover the same zoom range and switching basemaps changes the imagery
+# and nothing else.
+BASE_TILE_NATIVE_ZOOM <- c(
+  "Esri.WorldImagery"  = 19,
+  "OpenTopoMap"        = 17,
+  "OpenStreetMap"      = 19,
+  "CartoDB.DarkMatter" = 20,
+  "CartoDB.Positron"   = 20
+)
+BASE_TILE_MAX_ZOOM <- 20
+
+add_base_tiles <- function(map, provider) {
+  if (is.null(provider) || !nzchar(provider)) provider <- "CartoDB.Positron"
+  native <- unname(BASE_TILE_NATIVE_ZOOM[provider])
+  if (is.na(native)) native <- BASE_TILE_MAX_ZOOM
+  leaflet::addProviderTiles(
+    map, provider, layerId = "base_tiles",
+    options = leaflet::providerTileOptions(
+      zIndex = 0,
+      maxZoom = BASE_TILE_MAX_ZOOM,
+      maxNativeZoom = native
+    )
+  )
+}
+
 add_map_ruler <- function(map, position = "bottomleft") {
   map %>%
     leaflet::addMeasure(

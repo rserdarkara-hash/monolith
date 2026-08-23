@@ -596,6 +596,39 @@ test_that("RFK jackknife changes only the uncertainty surface, not predictions",
   expect_match(res_jack$log_msg, "infinitesimal jackknife")
 })
 
+test_that("RFK grid trend prediction is invariant to the prediction block size", {
+  # The grid trend is predicted in row blocks so predict.all cannot allocate an
+  # n_grid x ntree matrix in one shot. A forest predicts each row independently
+  # and both variance estimators are row-independent, so shrinking the block must
+  # not move a single value - if it does, the blocking is not exact.
+  pts <- make_test_points(15)
+  pts$v <- pts$v + 0.5 * pts$aux1
+  grid <- make_test_grid_safe(pts, res = 200)
+  lags <- calc_scientific_lags(pts)
+  expect_gt(nrow(grid), 3)   # otherwise the block override below is a no-op
+
+  run_rfk <- function(unc) {
+    set.seed(123)
+    suppressWarnings(
+      apply_RFK(pts, "v", grid, lags, list(rf_ntree = 40, rfk_uncertainty = unc), c("aux1"))
+    )
+  }
+
+  for (unc in c("jackknife", "spread")) {
+    one_block <- run_rfk(unc)
+
+    orig <- .RFK_PREDICT_BLOCK_CELLS
+    withr::defer(assign(".RFK_PREDICT_BLOCK_CELLS", orig, envir = globalenv()))
+    # 2 rows per block => several blocks over this grid.
+    assign(".RFK_PREDICT_BLOCK_CELLS", 2 * 40, envir = globalenv())
+    many_blocks <- run_rfk(unc)
+    assign(".RFK_PREDICT_BLOCK_CELLS", orig, envir = globalenv())
+
+    expect_identical(many_blocks$res_sf$var1.pred, one_block$res_sf$var1.pred)
+    expect_identical(many_blocks$res_sf$var1.var, one_block$res_sf$var1.var)
+  }
+})
+
 # ── apply_CK ──────────────────────────────────────────────────────────────
 
 test_that("apply_CK returns predictions labelled Co-Kriging or OK fallback", {
@@ -827,6 +860,29 @@ test_that("tps_gcv_item returns a GCV curve and idw_opt_item an optimized power"
   small <- df[1:3, ]
   expect_identical(tps_gcv_item(list(l = "S", df = small), 32633)$best_lam, 0)
   expect_identical(idw_opt_item(list(l = "S", df = small), 32633, 12)$best_f, 2.0)
+})
+
+test_that("idw_opt_item forwards cv_strategy to the power search", {
+  # 2026-08-23 audit, Tier 3: the worker must hand the run's CV strategy to
+  # optimize_idw_p, or the power is tuned on a partition the metrics never use.
+  pts <- make_test_points(60, seed = 21)
+  coords <- sf::st_coordinates(pts)
+  df <- data.frame(x = coords[, 1], y = coords[, 2], v = pts$v)
+  # idw_opt_item dedups at centimetre precision before searching; mirror that
+  # so the expectation is scored on the identical point set.
+  kept <- pts[!duplicated(round(sf::st_coordinates(pts), 2)), ]
+
+  for (strategy in c("loocv", "block")) {
+    expect_identical(
+      idw_opt_item(list(l = "L", df = df), current_crs = 32633,
+                   idw_nmax_val = 12, cv_strategy = strategy)$best_f,
+      optimize_idw_p(kept, "v", nmax = 12, cv_strategy = strategy),
+      info = strategy)
+  }
+  # Default keeps the auto plan when the caller supplies no strategy.
+  expect_identical(
+    idw_opt_item(list(l = "L", df = df), 32633, 12)$best_f,
+    optimize_idw_p(kept, "v", nmax = 12, cv_strategy = "auto"))
 })
 
 test_that("idw_opt_item and tps_gcv_item project geographic input to match the run CRS", {

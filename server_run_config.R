@@ -416,8 +416,11 @@
       if (!is.null(cfg$map_x)) updateSelectInput(session, "map_x", selected = cfg$map_x)
       if (!is.null(cfg$map_y)) updateSelectInput(session, "map_y", selected = cfg$map_y)
       if (!is.null(cfg$map_loc)) updateSelectInput(session, "map_loc", selected = cfg$map_loc)
-      if (!is.null(cfg$map_crs)) updateSelectizeInput(session, "map_crs", selected = cfg$map_crs)
-      if (!is.null(cfg$crs_selection)) updateSelectizeInput(session, "crs_selection", selected = cfg$crs_selection)
+      # via set_*_crs (server_data_setup.R): a saved CRS is usually not one of
+      # the dropdown's built-in choices, and selectize ignores a value with no
+      # matching option.
+      if (!is.null(cfg$map_crs)) set_input_crs(cfg$map_crs)
+      if (!is.null(cfg$crs_selection)) set_target_crs(cfg$crs_selection)
       
       if (!is.null(cfg$var_category)) updateSelectInput(session, "var_category", selected = cfg$var_category)
       if (!is.null(cfg$var_id)) shinyWidgets::updatePickerInput(session, "var_id", selected = cfg$var_id)
@@ -468,6 +471,7 @@
     x_col <- rv$mapping$x
     y_col <- rv$mapping$y
     req(x_col, y_col, x_col %in% colnames(rv$user_data), y_col %in% colnames(rv$user_data))
+    req(rv$mapping$crs, input$crs_selection)
     coords_df <- rv$user_data[, c(x_col, y_col)]
     coords_df <- coords_df[complete.cases(coords_df), , drop = FALSE]
     tryCatch({

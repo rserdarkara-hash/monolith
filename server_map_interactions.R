@@ -38,7 +38,7 @@
   })
 
   observeEvent(input$save_group, {
-    req(rv$drawn_feature, input$new_group_name, rv$user_data, rv$mapping$x, rv$mapping$y)
+    req(rv$drawn_feature, input$new_group_name, rv$user_data, rv$mapping$x, rv$mapping$y, rv$mapping$crs)
     group_name <- trimws(input$new_group_name)
     if (group_name == "") {
       showNotification("Group name cannot be empty.", type = "error")

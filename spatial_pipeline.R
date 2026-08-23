@@ -655,7 +655,7 @@ run_regional_interpolation <- function(item, current_method, current_crs, aux_va
             "R2 / NSE / CCC / RPD / RPIQ are undefined."))
         }
         lags_a <- calc_scientific_lags(pts_a)
-        mp_a <- list(idw_p = m_params$idw_p_act, idw_nmax = m_params$idw_nmax, tps_lambda = m_params$tps_lambda_act, pre_fit = m_params$pre_fit_act, grid_aux = grid_aux, cv_strategy = m_params$cv_strategy, cv_repeats = m_params$cv_repeats, cancel_file = cancel_file_val, rfk_uncertainty = m_params$rfk_uncertainty, ck_nmax = m_params$ck_nmax, aux_kept = aux_kept_a)
+        mp_a <- list(idw_p = m_params$idw_p_act, idw_nmax = m_params$idw_nmax, tps_lambda = m_params$tps_lambda_act, pre_fit = m_params$pre_fit_act, grid_aux = grid_aux, cv_strategy = m_params$cv_strategy, cv_repeats = m_params$cv_repeats, cancel_file = cancel_file_val, rfk_uncertainty = m_params$rfk_uncertainty, rf_ntree = m_params$rf_ntree, ck_nmax = m_params$ck_nmax, aux_kept = aux_kept_a)
         if (!is.null(cancel_file_val) && file.exists(cancel_file_val)) stop("Model generation cancelled by user.")
         res_a_list <- apply_interpolation(pts_a, "v", current_method, grid_p, aux_vars, lags_a, mp_a, l, "act", vif_threshold)
         res_out$v_emp_act <- res_a_list$v_emp; res_out$v_fit_act <- res_a_list$fit; res_out$cv_act <- res_a_list$cv_metrics; res_out$cv_obj_act <- res_a_list$cv_obj
@@ -695,7 +695,7 @@ run_regional_interpolation <- function(item, current_method, current_crs, aux_va
                 "R2 / NSE / CCC / RPD / RPIQ are undefined."))
             }
             lags_p <- calc_scientific_lags(pts_p)
-            mp_p <- list(idw_p = m_params$idw_p_pre, idw_nmax = m_params$idw_nmax, tps_lambda = m_params$tps_lambda_pre, pre_fit = m_params$pre_fit_pre, grid_aux = grid_aux, cv_strategy = m_params$cv_strategy, cv_repeats = m_params$cv_repeats, cancel_file = cancel_file_val, rfk_uncertainty = m_params$rfk_uncertainty, ck_nmax = m_params$ck_nmax, aux_kept = aux_kept_p)
+            mp_p <- list(idw_p = m_params$idw_p_pre, idw_nmax = m_params$idw_nmax, tps_lambda = m_params$tps_lambda_pre, pre_fit = m_params$pre_fit_pre, grid_aux = grid_aux, cv_strategy = m_params$cv_strategy, cv_repeats = m_params$cv_repeats, cancel_file = cancel_file_val, rfk_uncertainty = m_params$rfk_uncertainty, rf_ntree = m_params$rf_ntree, ck_nmax = m_params$ck_nmax, aux_kept = aux_kept_p)
             if (!is.null(cancel_file_val) && file.exists(cancel_file_val)) stop("Model generation cancelled by user.")
             res_p_list <- apply_interpolation(pts_p, "pv", current_method, grid_p, aux_vars, lags_p, mp_p, l, "pre", vif_threshold)
             res_out$v_emp_pre <- res_p_list$v_emp; res_out$v_fit_pre <- res_p_list$fit; res_out$cv_pre <- res_p_list$cv_metrics; res_out$cv_obj_pre <- res_p_list$cv_obj
@@ -1056,7 +1056,7 @@ tps_gcv_item <- function(item, current_crs) {
 
 # Per-locality worker for the "OPTIMIZE IDW FACTORS" button.
 # item = list(l, df = data.frame(x, y, v)).
-idw_opt_item <- function(item, current_crs, idw_nmax_val) {
+idw_opt_item <- function(item, current_crs, idw_nmax_val, cv_strategy = "auto") {
   if (nrow(item$df) < 5) return(list(l = item$l, best_f = 2.0))
   # Project first so optimize_idw_p's nmax neighbour selection and distance-decay
   # weighting run on the same metric coordinates the run pipeline uses. IDW is
@@ -1070,6 +1070,6 @@ idw_opt_item <- function(item, current_crs, idw_nmax_val) {
   # power scores an exact hit there and the search is inflated.
   pts <- pts[!duplicated(round(sf::st_coordinates(pts), 2)), ]
   if (nrow(pts) < 5) return(list(l = item$l, best_f = 2.0))
-  best_f <- optimize_idw_p(pts, "v", nmax = idw_nmax_val)
+  best_f <- optimize_idw_p(pts, "v", nmax = idw_nmax_val, cv_strategy = cv_strategy)
   list(l = item$l, best_f = best_f)
 }

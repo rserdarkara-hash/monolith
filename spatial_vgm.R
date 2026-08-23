@@ -33,8 +33,8 @@ with_rng_sandbox <- function(expr) {
 }
 
 # Sandboxed AND seeded - the common case (reproducible draws that leave the
-# caller's stream untouched). Sites that seed CONDITIONALLY (optimize_idw_p)
-# use with_rng_sandbox directly and keep their own set.seed inside the block.
+# caller's stream untouched). Sites that seed CONDITIONALLY use
+# with_rng_sandbox directly and keep their own set.seed inside the block.
 with_seed <- function(seed, expr) {
   with_rng_sandbox({
     set.seed(seed)

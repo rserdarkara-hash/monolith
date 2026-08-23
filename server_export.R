@@ -62,6 +62,12 @@
                                                                      "Auto")) else "CV strategy: not recorded",
         if (!is.null(cfg$cv_repeats) && !is.na(cfg$cv_repeats) && cfg$cv_repeats > 1) paste0(" | Repeated CV: ", cfg$cv_repeats, " fold realizations") else "",
         if (!is.null(cfg$vif_threshold) && !is.na(cfg$vif_threshold)) paste0(" | Collinearity gate: ", if (is.finite(cfg$vif_threshold)) paste0("VIF > ", cfg$vif_threshold, " dropped") else "Keep all (user override)") else "",
+        # Printed only when the CRS distorts distances enough to matter, so a
+        # well-chosen CRS adds no noise and an overridden one leaves a trace.
+        if (!is.null(cfg$crs_scale_factor) && !is.na(cfg$crs_scale_factor) &&
+            abs(cfg$crs_scale_factor - 1) > 0.001)
+          paste0(" | CRS scale factor: k = ", format(round(cfg$crs_scale_factor, 6), nsmall = 6),
+                 if (isTRUE(cfg$crs_gate_override)) " (user override)" else "") else "",
         if (!is.null(cfg$rf_ntree) && !is.na(cfg$rf_ntree)) paste0(" | RF trees: ", cfg$rf_ntree) else "",
         if (!is.null(cfg$rfk_uncertainty) && !is.na(cfg$rfk_uncertainty)) paste0(" | RFK uncertainty: ", cfg$rfk_uncertainty) else "",
         if (!is.null(cfg$ck_nmax) && !is.na(cfg$ck_nmax)) paste0(" | CK nmax: ", cfg$ck_nmax) else ""
@@ -83,7 +89,7 @@
     content = function(file) {
       cfg <- rv$run_config_summary
       req(cfg)
-      pkgs <- c("sf", "gstat", "automap", "fields", "randomForest", "terra")
+      pkgs <- c("sf", "gstat", "fields", "randomForest", "terra")
       pkg_versions <- setNames(
         lapply(pkgs, function(p) tryCatch(as.character(utils::packageVersion(p)),
                                           error = function(e) NA_character_)),
@@ -684,8 +690,14 @@
           
           wb <- createWorkbook()
           used_sheet_names <- c()
+          n_sheets <- 0L
           for(item in table_items) {
-            clean_label <- gsub("[^a-zA-Z0-9 ]", "_", item$label)
+            # openxlsx rejects an empty or whitespace-only sheet name; fall back to
+            # the registry id (then to a positional name) so a label-less item cannot
+            # take the whole batch down with it.
+            clean_label <- trimws(gsub("[^a-zA-Z0-9 ]", "_", item$label %||% ""))
+            if (!nzchar(clean_label)) clean_label <- trimws(gsub("[^a-zA-Z0-9 ]", "_", item$id %||% ""))
+            if (!nzchar(clean_label)) clean_label <- paste0("Table_", n_sheets + 1L)
             sheet_name <- substr(clean_label, 1, 31)
             
             if(sheet_name %in% used_sheet_names) {
@@ -700,11 +712,23 @@
               sheet_name <- candidate
             }
             used_sheet_names <- c(used_sheet_names, sheet_name)
-            addWorksheet(wb, sheet_name)
-            writeData(wb, sheet_name, item$obj)
+            # Per item, like the plot loop below: one unwritable table costs one
+            # table, not the whole zip (every selected figure included).
+            ok <- tryCatch({
+              addWorksheet(wb, sheet_name)
+              writeData(wb, sheet_name, item$obj)
+              TRUE
+            }, error = function(e) {
+              rv$log <- paste0(rv$log, "\n[Batch] Failed to add table sheet '",
+                               item$label, "': ", conditionMessage(e))
+              FALSE
+            })
+            if (ok) n_sheets <- n_sheets + 1L
           }
-          saveWorkbook(wb, excel_path, overwrite = TRUE)
-          files_to_zip <- c(files_to_zip, excel_name)
+          if (n_sheets > 0) {
+            saveWorkbook(wb, excel_path, overwrite = TRUE)
+            files_to_zip <- c(files_to_zip, excel_name)
+          }
         }
         
         for (i in seq_along(plot_items)) {

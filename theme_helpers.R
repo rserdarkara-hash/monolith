@@ -580,28 +580,14 @@ export_plot_to_file <- function(p, filepath, ext, input,
   # requested resolution. Either way showtext has to be told which, or the point
   # sizes in the theme are not the point sizes on the page (see with_showtext_dpi).
   with_showtext_dpi(if (ext == "pdf") 72 else dpi, {
-    if (inherits(p, "trellis")) {
-      if (ext == "png") {
-        png(filepath, width = width, height = height, units = "in", res = dpi)
-      } else if (ext == "tiff") {
-        tiff(filepath, width = width, height = height, units = "in", res = dpi)
-      } else if (ext == "pdf") {
-        pdf(filepath, width = width, height = height)
-      } else {
-        jpeg(filepath, width = width, height = height, units = "in", res = dpi)
-      }
-      print(p)
-      dev.off()
-    } else {
-      ggplot2::ggsave(
-        filename = filepath,
-        plot = p,
-        device = if(ext == "pdf") "pdf" else (if(ext == "tiff") "tiff" else NULL),
-        dpi = dpi,
-        width = width,
-        height = height,
-        units = "in"
-      )
-    }
+    ggplot2::ggsave(
+      filename = filepath,
+      plot = p,
+      device = if(ext == "pdf") "pdf" else (if(ext == "tiff") "tiff" else NULL),
+      dpi = dpi,
+      width = width,
+      height = height,
+      units = "in"
+    )
   })
 }

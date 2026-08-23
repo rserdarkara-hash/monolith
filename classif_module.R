@@ -903,7 +903,7 @@ classif_server <- function(id, data_reactive, vars_metadata_reactive, spatial_re
       promises::future_promise({
         setwd(run_args$proj_root)
         suppressPackageStartupMessages({
-          library(sf); library(terra); library(gstat); library(automap); library(fields)
+          library(sf); library(terra); library(gstat); library(fields)
           library(spdep); library(FNN); library(concaveman); library(dplyr); library(classInt)
           library(recipes); library(parsnip); library(workflows); library(tune)
           library(rsample); library(dials); library(yardstick); library(spatialsample); library(hardhat)

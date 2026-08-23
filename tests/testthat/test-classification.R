@@ -720,12 +720,45 @@ test_that("covariate lift reproduces hand-computed accuracies and McNemar pairin
   expect_equal(lf$baseline_acc, 0.625)
   expect_equal(lf$majority_acc, 0.5)
   expect_equal(lf$lift_abs, 0.125)
-  expect_equal(lf$mcnemar_p,
-               stats::mcnemar.test(matrix(c(0, 1, 2, 0), nrow = 2))$p.value)
+  # 3 discordant pairs is far below the 25-pair switch point, so the exact
+  # binomial form applies, not the chi-square approximation.
+  expect_equal(lf$mcnemar_p, stats::binom.test(2, 3, p = 0.5)$p.value)
 
   # No discordant pairs -> p undefined, not an error.
   same <- pred_df; same$.pred_base <- same$.pred_class
   expect_true(is.na(classif_covariate_lift(same, "truth")$mcnemar_p))
+})
+
+test_that("covariate lift switches from exact binomial to chi-square at 25 discordant pairs", {
+  # 2026-08-23 audit, Tier 2: mcnemar.test is the continuity-corrected
+  # chi-square APPROXIMATION and is unreliable on few discordant pairs, which
+  # is the common case for this panel. Build a frame with an exact discordant
+  # tally: n_conc rows where model and baseline are both right, b rows where
+  # only the baseline is right, c_ rows where only the model is right.
+  levs <- c("A", "B")
+  mk <- function(b, c_, n_conc = 40) {
+    truth <- rep("A", b + c_ + n_conc)
+    model <- c(rep("B", b), rep("A", c_), rep("A", n_conc))
+    base  <- c(rep("A", b), rep("B", c_), rep("A", n_conc))
+    data.frame(truth = factor(truth, levels = levs),
+               .pred_class = factor(model, levels = levs),
+               .pred_base  = factor(base, levels = levs))
+  }
+
+  # 24 discordant pairs: exact binomial.
+  lf_lo <- classif_covariate_lift(mk(10, 14), "truth")
+  expect_equal(lf_lo$mcnemar_p, stats::binom.test(14, 24, p = 0.5)$p.value)
+
+  # 25 discordant pairs: continuity-corrected chi-square.
+  lf_hi <- classif_covariate_lift(mk(10, 15), "truth")
+  expect_equal(lf_hi$mcnemar_p,
+               stats::mcnemar.test(matrix(c(0, 10, 15, 0), nrow = 2))$p.value)
+
+  # The two forms genuinely disagree in this regime, which is why the switch
+  # exists: the corrected chi-square is the conservative one.
+  expect_false(isTRUE(all.equal(
+    stats::binom.test(14, 24, p = 0.5)$p.value,
+    stats::mcnemar.test(matrix(c(0, 10, 14, 0), nrow = 2))$p.value)))
 })
 
 test_that("run_classification_cv threads the baseline through .row alignment", {

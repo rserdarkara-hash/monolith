@@ -193,6 +193,73 @@ test_that("the About dialog reports the version read from DESCRIPTION", {
   app$wait_for_idle()
 })
 
+# ── CRS wiring, end to end ────────────────────────────────────────────────
+# These two run LAST and deliberately mutate session state (they upload a
+# table), because the tests above assert the pristine shell. They exist
+# because the CRS wiring had been pinned only by source-text assertions, and
+# a source-text assertion cannot tell a live branch from a dead one: the
+# "Input Data CRS Not Set" modal was certified by such a test while sitting
+# downstream of a req() that aborted the run in silence.
+
+crs_smoke_csv <- function(with_lonlat) {
+  # 15 stations around Potsdam, written in UTM 33N. With no lon/lat pair the
+  # zone is not recoverable from the eastings, which is the case the empty
+  # selectors and the Tier-3 picker exist for.
+  ctr <- sf::st_coordinates(sf::st_transform(
+    sf::st_sfc(sf::st_point(c(12.958, 52.466)), crs = 4326), 32633))
+  df <- data.frame(
+    locality = "Potsdam",
+    x = ctr[1] + seq(-2000, 2000, length.out = 15),
+    y = ctr[2] + seq(-1500, 1500, length.out = 15),
+    value = seq(10, 24, length.out = 15)
+  )
+  if (with_lonlat) {
+    ll <- sf::st_coordinates(sf::st_transform(
+      sf::st_as_sf(df, coords = c("x", "y"), crs = 32633), 4326))
+    df <- data.frame(df[, c("locality", "x", "y")],
+                     lon = ll[, 1], lat = ll[, 2], value = df$value)
+  }
+  f <- tempfile(fileext = ".csv")
+  utils::write.csv(df, f, row.names = FALSE)
+  f
+}
+
+test_that("Run Interpolation refuses visibly while the Input Data CRS is unset", {
+  app <- smoke_app()
+  app$upload_file(user_file = crs_smoke_csv(with_lonlat = FALSE))
+  app$wait_for_idle()
+
+  # No evidence in the file, so nothing may be assumed: both selectors empty.
+  expect_equal(app$get_value(input = "map_crs") %||% "", "")
+  expect_equal(app$get_value(input = "map_x"), "x")
+  expect_equal(app$get_value(input = "map_y"), "y")
+  # The standing caption under the mini-map says why nothing is plotted. It
+  # req()s rv$mapping$x, which is only non-NULL because the column mapping is
+  # no longer gated behind the CRS.
+  expect_true(grepl("Input Data CRS not set", app$get_html("body"), fixed = TRUE))
+
+  app$click("run")
+  app$wait_for_idle()
+  body <- app$get_html("body")
+  expect_true(grepl("Input Data CRS Not Set", body, fixed = TRUE))
+  # And the run did not start behind the modal.
+  expect_equal(as.character(app$get_value(output = "disp_method")), "")
+
+  app$run_js("$('#shiny-modal').modal('hide');")
+  app$wait_for_idle()
+})
+
+test_that("a companion lon/lat pair identifies the input CRS on upload", {
+  app <- smoke_app()
+  app$upload_file(user_file = crs_smoke_csv(with_lonlat = TRUE))
+  app$wait_for_idle()
+
+  expect_equal(app$get_value(input = "map_crs"), "EPSG:32633")
+  # The Target Mapping CRS is filled only because it was still unset.
+  expect_equal(app$get_value(input = "crs_selection"), "EPSG:32633")
+  expect_true(grepl("Currently plotting at", app$get_html("body"), fixed = TRUE))
+})
+
 # Shut the app down here rather than at suite teardown: global.R sets
 # future::plan(multisession), so the app process keeps one worker per core
 # alive for as long as it lives (~2 GB of RSS on an 16-core machine), and

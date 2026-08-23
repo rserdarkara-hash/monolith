@@ -56,7 +56,12 @@ calc_ccc <- function(observed, predicted) {
 # straight into the Model Performance table, the metrics CSV and the pooled
 # Total (Combined) diagnostics; NA states "undefined here", which is what these
 # quantities actually are. Same convention as calc_ccc's constant-vector branch.
-augment_metrics <- function(obs, pre) {
+# `round_values = FALSE` returns the metrics at full precision. Repeated CV
+# uses it: a mean/SD taken across fold realizations must be computed on raw
+# values, or the SD is quantized by the display rounding and reports rounding
+# noise instead of fold-assignment variance. The display layer formats.
+augment_metrics <- function(obs, pre, round_values = TRUE) {
+  rnd <- if (isTRUE(round_values)) function(x, d) round(x, d) else function(x, d) x
   res <- list(nse = NA, nrmse_mean = NA, rpd = NA, rpiq = NA, smape = NA)
   if (length(obs) < 2) return(res)
 
@@ -69,26 +74,26 @@ augment_metrics <- function(obs, pre) {
   sst <- sum((obs - mean_obs)^2, na.rm = TRUE)
   sse <- sum(residuals^2, na.rm = TRUE)
   # NSE is undefined when the observations carry no variance (0/0).
-  res$nse <- if (is.finite(sst) && sst > 0) round(1 - (sse / sst), 4) else NA
+  res$nse <- if (is.finite(sst) && sst > 0) rnd(1 - (sse / sst), 4) else NA
 
   # Relative RMSE is undefined for a zero-mean variable (centred/anomaly data).
   # Normalised by |mean|, not the signed mean: RMSE is non-negative, so a
   # negative-mean variable (anomalies, sub-zero temperatures, redox potential)
   # would otherwise report a negative NRMSE%, a nonsensical sign for a
   # normalised error. Identical for every positive-mean variable.
-  res$nrmse_mean <- if (is.finite(mean_obs) && abs(mean_obs) > 0) round((rmse / abs(mean_obs)) * 100, 2) else NA
+  res$nrmse_mean <- if (is.finite(mean_obs) && abs(mean_obs) > 0) rnd((rmse / abs(mean_obs)) * 100, 2) else NA
 
   # RPD / RPIQ are spread-to-error ratios (Chang et al. 2001): undefined at
   # zero error, so both guard on rmse > 0, not just RPIQ's spread term.
-  res$rpd <- if (is.finite(rmse) && rmse > 0) round(sd_obs / rmse, 2) else NA
-  res$rpiq <- if (is.finite(rmse) && rmse > 0 && iqr_obs > 0) round(iqr_obs / rmse, 2) else NA
+  res$rpd <- if (is.finite(rmse) && rmse > 0) rnd(sd_obs / rmse, 2) else NA
+  res$rpiq <- if (is.finite(rmse) && rmse > 0 && iqr_obs > 0) rnd(iqr_obs / rmse, 2) else NA
 
   # sMAPE's summand is 0/0 where obs == pre == 0. Dropping those rows via
   # na.rm would average sMAPE over a different n than every other metric;
   # define the term as 0 instead (the usual convention) so n stays consistent.
   denom <- abs(obs) + abs(pre)
   term <- ifelse(denom == 0, 0, 2 * abs(residuals) / denom)
-  res$smape <- round(mean(term, na.rm = TRUE) * 100, 2)
+  res$smape <- rnd(mean(term, na.rm = TRUE) * 100, 2)
 
   return(res)
 }
@@ -231,7 +236,11 @@ is_coord_col <- function(x) {
 #' of the deterministic error metrics only: Moran's I is a spatial diagnostic of
 #' ONE residual field, is the most expensive term here (an spdep neighbour
 #' search), and is reported for the reference realization in the main table.
-perform_cv <- function(cv_obj, moran = TRUE) {
+#' `round_values = FALSE` returns every metric at full precision (see
+#' augment_metrics): repeated CV aggregates across fold realizations and must
+#' not take an SD over values the display rounding has already quantized.
+perform_cv <- function(cv_obj, moran = TRUE, round_values = TRUE) {
+  rnd <- if (isTRUE(round_values)) function(x, d) round(x, d) else function(x, d) x
   res <- list(rmse = NA, r2 = NA, nse = NA, me = NA, mae = NA, ccc = NA,
               nrmse_mean = NA, rpd = NA, rpiq = NA, smape = NA,
               moran_i = NA, moran_e = NA, moran_p = NA, n = 0)
@@ -260,9 +269,9 @@ perform_cv <- function(cv_obj, moran = TRUE) {
   
   residuals <- obs - pre
   
-  res$rmse <- round(sqrt(mean(residuals^2, na.rm = TRUE)), 4)
-  res$me <- round(mean(residuals, na.rm = TRUE), 4)
-  res$mae <- round(mean(abs(residuals), na.rm = TRUE), 4)
+  res$rmse <- rnd(sqrt(mean(residuals^2, na.rm = TRUE)), 4)
+  res$me <- rnd(mean(residuals, na.rm = TRUE), 4)
+  res$mae <- rnd(mean(abs(residuals), na.rm = TRUE), 4)
   # cor() on a constant vector already returns NA, but it emits "the standard
   # deviation is zero" on the way — and inside a PSOCK worker that warning
   # surfaces in the run log as an unexplained condition. Guard explicitly, the
@@ -270,11 +279,11 @@ perform_cv <- function(cv_obj, moran = TRUE) {
   r2_val <- if (isTRUE(stats::sd(obs) > 0) && isTRUE(stats::sd(pre) > 0)) {
     tryCatch(cor(obs, pre)^2, error = function(e) NA_real_)
   } else NA_real_
-  res$r2 <- round(r2_val, 4)
+  res$r2 <- rnd(r2_val, 4)
   res$n <- length(obs)
   
-  res$ccc <- round(calc_ccc(obs, pre), 4)
-  aug <- augment_metrics(obs, pre)
+  res$ccc <- rnd(calc_ccc(obs, pre), 4)
+  aug <- augment_metrics(obs, pre, round_values = round_values)
   res$nse <- aug$nse
   res$nrmse_mean <- aug$nrmse_mean
   res$rpd <- aug$rpd
@@ -427,7 +436,10 @@ CV_REPEAT_METRICS <- c(rmse = "RMSE", nrmse_mean = "NRMSE (%)", mae = "MAE",
 summarise_cv_repeats <- function(reps) {
   if (is.null(reps) || length(reps) < 2) return(NULL)
   if (any(vapply(reps, is.null, logical(1)))) return(NULL)
-  mets <- lapply(reps, function(x) perform_cv(x, moran = FALSE))
+  # Raw precision: a mean/SD across realizations must not be taken over values
+  # the display rounding has already quantized (RPD to 0.01, RMSE to 1e-4), or
+  # the SD reports the rounding lattice rather than fold-assignment variance.
+  mets <- lapply(reps, function(x) perform_cv(x, moran = FALSE, round_values = FALSE))
   keys <- names(CV_REPEAT_METRICS)
   agg <- lapply(keys, function(k) {
     v <- vapply(mets, function(m) {
