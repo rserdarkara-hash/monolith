@@ -1,8 +1,8 @@
 ![Monolith: Spatial Analysis Dashboard](assets/banner.png)
 
-# Monolith Spatial Analysis Dashboard (v1.0.6)
+# Monolith Spatial Analysis Dashboard (v1.0.7)
 
-[![Version](https://img.shields.io/badge/version-1.0.6-6f42c1)](#)
+[![Version](https://img.shields.io/badge/version-1.0.7-6f42c1)](#)
 [![R](https://img.shields.io/badge/R-%E2%89%A5%204.5.0-276DC3?logo=r&logoColor=white)](https://cran.r-project.org/)
 [![Shiny](https://img.shields.io/badge/built%20with-Shiny-1f77b4)](https://shiny.posit.co/)
 [![Tests](https://github.com/rserdarkara-hash/monolith/actions/workflows/tests.yaml/badge.svg)](https://github.com/rserdarkara-hash/monolith/actions/workflows/tests.yaml)
@@ -262,7 +262,7 @@ The full dependency suite, grouped by function:
 | **CRS catalogue** | `DBI`, `RSQLite` |
 
 <details>
-<summary><strong>Tested version matrix</strong>: the exact package versions Monolith 1.0.6 is developed and validated against (click to expand)</summary>
+<summary><strong>Tested version matrix</strong>: the exact package versions Monolith 1.0.7 is developed and validated against (click to expand)</summary>
 
 <br>
 
@@ -450,7 +450,7 @@ Human oversight remained central throughout: all methodological choices, model f
   title     = {Monolith: A Spatial Analysis Dashboard for Geostatistical Modeling and Mapping},
   author    = {Kara, R. Serdar},
   year      = {2026},
-  version   = {1.0.6},
+  version   = {1.0.7},
   doi       = {10.5281/zenodo.21130951},
   publisher = {Zenodo},
   url       = {https://github.com/rserdarkara-hash/monolith},

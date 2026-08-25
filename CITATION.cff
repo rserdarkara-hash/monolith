@@ -26,8 +26,8 @@ authors:
     given-names: R. Serdar
     email: r.serdarkara@gmail.com
     orcid: "https://orcid.org/0000-0003-1297-2328"
-version: 1.0.6
-date-released: "2026-08-17"
+version: 1.0.7
+date-released: "2026-08-25"
 license: GPL-3.0
 repository-code: "https://github.com/rserdarkara-hash/monolith"
 doi: "10.5281/zenodo.21130951"
