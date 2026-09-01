@@ -93,13 +93,27 @@ ui_main_tabs <- mainPanel(width = 9,
                                  checkboxInput("show_north", "North Arrow", FALSE, width = "auto"),
                                  checkboxInput("show_borders", "Borders", FALSE, width = "auto"),
                                  checkboxInput("show_scale", "Map Scale", FALSE, width = "auto"),
+                                 # The two CARTO layers sit last because they are the only
+                                 # ones that need a key; the three above them work as-is.
                                  selectInput("base_map_layer", NULL,
                                              choices = c("Satellite (Esri)" = "Esri.WorldImagery",
                                                          "Topographic" = "OpenTopoMap",
                                                          "Standard Street" = "OpenStreetMap",
-                                                         "Dark Matter" = "CartoDB.DarkMatter",
-                                                         "Light (Positron)" = "CartoDB.Positron"),
-                                             selected = "Esri.WorldImagery", width = "160px", selectize = FALSE),
+                                                         "Dark Matter (key)" = "CartoDB.DarkMatter",
+                                                         "Light / Positron (key)" = "CartoDB.Positron"),
+                                             selected = "Esri.WorldImagery", width = "185px", selectize = FALSE),
+                                 conditionalPanel(
+                                   condition = "input.base_map_layer == 'CartoDB.Positron' || input.base_map_layer == 'CartoDB.DarkMatter'",
+                                   div(style = "display:flex; align-items:center; gap:6px;",
+                                       textInput("carto_api_key", NULL, value = "", width = "175px",
+                                                 placeholder = "CARTO API key"),
+                                       info_tooltip("carto_key_info", paste0(
+                                         "CARTO now requires a free API key for its Positron and Dark Matter basemaps. ",
+                                         "Without one the tiles arrive stamped with an 'API key required' watermark. ",
+                                         "Request a key at carto.com/basemaps/apikey and paste it here. ",
+                                         "The key is held for this session only - it is sent to CARTO to fetch tiles and ",
+                                         "is never written into a run configuration, an export, or the run history.")))
+                                 ),
                                  uiOutput("locality_pan_ui"),
                                  div(title = "Switch between the surfaces computed by the last interpolation run. Rerun to change variable or method.",
                                      uiOutput("map_view_ui"))

@@ -266,9 +266,12 @@
 
   output$crs_locator_map <- renderLeaflet({
     # A plain street basemap, not the satellite layer the other maps default
-    # to: this map is read for country outlines, not for ground detail.
+    # to: this map is read for country outlines, not for ground detail. Fixed
+    # to OpenStreetMap rather than following the basemap switcher, because the
+    # other two label-bearing options either need a CARTO API key or show no
+    # borders at all - and this map is unusable without them.
     leaflet(options = leafletOptions(minZoom = 1, worldCopyJump = TRUE)) %>%
-      addProviderTiles("CartoDB.Positron") %>%
+      addProviderTiles("OpenStreetMap") %>%
       setView(lng = 10, lat = 25, zoom = 1)
   })
 
@@ -933,7 +936,8 @@
 
     current_tiles <- input$base_map_layer %||% "Esri.WorldImagery"
 
-    m <- leaflet(pts, options = leafletOptions(zoomControl = FALSE)) %>% add_base_tiles(current_tiles)
+    m <- leaflet(pts, options = leafletOptions(zoomControl = FALSE)) %>%
+      add_base_tiles(current_tiles, carto_api_key())
 
     if (apply_mini && color_by != "none") {
       m <- add_styled_points(m, pts,

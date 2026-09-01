@@ -190,7 +190,10 @@ make_ccc_known <- function() {
     observed  = c(10, 20, 30, 40, 50),
     predicted = c(12, 19, 31, 38, 52),
     # CCC computed externally with DescTools::CCC(obs, pre)$rho.c$est
-    expected  = 0.9937
+    # (re-derived 2026-09-01 to full precision: the previous 0.9937 was wrong in
+    # the 4th decimal and the 0.01 tolerance it was asserted under could not
+    # tell Lin's population-moment definition from the sample-moment variant.)
+    expected  = 0.9929789368
   )
 }
 

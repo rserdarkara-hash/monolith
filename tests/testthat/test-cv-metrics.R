@@ -73,7 +73,11 @@ test_that("calc_ccc matches known external value", {
   k <- make_ccc_known()
   ccc_val <- calc_ccc(k$observed, k$predicted)
   expect_true(!is.na(ccc_val))
-  expect_equal(ccc_val, k$expected, tolerance = 0.01)
+  # 1e-5 separates the population-moment definition (Lin 1989, DescTools) from
+  # the sample-moment one - they differ by 8e-5 on this fixture, which the
+  # previous 0.01 tolerance could not resolve. Re-derive the fixture externally
+  # if a formula ever changes; never relax this to make the test pass.
+  expect_equal(ccc_val, k$expected, tolerance = 1e-5)
 })
 
 test_that("calc_ccc filters to jointly complete pairs before computing moments", {

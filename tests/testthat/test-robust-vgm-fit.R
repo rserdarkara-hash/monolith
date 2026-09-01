@@ -21,6 +21,35 @@ test_that("returned fit carries the vgm_diagnostics contract", {
   expect_true(is.logical(d$flawed_winner))
 })
 
+test_that("the candidate screen refuses a negative nugget", {
+  # gamma(h) < 0 near the origin is not a valid variogram: the model is not
+  # conditionally negative definite and gstat::krige() answers with 100% NA
+  # predictions and NO condition raised, which reaches the user as a blank
+  # locality behind a clean-looking variogram panel. Eligibility must exclude
+  # such a candidate so it cannot win the lowest-SSErr contest.
+  #
+  # gstat 2.1.5 clamps negative sills itself, but ONLY for an empirical
+  # variogram carrying attr(, "direct") - so drive the screen directly rather
+  # than trying to coax a negative nugget out of fit.variogram.
+  fit_neg <- gstat::vgm(psill = 2, model = "Sph", range = 300, nugget = -0.05)
+  fit_ok  <- gstat::vgm(psill = 2, model = "Sph", range = 300, nugget = 0.05)
+  max_dist <- 700
+  screen <- function(f) {
+    prange <- f$range[2] * .vgm_practical_range_factor(f$model[2], f$kappa[2])
+    prange > (max_dist / 100) && prange < max_dist * 2 && f$psill[2] > 0 &&
+      is.finite(f$psill[1]) && f$psill[1] >= 0
+  }
+  expect_false(screen(fit_neg))
+  expect_true(screen(fit_ok))
+
+  # And the shipped function never returns one on a real empirical variogram.
+  pts <- make_test_points(40)
+  lags <- calc_scientific_lags(pts)
+  v_emp <- gstat::variogram(v ~ 1, pts, width = lags$width, cutoff = lags$cutoff)
+  fit <- suppressWarnings(robust_vgm_fit(v_emp, pts$v))
+  expect_true(is.finite(fit$psill[1]) && fit$psill[1] >= 0)
+})
+
 test_that("diagnostics present on the tiny-variogram early return", {
   fit <- robust_vgm_fit(NULL, rnorm(10))
   d <- attr(fit, "vgm_diagnostics")

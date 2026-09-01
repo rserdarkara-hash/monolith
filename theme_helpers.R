@@ -391,6 +391,11 @@ create_app_theme <- function(light_blue, dark_bg, content_bg, font_family, map_t
   )
 }
 
+# `map_tiles` is the basemap a theme selects on activation (server_setup.R).
+# Every theme names the satellite layer: the CARTO layers that used to sit here
+# need an API key now, so a theme choosing one silently handed the user a
+# watermarked map with no way to see why. The field is kept per theme rather
+# than collapsed to a constant so a future theme can still pick its own.
 themes_params <- list(
   "Deep Forest" = list(
     light_blue = "#2d5a27",
@@ -407,7 +412,7 @@ themes_params <- list(
     dark_bg = "#121212",
     content_bg = "#1e1e1e",
     font_family = "Roboto Mono",
-    map_tiles = "CartoDB.DarkMatter",
+    map_tiles = "Esri.WorldImagery",
     box_bg = "#2d2d2d",
     sidebar_text_color = "#f0f0f0",
     body_text_color = "#d4d4d4",
@@ -429,7 +434,7 @@ themes_params <- list(
     dark_bg = "#e3f2fd",
     content_bg = "#ffffff",
     font_family = "Montserrat",
-    map_tiles = "CartoDB.Positron",
+    map_tiles = "Esri.WorldImagery",
     sidebar_text_color = "#0d47a1",
     body_text_color = "#333333",
     header_text_color = "#ffffff",
@@ -440,7 +445,7 @@ themes_params <- list(
     dark_bg = "#1a0033",
     content_bg = "#2b0052",
     font_family = "Fira Code",
-    map_tiles = "CartoDB.DarkMatter",
+    map_tiles = "Esri.WorldImagery",
     box_bg = "#3c0073",
     sidebar_text_color = "#f0f0f0",
     # Must stay light: content_bg is #2b0052 — a matching body color renders
@@ -453,7 +458,7 @@ themes_params <- list(
     dark_bg = "#4b534d",
     content_bg = "#f4f6f4",
     font_family = "Lato",
-    map_tiles = "CartoDB.Positron",
+    map_tiles = "Esri.WorldImagery",
     sidebar_text_color = "#f8f9fa",
     body_text_color = "#2c3e50",
     header_text_color = "#ffffff"
@@ -463,7 +468,7 @@ themes_params <- list(
     dark_bg = "#2c3e50",
     content_bg = "#34495e",
     font_family = "Source Sans Pro",
-    map_tiles = "CartoDB.DarkMatter",
+    map_tiles = "Esri.WorldImagery",
     box_bg = "#455a64",
     sidebar_text_color = "#ecf0f1",
     # Must stay light: dark brown on the #34495e slate content background was
@@ -476,7 +481,7 @@ themes_params <- list(
     dark_bg = "#001f3f",
     content_bg = "#e0f7fa",
     font_family = "Open Sans",
-    map_tiles = "CartoDB.DarkMatter",
+    map_tiles = "Esri.WorldImagery",
     sidebar_text_color = "#f0f8ff",
     body_text_color = "#002b36",
     header_text_color = "#ffffff"
@@ -496,7 +501,7 @@ themes_params <- list(
     dark_bg = "#0d0d0d",
     content_bg = "#1a1a1a",
     font_family = "Orbitron",
-    map_tiles = "CartoDB.DarkMatter",
+    map_tiles = "Esri.WorldImagery",
     box_bg = "#262626",
     sidebar_text_color = "#00ff00",
     body_text_color = "#00ff00",

@@ -200,7 +200,22 @@ robust_vgm_fit <- function(v_emp, v_data) {
       # Sanity window on the PRACTICAL range (ground distance), not on gstat's
       # `a` - see .vgm_practical_range_factor().
       prange <- f$range[2] * .vgm_practical_range_factor(f$model[2], f$kappa[2])
-      in_window <- !is.null(sse) && !is.na(sse) && prange > (max_dist/100) && prange < max_dist * 2 && f$psill[2] > 0
+      # The nugget must be non-negative for gamma(h) to be a valid variogram: a
+      # negative psill[1] makes gamma(h) < 0 near the origin, the model is not
+      # conditionally negative definite, and gstat::krige() answers a system it
+      # cannot solve with 100% NA predictions and NO condition raised - which
+      # would reach the user as a blank locality behind a variogram panel
+      # reporting a clean converged fit. This is ELIGIBILITY, not preference: an
+      # invalid model must not be comparable on SSErr at all.
+      # Belt-and-braces as of gstat 2.1.5: fit.variogram itself clamps negative
+      # sills to zero and refits, but ONLY when the empirical variogram carries
+      # attr(, "direct") - which gstat::variogram() sets and every call site
+      # here supplies. Keep this test so eligibility does not depend on that
+      # attribute surviving, or on the clamp staying in a future gstat.
+      in_window <- !is.null(sse) && !is.na(sse) &&
+                   prange > (max_dist/100) && prange < max_dist * 2 &&
+                   f$psill[2] > 0 &&
+                   is.finite(f$psill[1]) && f$psill[1] >= 0
       candidates[[length(candidates) + 1]] <- list(fit = f, sse = sse, flawed = flawed, in_window = in_window)
     }
   }

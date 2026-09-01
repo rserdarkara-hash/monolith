@@ -422,7 +422,13 @@ sanitize_spatial_predictions <- function(res_sf) {
 # Returns a length-n_pred variance vector, negatives (from the bias correction)
 # truncated to 0. Chunked over prediction rows to bound the n_train x n_pred
 # intermediate. Returns NA when fewer than two trees (variance undefined).
-rf_infinitesimal_jackknife_var <- function(pred_individual, inbag, chunk = 2000L) {
+#   inbag_centred   : optional pre-centred `inbag`. The centring depends only on
+#                     the fitted forest, but the RFK grid loop calls this once per
+#                     prediction block (50 times on a 1e6-cell grid at ntree = 200),
+#                     so that loop centres once and passes the result in. NULL keeps
+#                     the self-contained behaviour for every other caller.
+rf_infinitesimal_jackknife_var <- function(pred_individual, inbag, chunk = 2000L,
+                                           inbag_centred = NULL) {
   pred_individual <- as.matrix(pred_individual)
   inbag <- as.matrix(inbag)
   B <- ncol(pred_individual)
@@ -430,7 +436,8 @@ rf_infinitesimal_jackknife_var <- function(pred_individual, inbag, chunk = 2000L
   n_train <- nrow(inbag)
   if (is.null(B) || B < 2 || ncol(inbag) != B) return(rep(NA_real_, n_pred))
 
-  N_c <- inbag - rowMeans(inbag)                         # n_train x B, centred in-bag counts
+  # n_train x B, centred in-bag counts
+  N_c <- if (is.null(inbag_centred)) inbag - rowMeans(inbag) else inbag_centred
   out <- numeric(n_pred)
   starts <- seq(1L, n_pred, by = chunk)
   for (s in starts) {
@@ -495,6 +502,33 @@ apply_kriging_pipeline <- function(engine = c("OK", "RK", "RFK"), data, target_v
     }
     res <- run_cv_with_repeats(res, cv_ok, method_params, nrow(data), "OK", l, prefix)
     res$res_sf <- krige(form_ok, data, grid_p, model = res$fit, debug.level = 0)
+
+    # A zero-nugget model over near-coincident points makes the kriging
+    # covariance matrix singular, and gstat does not raise there: it returns NA
+    # for every location. The 2 dp dedup removes exact co-location, not points a
+    # centimetre apart, and robust_vgm_fit produces nugget = 0 routinely.
+    # Measured (gstat 2.1.5): 40 points with 8 pairs 11 mm apart under
+    # Gau(psill 1, range 900, nugget 0) -> 100/100 NA predictions, no condition;
+    # the same model with a micro-nugget -> 0/100 NA. RK/RFK/CK each have a
+    # named fallback for their own failure; OK had none, so the locality was
+    # simply absent from the map with nothing said. Retry ONCE with 1e-6 of the
+    # sill - far below any measurable signal - and only when the surface is
+    # already unusable, so this is numerically inert on every run that works.
+    if (!is.null(res$res_sf) && "var1.pred" %in% names(res$res_sf) &&
+        all(is.na(res$res_sf$var1.pred)) &&
+        identical(as.character(res$fit$model[1]), "Nug") &&
+        isTRUE(res$fit$psill[1] <= 0)) {
+      write_warning_file(l, prefix, paste0(
+        "Ordinary Kriging produced no predictions with a zero-nugget model (singular ",
+        "covariance matrix, typically near-coincident samples); retried with a micro-nugget."))
+      res$log_msg <- paste0(res$log_msg,
+        " [OK] Zero-nugget model gave an empty surface; retried with a micro-nugget (1e-6 of sill).")
+      fit_eps <- res$fit
+      fit_eps$psill[1] <- max(sum(res$fit$psill, na.rm = TRUE) * 1e-6, .Machine$double.eps)
+      res$fit <- fit_eps
+      res$res_sf <- krige(form_ok, data, grid_p, model = res$fit, debug.level = 0)
+      res <- run_cv_with_repeats(res, cv_ok, method_params, nrow(data), "OK", l, prefix)
+    }
   } else {
     update_progress_file(l, prefix, 10, 100)
     krig_res <- tryCatch({
@@ -593,6 +627,10 @@ apply_kriging_pipeline <- function(engine = c("OK", "RK", "RFK"), data, target_v
         blk <- max(1L, min(n_grid, as.integer(ceiling(.RFK_PREDICT_BLOCK_CELLS / max(1L, rf_ntree)))))
         pred_mean <- numeric(n_grid)
         trend_var <- numeric(n_grid)
+        # Centre the in-bag matrix ONCE: it is a property of the fitted forest,
+        # not of the prediction block, so recomputing it per block was pure
+        # repetition. Same matrix, same result.
+        inbag_c <- if (use_ij) { im <- as.matrix(rf_mod$inbag); im - rowMeans(im) } else NULL
         for (s in seq.int(1L, n_grid, by = blk)) {
           e <- min(s + blk - 1L, n_grid)
           pa <- predict(rf_mod, grid_aux_df[s:e, , drop = FALSE], predict.all = TRUE)
@@ -607,7 +645,7 @@ apply_kriging_pipeline <- function(engine = c("OK", "RK", "RFK"), data, target_v
           trend_var[s:e] <- if (use_ij) {
             # Calibrated trend variance: infinitesimal jackknife of the ensemble
             # mean (Wager et al. 2014): the RF analogue of RK's lm se.fit^2.
-            rf_infinitesimal_jackknife_var(Mb, rf_mod$inbag)
+            rf_infinitesimal_jackknife_var(Mb, rf_mod$inbag, inbag_centred = inbag_c)
           } else {
             # Ensemble spread (between-tree variance): fast stability heuristic
             # that understates predictive uncertainty (scientific_guide 7.3).
@@ -755,8 +793,42 @@ apply_CK <- function(data, target_var, grid_p, lags, method_params, aux_vars, l 
     # were ever set TRUE — the same probe then spread the fitted sill over
     # 1.0 to 3179 with no-convergence warnings — so scale the seeds per id at
     # the same time as any such change.
+    # The LMC needs ONE range shared by every direct and cross variogram, which
+    # is why fit.lmc's fit.ranges = FALSE default is correct and stays. But that
+    # is exactly what makes the SEED range the FINAL range: unlike the seed sill
+    # (see the note above) it is not inert - verified, the fitted LMC reports the
+    # seed value back on every id. The seed was lags$cutoff / 2, i.e. a quarter
+    # of the bounding-box diagonal, a geometric heuristic unrelated to the data,
+    # while the range weighted least squares fitted to the primary variable was
+    # already in hand as fit_ok_init$range[2] and thrown away apart from its
+    # model family. Measured on a short-range fixture (fitted a = 243 m against
+    # the heuristic's 685 m): the CK surface moved by up to 18% of the field's
+    # standard deviation. Fall back to the old heuristic only when the primary
+    # fit is itself a heuristic (is_fallback) or its range is unusable, so a CK
+    # run is never worse informed than it was.
+    lmc_range <- suppressWarnings(as.numeric(fit_ok_init$range[2])[1])
+    # gstat's `a` only means a ground distance once the FAMILY and, for Matern,
+    # the smoothness are fixed. vgm() defaults kappa to 0.5 while robust_vgm_fit
+    # fits Matern at 1.5, so seeding "Mat" without its kappa would carry the
+    # range across a smoothness change (practical range 3a at nu = 0.5 against
+    # 4.75a at nu = 1.5) and quietly stretch the modelled correlation length.
+    # Inert for Sph/Exp/Gau, which ignore kappa - verified identical curves.
+    lmc_kappa <- suppressWarnings(as.numeric(fit_ok_init$kappa[2])[1])
+    if (!isTRUE(is.finite(lmc_kappa))) lmc_kappa <- 0.5
+    if (!isTRUE(is.finite(lmc_range)) || lmc_range <= 0 ||
+        isTRUE(attr(fit_ok_init, "is_fallback"))) {
+      lmc_range <- lags$cutoff / 2
+      lmc_kappa <- 0.5
+      res$log_msg <- paste0(res$log_msg,
+        "\n[CK] Primary variogram gave no usable range; LMC seeded with the extent heuristic (cutoff/2 = ",
+        signif(lmc_range, 4), ").")
+    } else {
+      res$log_msg <- paste0(res$log_msg,
+        "\n[CK] LMC range fixed at the primary variable's fitted range (",
+        signif(lmc_range, 4), "); fit.lmc fits sills only.")
+    }
     g_or_err <- tryCatch({
-      fit_obj <- fit.lmc(vm, g, vgm(var(data_scaled[[target_var]]), m_type, lags$cutoff / 2, 0), correct.diagonal = 1.01)
+      fit_obj <- fit.lmc(vm, g, vgm(var(data_scaled[[target_var]]), m_type, lmc_range, 0, kappa = lmc_kappa), correct.diagonal = 1.01)
       res$log_msg <- paste0(res$log_msg, "\nLMC fitted with correct.diagonal = 1.01 (standard stabilization applied to every CK fit to keep the coregionalization matrices positive definite).")
       fit_obj
     }, error = function(e) {

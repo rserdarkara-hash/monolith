@@ -401,6 +401,16 @@
     }
   }, ignoreInit = FALSE)
 
+  # CARTO's Positron and Dark Matter raster basemaps require a free API key
+  # (ui_plotting.R, add_base_tiles); the field only appears in the Map Viewer
+  # toolbar while one of them is selected. Defined here, in the first chunk, so
+  # the Data Setup validation minimap (chunk D) and the Map Viewer (chunk H)
+  # read one value. Debounced because a textInput reports every keystroke, and
+  # each report would otherwise send a half-typed key to CARTO as a fresh tile
+  # request. Session-scoped: never persisted to a run config or an export.
+  carto_api_key <- shiny::debounce(
+    reactive(trimws(input$carto_api_key %||% "")), 800)
+
   session_state <- new.env(parent = emptyenv())
   session_state$main_map_rendered <- FALSE
   session_state$comp_maps_rendered <- FALSE

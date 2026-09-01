@@ -1235,8 +1235,9 @@ predict_classification_surface <- function(model, newdata, chunk_size = NULL,
 #' `.pred_class`, `.pred_<level>`, and `.entropy` columns from
 #' predict_classification_surface(). Returns a list with a categorical class
 #' SpatRaster, a multi-layer probability SpatRaster, an entropy SpatRaster, and
-#' a per-class area table in hectares (exact cell counts x cell area, matching
-#' the app's continuous classified-map area reporting).
+#' a per-class area table in ellipsoidal (true ground) hectares from
+#' terra::expanse, the same call the app's continuous classified-map area
+#' reporting and class-zone GIS export use.
 #' `conf_threshold` implements the abstention ("reject option", Chow 1970)
 #' rule: cells whose maximum class probability falls BELOW the threshold are
 #' assigned an explicit "Unclassified" category (rendered grey) instead of a
@@ -1296,12 +1297,30 @@ classif_surface_to_rasters <- function(grid_sf, res, crs_wkt, levels_order = NUL
   ent_r <- terra::rasterize(xy, templ, values = df$.entropy)
   names(ent_r) <- "entropy"
 
-  cell_ha <- (res * res) / 10000
   counts <- table(factor(cls_chr, levels = levs_map))
+  # Ellipsoidal area, from the SAME terra::expanse call the interpolation Area
+  # Coverage table (server_sci_analysis.R) and the class-zone GIS export
+  # (spatial_pipeline.R) make, so the three cannot disagree. The planimetric
+  # alternative (n_cells x res^2) is the area IN THE PROJECTION PLANE and
+  # differs from ground area by the CRS's area scale factor k^2: measured
+  # -0.08% on a UTM central meridian, +0.19% at the zone edge. Small, but
+  # systematic, and in a column labelled hectares on the ground.
+  # class_r is CATEGORICAL, so expanse(byValue = TRUE) reports `value` as the
+  # class LABEL, not the integer ID - match on the label. Falls back to the
+  # planimetric figure only if expanse cannot be evaluated.
+  cell_ha <- (res * res) / 10000
+  area_ha <- as.numeric(counts) * cell_ha
+  area_exp <- tryCatch({
+    e <- as.data.frame(terra::expanse(class_r, unit = "ha", byValue = TRUE))
+    if (all(c("value", "area") %in% names(e)))
+      e$area[match(levs_map, as.character(e$value))] else NULL
+  }, error = function(e) NULL)
+  if (!is.null(area_exp)) area_ha <- ifelse(is.na(area_exp), 0, area_exp)
+
   area_tbl <- data.frame(
     class = levs_map,
     n_cells = as.integer(counts),
-    area_ha = as.numeric(counts) * cell_ha,
+    area_ha = area_ha,
     stringsAsFactors = FALSE
   )
 

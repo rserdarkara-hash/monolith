@@ -266,6 +266,7 @@
   # applied by leafletProxy observers keyed on map_overlay_rev.
   draw_map <- function(r_obj, lab, map_id = NULL) {
     current_tiles <- isolate(input$base_map_layer) %||% "Esri.WorldImagery"
+    current_key <- isolate(carto_api_key())
 
     if((is.null(r_obj) || (is.list(r_obj) && length(r_obj) == 0)) && lab != "resid_points") {
       # Placeholder map (no raster layers yet, e.g. mid-run): a Leaflet widget
@@ -276,7 +277,7 @@
         assign(map_id, 0L, envir = map_raster_count)
       }
       m0 <- leaflet(options = leafletOptions(zoomControl = FALSE)) %>%
-        add_base_tiles(current_tiles) %>%
+        add_base_tiles(current_tiles, current_key) %>%
         add_map_ruler()
       bb <- run_area_bbox()
       m0 <- if (!is.null(bb)) {
@@ -287,7 +288,7 @@
       return(m0)
     }
     
-    m <- leaflet(options = leafletOptions(zoomControl = FALSE)) %>% add_base_tiles(current_tiles) %>%
+    m <- leaflet(options = leafletOptions(zoomControl = FALSE)) %>% add_base_tiles(current_tiles, current_key) %>%
       leaflet.extras::addDrawToolbar(
         targetGroup = "drawn_features",
         polylineOptions = FALSE,
@@ -600,13 +601,15 @@
     paste0(d$label, " - ", disp_pred_label(d), disp_method_label(d))
   })
 
-  observeEvent(input$base_map_layer, {
+  observeEvent(list(input$base_map_layer, carto_api_key()), {
     # draw_map reads the tile choice under isolate(), so this proxy swap is
-    # the only path that updates tiles on an already-rendered map
+    # the only path that updates tiles on an already-rendered map. The CARTO
+    # key is part of the tile URL on those two providers, so entering or
+    # clearing it has to re-add the layer the same way a provider switch does.
     for (map_id in overlay_map_ids) {
       leafletProxy(map_id) %>%
         clearTiles() %>%
-        add_base_tiles(input$base_map_layer)
+        add_base_tiles(input$base_map_layer, carto_api_key())
     }
   })
 
@@ -766,15 +769,15 @@
     req(input$base_map_layer)
     leafletProxy("main_map") %>%
       clearTiles() %>%
-      add_base_tiles(input$base_map_layer)
+      add_base_tiles(input$base_map_layer, carto_api_key())
 
     leafletProxy("comp_map_left") %>%
       clearTiles() %>%
-      add_base_tiles(input$base_map_layer)
+      add_base_tiles(input$base_map_layer, carto_api_key())
 
     leafletProxy("comp_map_right") %>%
       clearTiles() %>%
-      add_base_tiles(input$base_map_layer)
+      add_base_tiles(input$base_map_layer, carto_api_key())
 
     fit_maps_to_data()
   })

@@ -23,25 +23,32 @@ calc_ccc <- function(observed, predicted) {
   predicted <- predicted[ok]
   if (length(observed) < 2) return(NA)
 
-  mean_obs <- mean(observed, na.rm = TRUE)
-  mean_pred <- mean(predicted, na.rm = TRUE)
-  
-  var_obs <- var(observed, na.rm = TRUE)
-  var_pred <- var(predicted, na.rm = TRUE)
-  
+  n <- length(observed)
+  mean_obs <- mean(observed)
+  mean_pred <- mean(predicted)
+
+  # Lin (1989) defines CCC on POPULATION second moments. Using the sample (n-1)
+  # variances and covariance while leaving the squared bias (mean_obs -
+  # mean_pred)^2 unscaled is a different statistic: the two agree only when the
+  # means are equal, and elsewhere the (n-1) form is optimistic - it discounts
+  # exactly the systematic offset CCC exists to penalise. Measured against
+  # DescTools::CCC, the reference the known-answer fixture cites: +0.17% at
+  # n = 30 and +0.66% at n = 12 on a biased fixture, and the (n-1)/n rescaling
+  # below reproduces DescTools to 1e-10. Excess shrinks as 1/n, so it is under
+  # 0.1% at the reference dataset's n = 632.
+  scale_pop <- (n - 1) / n
+  var_obs <- var(observed) * scale_pop
+  var_pred <- var(predicted) * scale_pop
+
   if (is.na(var_obs) || is.na(var_pred) || var_obs == 0 || var_pred == 0) {
     # CCC is undefined when either vector is constant: the correlation term
     # does not exist (0/0). Report NA rather than asserting agreement.
     return(NA)
   }
-  
-  sd_obs <- sqrt(var_obs)
-  sd_pred <- sqrt(var_pred)
-  
-  cov_op <- cov(observed, predicted)
-  rho <- cov_op / (sd_obs * sd_pred)
-  
-  numerator <- 2 * rho * sd_obs * sd_pred
+
+  cov_op <- cov(observed, predicted) * scale_pop
+
+  numerator <- 2 * cov_op
   denominator <- var_obs + var_pred + (mean_obs - mean_pred)^2
   
   if (is.na(denominator) || denominator == 0) return(NA)
@@ -307,9 +314,12 @@ perform_cv <- function(cv_obj, moran = TRUE, round_values = TRUE) {
       # I on its own cannot be read without its null expectation; carry E[I] and
       # the two-sided p alongside it (p is NA on the all-pairs fallback path).
       mor <- calc_moran(residuals, coords)
-      res$moran_i <- round(mor$i, 4)
-      res$moran_e <- round(mor$e_i, 4)
-      res$moran_p <- round(mor$p, 4)
+      # rnd(), not round(): `moran` and `round_values` are independent arguments,
+      # so a caller asking for full precision must get it on these three fields
+      # too, the way every other metric in `res` already does.
+      res$moran_i <- rnd(mor$i, 4)
+      res$moran_e <- rnd(mor$e_i, 4)
+      res$moran_p <- rnd(mor$p, 4)
   }
   
   return(res)

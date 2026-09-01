@@ -666,6 +666,58 @@ test_that("apply_interpolation dispatches IDW identically to apply_IDW", {
   expect_equal(res_d$cv_metrics, res_i$cv_metrics)
 })
 
+test_that("OK retries with a micro-nugget when a zero-nugget model gives an empty surface", {
+  # A zero-nugget model over near-coincident samples makes the kriging
+  # covariance matrix singular, and gstat does NOT raise there: it returns NA
+  # for every location. RK/RFK/CK each route their own failure to a named OK
+  # fallback; OK had no failure path at all, so the locality simply vanished
+  # from the map with nothing said. Measured on gstat 2.1.5: this fixture
+  # returns 100% NA under the zero-nugget model and 0% NA after the retry.
+  set.seed(19)
+  n <- 40
+  # A 1 km extent under a 900 m Gaussian range: the near-degenerate regime a
+  # smooth, low-noise variable produces routinely (reproduces across seeds).
+  x <- runif(n, 450000, 451000); y <- runif(n, 5800000, 5801000)
+  for (i in 1:8) { x[2 * i] <- x[2 * i - 1] + 0.011; y[2 * i] <- y[2 * i - 1] }
+  pts <- sf::st_as_sf(data.frame(x = x, y = y, v = rnorm(n, 50, 10)),
+                      coords = c("x", "y"), crs = 32633)
+  # The 2 dp dedup keeps these: 11 mm apart is distinct at centimetre rounding.
+  expect_equal(nrow(pts[!duplicated(round(sf::st_coordinates(pts), 2)), ]), n)
+
+  grid <- make_test_grid_safe(pts, res = 400)
+  lags <- calc_scientific_lags(pts)
+  zero_nug <- gstat::vgm(psill = 1, model = "Gau", range = 900, nugget = 0)
+
+  # Confirm the premise on this fixture before asserting the repair.
+  bare <- gstat::krige(v ~ 1, pts, grid, model = zero_nug, debug.level = 0)
+  expect_true(all(is.na(bare$var1.pred)))
+
+  res <- suppressWarnings(apply_interpolation(
+    pts, "v", "OK", grid, character(0), lags,
+    list(pre_fit = zero_nug, cv_strategy = "loocv"), "region", "act"))
+
+  expect_false(all(is.na(res$res_sf$var1.pred)))
+  expect_gt(res$fit$psill[1], 0)
+  expect_match(res$log_msg, "micro-nugget", fixed = TRUE)
+})
+
+test_that("a healthy OK run is untouched by the micro-nugget retry", {
+  # The retry is gated on an already all-NA surface, so it must be numerically
+  # inert on every run that produces one.
+  pts <- make_test_points(25)
+  grid <- make_test_grid_safe(pts, res = 200)
+  lags <- calc_scientific_lags(pts)
+  fit <- gstat::vgm(psill = 90, model = "Sph", range = 400, nugget = 0)
+  res <- suppressWarnings(apply_interpolation(
+    pts, "v", "OK", grid, character(0), lags,
+    list(pre_fit = fit, cv_strategy = "loocv"), "region", "act"))
+  ref <- gstat::krige(v ~ 1, pts, grid, model = fit, debug.level = 0)
+
+  expect_equal(res$res_sf$var1.pred, ref$var1.pred)
+  expect_identical(res$fit$psill[1], 0)
+  expect_false(grepl("micro-nugget", res$log_msg, fixed = TRUE))
+})
+
 test_that("apply_interpolation returns error result for unknown method", {
   pts <- make_test_points(10)
   grid <- make_test_grid_safe(pts, res = 200)
@@ -1055,6 +1107,44 @@ test_that("residual (Delta) raster carries only the prediction layer", {
   expect_identical(names(rr), "var1.pred")
   # ...and the OK surfaces it was built from DO carry a variance layer.
   expect_true("var1.var" %in% names(terra::unwrap(res$r_a)))
+})
+
+test_that("the prediction grid is invariant to the boundary-clip block size", {
+  # The bounding-box cells are converted to sf points a block at a time and
+  # tested against the boundary as they go, so peak memory is one block plus
+  # the survivors rather than the whole box (an sfc_POINT costs ~430 bytes per
+  # cell against 16 for a matrix row). The predicate and the surviving rows must
+  # be exactly what a single pass produced - if the block size can move a value,
+  # the blocking is not exact.
+  pts <- make_test_points(20)
+  coords <- sf::st_coordinates(pts)
+  pts_data <- data.frame(x = coords[, 1], y = coords[, 2],
+                         v = pts$v, pv = pts$pv, Locality = "LocA")
+  item <- list(l = "LocA", pts_data = pts_data,
+               m_params = list(idw_p_act = 2, idw_p_pre = 2, idw_nmax = 12,
+                               tps_lambda_act = -1, tps_lambda_pre = -1,
+                               pre_fit_act = NULL, pre_fit_pre = NULL,
+                               cv_strategy = "auto", rfk_uncertainty = "jackknife"))
+  run_grid <- function() {
+    suppressWarnings(run_regional_interpolation(
+      # "concave" leaves a large out-of-boundary surplus in the bounding box,
+      # which is the case the block clip exists for.
+      item, "IDW", 32633, character(0), NULL, "concave", "dynamic", 250,
+      "fixed", 200, "EPSG:4326", FALSE, "actual"))
+  }
+
+  one_block <- run_grid()
+  orig <- .GRID_CLIP_BLOCK_CELLS
+  withr::defer(assign(".GRID_CLIP_BLOCK_CELLS", orig, envir = globalenv()))
+  assign(".GRID_CLIP_BLOCK_CELLS", 7, envir = globalenv())   # several blocks
+  many_blocks <- run_grid()
+  assign(".GRID_CLIP_BLOCK_CELLS", orig, envir = globalenv())
+
+  r1 <- terra::unwrap(one_block$r_a)
+  r2 <- terra::unwrap(many_blocks$r_a)
+  expect_gt(prod(dim(r1)[1:2]), 7)   # otherwise the block override is a no-op
+  expect_identical(dim(r1), dim(r2))
+  expect_identical(terra::values(r1), terra::values(r2))
 })
 
 test_that("IDW and TPS surfaces carry no phantom variance band", {

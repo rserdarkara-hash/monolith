@@ -1502,10 +1502,52 @@ BASE_TILE_NATIVE_ZOOM <- c(
 )
 BASE_TILE_MAX_ZOOM <- 20
 
-add_base_tiles <- function(map, provider) {
-  if (is.null(provider) || !nzchar(provider)) provider <- "CartoDB.Positron"
+# CARTO's raster basemaps now require a free API key: an unkeyed request is
+# answered with an "API key required" watermark stamped over the tiles, and
+# CARTO has the raster service on a retirement path. leaflet-providers' CartoDB
+# entry carries no key placeholder, so a keyed request has to be issued as a
+# plain tile layer built from CARTO's own template
+# (https://{s}.basemaps.cartocdn.com/{style}/{z}/{x}/{y}{r}.png?key=...).
+# Everything the switcher depends on - layerId, zIndex, and the two zoom limits
+# below - is set identically on both paths, so a keyed CARTO layer behaves
+# exactly like every other basemap.
+BASE_TILE_CARTO_VARIANT <- c(
+  "CartoDB.Positron"   = "light_all",
+  "CartoDB.DarkMatter" = "dark_all"
+)
+BASE_TILE_CARTO_ATTRIBUTION <- paste0(
+  '&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> contributors ',
+  '&copy; <a href="https://carto.com/attributions">CARTO</a>'
+)
+
+# api_key is used only by the two CARTO providers; every other provider ignores
+# it. An empty key keeps the previous unkeyed behaviour (watermarked tiles)
+# rather than blanking the map, so the switcher never answers with nothing.
+add_base_tiles <- function(map, provider, api_key = NULL) {
+  if (is.null(provider) || !nzchar(provider)) provider <- "Esri.WorldImagery"
   native <- unname(BASE_TILE_NATIVE_ZOOM[provider])
   if (is.na(native)) native <- BASE_TILE_MAX_ZOOM
+
+  carto_variant <- unname(BASE_TILE_CARTO_VARIANT[provider])
+  key <- if (is.null(api_key)) "" else trimws(as.character(api_key)[1])
+  if (is.na(key)) key <- ""
+  if (!is.na(carto_variant) && nzchar(key)) {
+    return(leaflet::addTiles(
+      map,
+      urlTemplate = paste0("https://{s}.basemaps.cartocdn.com/", carto_variant,
+                           "/{z}/{x}/{y}{r}.png?key=",
+                           utils::URLencode(key, reserved = TRUE)),
+      attribution = BASE_TILE_CARTO_ATTRIBUTION,
+      layerId = "base_tiles",
+      options = leaflet::tileOptions(
+        subdomains = "abcd",
+        zIndex = 0,
+        maxZoom = BASE_TILE_MAX_ZOOM,
+        maxNativeZoom = native
+      )
+    ))
+  }
+
   leaflet::addProviderTiles(
     map, provider, layerId = "base_tiles",
     options = leaflet::providerTileOptions(

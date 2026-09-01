@@ -148,9 +148,67 @@ test_that("add_base_tiles pins the basemap one level below the rasters", {
   }
 })
 
-test_that("add_base_tiles falls back to Positron for an empty provider", {
-  expect_equal(tile_call(add_base_tiles(leaflet::leaflet(), NULL))[[1]], "CartoDB.Positron")
-  expect_equal(tile_call(add_base_tiles(leaflet::leaflet(), ""))[[1]], "CartoDB.Positron")
+test_that("add_base_tiles falls back to the satellite layer for an empty provider", {
+  # The fallback must be a provider that needs no API key, or a map with no
+  # explicit choice comes up watermarked.
+  expect_equal(tile_call(add_base_tiles(leaflet::leaflet(), NULL))[[1]], "Esri.WorldImagery")
+  expect_equal(tile_call(add_base_tiles(leaflet::leaflet(), ""))[[1]], "Esri.WorldImagery")
+})
+
+# ── CARTO API key ──────────────────────────────────────────────────────────
+#
+# CARTO's raster basemaps answer an unkeyed request with an "API key required"
+# watermark, and leaflet-providers' CartoDB entry has nowhere to put a key, so
+# a keyed layer is issued as a plain tile layer built from CARTO's own URL
+# template. The two paths must be interchangeable to every other part of the
+# map: same layerId, same z-index, same zoom terms.
+
+keyed_call <- function(m) {
+  hit <- Filter(function(c) identical(c$method, "addTiles"), m$x$calls)
+  expect_length(hit, 1)
+  hit[[1]]$args
+}
+
+test_that("a CARTO key produces a keyed tile URL for each CARTO variant", {
+  expect_equal(
+    keyed_call(add_base_tiles(leaflet::leaflet(), "CartoDB.Positron", "KEY123"))[[1]],
+    "https://{s}.basemaps.cartocdn.com/light_all/{z}/{x}/{y}{r}.png?key=KEY123")
+  expect_equal(
+    keyed_call(add_base_tiles(leaflet::leaflet(), "CartoDB.DarkMatter", "KEY123"))[[1]],
+    "https://{s}.basemaps.cartocdn.com/dark_all/{z}/{x}/{y}{r}.png?key=KEY123")
+})
+
+test_that("a keyed CARTO layer keeps the same identity and zoom terms", {
+  for (p in names(BASE_TILE_CARTO_VARIANT)) {
+    args <- keyed_call(add_base_tiles(leaflet::leaflet(), p, "KEY123"))
+    expect_equal(args[[2]], "base_tiles")                                  # layerId
+    expect_equal(args[[4]]$zIndex, 0)
+    expect_equal(args[[4]]$maxZoom, BASE_TILE_MAX_ZOOM)
+    expect_equal(args[[4]]$maxNativeZoom, unname(BASE_TILE_NATIVE_ZOOM[p]))
+    expect_equal(args[[4]]$subdomains, "abcd")
+    expect_true(grepl("CARTO", args[[4]]$attribution, fixed = TRUE))
+  }
+})
+
+test_that("a key that is absent, empty or blank leaves the provider path alone", {
+  # Unkeyed tiles are watermarked, not missing, so the map still draws.
+  for (key in list(NULL, "", "   ", NA_character_)) {
+    expect_equal(tile_call(add_base_tiles(leaflet::leaflet(), "CartoDB.Positron", key))[[1]],
+                 "CartoDB.Positron")
+  }
+})
+
+test_that("a CARTO key is ignored by every non-CARTO provider", {
+  for (p in setdiff(names(BASE_TILE_NATIVE_ZOOM), names(BASE_TILE_CARTO_VARIANT))) {
+    expect_equal(tile_call(add_base_tiles(leaflet::leaflet(), p, "KEY123"))[[1]], p)
+  }
+})
+
+test_that("a CARTO key is percent-encoded into the query string", {
+  # An unescaped & or = in the key would truncate or corrupt the query.
+  expect_equal(
+    keyed_call(add_base_tiles(leaflet::leaflet(), "CartoDB.Positron", "a b&c=d"))[[1]],
+    "https://{s}.basemaps.cartocdn.com/light_all/{z}/{x}/{y}{r}.png?key=a%20b%26c%3Dd")
 })
 
 test_that("add_base_tiles accepts a provider it has no depth entry for", {

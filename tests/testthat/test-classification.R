@@ -320,8 +320,13 @@ test_that("surface rasterisation yields aligned class/prob/entropy layers and he
   expect_setequal(names(rl$prob), paste0("P_", mod$levels))
   expect_equal(names(rl$entropy), "entropy")
   expect_true(terra::is.factor(rl$class))
-  # Exact area accounting: sum of class areas == cells x cell area (ha).
-  expect_equal(sum(rl$area$area_ha), sum(rl$area$n_cells) * (200 * 200 / 10000))
+  # Area accounting tracks the cell count. Areas are ELLIPSOIDAL
+  # (terra::expanse, the same call the interpolation Area Coverage table and
+  # the class-zone export make), so they differ from the planimetric
+  # cells x cell-area figure by the CRS's area scale factor k^2 - ~0.1% in
+  # UTM. Assert the correspondence with a tolerance, never exact equality.
+  expect_equal(sum(rl$area$area_ha), sum(rl$area$n_cells) * (200 * 200 / 10000),
+               tolerance = 0.005)
 })
 
 test_that("every emitted metric id and estimator has a display label", {
@@ -816,8 +821,10 @@ test_that("confidence threshold abstains low-certainty cells into Unclassified",
   expect_true("Unclassified" %in% terra::levels(rl$class)[[1]]$class)
   expect_equal(rl$area$n_cells[rl$area$class == "Unclassified"], 1L)
   expect_equal(rl$area$n_cells[rl$area$class == "C"], 0L)
-  # Area accounting stays exact, including the abstained cells.
-  expect_equal(sum(rl$area$area_ha), sum(rl$area$n_cells) * (200 * 200 / 10000))
+  # Area accounting still covers every cell, abstained ones included (same
+  # ellipsoidal-vs-planimetric tolerance as above).
+  expect_equal(sum(rl$area$area_ha), sum(rl$area$n_cells) * (200 * 200 / 10000),
+               tolerance = 0.005)
   # Probability and entropy layers are untouched by the threshold.
   expect_equal(terra::values(rl$prob, mat = FALSE),
                terra::values(rl0$prob, mat = FALSE))

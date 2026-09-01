@@ -3,6 +3,12 @@
 # idw_opt_item), progress/warning files, CRS projection, dedup, raster and
 # class-break utilities. Sourced via spatial_helpers.R.
 
+# How many bounding-box cells the prediction grid converts to sf points at a
+# time before testing them against the boundary. Peak memory is one block plus
+# the cells that survive the clip, instead of the whole bounding box. Named so
+# the suite can shrink it and assert the clip is block-invariant.
+.GRID_CLIP_BLOCK_CELLS <- 2e5
+
 
 # Workers cannot touch Shiny reactives, so run state travels to the main
 # session as small files under the session's progress directory. Both writers
@@ -531,35 +537,75 @@ run_regional_interpolation <- function(item, current_method, current_crs, aux_va
     }
 
     grid_r <- terra::rast(terra::ext(bbox), resolution = actual_res, crs = sf::st_crs(pts)$wkt)
-    grid_p <- terra::as.points(grid_r, values=FALSE) %>% sf::st_as_sf()
-    # One st_coordinates pass, not two: this grid reaches ~1e6 nodes and each
-    # call materializes the full coordinate matrix.
+
+    # Cell centres as a plain MATRIX first. An sfc_POINT stores every node as its
+    # own classed numeric(2), ~430 bytes per cell against 16 for a matrix row:
+    # measured, a 1e6-cell bounding box costs 427 MB as an sf object (848 MB peak,
+    # 10.8 s to build), and the Fixed-mode ~4M-cell cap above extrapolates to
+    # ~1.7 GB - per locality, inside a nested PSOCK worker, with up to
+    # availableCores()-1 of them live, and roughly 3x that again for RK/RFK once
+    # grid_aux and res_sf exist. terra::crds returns exactly the centres
+    # terra::as.points does, in the same cell order, at matrix cost.
+    grid_xy <- terra::crds(grid_r, na.rm = FALSE)
+
+    grid_block <- function(s, e) {
+      sf::st_as_sf(data.frame(x = grid_xy[s:e, 1], y = grid_xy[s:e, 2]),
+                   coords = c("x", "y"), crs = sf::st_crs(pts))
+    }
+
+    # All engines predict pointwise, so cells outside the boundary - which the
+    # post-interpolation mask discards anyway - can be dropped up front. This
+    # cuts kriging cost substantially for concave/multi-part boundaries with
+    # zero change to within-boundary values. Testing in BLOCKS is what keeps the
+    # peak at one block plus the survivors instead of the whole bounding box:
+    # for a concave, wrapped or multi-part boundary the bbox routinely carries
+    # 1.5-3x the cells that survive, and the clip used to run only after all of
+    # them existed. Same st_intersects predicate, same surviving rows, same
+    # order, same columns as the single-pass form.
+    keep_blocks <- tryCatch({
+      blk_g <- max(1L, as.integer(.GRID_CLIP_BLOCK_CELLS))
+      n_bbox <- nrow(grid_xy)
+      out <- vector("list", max(1L, ceiling(n_bbox / blk_g)))
+      for (bi in seq_along(out)) {
+        s <- (bi - 1L) * blk_g + 1L
+        e <- min(bi * blk_g, n_bbox)
+        chunk <- grid_block(s, e)
+        hit <- sf::st_intersects(chunk, bound, sparse = FALSE)[, 1]
+        out[[bi]] <- if (any(hit)) chunk[hit, ] else NULL
+      }
+      Filter(Negate(is.null), out)
+    }, error = function(e) NULL)
+
+    if (is.null(keep_blocks)) {
+      # Predicate failed (degenerate boundary geometry): fall back to the
+      # unclipped grid, exactly as the `inside <- NULL` branch did.
+      grid_p <- grid_block(1L, nrow(grid_xy))
+    } else if (!length(keep_blocks)) {
+      # A coarse fixed resolution over a small boundary can leave NO grid node
+      # inside it. The engines would then krige the full bbox and the mask
+      # would discard every cell - a blank locality with no message, after
+      # paying for the whole interpolation. Name the cause and skip instead
+      # (the surface was all-NA in this state before; nothing displayable is
+      # lost). classif_build_grid stops loudly in the same situation.
+      write_warning_file(l, "act", sprintf(
+        "No grid node falls inside this locality's boundary at %.1f m resolution; the surface would be empty. Reduce the fixed grid resolution or widen the boundary/buffer.",
+        actual_res))
+      res_out$log_msg <- paste0(res_out$log_msg, "\nWarning in ", l,
+        ": no grid cells fall inside the boundary at this resolution; locality skipped.")
+      return(res_out)
+    } else {
+      grid_p <- if (length(keep_blocks) == 1L) keep_blocks[[1]] else do.call(rbind, keep_blocks)
+    }
+    rm(grid_xy, keep_blocks)
+
+    # x/y attached ONCE, after the clip, so the column order is (geometry, x, y)
+    # whatever the block count: rbind.sf moves the geometry column last, which
+    # would otherwise make the layout of an exported surface depend on how many
+    # blocks the grid happened to need. One st_coordinates pass, over the
+    # survivors rather than the whole bounding box.
     grid_cc <- sf::st_coordinates(grid_p)
     grid_p <- dplyr::mutate(grid_p, x = grid_cc[, 1], y = grid_cc[, 2])
     rm(grid_cc)
-
-    # All engines predict pointwise, so cells outside the boundary — which the
-    # post-interpolation mask discards anyway — can be dropped up front. This
-    # cuts kriging cost substantially for concave/multi-part boundaries with
-    # zero change to within-boundary values.
-    inside <- tryCatch(sf::st_intersects(grid_p, bound, sparse = FALSE)[, 1], error = function(e) NULL)
-    if (!is.null(inside)) {
-      if (!any(inside)) {
-        # A coarse fixed resolution over a small boundary can leave NO grid node
-        # inside it. The engines would then krige the full bbox and the mask
-        # would discard every cell — a blank locality with no message, after
-        # paying for the whole interpolation. Name the cause and skip instead
-        # (the surface was all-NA in this state before; nothing displayable is
-        # lost). classif_build_grid stops loudly in the same situation.
-        write_warning_file(l, "act", sprintf(
-          "No grid node falls inside this locality's boundary at %.1f m resolution; the surface would be empty. Reduce the fixed grid resolution or widen the boundary/buffer.",
-          actual_res))
-        res_out$log_msg <- paste0(res_out$log_msg, "\nWarning in ", l,
-          ": no grid cells fall inside the boundary at this resolution; locality skipped.")
-        return(res_out)
-      }
-      grid_p <- grid_p[inside, ]
-    }
 
     r_a <- NULL; r_p <- NULL
 
@@ -664,7 +710,26 @@ run_regional_interpolation <- function(item, current_method, current_crs, aux_va
         res_out$log_msg <- paste0(res_out$log_msg, "\n", res_a_list$log_msg)
         if (cov_log_msg != "") res_out$log_msg <- paste0(res_out$log_msg, "\n", cov_log_msg)
         
-        if(!is.null(res_a_list$res_sf)) {
+        # A non-NULL res_sf whose predictions are ALL NA is not a surface. It
+        # reaches here whenever the kriging system could not be solved - gstat
+        # returns NA per location rather than raising (measured: a zero-nugget
+        # model over near-coincident samples returns 100% NA silently) - and the
+        # rasterize/mask/project chain accepts it happily, so the locality was
+        # stored and displayed as a completed run with a blank map and an all-NA
+        # metrics row. Name it instead. The column test comes first because
+        # all(is.na(NULL)) is TRUE, which would skip a locality whose engine
+        # named its prediction column something else.
+        if (!is.null(res_a_list$res_sf) &&
+            "var1.pred" %in% names(res_a_list$res_sf) &&
+            all(is.na(res_a_list$res_sf$var1.pred))) {
+            write_warning_file(l, "act", paste0(
+              "The ", current_method, " system produced no predictions for this locality ",
+              "(every grid cell is undefined). This usually means the fitted variogram is not ",
+              "a valid covariance model or the kriging matrix is singular; check the variogram ",
+              "panel for this locality."))
+            res_out$log_msg <- paste0(res_out$log_msg, "\n[WARN] ", l,
+              ": the ", current_method, " surface is entirely undefined; locality skipped.")
+        } else if(!is.null(res_a_list$res_sf)) {
             # gstat::idw() returns an all-NA `var1.var` alongside var1.pred (IDW
             # is an exact deterministic weighting; it has no prediction variance
             # to report). Rasterizing it doubled the size of every IDW surface
@@ -703,7 +768,18 @@ run_regional_interpolation <- function(item, current_method, current_crs, aux_va
             res_out$summ_pre <- res_p_list$model_summary; res_out$rf_pre <- res_p_list$rf_model; res_out$gstat_pre <- res_p_list$gstat_obj
             res_out$log_msg <- paste0(res_out$log_msg, "\n", res_p_list$log_msg)
             
-            if(!is.null(res_p_list$res_sf)) {
+            # Same all-NA guard as the actual surface above.
+            if (!is.null(res_p_list$res_sf) &&
+                "var1.pred" %in% names(res_p_list$res_sf) &&
+                all(is.na(res_p_list$res_sf$var1.pred))) {
+                write_warning_file(l, "pre", paste0(
+                  "The ", current_method, " system produced no predictions for this locality ",
+                  "(every grid cell is undefined). This usually means the fitted variogram is not ",
+                  "a valid covariance model or the kriging matrix is singular; check the variogram ",
+                  "panel for this locality."))
+                res_out$log_msg <- paste0(res_out$log_msg, "\n[WARN] ", l,
+                  ": the ", current_method, " predicted surface is entirely undefined; locality skipped.")
+            } else if(!is.null(res_p_list$res_sf)) {
                 # Same method gate as the actual surface above.
                 fields_p <- if(method_has_variance(current_method) && "var1.var" %in% colnames(res_p_list$res_sf)) c("var1.pred", "var1.var") else "var1.pred"
                 r_p <- terra::rasterize(res_p_list$res_sf, grid_r, field=fields_p) %>% terra::mask(terra::vect(bound)) %>% terra::project(crs_sel)
@@ -797,12 +873,20 @@ calc_metric_spacing <- function(pts) {
 
   crs_units <- sf::st_crs(pts)$units_gdal
   if (!is.null(crs_units) && !is.na(crs_units) && grepl("degree", crs_units, ignore.case = TRUE)) {
-    pts_m <- tryCatch(sf::st_transform(pts, 3857), error = function(e) pts)
+    # Flag the failure where it happens rather than inferring it afterwards from
+    # deep object equality: identical(pts_m, pts) tied a numeric scaling decision
+    # to sf's internal representation and compared two whole point sets to answer
+    # a yes/no question.
+    projected_ok <- TRUE
+    pts_m <- tryCatch(sf::st_transform(pts, 3857),
+                      error = function(e) { projected_ok <<- FALSE; pts })
     lat_c <- mean(sf::st_coordinates(sf::st_transform(pts, 4326))[, 2])
-    dist_scale <- if (identical(pts_m, pts)) {
-      111319 * cos(lat_c * pi / 180)
-    } else {
+    dist_scale <- if (projected_ok) {
+      # Web Mercator inflates distances by 1/cos(latitude); undo it.
       cos(lat_c * pi / 180)
+    } else {
+      # Still in degrees: approximate metres per degree at this latitude.
+      111319 * cos(lat_c * pi / 180)
     }
     coords <- sf::st_coordinates(pts_m)
   } else {
