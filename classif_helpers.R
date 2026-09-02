@@ -1445,6 +1445,29 @@ build_classification_grid_aux <- function(pts_proj, grid_p, predictors,
 }
 
 # ── Spatial scope (localities / polygons) ───────────────────────────────────
+#' Put a point set on a metric CRS before any spatial step of a classification
+#' run touches it. The Target Mapping CRS may legitimately be geographic
+#' (EPSG:4326 is the first entry of that selector), but grid resolution and
+#' hull buffers are metres, the covariate surfaces are kriged on metric lags,
+#' spatial-CV blocks are sized in metres and cell area is reported in hectares.
+#' Left in degrees, the auto resolution (metres, derived from an s2 area in
+#' m^2) is applied to an extent measured in degrees and the prediction grid
+#' collapses to a single continent-sized cell: one flat rectangle instead of a
+#' map. The fallback is the data's UTM zone, the same one the interpolation
+#' pipeline applies (validate_and_project_sf), restated as its EPSG code -
+#' the proj4 string that function builds carries none, which would leave the
+#' maps and the exported GeoTIFFs describing their projection as "unknown".
+classif_project_metric <- function(pts) {
+  if (is.null(pts) || nrow(pts) == 0 || !sf::st_is_longlat(pts)) return(pts)
+  pts <- validate_and_project_sf(pts)
+  tryCatch({
+    p4 <- sf::st_crs(pts)$proj4string
+    z <- as.integer(sub(".*\\+zone=([0-9]+).*", "\\1", p4))
+    stopifnot(grepl("+proj=utm", p4, fixed = TRUE), !is.na(z), z >= 1, z <= 60)
+    sf::st_transform(pts, (if (grepl("+south", p4, fixed = TRUE)) 32700 else 32600) + z)
+  }, error = function(e) pts)
+}
+
 #' Collect the polygons available for scoping a classification run: shapes the
 #' user drew on the Leaflet map (EPSG:4326) and/or the uploaded shapefile (any
 #' CRS). Returns one sf with a `label` column, or NULL when no usable polygon
@@ -1591,6 +1614,12 @@ classif_resolve_scope <- function(df, x_col, y_col, src_crs, proj_crs,
   n_input <- nrow(d)
   pts <- sf::st_as_sf(d, coords = c(x_col, y_col), crs = src_crs)
   pts <- sf::st_transform(pts, proj_crs)
+  # Everything below this line is metric (see classif_project_metric); the CRS
+  # actually used travels back so the caller stays on it.
+  crs_requested <- sf::st_crs(pts)
+  pts <- classif_project_metric(pts)
+  work_crs <- sf::st_crs(pts)
+  crs_fallback <- !identical(work_crs, crs_requested)
 
   use_loc <- !is.null(loc_col) && loc_col %in% names(d)
   keep <- rep(TRUE, nrow(d))
@@ -1601,7 +1630,7 @@ classif_resolve_scope <- function(df, x_col, y_col, src_crs, proj_crs,
   poly_proj <- NULL
   poly_hit <- NULL
   if (poly_mode %in% c("intersect", "only")) {
-    poly_proj <- sf::st_transform(poly_sf, proj_crs)
+    poly_proj <- sf::st_transform(poly_sf, work_crs)
     if (!"label" %in% names(poly_proj)) {
       poly_proj$label <- paste("Polygon", seq_len(nrow(poly_proj)))
     }
@@ -1615,6 +1644,7 @@ classif_resolve_scope <- function(df, x_col, y_col, src_crs, proj_crs,
   if (nrow(d) == 0) {
     return(list(df = d, group = character(0), boundary_wkt = NULL,
                 boundary_area_m2 = NULL, boundary_bbox = NULL,
+                working_crs = work_crs$wkt, crs_fallback = crs_fallback,
                 n_input = n_input, n_scoped = 0L))
   }
 
@@ -1657,6 +1687,10 @@ classif_resolve_scope <- function(df, x_col, y_col, src_crs, proj_crs,
        boundary_wkt = sf::st_as_text(bnd_u, digits = 15),
        boundary_area_m2 = sum(as.numeric(sf::st_area(bnd_u))),
        boundary_bbox = sf::st_bbox(bnd_u),
+       # The CRS the boundary, the grid, and every distance are expressed in:
+       # the requested target CRS when it is metric, its UTM fallback when it
+       # is not. Callers must reuse it rather than the requested CRS.
+       working_crs = work_crs$wkt, crs_fallback = crs_fallback,
        n_input = n_input, n_scoped = nrow(d))
 }
 
@@ -1746,6 +1780,12 @@ run_classification_pipeline <- function(df, target, predictors,
 
   pts <- sf::st_as_sf(d, coords = c(x_col, y_col), crs = src_crs)
   pts <- sf::st_transform(pts, proj_crs)
+  # Metric working CRS (see classif_project_metric). The module hands over the
+  # CRS classif_resolve_scope already settled on, so this is normally a no-op;
+  # it protects direct calls and keeps `boundary_wkt` interpretable (it is read
+  # in `proj_crs`, then moved to the working CRS below).
+  pts <- classif_project_metric(pts)
+  work_crs <- sf::st_crs(pts)
   co <- sf::st_coordinates(pts); pts$x <- co[, 1]; pts$y <- co[, 2]
 
   cv <- run_classification_cv(pts, target, predictors, method = method,
@@ -1832,7 +1872,9 @@ run_classification_pipeline <- function(df, target, predictors,
       # fit_classification_model) — the CV loop's selection can differ and,
       # under nested CV, doesn't even exist as a single set.
       best_params  = if (is.null(model$best_params)) NULL else as.data.frame(model$best_params),
-      proj_crs   = proj_crs,
+      # The CRS the run was actually computed in (the UTM fallback when the
+      # requested target CRS was geographic), not the one that was asked for.
+      proj_crs   = if (is.null(work_crs$wkt) || is.na(work_crs$wkt)) proj_crs else work_crs$wkt,
       n_train    = nrow(pts),
       trained_at = Sys.time(),
       versions   = list(
@@ -1856,7 +1898,9 @@ run_classification_pipeline <- function(df, target, predictors,
   if (make_surface) {
     .classif_check_cancel(cancel_file)
     report("grid", 0, "Building the prediction grid...")
-    bnd_sf <- if (is.null(boundary_wkt)) NULL else sf::st_as_sfc(boundary_wkt, crs = proj_crs)
+    bnd_sf <- if (is.null(boundary_wkt)) NULL else {
+      sf::st_transform(sf::st_as_sfc(boundary_wkt, crs = proj_crs), work_crs)
+    }
     gr <- classif_build_grid(pts, res = grid_res, boundary = boundary, boundary_sf = bnd_sf,
                              buffer_mode = buffer_mode, buffer_dist = buffer_dist,
                              strict_scope = strict_scope)

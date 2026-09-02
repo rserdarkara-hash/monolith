@@ -22,12 +22,16 @@ classif_build_target <- function(df, mode, cat_col, num_col, n_classes = 4,
     if (length(brks) < 3) return(NULL)
     # Distinct breaks can still collide after rounding (tight distributions),
     # and factor() errors on duplicated levels — widen the label precision
-    # until every interval label is unique.
+    # until every interval label is unique AND no label has collapsed to a
+    # single point ("[0.07, 0.07)"), which reads as an empty class and makes
+    # the legend look broken even though the underlying interval is real.
+    lo <- utils::head(brks, -1)
+    hi <- brks[-1]
     lab_digits <- 2
     repeat {
-      labs <- paste0("[", round(utils::head(brks, -1), lab_digits), ", ",
-                     round(brks[-1], lab_digits), ")")
-      if (anyDuplicated(labs) == 0 || lab_digits >= 10) break
+      labs <- paste0("[", round(lo, lab_digits), ", ", round(hi, lab_digits), ")")
+      ok <- anyDuplicated(labs) == 0 && !any(round(lo, lab_digits) == round(hi, lab_digits))
+      if (ok || lab_digits >= 10) break
       lab_digits <- lab_digits + 1
     }
     if (anyDuplicated(labs) > 0) return(NULL)
@@ -237,10 +241,18 @@ classif_ui <- function(id) {
                           style = "color: #007bff; cursor: help; margin-left: 5px;")),
                       value = FALSE)
                   ),
-                  shiny::checkboxInput(ns("map_points"),
-                    shiny::tags$span("Show sample points",
+                  shiny::div(style = "margin-right: 15px;",
+                    shiny::checkboxInput(ns("map_points"),
+                      shiny::tags$span("Show sample points",
+                        shiny::tags$i(class = "fa fa-info-circle",
+                          title = "Overlays the scoped training samples (white circles) so you can judge where predictions are supported by data and where they extrapolate.",
+                          style = "color: #007bff; cursor: help; margin-left: 5px;")),
+                      value = FALSE)
+                  ),
+                  shiny::checkboxInput(ns("map_stretch"),
+                    shiny::tags$span("Stretch colour scale",
                       shiny::tags$i(class = "fa fa-info-circle",
-                        title = "Overlays the scoped training samples (white circles) so you can judge where predictions are supported by data and where they extrapolate.",
+                        title = "Entropy and class-probability maps are drawn on the absolute 0-1 scale by default, so the per-class probability maps are comparable with each other and entropy is comparable between runs. A weak model keeps every probability near 1/k and every entropy near 1, which renders as one flat colour; stretching the colour scale to the observed range (stated in each map's subtitle) reveals that structure, at the cost of comparability.",
                         style = "color: #007bff; cursor: help; margin-left: 5px;")),
                     value = FALSE)
                 )
@@ -637,8 +649,25 @@ classif_server <- function(id, data_reactive, vars_metadata_reactive, spatial_re
       shiny::tagList(
         shiny::tags$small(style = paste0("color:", col, ";"),
           sprintf("In scope: %d of %d georeferenced points.", sc$n_scoped, sc$n_input)),
+        crs_note(),
         strict_note()
       )
+    })
+
+    # The Target Mapping CRS can be geographic; the run cannot (grid, buffers,
+    # and distances are metres). classif_resolve_scope substitutes the data's
+    # UTM zone in that case - said here so the projection the maps are drawn in
+    # is never a silent one.
+    crs_note <- shiny::reactive({
+      sc <- current_scope()
+      if (is.null(sc) || !isTRUE(sc$crs_fallback) || is.null(sc$working_crs)) return(NULL)
+      nm <- tryCatch({
+        co <- sf::st_crs(sc$working_crs)
+        if (is.null(co$epsg) || is.na(co$epsg)) co$Name else
+          sprintf("%s (EPSG:%s)", co$Name, co$epsg)
+      }, error = function(e) "a metric projection")
+      shiny::tags$small(style = "color:#888; display:block; margin-top: 4px;",
+        sprintf("Target Mapping CRS is geographic, so this run is computed and mapped in %s.", nm))
     })
 
     # Live advisory: a Strict Measured buffer narrower than half the grid cell
@@ -849,11 +878,17 @@ classif_server <- function(id, data_reactive, vars_metadata_reactive, spatial_re
       # at depth "none", so also guard against a stale value.
       nested_v <- isTRUE(input$nested_cv) && !identical(depth_v, "none")
       make_surf <- isTRUE(input$make_surface)
+      # CRS the run is computed in. classif_resolve_scope falls back to the
+      # data's UTM zone when the Target Mapping CRS is geographic (degrees
+      # would collapse the metre-based prediction grid to a single cell), and
+      # the boundary WKT above is already expressed in it - so the pipeline,
+      # the rasters, and the point overlay must all use the same CRS.
+      proj_v <- if (!is.null(sc$working_crs)) sc$working_crs else sp$proj_crs
       # Projected training coordinates (small: n x 2) for the optional
       # sample-point overlay on the prediction maps.
       train_xy_v <- tryCatch({
         p_sf <- sf::st_as_sf(sdf[, c(sp$x, sp$y)], coords = c(sp$x, sp$y), crs = sp$src_crs)
-        sf::st_coordinates(sf::st_transform(p_sf, sp$proj_crs))
+        sf::st_coordinates(sf::st_transform(p_sf, proj_v))
       }, error = function(e) NULL)
       # Boundary type, buffer, and grid resolution come from the module's own
       # Spatial Scope controls: fixed resolution mode uses the manual slider
@@ -864,7 +899,7 @@ classif_server <- function(id, data_reactive, vars_metadata_reactive, spatial_re
       strict_scope_v <- strict_scope_active()
       weights_v <- isTRUE(input$class_weights)
       imp_mode_v <- input$importance_mode %||% "oof"
-      x_v <- sp$x; y_v <- sp$y; src_v <- sp$src_crs; proj_v <- sp$proj_crs
+      x_v <- sp$x; y_v <- sp$y; src_v <- sp$src_crs
       proj_root_ship <- getwd()
       progress_dir_ship <- cls_progress_dir
       session_id_ship <- cls_session_id
@@ -1241,9 +1276,46 @@ classif_server <- function(id, data_reactive, vars_metadata_reactive, spatial_re
       pal <- stats::setNames(viridisLite::viridis(sum(levs_r != "Unclassified")),
                              levs_r[levs_r != "Unclassified"])
       if ("Unclassified" %in% levs_r) pal <- c(pal, c(Unclassified = "#9E9E9E"))
+      # drop = TRUE: ggplot2 (>= 3.5) draws a key glyph only for values the
+      # LAYER actually holds, so a class absent from the surface kept its label
+      # in the legend but lost its colour swatch - an empty box that reads as a
+      # rendering fault. The legend now lists the classes that are on the map;
+      # the full inventory ("k of n classes mapped") moves to the subtitle.
       ggplot2::scale_fill_manual(name = "Class", values = pal,
-                                 na.value = "transparent", drop = FALSE,
+                                 na.value = "transparent", drop = TRUE,
                                  na.translate = FALSE)
+    }
+    # "k of n classes mapped | largest: X (p% of cells)". A surface where one
+    # class swallows the whole grid is the expected output of a model with no
+    # skill (compare the accuracy/kappa against the no-information rate), not a
+    # broken map - this line says so on the map itself.
+    class_map_subtitle <- function(rl) {
+      a <- rl$area
+      if (is.null(a) || nrow(a) == 0) return(NULL)
+      total <- sum(a$n_cells)
+      if (!is.finite(total) || total <= 0) return(NULL)
+      present <- a[a$n_cells > 0, , drop = FALSE]
+      top <- present[which.max(present$n_cells), ]
+      sprintf("%d of %d classes mapped | largest: %s (%.1f%% of cells)",
+              nrow(present), nrow(a), top$class, 100 * top$n_cells / total)
+    }
+    # Colour-scale limits for the two continuous maps. Both quantities are
+    # bounded on [0, 1] and the default keeps that absolute scale, so the four
+    # per-class probability maps stay comparable with each other and entropy
+    # stays comparable between runs. A narrow field (a weak model's
+    # probabilities sit near 1/k, its entropy near 1) then renders as one flat
+    # colour, which is honest but unreadable - "Stretch colour scale" rescales
+    # to the observed range instead. The range is stated in the subtitle either
+    # way so a flat map can never be mistaken for a constant surface.
+    value_scale <- function(r) {
+      v <- terra::values(r, mat = FALSE)
+      v <- v[is.finite(v)]
+      if (length(v) == 0) return(list(limits = c(0, 1), subtitle = NULL))
+      rng <- range(v)
+      stretch <- isTRUE(input$map_stretch) && diff(rng) > 1e-9
+      list(limits = if (stretch) rng else c(0, 1),
+           subtitle = sprintf("Observed range %.3f - %.3f%s", rng[1], rng[2],
+                              if (stretch) " (colour scale stretched to this range)" else ""))
     }
     # Scoped training points as sf in the raster CRS, for the optional
     # sample-point overlay (coords shipped with the run result).
@@ -1282,22 +1354,28 @@ classif_server <- function(id, data_reactive, vars_metadata_reactive, spatial_re
         tidyterra::geom_spatraster(data = rl$class, maxcell = maxcell) +
         class_fill_scale(rl) +
         map_overlays(export) +
-        ggplot2::labs(title = "Predicted Class") + export_axes(export) + map_theme(export)
+        ggplot2::labs(title = "Predicted Class", subtitle = class_map_subtitle(rl)) +
+        export_axes(export) + map_theme(export)
     }
     plot_entropy_map <- function(rl, export = FALSE, maxcell = 5e4) {
+      sc <- value_scale(rl$entropy)
       ggplot2::ggplot() +
         tidyterra::geom_spatraster(data = rl$entropy, maxcell = maxcell) +
         ggplot2::scale_fill_viridis_c(name = "Entropy", option = "magma",
-                                      na.value = "transparent", limits = c(0, 1)) +
+                                      na.value = "transparent", limits = sc$limits) +
         map_overlays(export) +
-        ggplot2::labs(title = "Classification Uncertainty") + export_axes(export) + map_theme(export)
+        ggplot2::labs(title = "Classification Uncertainty", subtitle = sc$subtitle) +
+        export_axes(export) + map_theme(export)
     }
     plot_prob_map <- function(rl, lyr, class_label, export = FALSE, maxcell = 5e4) {
+      sc <- value_scale(rl$prob[[lyr]])
       ggplot2::ggplot() +
         tidyterra::geom_spatraster(data = rl$prob[[lyr]], maxcell = maxcell) +
-        ggplot2::scale_fill_viridis_c(name = "P", na.value = "transparent", limits = c(0, 1)) +
+        ggplot2::scale_fill_viridis_c(name = "P", na.value = "transparent",
+                                      limits = sc$limits) +
         map_overlays(export) +
-        ggplot2::labs(title = paste("P(class =", class_label, ")")) + export_axes(export) + map_theme(export)
+        ggplot2::labs(title = paste("P(class =", class_label, ")"), subtitle = sc$subtitle) +
+        export_axes(export) + map_theme(export)
     }
 
     # ── Expanded (modal) map view ────────────────────────────────────────────
@@ -1359,7 +1437,8 @@ classif_server <- function(id, data_reactive, vars_metadata_reactive, spatial_re
       plot_entropy_map(get_rasters())
     }, cacheKeyExpr = {
       res <- cl_rv$res; shiny::req(res, res$surface_df)
-      list(res$run_id, isTRUE(input$map_adorn), isTRUE(input$map_points))
+      list(res$run_id, isTRUE(input$map_adorn), isTRUE(input$map_points),
+           isTRUE(input$map_stretch))
     })
 
     output$prob_class_ui <- shiny::renderUI({
@@ -1375,7 +1454,8 @@ classif_server <- function(id, data_reactive, vars_metadata_reactive, spatial_re
       plot_prob_map(rl, lyr, input$prob_class)
     }, cacheKeyExpr = {
       res <- cl_rv$res; shiny::req(res, res$surface_df, input$prob_class)
-      list(res$run_id, input$prob_class, isTRUE(input$map_adorn), isTRUE(input$map_points))
+      list(res$run_id, input$prob_class, isTRUE(input$map_adorn), isTRUE(input$map_points),
+           isTRUE(input$map_stretch))
     })
 
     # ── Downloads ────────────────────────────────────────────────────────────

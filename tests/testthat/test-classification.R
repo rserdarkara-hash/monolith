@@ -952,6 +952,22 @@ test_that("classif_build_target widens label precision when rounded breaks colli
   expect_gte(nlevels(tv), 2)
 })
 
+test_that("classif_build_target never labels an interval as a single point", {
+  # Quantile breaks that are distinct but round to the same 2-dp value on ONE
+  # side produce a label like "[0.07, 0.07)": a real interval that reads as an
+  # empty class in the legend. Precision must widen until every label shows a
+  # lower bound strictly below its upper bound.
+  set.seed(11)
+  df <- data.frame(v = c(runif(20, 0.034, 0.066), runif(20, 0.066, 0.0745),
+                         runif(20, 0.0745, 0.086), runif(20, 0.086, 0.16)))
+  tv <- classif_build_target(df, mode = "bin", cat_col = NULL, num_col = "v",
+                             n_classes = 4, style = "quantile")
+  bounds <- do.call(rbind, lapply(strsplit(gsub("[][)]", "", levels(tv)), ", "),
+                                  as.numeric))
+  expect_true(all(bounds[, 1] < bounds[, 2]))
+  expect_equal(anyDuplicated(levels(tv)), 0L)
+})
+
 test_that("the final classification model tunes under the run's CV strategy", {
   # fit_classification_model hardcoded "standard" folds for its own tuning
   # search while run_classification_cv honoured the user's strategy. The class
@@ -1258,4 +1274,72 @@ test_that("classif_resolve_scope reports the boundary area and bbox", {
                                    loc_col = "loc", localities = "nonexistent")
   expect_null(sc_none$boundary_area_m2)
   expect_null(sc_none$boundary_bbox)
+})
+
+test_that("a geographic target CRS is replaced by a metric one for the whole run", {
+  # EPSG:4326 is a legitimate Target Mapping CRS choice. Working in degrees
+  # would apply a metre-based Auto resolution to a degree-wide extent and
+  # collapse the prediction grid to a single cell, so the scope resolver moves
+  # the run onto the data's UTM zone and reports the CRS it settled on.
+  set.seed(21)
+  n <- 80
+  d <- data.frame(lon = runif(n, 28.0, 28.3), lat = runif(n, 40.0, 40.2), loc = "A")
+
+  sc_geo <- classif_resolve_scope(d, "lon", "lat", 4326, "EPSG:4326",
+                                  loc_col = "loc", localities = "A")
+  expect_true(sc_geo$crs_fallback)
+  work <- sf::st_crs(sc_geo$working_crs)
+  expect_false(sf::st_is_longlat(work))
+  expect_equal(work$epsg, 32635L)
+
+  # An already-metric target CRS is used verbatim.
+  sc_utm <- classif_resolve_scope(d, "lon", "lat", 4326, "EPSG:32635",
+                                  loc_col = "loc", localities = "A")
+  expect_false(sc_utm$crs_fallback)
+  expect_equal(sf::st_crs(sc_utm$working_crs)$epsg, 32635L)
+  # Same domain either way (metres, so the areas agree).
+  expect_equal(sc_geo$boundary_area_m2, sc_utm$boundary_area_m2, tolerance = 1e-6)
+
+  # The boundary is in the working CRS, and the grid it bounds is a real
+  # surface rather than one continent-sized cell.
+  pts <- sf::st_transform(sf::st_as_sf(d, coords = c("lon", "lat"), crs = 4326), work)
+  bnd <- sf::st_as_sf(sf::st_as_sfc(sc_geo$boundary_wkt, crs = work))
+  gr <- classif_build_grid(pts, res = 200, boundary_sf = bnd)
+  expect_gt(nrow(gr$grid_p), 1000)
+  expect_equal(sf::st_crs(gr$crs_wkt)$epsg, 32635L)
+
+  # Polygons drawn in degrees still scope the run once it is metric.
+  poly <- sf::st_sf(label = "Zone 1", geometry = sf::st_sfc(sf::st_polygon(list(rbind(
+    c(28.0, 40.0), c(28.15, 40.0), c(28.15, 40.1), c(28.0, 40.1), c(28.0, 40.0)))),
+    crs = 4326))
+  sc_poly <- classif_resolve_scope(d, "lon", "lat", 4326, "EPSG:4326",
+                                   loc_col = "loc", localities = "A",
+                                   poly_sf = poly, poly_mode = "only")
+  expect_true(sc_poly$n_scoped > 0 && sc_poly$n_scoped < nrow(d))
+  bnd_poly <- sf::st_as_sfc(sc_poly$boundary_wkt, crs = sf::st_crs(sc_poly$working_crs))
+  expect_equal(as.numeric(sf::st_area(bnd_poly)),
+               as.numeric(sf::st_area(sf::st_transform(poly, work))), tolerance = 1e-6)
+})
+
+test_that("the pipeline reprojects a geographic boundary onto the working CRS", {
+  # Defensive path: a direct call that still passes a geographic proj_crs (and
+  # a boundary stated in it) must produce the same metric grid as the module's
+  # pre-resolved one, not a degenerate one.
+  set.seed(22)
+  n <- 60
+  d <- data.frame(lon = runif(n, 28.0, 28.2), lat = runif(n, 40.0, 40.15))
+  d$elev <- 100 * (d$lon - 28) + 50 * (d$lat - 40) + rnorm(n, 0, 0.2)
+  d$slope <- runif(n, 0, 10)
+  d$soil <- factor(ifelse(d$elev > stats::median(d$elev), "High", "Low"))
+
+  res <- run_classification_pipeline(
+    d, target = "soil", predictors = c("elev", "slope"),
+    x_col = "lon", y_col = "lat", src_crs = 4326, proj_crs = "EPSG:4326",
+    method = "rf", strategy = "standard", depth = "none", v = 3,
+    grid_res = 300, boundary = "concave", make_surface = TRUE
+  )
+  expect_false(sf::st_is_longlat(sf::st_crs(res$crs_wkt)))
+  expect_gt(nrow(res$surface_df), 500)
+  # The surface is spatially structured, not one flat class.
+  expect_gt(length(unique(res$surface_df$.pred_class)), 1)
 })
