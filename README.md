@@ -1,8 +1,8 @@
 ![Monolith: Spatial Analysis Dashboard](assets/banner.png)
 
-# Monolith Spatial Analysis Dashboard (v1.0.7)
+# Monolith Spatial Analysis Dashboard (v1.0.8)
 
-[![Version](https://img.shields.io/badge/version-1.0.7-6f42c1)](#)
+[![Version](https://img.shields.io/badge/version-1.0.8-6f42c1)](#)
 [![R](https://img.shields.io/badge/R-%E2%89%A5%204.5.0-276DC3?logo=r&logoColor=white)](https://cran.r-project.org/)
 [![Shiny](https://img.shields.io/badge/built%20with-Shiny-1f77b4)](https://shiny.posit.co/)
 [![Tests](https://github.com/rserdarkara-hash/monolith/actions/workflows/tests.yaml/badge.svg)](https://github.com/rserdarkara-hash/monolith/actions/workflows/tests.yaml)
@@ -262,7 +262,7 @@ The full dependency suite, grouped by function:
 | **CRS catalogue** | `DBI`, `RSQLite` |
 
 <details>
-<summary><strong>Tested version matrix</strong>: the exact package versions Monolith 1.0.7 is developed and validated against (click to expand)</summary>
+<summary><strong>Tested version matrix</strong>: the exact package versions Monolith 1.0.8 is developed and validated against (click to expand)</summary>
 
 <br>
 
@@ -412,7 +412,7 @@ Sample datasets in [sample_data/](sample_data/) let you exercise every module wi
 
 ## Testing and Reproducibility
 
-Monolith ships with a `testthat` suite of 1,863 assertions across 32 test files, covering the interpolation pipeline, cross-validation metrics, variogram fitting, the classification engine, the descriptive/correlation/PCA plot builders, metadata matching and the Governing Factors module. Where a quantity has an external or closed-form reference, the tests assert against that rather than against the app's own output: Lin's CCC against a value computed independently with `DescTools`, NSE and RMSE against known-answer fixtures, and the plotted variogram curves against `gstat::variogramLine`. A separate file boots the assembled application in a headless browser through `shinytest2` and checks the shell (server initialisation, input identifiers, tab wiring, documentation drawer); it skips itself when `shinytest2` or a Chromium-based browser is unavailable. The suite runs on every push through GitHub Actions against the pinned `renv.lock` environment. To run everything from the project root:
+Monolith ships with a `testthat` suite of 2,313 assertions across 32 test files, covering the interpolation pipeline, cross-validation metrics, variogram fitting, the classification engine, the descriptive/correlation/PCA plot builders, metadata matching and the Governing Factors module. Where a quantity has an external or closed-form reference, the tests assert against that rather than against the app's own output: Lin's CCC against a value computed independently with `DescTools`, NSE and RMSE against known-answer fixtures, and the plotted variogram curves against `gstat::variogramLine`. A separate file boots the assembled application in a headless browser through `shinytest2` and checks the shell (server initialisation, input identifiers, tab wiring, documentation drawer); it skips itself when `shinytest2` or a Chromium-based browser is unavailable. The suite runs on every push through GitHub Actions against the pinned `renv.lock` environment. To run everything from the project root:
 
 ```bash
 Rscript tests/testthat.R
@@ -450,7 +450,7 @@ Human oversight remained central throughout: all methodological choices, model f
   title     = {Monolith: A Spatial Analysis Dashboard for Geostatistical Modeling and Mapping},
   author    = {Kara, R. Serdar},
   year      = {2026},
-  version   = {1.0.7},
+  version   = {1.0.8},
   doi       = {10.5281/zenodo.21130951},
   publisher = {Zenodo},
   url       = {https://github.com/rserdarkara-hash/monolith},

@@ -2,7 +2,7 @@
 
 All notable changes to Monolith are documented in this file.
 
-## [Unreleased]
+## [1.0.8] - 2026-09-02
 
 ### Fixed
 - **A negative fitted nugget could win the variogram candidate search and silently blank a locality.** The robust fit tries four model families from four starting ranges and keeps the eligible candidate with the lowest weighted-least-squares error. Eligibility tested convergence and the practical range, but not the sign of the nugget, and a convex empirical variogram can drive `fit.variogram` to a negative <i>C<sub>0</sub></i>. Such a model makes <i>&gamma;(h)</i> negative near the origin: it is not conditionally negative definite, and the kriging system built from it has no solution. `gstat::krige()` does not raise there - it returns an undefined prediction at every location - so the run completed, the locality was stored, and the user was shown a blank map and an all-NA metrics row behind a variogram panel reporting a clean converged fit. Non-negativity is now part of eligibility, checked before any error comparison, so an invalid model cannot be compared on fit quality at all. Verified inert on 120 of 120 healthy fields: no run that currently produces a surface changes by any amount. The affected case turns from a blank map into a valid, amber-flagged fit. Scientific Guide §4.1.
@@ -28,6 +28,7 @@ All notable changes to Monolith are documented in this file.
 - Extended `test-cv-metrics.R` and the shared CCC fixture with the population-moment definition, re-derived externally to ten significant figures and asserted at 1e-5 - tight enough to separate the two definitions, which the previous 0.01 tolerance was not.
 - Extended `test-classification.R` with the ellipsoidal area convention, asserting the cell-count correspondence under a tolerance rather than as exact equality.
 - Extended `test-styled-points.R` with the CARTO API key: the keyed URL for both variants, a keyed layer keeping the same layer id, stacking level, subdomains, attribution and zoom terms as the provider path, an absent, empty, blank or `NA` key falling back to the unkeyed provider, the key ignored by every non-CARTO provider, percent-encoding of a key containing reserved characters, and the empty-provider fallback moving to the satellite layer.
+- Full suite: 2313 passing, 0 failing, 0 skipped, across 32 test files (up from 2265 at 1.0.7).
 
 ## [1.0.7] - 2026-08-25
 
