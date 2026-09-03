@@ -27,6 +27,14 @@ if (FALSE) {
   requireNamespace("nnet")
 }
 
+# How many BOUNDING-BOX cells a classification prediction grid may consider
+# before its resolution is coarsened. The raster template spans the full bbox
+# and a multi-part scope (distant localities) covers far more of it than the
+# hulls do, so this bounds the candidate grid, not the surviving one. Both the
+# Auto resolution and a manual one from the slider are floored by it. Named so
+# the suite can shrink it and exercise the cap without allocating the budget.
+.CLASSIF_MAX_CANDIDATE_CELLS <- 4e6
+
 # ── Seed sandbox ────────────────────────────────────────────────────────────
 # Thin alias for the app-wide sandbox `with_seed()` (spatial_vgm.R): seed the
 # RNG, run `expr`, then restore the caller's .Random.seed (or remove it if the
@@ -1343,9 +1351,30 @@ classif_surface_to_rasters <- function(grid_sf, res, crs_wkt, levels_order = NUL
 #' the number the user is shown is the number the run will use.
 classif_auto_res <- function(area_m2, bbox) {
   res <- max(5, min(1000, sqrt(area_m2 / 50000)))
+  max(res, .classif_res_floor(bbox))
+}
+
+#' The candidate-cell budget, as a resolution floor in metres. Named so the
+#' suite can shrink it and exercise the cap without allocating the budget.
+.classif_res_floor <- function(bbox) {
   dx <- as.numeric(bbox["xmax"] - bbox["xmin"])
   dy <- as.numeric(bbox["ymax"] - bbox["ymin"])
-  max(res, sqrt(dx * dy / 4e6))
+  sqrt(dx * dy / .CLASSIF_MAX_CANDIDATE_CELLS)
+}
+
+#' Apply the same ~4M candidate-cell floor to a MANUAL resolution. The Auto
+#' path has carried it since 2026-07-10; the Manual Resolution slider had no
+#' cap at all, and it is the path that can ask for the finest grid. The raster
+#' template spans the whole bounding box before the clip, so the slider's 5 m
+#' minimum over a multi-locality scope of 20 x 20 km is 1.6e7 candidate nodes -
+#' several GB inside the classification worker, where an allocation failure
+#' surfaces to the user only as a generic run failure. Shared by
+#' classif_build_grid and the module's live resolution advisory so the number
+#' the user is shown before the run is the number the run uses.
+classif_cap_res <- function(res, bbox) {
+  if (is.null(res) || !is.finite(res)) return(res)
+  cap <- .classif_res_floor(bbox)
+  if (is.finite(cap) && res < cap) cap else res
 }
 
 #' Resolution defaults to ~50k cells inside the domain, clamped to [5, 1000] m.
@@ -1374,7 +1403,19 @@ classif_build_grid <- function(pts_proj, res = NULL,
   bnd <- sf::st_as_sf(sf::st_sfc(sf::st_geometry(bnd), crs = sf::st_crs(pts_proj)))
 
   bbox <- sf::st_bbox(bnd)
-  if (is.null(res)) res <- classif_auto_res(sum(as.numeric(sf::st_area(bnd))), bbox)
+  res_note <- NULL
+  if (is.null(res)) {
+    res <- classif_auto_res(sum(as.numeric(sf::st_area(bnd))), bbox)
+  } else {
+    res_capped <- classif_cap_res(res, bbox)
+    if (!isTRUE(all.equal(res_capped, res))) {
+      res_note <- sprintf(
+        "Grid resolution %.1f m over this scope would need more than %s candidate cells; coarsened to %.1f m to keep the run inside memory.",
+        res, format(.CLASSIF_MAX_CANDIDATE_CELLS, big.mark = ",", scientific = FALSE),
+        res_capped)
+      res <- res_capped
+    }
+  }
   # A Strict Measured boundary narrower than half the cell diagonal discards
   # the cells of isolated samples (see strict_buffer_gap, spatial_pipeline.R).
   # Reported here because this is the only place the effective resolution is
@@ -1383,19 +1424,48 @@ classif_build_grid <- function(pts_proj, res = NULL,
     strict_buffer_message(buffer_dist, res)
   } else NULL
   grid_r <- terra::rast(terra::ext(bbox), resolution = res, crs = sf::st_crs(pts_proj)$wkt)
-  grid_p <- terra::as.points(grid_r, values = FALSE) |> sf::st_as_sf()
-  inside <- sf::st_within(grid_p, bnd, sparse = FALSE)[, 1]
+  # Cell centres as a plain MATRIX, tested against the boundary a block at a
+  # time, with the sf built ONCE from the survivors - the same shape
+  # run_regional_interpolation uses, and for the same reason: an sfc_POINT
+  # stores every node as its own classed numeric(2), ~430 bytes per cell
+  # against 16 for a matrix row, and terra::as.points materialised every
+  # bounding-box node before anything was discarded. Same st_within predicate,
+  # same surviving rows, same order, same columns as the single-pass form.
+  # st_within (not st_intersects) is deliberate: a node exactly on the boundary
+  # is outside the scope.
+  grid_xy <- terra::crds(grid_r, na.rm = FALSE)
+  n_bbox <- nrow(grid_xy)
+  blk <- max(1L, as.integer(.GRID_CLIP_BLOCK_CELLS))
+  inside <- logical(n_bbox)
+  for (s in seq.int(1L, n_bbox, by = blk)) {
+    e <- min(s + blk - 1L, n_bbox)
+    chunk <- sf::st_as_sf(data.frame(x = grid_xy[s:e, 1], y = grid_xy[s:e, 2]),
+                          coords = c("x", "y"), crs = sf::st_crs(pts_proj))
+    inside[s:e] <- sf::st_within(chunk, bnd, sparse = FALSE)[, 1]
+    rm(chunk)
+  }
   # Falling back to the full bbox here would silently predict over the entire
   # bounding box — the opposite of what scoping promises. Fail loudly instead;
-  # the module's promise-error handler surfaces this message.
+  # the module's promise-error handler surfaces this message. When the cap has
+  # already coarsened the cells, "reduce the resolution" is advice the user
+  # cannot take, so the message has to name what actually happened.
   if (!any(inside)) {
-    stop("No grid cells fall inside the scope boundary at this resolution; reduce the grid resolution or widen the scope.")
+    stop("No grid cells fall inside the scope boundary at this resolution; reduce the grid resolution or widen the scope.",
+         if (is.null(res_note)) "" else paste0(" ", res_note))
   }
-  grid_p <- grid_p[inside, ]
-  coords <- sf::st_coordinates(grid_p)
-  grid_p$x <- coords[, 1]; grid_p$y <- coords[, 2]
+  keep_xy <- grid_xy[inside, , drop = FALSE]
+  rm(grid_xy)
+  grid_p <- sf::st_as_sf(data.frame(x = keep_xy[, 1], y = keep_xy[, 2]),
+                         coords = c("x", "y"), crs = sf::st_crs(pts_proj))
+  grid_p$x <- keep_xy[, 1]; grid_p$y <- keep_xy[, 2]
+  rm(keep_xy)
+  # One advisory channel: the module raises res$grid_warning as a single
+  # notification, so a coarsened resolution and a strict-buffer gap must arrive
+  # together rather than one silencing the other.
+  notes <- c(res_note, strict_warning)
+  notes <- notes[!is.na(notes) & nzchar(notes)]
   list(grid_p = grid_p, res = res, crs_wkt = sf::st_crs(pts_proj)$wkt,
-       strict_warning = strict_warning)
+       strict_warning = if (length(notes)) paste(notes, collapse = " ") else NULL)
 }
 
 #' Populate a prediction grid with covariate values. Numeric covariates are

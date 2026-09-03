@@ -613,18 +613,31 @@
       tags$span(style = "color: #868e96;",
                 sprintf(" Repeated CV is on (%d fold realizations); the values here are realization 1, the spread is in the table below.", n_rep))
     }
-    # What a fold refits is engine-dependent: RK/RFK re-estimate the trend AND
-    # the residual variogram inside every fold, while gstat::krige.cv /
-    # gstat.cv (OK, CK, IDW) re-solve the kriging system per fold but reuse the
-    # variogram/LMC fitted on the FULL point set. The bias is small but
+    # What a fold refits is engine-dependent, and the shared property is REUSE
+    # OF A PARAMETER FITTED ON THE FULL POINT SET - not "has a kriging
+    # variance", which is what method_has_variance() answers. OK's and CK's
+    # variogram/LMC, an IDW power from OPTIMIZE IDW FACTORS and a fixed TPS
+    # lambda are all chosen once on all the data and reused in every fold;
+    # RK/RFK re-estimate trend and residual variogram per fold, and TPS on
+    # Auto (GCV) re-selects lambda per fold (spatial_kriging.R, fit_tps inside
+    # the fold loop), so neither carries the reuse. The bias is small but
     # systematic and one-directional, and it lands in exactly the table users
-    # pick an engine from. Message only.
-    refit_note <- if (method_has_variance(rv$disp$method) && !(rv$disp$method %in% c("RK", "RFK"))) {
+    # pick an engine from. rv$disp does not record whether the power/lambda was
+    # tuned or typed (server_execution.R, rv$disp construction), so the IDW/TPS
+    # wording is conditional rather than asserted - the reader knows which
+    # button they pressed. Message only.
+    reuse_txt <- switch(
+      rv$disp$method %||% "",
+      "OK" = , "CK" = " is cross-validated against a variogram fitted on the full point set (the held-out point contributed to it), whereas RK/RFK refit inside every fold. These metrics are therefore mildly optimistic relative to RK/RFK on the same data; see Scientific Guide §5.",
+      "IDW" = " re-solves each fold with one distance power. If that power came from OPTIMIZE IDW FACTORS it was selected on the full point set, so the held-out point contributed to it and these metrics are mildly optimistic relative to RK/RFK, which refit inside every fold; a power you typed yourself carries no such reuse. See Scientific Guide §5.",
+      "TPS" = " re-fits its spline inside every fold, but a fixed lambda - typed into the slider or taken from OPTIMIZE TPS LAMBDA - is reused unchanged in every fold and was selected on the full point set, so these metrics are mildly optimistic relative to RK/RFK. Auto (GCV) re-selects lambda inside each fold and carries no such reuse. See Scientific Guide §5.",
+      NULL
+    )
+    refit_note <- if (!is.null(reuse_txt)) {
       tags$div(
         style = "font-size: 0.82em; color: #495057; margin: -4px 0 8px 0;",
         tags$span(style = "color: #868e96;",
-                  paste0(get_method_label(rv$disp$method),
-                         " is cross-validated against a variogram fitted on the full point set (the held-out point contributed to it), whereas RK/RFK refit inside every fold. These metrics are therefore mildly optimistic relative to RK/RFK on the same data; see Scientific Guide §5."))
+                  paste0(get_method_label(rv$disp$method), reuse_txt))
       )
     }
     tagList(
@@ -811,23 +824,31 @@
           
           if(nrow(df) < 3) return(sci_dt(data.frame(Status = "Not enough data points for numeric metrics.")))
           
-          rmse_val <- tryCatch(yardstick::rmse_vec(df$v, df$pv), error = function(e) NA)
-          rsq_val <- tryCatch(yardstick::rsq_vec(df$v, df$pv), error = function(e) NA)
-          rsq_trad <- tryCatch(yardstick::rsq_trad_vec(df$v, df$pv), error = function(e) NA)
-          mae_val <- tryCatch(yardstick::mae_vec(df$v, df$pv), error = function(e) NA)
-          mbe_val <- mean(df$pv - df$v, na.rm = TRUE)
-          ccc_val <- tryCatch(yardstick::ccc_vec(df$v, df$pv), error = function(e) NA)
-          rpd_val <- tryCatch(yardstick::rpd_vec(df$v, df$pv), error = function(e) NA)
-          rpiq_val <- tryCatch(yardstick::rpiq_vec(df$v, df$pv), error = function(e) NA)
-          smape_val <- tryCatch(yardstick::smape_vec(df$v, df$pv), error = function(e) NA)
-          
-          mean_v <- mean(df$v, na.rm=TRUE)
-          nrmse_val <- if(!is.na(rmse_val) && mean_v != 0) (rmse_val / mean_v) * 100 else NA
-          nmae_val <- if(!is.na(mae_val) && mean_v != 0) (mae_val / mean_v) * 100 else NA
-          
+          # ONE metric dictionary: perform_cv() is the app's metric authority, so
+          # this table and Model Performance cannot drift apart. It carries
+          # calc_ccc's population moments (yardstick's ccc_vec defaults to the
+          # sample-moment variant removed in 1.0.8), NRMSE against |mean| (a
+          # signed denominator reports a negative error percentage for an
+          # anomaly variable), and NA - never Inf or NaN - for every degenerate
+          # ratio. moran = FALSE: an externally supplied prediction column
+          # carries no cross-validation residual field.
+          m <- perform_cv(data.frame(var1.observed = df$v, var1.pred = df$pv),
+                          moran = FALSE)
+
+          # The remaining documented departures from Model Performance
+          # (Scientific Guide 5, which lists three - the third is the moran =
+          # FALSE above): MBE is reported predicted-minus-observed, and NMAE has
+          # no CV counterpart. NMAE comes off the raw residuals rather than the
+          # display-rounded m$mae, so a small-mean variable does not carry that
+          # rounding into a percentage.
+          mbe_val <- -m$me
+          mean_v <- mean(df$v, na.rm = TRUE)
+          mae_raw <- mean(abs(df$v - df$pv), na.rm = TRUE)
+          nmae_val <- if(is.finite(mae_raw) && abs(mean_v) > 0) round((mae_raw / abs(mean_v)) * 100, 2) else NA
+
               sci_dt(data.frame(
                 Metric = c("R2 (NSE/Traditional)", "R2 (Correlation)", "RMSE", "NRMSE (%)", "MAE", "NMAE (%)", "MBE (ML pred - observed)", "Lin's CCC (Agree)", "RPD (Precision)", "RPIQ", "SMAPE (%)"),
-                Value = c(round(rsq_trad, 4), round(rsq_val, 4), round(rmse_val, 4), round(nrmse_val, 4), round(mae_val, 4), round(nmae_val, 4), round(mbe_val, 4), round(ccc_val, 4), round(rpd_val, 4), round(rpiq_val, 4), round(smape_val, 4))
+                Value = c(m$nse, m$r2, m$rmse, m$nrmse_mean, m$mae, nmae_val, mbe_val, m$ccc, m$rpd, m$rpiq, m$smape)
               ))        })
   output$kappa_table <- DT::renderDataTable({
     req(rv$sf, input$sel_loc_stats, input$kappa_bin_method)

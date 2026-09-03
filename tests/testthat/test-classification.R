@@ -627,6 +627,82 @@ test_that("classif_build_grid honours the wrapped boundary and resolve_scope thr
   expect_gt(a2, a1)
 })
 
+test_that("a manual grid resolution is capped at the candidate-cell budget and says so", {
+  # The Auto path has carried this floor since 2026-07-10; the Manual
+  # Resolution slider had none, and it is the path that can ask for the finest
+  # grid. Its 5 m minimum over a multi-locality scope of 20 x 20 km is 1.6e7
+  # candidate nodes, inside the classification worker, where an allocation
+  # failure reaches the user only as a generic run failure.
+  pts <- make_classif_points(n = 50)
+
+  # Below the budget: the requested resolution is used verbatim, no note.
+  g_ok <- classif_build_grid(pts, res = 100, boundary = "concave")
+  expect_equal(g_ok$res, 100)
+  expect_null(g_ok$strict_warning)
+
+  # Shrink the budget rather than widen the scope: firing the real 4e6 cap
+  # allocates 4e6 candidate cells by construction, which is the whole point of
+  # having it.
+  orig <- .CLASSIF_MAX_CANDIDATE_CELLS
+  withr::defer(assign(".CLASSIF_MAX_CANDIDATE_CELLS", orig, envir = globalenv()))
+  assign(".CLASSIF_MAX_CANDIDATE_CELLS", 400, envir = globalenv())
+  g_cap <- classif_build_grid(pts, res = 20, boundary = "concave")
+  assign(".CLASSIF_MAX_CANDIDATE_CELLS", orig, envir = globalenv())
+
+  expect_gt(g_cap$res, 20)
+  expect_true(is.character(g_cap$strict_warning))
+  expect_match(g_cap$strict_warning, "coarsened", ignore.case = TRUE)
+  # The reported resolution is the one the grid was actually built at.
+  bb <- sf::st_bbox(g_cap$grid_p)
+  expect_lte(nrow(g_cap$grid_p),
+             ceiling((as.numeric(bb["xmax"] - bb["xmin"]) / g_cap$res + 1) *
+                     (as.numeric(bb["ymax"] - bb["ymin"]) / g_cap$res + 1)))
+})
+
+test_that("the Auto resolution keeps the candidate grid inside its budget", {
+  # classif_auto_res floors the ~50k-cells-in-the-domain target so a multi-part
+  # scope (a bounding box far larger than the hulls it contains) cannot blow
+  # the candidate grid up. Pure arithmetic; nothing is allocated.
+  bbox <- sf::st_bbox(c(xmin = 0, ymin = 0, xmax = 20000, ymax = 20000),
+                      crs = sf::st_crs(32633))
+  # Two small distant hulls: a tiny domain area inside a very wide bounding box.
+  res <- classif_auto_res(area_m2 = 2e6, bbox = bbox)
+  expect_lte((20000 / res) * (20000 / res), .CLASSIF_MAX_CANDIDATE_CELLS)
+})
+
+test_that("the classification prediction grid is invariant to the clip block size", {
+  # The bounding-box cells are converted to sf a block at a time and only the
+  # keep mask survives the loop, so the grid must be exactly what a single pass
+  # produced - same rows, same order - whatever the block size.
+  pts <- make_classif_points(n = 50)
+  orig <- .GRID_CLIP_BLOCK_CELLS
+  withr::defer(assign(".GRID_CLIP_BLOCK_CELLS", orig, envir = globalenv()))
+
+  one_block <- classif_build_grid(pts, res = 100, boundary = "concave")
+  assign(".GRID_CLIP_BLOCK_CELLS", 7, envir = globalenv())
+  many_blocks <- classif_build_grid(pts, res = 100, boundary = "concave")
+  assign(".GRID_CLIP_BLOCK_CELLS", orig, envir = globalenv())
+
+  expect_gt(nrow(one_block$grid_p), 7)   # otherwise the override is a no-op
+  expect_identical(sf::st_coordinates(one_block$grid_p),
+                   sf::st_coordinates(many_blocks$grid_p))
+  expect_identical(one_block$grid_p$x, many_blocks$grid_p$x)
+  expect_identical(one_block$grid_p$y, many_blocks$grid_p$y)
+  # ... and identical to the single-pass terra::as.points form it replaced, so
+  # the memory rewrite provably keeps the same cells. terra::crds returns the
+  # same centres in the same cell order; the predicate stays st_within (not
+  # st_intersects: a node exactly on the boundary is outside the scope).
+  bnd <- sf::st_as_sf(sf::st_sfc(
+    sf::st_union(sf::st_geometry(.classif_scope_hulls(pts, group = NULL, style = "concave"))),
+    crs = sf::st_crs(pts)))
+  grid_r <- terra::rast(terra::ext(sf::st_bbox(bnd)), resolution = 100,
+                        crs = sf::st_crs(pts)$wkt)
+  ref <- sf::st_as_sf(terra::as.points(grid_r, values = FALSE))
+  ref <- ref[sf::st_within(ref, bnd, sparse = FALSE)[, 1], ]
+  expect_equal(unname(sf::st_coordinates(one_block$grid_p)),
+               unname(sf::st_coordinates(ref)))
+})
+
 # ── Class-imbalance weights ──────────────────────────────────────────────────
 
 test_that("inverse-frequency class weights follow the balanced heuristic", {

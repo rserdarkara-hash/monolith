@@ -107,7 +107,7 @@ test_that("augment_metrics returns all-NA list for < 2 observations", {
 })
 
 test_that("augment_metrics NSE = 1 for perfect prediction", {
-  k <- make_metrics_known()
+  k <- make_metrics_known()$perfect
   res <- augment_metrics(k$observed, k$predicted)
   expect_equal(res$nse, 1.0)
   expect_equal(res$nrmse_mean, 0.0)
@@ -176,6 +176,17 @@ test_that("augment_metrics RPD and RPIQ are NA at zero RMSE", {
   expect_true(is.na(res$rpiq))
   expect_false(is.infinite(res$rpd))
   expect_false(is.infinite(res$rpiq))
+
+  # ...and through perform_cv, which is what the uploaded-prediction tables
+  # call. A "predicted" column uploaded as a copy of the measured column is a
+  # routine sanity check, and it is the reachable path to this branch.
+  pcv <- perform_cv(data.frame(var1.observed = obs, var1.pred = obs), moran = FALSE)
+  expect_true(is.na(pcv$rpd))
+  expect_true(is.na(pcv$rpiq))
+  expect_false(is.infinite(pcv$rpd))
+  expect_false(is.infinite(pcv$rpiq))
+  # The reason those tables must not call yardstick directly: it answers Inf.
+  expect_true(is.infinite(yardstick::rpd_vec(obs, obs)))
 })
 
 test_that("augment_metrics sMAPE defines the 0/0 term as 0, keeping n consistent", {
@@ -190,6 +201,12 @@ test_that("augment_metrics sMAPE defines the 0/0 term as 0, keeping n consistent
   pre2 <- c(0, 0, 10, 30)
   # terms: 0, 0, 0, 2*20/40 = 1  ->  mean = 0.25  ->  25%
   expect_equal(augment_metrics(obs2, pre2)$smape, 25)
+
+  # Same convention through perform_cv, the authority the uploaded-prediction
+  # tables read. yardstick voids the whole column on a single zero pair.
+  expect_equal(perform_cv(data.frame(var1.observed = obs2, var1.pred = pre2),
+                          moran = FALSE)$smape, 25)
+  expect_true(is.nan(yardstick::smape_vec(obs2, pre2)))
 })
 
 # ── .cv_to_df ──────────────────────────────────────────────────────────────
@@ -237,6 +254,37 @@ test_that("perform_cv computes correct metrics on perfect prediction", {
   expect_equal(res$r2, 1.0)
   expect_equal(res$mae, 0.0)
   expect_equal(res$n, 5)
+})
+
+test_that("the metric dictionary reproduces its external known answers", {
+  # A perfect-prediction fixture cannot distinguish a correct RMSE from one with
+  # the wrong divisor, nor NSE from SSE/SST, so every metric perform_cv reports
+  # is pinned here on a NON-degenerate pair whose answers were derived from the
+  # definitions (see make_metrics_known). round_values = FALSE because the
+  # display lattice (1e-4 / 0.01) is coarser than the tolerance below.
+  k <- make_metrics_known()
+  m <- perform_cv(data.frame(var1.observed = k$observed, var1.pred = k$predicted),
+                  moran = FALSE, round_values = FALSE)
+  expect_equal(m$rmse,       k$rmse,  tolerance = 1e-9)
+  expect_equal(m$mae,        k$mae,   tolerance = 1e-9)
+  expect_equal(m$me,         k$me,    tolerance = 1e-9)
+  expect_equal(m$r2,         k$r2,    tolerance = 1e-9)
+  expect_equal(m$nse,        k$nse,   tolerance = 1e-9)
+  expect_equal(m$nrmse_mean, k$nrmse, tolerance = 1e-9)
+  expect_equal(m$rpd,        k$rpd,   tolerance = 1e-9)
+  expect_equal(m$rpiq,       k$rpiq,  tolerance = 1e-9)
+  expect_equal(m$smape,      k$smape, tolerance = 1e-9)
+  expect_equal(m$n, length(k$observed))
+
+  # The uploaded-prediction tables (server_sci_analysis.R, server_execution.R,
+  # server_setup.R) read these same fields instead of calling yardstick, whose
+  # ccc_vec defaults to the sample-moment variant this app removed in 1.0.8.
+  # Both halves are pinned: what the app's CCC IS, and what it is NOT.
+  expect_equal(calc_ccc(k$observed, k$predicted),
+               yardstick::ccc_vec(k$observed, k$predicted, bias = TRUE),
+               tolerance = 1e-10)
+  expect_false(isTRUE(all.equal(calc_ccc(k$observed, k$predicted),
+                                yardstick::ccc_vec(k$observed, k$predicted))))
 })
 
 test_that("perform_cv detects non-standard column names via fallback", {

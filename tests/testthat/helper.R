@@ -197,13 +197,40 @@ make_ccc_known <- function() {
   )
 }
 
-#' Create a known-answer pair for NSE / RMSE.
+#' Create a known-answer pair for the WHOLE error-metric dictionary.
+#' The pair is make_ccc_known()'s, so one fixture anchors every statistic
+#' perform_cv() reports. Every value below was derived from the definition
+#' (2026-09-03), not read off this implementation, and RMSE/RPD/RPIQ were
+#' additionally cross-checked against yardstick, which agrees on those three
+#' conventions:
+#'   RMSE      = sqrt(mean(r^2))                    r = observed - predicted
+#'   MAE       = mean(|r|)          ME  = mean(r)   (perform_cv's direction)
+#'   R2(corr)  = cor(observed, predicted)^2
+#'   NSE       = 1 - SSE/SST, SST about mean(observed)
+#'   NRMSE     = RMSE / |mean(observed)| * 100
+#'   RPD       = sd(observed) / RMSE     (sample sd; Chang et al. 2001)
+#'   RPIQ      = IQR(observed) / RMSE
+#'   sMAPE     = mean(2|r| / (|observed| + |predicted|)) * 100
+#' A perfect pair alone (the old fixture) cannot separate sqrt(mean(r^2)) from
+#' sqrt(sum(r^2)/(n-1)), nor NSE from SSE/SST - both are trivially right at zero
+#' residual - so it is kept only as the degenerate companion. If a formula ever
+#' changes, re-derive these externally; never adjust them to make a test pass.
 make_metrics_known <- function() {
   list(
-    observed  = c(1, 2, 4, 5),
-    predicted = c(1, 2, 4, 5),    # perfect → NSE = 1, RMSE = 0
-    nse       = 1.0,
-    rmse      = 0.0
+    observed  = c(10, 20, 30, 40, 50),
+    predicted = c(12, 19, 31, 38, 52),
+    rmse      = 1.6733200531,
+    mae       = 1.6,
+    me        = -0.4,
+    r2        = 0.9868103101,
+    nse       = 0.986,
+    nrmse     = 5.5777335102,
+    rpd       = 9.4491118252,
+    rpiq      = 11.9522860933,
+    smape     = 7.1276971181,
+    # Perfect-prediction companion, for the degenerate branches.
+    perfect   = list(observed = c(1, 2, 4, 5), predicted = c(1, 2, 4, 5),
+                     nse = 1.0, rmse = 0.0)
   )
 }
 

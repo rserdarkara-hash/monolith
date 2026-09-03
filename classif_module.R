@@ -690,7 +690,10 @@ classif_server <- function(id, data_reactive, vars_metadata_reactive, spatial_re
       sc <- current_scope()
       if (is.null(sc)) return(NULL)
       res_eff <- if (identical(bs$res_mode, "fixed")) {
-        bs$res
+        # A manual resolution is coarsened by the grid builder when it would
+        # exceed ~4M candidate cells, so the advisory must read the same
+        # effective cell size the run will use.
+        if (is.null(sc$boundary_bbox)) bs$res else classif_cap_res(bs$res, sc$boundary_bbox)
       } else if (!is.null(sc$boundary_area_m2) && !is.null(sc$boundary_bbox)) {
         classif_auto_res(sc$boundary_area_m2, sc$boundary_bbox)
       } else NULL

@@ -1008,28 +1008,11 @@
       }, error = function(e) NULL)
     }
 
-    if(!is.null(rv$sf)) {
-      df_met <- rv$sf %>% st_drop_geometry() %>% filter(!is.na(v), !is.na(pv))
-      if(nrow(df_met) > 0) {
-        resids <- df_met$v - df_met$pv
-        rmse_val <- sqrt(mean(resids^2))
-        mbe_val <- mean(df_met$pv - df_met$v)
-        # Guard the ratio metrics against a constant (zero-variance) vector, the
-        # same NA-not-Inf convention augment_metrics()/calc_ccc() follow: a
-        # zero-variance observed vector makes NSE = 1 - x/0 = -Inf and R2
-        # (squared correlation) undefined, and Inf/NaN would read as a real score
-        # in the exported Global Performance Metrics table.
-        sst <- sum((df_met$v - mean(df_met$v))^2)
-        nse_val <- if (sst > 0) 1 - sum(resids^2) / sst else NA
-        r2_val <- if (isTRUE(stats::sd(df_met$v) > 0) && isTRUE(stats::sd(df_met$pv) > 0)) cor(df_met$v, df_met$pv)^2 else NA
-        
-        global_metrics <- data.frame(
-          Metric = c("RMSE (Avg Error)", "R2 (Correlation)", "R2 (Traditional)", "MBE (ML pred - observed)"),
-          Value = c(round(rmse_val, 4), round(r2_val, 4), round(nse_val, 4), round(mbe_val, 4))
-        )
-        register_export_item("table_global_metrics", paste(meta$label, "- Global Performance Metrics"), "table", global_metrics, meta$category)
-      }
-    }
+    # NOTE: a hand-rolled "Global Performance Metrics" export table used to sit
+    # here. It reported four of the statistics "Total Prediction Performance"
+    # reports below, off the same rv$sf filter, under near-identical labels; it
+    # went once that table moved onto perform_cv(). Do not re-add a second
+    # dictionary here.
     # NOTE: intentionally no get_current_meta() re-read here - the export
     # labels below must use the meta captured at dispatch, not whatever the
     # sidebar points at when the run finishes.
@@ -1037,16 +1020,15 @@
     if(!is.null(rv$sf)) {
       df_perf <- rv$sf %>% st_drop_geometry() %>% filter(!is.na(v), !is.na(pv))
       if(nrow(df_perf) >= 3) {
+        # Same metric dictionary as the on-screen Prediction Performance card
+        # (server_sci_analysis.R) and as Model Performance: perform_cv() owns
+        # every definition, so an export cannot report a different CCC or an
+        # Inf RPD than the screen. moran = FALSE: no CV residual field here.
+        perf_m <- perform_cv(data.frame(var1.observed = df_perf$v, var1.pred = df_perf$pv),
+                             moran = FALSE)
         perf_total <- data.frame(
           Metric = c("R2 (Trad)", "R2 (Corr)", "RMSE", "MBE (ML pred - observed)", "CCC", "RPD"),
-          Value = c(
-            round(yardstick::rsq_trad_vec(df_perf$v, df_perf$pv), 4),
-            round(yardstick::rsq_vec(df_perf$v, df_perf$pv), 4),
-            round(yardstick::rmse_vec(df_perf$v, df_perf$pv), 4),
-            round(mean(df_perf$pv - df_perf$v, na.rm=TRUE), 4),
-            round(yardstick::ccc_vec(df_perf$v, df_perf$pv), 4),
-            round(yardstick::rpd_vec(df_perf$v, df_perf$pv), 4)
-          )
+          Value = c(perf_m$nse, perf_m$r2, perf_m$rmse, -perf_m$me, perf_m$ccc, perf_m$rpd)
         )
         register_export_item("table_perf_uploaded_total", paste(meta$label, "- Total Prediction Performance"), "table", perf_total, meta$category)
       }

@@ -483,11 +483,12 @@ run_regional_interpolation <- function(item, current_method, current_crs, aux_va
     
     if (!is.null(res_mode) && res_mode == "fixed") {
       actual_res <- grid_res_safe
-      # terra::as.points below materializes EVERY bbox cell before the boundary
-      # clip, so a fine fixed resolution over a large extent can allocate
-      # hundreds of millions of nodes and exhaust memory. Cap the candidate grid
-      # at ~4M cells, matching classif_build_grid's auto-resolution guard. Fires
-      # only in that pathological case; ordinary fixed resolutions are untouched.
+      # The raster template below spans the whole bounding box before the
+      # boundary clip, so a fine fixed resolution over a large extent puts
+      # hundreds of millions of candidate cells through the clip. Cap the
+      # candidate grid at ~4M cells, matching the floor classif_build_grid
+      # applies to both of its resolution modes. Fires only in that
+      # pathological case; ordinary fixed resolutions are untouched.
       dx <- as.numeric(bbox["xmax"] - bbox["xmin"])
       dy <- as.numeric(bbox["ymax"] - bbox["ymin"])
       min_res_cap <- sqrt(dx * dy / 4e6)
@@ -548,8 +549,11 @@ run_regional_interpolation <- function(item, current_method, current_crs, aux_va
     # terra::as.points does, in the same cell order, at matrix cost.
     grid_xy <- terra::crds(grid_r, na.rm = FALSE)
 
-    grid_block <- function(s, e) {
-      sf::st_as_sf(data.frame(x = grid_xy[s:e, 1], y = grid_xy[s:e, 2]),
+    # `i` is either a start index paired with `e` (a contiguous block) or a
+    # ready-made row index vector (the survivors of the clip).
+    grid_block <- function(i, e = NULL) {
+      if (!is.null(e)) i <- i:e
+      sf::st_as_sf(data.frame(x = grid_xy[i, 1], y = grid_xy[i, 2]),
                    coords = c("x", "y"), crs = sf::st_crs(pts))
     }
 
@@ -561,26 +565,29 @@ run_regional_interpolation <- function(item, current_method, current_crs, aux_va
     # for a concave, wrapped or multi-part boundary the bbox routinely carries
     # 1.5-3x the cells that survive, and the clip used to run only after all of
     # them existed. Same st_intersects predicate, same surviving rows, same
-    # order, same columns as the single-pass form.
-    keep_blocks <- tryCatch({
+    # order, same columns as the single-pass form. Only the keep MASK survives
+    # the loop (1 byte per bounding-box cell, ~4 MB at the ~4M-cell cap), never
+    # the surviving blocks: holding the blocks and then rbind()-ing them kept
+    # the survivors alive TWICE at the bind - measured 618 MB where 309 MB
+    # suffices, on a 1e6-cell box retaining 750,000 cells.
+    keep_mask <- tryCatch({
       blk_g <- max(1L, as.integer(.GRID_CLIP_BLOCK_CELLS))
       n_bbox <- nrow(grid_xy)
-      out <- vector("list", max(1L, ceiling(n_bbox / blk_g)))
-      for (bi in seq_along(out)) {
-        s <- (bi - 1L) * blk_g + 1L
-        e <- min(bi * blk_g, n_bbox)
+      km <- logical(n_bbox)
+      for (s in seq.int(1L, n_bbox, by = blk_g)) {
+        e <- min(s + blk_g - 1L, n_bbox)
         chunk <- grid_block(s, e)
-        hit <- sf::st_intersects(chunk, bound, sparse = FALSE)[, 1]
-        out[[bi]] <- if (any(hit)) chunk[hit, ] else NULL
+        km[s:e] <- sf::st_intersects(chunk, bound, sparse = FALSE)[, 1]
+        rm(chunk)
       }
-      Filter(Negate(is.null), out)
+      km
     }, error = function(e) NULL)
 
-    if (is.null(keep_blocks)) {
+    if (is.null(keep_mask)) {
       # Predicate failed (degenerate boundary geometry): fall back to the
       # unclipped grid, exactly as the `inside <- NULL` branch did.
       grid_p <- grid_block(1L, nrow(grid_xy))
-    } else if (!length(keep_blocks)) {
+    } else if (!any(keep_mask)) {
       # A coarse fixed resolution over a small boundary can leave NO grid node
       # inside it. The engines would then krige the full bbox and the mask
       # would discard every cell - a blank locality with no message, after
@@ -594,15 +601,13 @@ run_regional_interpolation <- function(item, current_method, current_crs, aux_va
         ": no grid cells fall inside the boundary at this resolution; locality skipped.")
       return(res_out)
     } else {
-      grid_p <- if (length(keep_blocks) == 1L) keep_blocks[[1]] else do.call(rbind, keep_blocks)
+      grid_p <- grid_block(which(keep_mask))
     }
-    rm(grid_xy, keep_blocks)
+    rm(grid_xy, keep_mask)
 
-    # x/y attached ONCE, after the clip, so the column order is (geometry, x, y)
-    # whatever the block count: rbind.sf moves the geometry column last, which
-    # would otherwise make the layout of an exported surface depend on how many
-    # blocks the grid happened to need. One st_coordinates pass, over the
-    # survivors rather than the whole bounding box.
+    # x/y attached ONCE, after the clip: the column order is (geometry, x, y)
+    # whatever the block count, and it is one st_coordinates pass over the
+    # survivors rather than over the whole bounding box.
     grid_cc <- sf::st_coordinates(grid_p)
     grid_p <- dplyr::mutate(grid_p, x = grid_cc[, 1], y = grid_cc[, 2])
     rm(grid_cc)

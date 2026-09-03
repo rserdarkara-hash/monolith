@@ -144,16 +144,14 @@
        if(comp_mode || val_type != "actual") {
          df_l_perf <- rv$sf %>% st_drop_geometry() %>% filter(loc == !!l, !is.na(v), !is.na(pv))
          if(nrow(df_l_perf) >= 3) {
+           # Same metric dictionary as the on-screen card and the Total export;
+           # per-locality n is small (8-30), which is exactly where the two CCC
+           # estimators diverge most. moran = FALSE: no CV residual field here.
+           perf_m_l <- perform_cv(data.frame(var1.observed = df_l_perf$v, var1.pred = df_l_perf$pv),
+                                  moran = FALSE)
            perf_l <- data.frame(
              Metric = c("R2 (Trad)", "R2 (Corr)", "RMSE", "MBE (ML pred - observed)", "CCC", "RPD"),
-             Value = c(
-               round(yardstick::rsq_trad_vec(df_l_perf$v, df_l_perf$pv), 4),
-               round(yardstick::rsq_vec(df_l_perf$v, df_l_perf$pv), 4),
-               round(yardstick::rmse_vec(df_l_perf$v, df_l_perf$pv), 4),
-               round(mean(df_l_perf$pv - df_l_perf$v, na.rm=TRUE), 4),
-               round(yardstick::ccc_vec(df_l_perf$v, df_l_perf$pv), 4),
-               round(yardstick::rpd_vec(df_l_perf$v, df_l_perf$pv), 4)
-             )
+             Value = c(perf_m_l$nse, perf_m_l$r2, perf_m_l$rmse, -perf_m_l$me, perf_m_l$ccc, perf_m_l$rpd)
            )
            register_export_item(paste0("table_perf_loc_", l), paste(meta$label, "-", l, "- Prediction Performance"), "table", perf_l, meta$category)
          }

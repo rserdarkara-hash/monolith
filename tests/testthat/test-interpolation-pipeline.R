@@ -1110,12 +1110,13 @@ test_that("residual (Delta) raster carries only the prediction layer", {
 })
 
 test_that("the prediction grid is invariant to the boundary-clip block size", {
-  # The bounding-box cells are converted to sf points a block at a time and
-  # tested against the boundary as they go, so peak memory is one block plus
-  # the survivors rather than the whole box (an sfc_POINT costs ~430 bytes per
-  # cell against 16 for a matrix row). The predicate and the surviving rows must
-  # be exactly what a single pass produced - if the block size can move a value,
-  # the blocking is not exact.
+  # The bounding-box cells are converted to sf points a block at a time, tested
+  # against the boundary as they go, and only the keep MASK survives the loop -
+  # the sf is built once from the masked rows, so peak memory is one block plus
+  # the survivors rather than the whole box or the survivors twice (an sfc_POINT
+  # costs ~430 bytes per cell against 16 for a matrix row). The predicate and
+  # the surviving rows must be exactly what a single pass produced - if the
+  # block size can move a value, the blocking is not exact.
   pts <- make_test_points(20)
   coords <- sf::st_coordinates(pts)
   pts_data <- data.frame(x = coords[, 1], y = coords[, 2],
@@ -1125,26 +1126,32 @@ test_that("the prediction grid is invariant to the boundary-clip block size", {
                                tps_lambda_act = -1, tps_lambda_pre = -1,
                                pre_fit_act = NULL, pre_fit_pre = NULL,
                                cv_strategy = "auto", rfk_uncertainty = "jackknife"))
-  run_grid <- function() {
+  run_grid <- function(b_type) {
     suppressWarnings(run_regional_interpolation(
-      # "concave" leaves a large out-of-boundary surplus in the bounding box,
-      # which is the case the block clip exists for.
-      item, "IDW", 32633, character(0), NULL, "concave", "dynamic", 250,
+      item, "IDW", 32633, character(0), NULL, b_type, "dynamic", 250,
       "fixed", 200, "EPSG:4326", FALSE, "actual"))
   }
 
-  one_block <- run_grid()
   orig <- .GRID_CLIP_BLOCK_CELLS
   withr::defer(assign(".GRID_CLIP_BLOCK_CELLS", orig, envir = globalenv()))
-  assign(".GRID_CLIP_BLOCK_CELLS", 7, envir = globalenv())   # several blocks
-  many_blocks <- run_grid()
-  assign(".GRID_CLIP_BLOCK_CELLS", orig, envir = globalenv())
 
-  r1 <- terra::unwrap(one_block$r_a)
-  r2 <- terra::unwrap(many_blocks$r_a)
-  expect_gt(prod(dim(r1)[1:2]), 7)   # otherwise the block override is a no-op
-  expect_identical(dim(r1), dim(r2))
-  expect_identical(terra::values(r1), terra::values(r2))
+  # "concave" leaves a large out-of-boundary surplus in the bounding box, which
+  # is the case the block clip exists for; "convex" retains most of its box,
+  # which is the case where holding the surviving blocks AND their rbind cost
+  # the most. Both must come out of the block loop identical.
+  for (b_type in c("concave", "convex")) {
+    assign(".GRID_CLIP_BLOCK_CELLS", orig, envir = globalenv())
+    one_block <- run_grid(b_type)
+    assign(".GRID_CLIP_BLOCK_CELLS", 7, envir = globalenv())   # several blocks
+    many_blocks <- run_grid(b_type)
+    assign(".GRID_CLIP_BLOCK_CELLS", orig, envir = globalenv())
+
+    r1 <- terra::unwrap(one_block$r_a)
+    r2 <- terra::unwrap(many_blocks$r_a)
+    expect_gt(prod(dim(r1)[1:2]), 7)   # otherwise the block override is a no-op
+    expect_identical(dim(r1), dim(r2), info = b_type)
+    expect_identical(terra::values(r1), terra::values(r2), info = b_type)
+  }
 })
 
 test_that("IDW and TPS surfaces carry no phantom variance band", {
