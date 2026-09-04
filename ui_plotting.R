@@ -35,19 +35,19 @@ build_vgm_warning_html <- function(v_fit_list, target = NULL) {
   if (length(fallback_keys) == 0 && length(flawed_keys) == 0) return(NULL)
 
   red_part <- if (length(fallback_keys) > 0) {
-    paste0("<span style='color:red;'>Note: Variogram fit failed for some localities (",
+    paste0("<span style='color:var(--mn-danger);'>Note: Variogram fit failed for some localities (",
            paste(fallback_keys, collapse = ", "),
            ").<br>A default spherical variogram model was used instead so the map could still be produced. The map is shown, but its spatial structure was not estimated from your data &mdash; interpret interpolations with caution.</span>")
   } else ""
   amber_part <- if (length(flawed_keys) > 0) {
-    paste0("<span style='color:#e67700;'>Auto-fit selected a non-converged or singular variogram for: ",
+    paste0("<span style='color:var(--mn-warn);'>Auto-fit selected a non-converged or singular variogram for: ",
            paste(flawed_keys, collapse = ", "),
            ".<br>No candidate model converged cleanly, so the best-scoring (lowest-error) fit was used to build this map. The map is still valid to explore, but variogram parameters may be imprecise &mdash; interpret interpolations with caution.</span>")
   } else ""
   sep <- if (nzchar(red_part) && nzchar(amber_part)) "<br>" else ""
 
-  paste0("<div class='vgm-fallback-warn' style='font-weight:bold; background:white; padding:5px 25px 5px 5px; border-radius:4px; position:relative;'>",
-         "<button onclick='this.parentElement.style.display=\"none\";' style='position:absolute; top:2px; right:2px; background:none; border:none; color:red; font-size:16px; font-weight:bold; cursor:pointer;'>&times;</button>",
+  paste0("<div class='vgm-fallback-warn' style='font-weight:bold; background:var(--mn-surface); border:1px solid var(--mn-line); padding:5px 25px 5px 5px; border-radius:4px; position:relative;'>",
+         "<button onclick='this.parentElement.style.display=\"none\";' style='position:absolute; top:2px; right:2px; background:none; border:none; color:var(--mn-danger); font-size:16px; font-weight:bold; cursor:pointer;'>&times;</button>",
          red_part, sep, amber_part,
          "</div>")
 }
@@ -1661,7 +1661,7 @@ add_map_ruler <- function(map, position = "bottomleft") {
             if (!rec.filled) {
               layer.setPopupContent(
                 '<div class=\"monolith-ruler-popup\"><h3>Measurement</h3>' +
-                '<p style=\"color:#999;\">Computing...</p></div>');
+                '<p style=\"color: var(--mn-text-3);\">Computing...</p></div>');
             }
           }, 0);
           Shiny.setInputValue(

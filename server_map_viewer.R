@@ -23,7 +23,7 @@
     )
     diffs <- unlist(Filter(Negate(is.null), diffs))
     if (!length(diffs)) return(NULL)
-    div(style = "margin-bottom: 10px; padding: 10px 14px; border-radius: 5px; border: 1px solid #f0c36d; background-color: #fdf6e3; color: #7d5a00;",
+    div(style = "margin-bottom: 10px; padding: 10px 14px; border-radius: 5px; border: 1px solid var(--mn-line); border-left: 2px solid var(--mn-warn); background-color: var(--mn-surface-2); color: var(--mn-text-2);",
         tags$b("These maps are out of date. "),
         "They were computed under ", tags$b(fmt(d$map_crs)),
         ", and the Data Setup tab has changed since: ",
@@ -89,8 +89,8 @@
     if (!identical(input$res_mode %||% "local", "fixed")) return(NULL)
     msg <- strict_buffer_message(input$buff_dist %||% 250, input$grid_res %||% 50)
     if (is.null(msg)) return(NULL)
-    p(style = paste("font-size: 0.78em; margin-top: 8px; border-left: 3px solid #f59e0b;",
-                    "padding-left: 8px; color: #fcd34d; line-height: 1.35;"),
+    p(style = paste("font-size: 0.78em; margin-top: 8px; border-left: 2px solid var(--mn-warn);",
+                    "padding-left: 8px; color: var(--mn-text-2); line-height: 1.35;"),
       msg,
       # An uploaded boundary shapefile replaces the point buffers for every
       # locality it matches, and the run-time check stays silent for those. It
@@ -216,7 +216,7 @@
       for (i in seq_along(resid_layers)) {
         m <- add_img(m, resid_layers[[i]], pal)
       }
-      m <- m %>% leaflet::addLegend(pal = pal, values = c(-abs_max, abs_max), title = paste("Resid:", meta$label), layerId = legend_id)
+      m <- m %>% leaflet::addLegend(pal = pal, values = c(-abs_max, abs_max), title = legend_var_title(paste("Resid:", meta$label)), layerId = legend_id)
     } else {
       # Classified styling when requested AND computable; any failure or
       # not-yet-applied class breaks fall back to the continuous palette so
@@ -233,7 +233,7 @@
           if (is.null(r_w)) next
           m <- add_img(m, select_active_layer(r_w), pal)
         }
-        m <- m %>% leaflet::addLegend(colors = class_params$colors, labels = class_params$leg_labels, opacity = 0.8, title = paste(meta$label, meta$unit), layerId = legend_id)
+        m <- m %>% leaflet::addLegend(colors = class_params$colors, labels = class_params$leg_labels, opacity = 0.8, title = legend_var_title(paste(meta$label, meta$unit)), layerId = legend_id)
       } else {
         vv_scale <- get_vv_scale()
         pal <- if(is_viridis) colorNumeric(viridis::viridis(256, option = meta$palette), vv_scale, na.color = "transparent")
@@ -247,7 +247,7 @@
 
         v_range <- diff(range(vv_scale, na.rm=TRUE))
         d_format <- if(is.na(v_range)) 2 else if(v_range < 0.01) 6 else if(v_range < 0.1) 4 else 2
-        m <- m %>% leaflet::addLegend(pal = pal, values = vv_scale, title = legend_title, labFormat = labelFormat(digits = d_format), layerId = legend_id)
+        m <- m %>% leaflet::addLegend(pal = pal, values = vv_scale, title = legend_var_title(legend_title), labFormat = labelFormat(digits = d_format), layerId = legend_id)
       }
     }
 
@@ -343,7 +343,7 @@
        m <- m %>% addCircleMarkers(data = pts_view, radius = 5, color = "black", weight = 1,
                                   fillColor = ~pal_pts(resid), fillOpacity = 0.9,
                                   popup = popups)
-       m <- m %>% leaflet::addLegend(pal = pal_pts, values = c(-abs_max_p, abs_max_p), title = paste("Point Resid:", meta$label))
+       m <- m %>% leaflet::addLegend(pal = pal_pts, values = c(-abs_max_p, abs_max_p), title = legend_var_title(paste("Point Resid:", meta$label)))
     }
     
     m
@@ -467,12 +467,33 @@
     map_overlay_rev()
     show <- isTRUE(input$show_res_overlay) && length(rv$loc_resolutions) > 0
     res_html <- if (show) {
-      paste0("<div style='background:white; padding:5px; border-radius:4px; border: 1px solid #ccc; font-size:12px; font-family:sans-serif;'><b>Resolutions:</b><br>", paste(names(rv$loc_resolutions), sapply(rv$loc_resolutions, function(x) round(x,2)), sep=": ", collapse="<br>"), "</div>")
+      paste0("<div style='background:var(--mn-surface); color:var(--mn-text); padding:5px; border-radius:4px; border:1px solid var(--mn-line); font-size:12px; font-family:var(--mn-sans);'><b>Resolutions:</b><br>", paste(names(rv$loc_resolutions), sapply(rv$loc_resolutions, function(x) round(x,2)), sep=": ", collapse="<br>"), "</div>")
     } else NULL
     for (map_id in overlay_map_ids) {
       proxy <- leafletProxy(map_id) %>% removeControl("res_overlay_ctrl")
       if (!is.null(res_html)) proxy %>% addControl(html = res_html, position = "bottomright", layerId = "res_overlay_ctrl")
     }
+  })
+
+  # Chrome toggles (Overlays panel). All three are answered by a class on
+  # <body> and a rule in the stylesheet rather than by touching the widgets:
+  # the draw toolbar and the measure control are built into the widget, so
+  # hiding them any other way would mean a full re-render, and the legend
+  # title is carried by three maps at once. isFALSE/isTRUE rather than a
+  # negated isTRUE so the first flush - when the input has not arrived yet -
+  # lands on the checkbox's own default instead of flickering through the
+  # opposite state.
+  observe({
+    shinyjs::toggleClass(selector = "body", class = "mn-hide-drawtools",
+                         condition = isFALSE(input$show_draw_tools))
+  })
+  observe({
+    shinyjs::toggleClass(selector = "body", class = "mn-hide-ruler",
+                         condition = isFALSE(input$show_ruler))
+  })
+  observe({
+    shinyjs::toggleClass(selector = "body", class = "mn-show-legend-title",
+                         condition = isTRUE(input$show_legend_title))
   })
 
   # Ruler readout, one observer per map: the three widgets carry separate input
@@ -901,11 +922,12 @@
 
    build_vgm_structure_plot <- function(target) {
      loc <- input$sel_loc_stats
-     # Displayed run's context when one exists; live sidebar selection as the
-     # pre-run fallback so "OPTIMIZE ALL VARIOGRAMS" -> Manual tuning shows
-     # the fitted curves BEFORE the first interpolation (the advertised
-     # workflow), instead of a blank panel.
-     meta <- get_display_meta()
+     # Displayed run's context when one exists; live sidebar selection while
+     # the sidebar is tuning variograms and as the pre-run fallback, so
+     # "OPTIMIZE ALL VARIOGRAMS" -> Manual tuning labels the fitted curves with
+     # the variable being tuned rather than with the variable of a run these
+     # curves did not come from.
+     meta <- if (isTRUE(sci_vgm_tuning())) get_current_meta() else get_display_meta()
      if (is.null(meta)) meta <- get_current_meta()
      req(loc, meta)
      tgt_label <- if (target == "act") "Actual" else "Predicted"
@@ -973,7 +995,8 @@
      loc <- input$sel_loc_stats
      # input$var_id covers the pre-run state (no committed rv$disp yet):
      # switching the sidebar variable must invalidate the pre-run panels
-     list("vgm_main", loc, rv$results_rev, rv$disp$actual %||% input$var_id, input$sci_name_mode,
+     list("vgm_main", loc, rv$results_rev, rv$disp$actual %||% input$var_id,
+          sci_vgm_tuning(), input$var_id, input$sci_name_mode,
           rv$v_emp_list[[paste0(loc, "_act")]], rv$v_fit_list[[paste0(loc, "_act")]],
           vgm_manual_overlay_key("act"))
    }, cache = "session")
@@ -981,7 +1004,9 @@
      p <- build_vgm_structure_plot("pre"); req(p); p
    }, cacheKeyExpr = {
      loc <- input$sel_loc_stats
-     list("vgm_pred", loc, rv$results_rev, rv$disp$actual %||% input$var_id, rv$disp$value_type %||% input$value_type, input$sci_name_mode,
+     list("vgm_pred", loc, rv$results_rev, rv$disp$actual %||% input$var_id,
+          sci_vgm_tuning(), input$var_id,
+          rv$disp$value_type %||% input$value_type, input$sci_name_mode,
           rv$v_emp_list[[paste0(loc, "_pre")]], rv$v_fit_list[[paste0(loc, "_pre")]],
           vgm_manual_overlay_key("pre"))
    }, cache = "session")

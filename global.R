@@ -13,7 +13,7 @@ required_packages <- c(
   "classInt", "gstat", "concaveman", "spdep", "FNN",
   "dplyr", "tidyr", "jsonlite", "readxl", "openxlsx", "officer", "zip",
   "ggplot2", "ggpubr", "plotly", "RColorBrewer", "viridis",
-  "patchwork", "fresh", "showtext", "scales", "commonmark", "glue",
+  "patchwork", "showtext", "scales", "commonmark", "glue",
   "randomForest", "DALEX", "yardstick", "agricolae", "mgcv",
   "parsnip", "recipes", "workflows", "tune", "rsample", "dials",
   "spatialsample", "hardhat", "ranger", "xgboost", "nnet",
@@ -71,7 +71,6 @@ library(plotly)
 library(RColorBrewer)
 library(viridis)
 library(patchwork)
-library(fresh)
 library(showtext)
 library(scales)
 library(commonmark)

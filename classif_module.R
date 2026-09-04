@@ -68,7 +68,7 @@ classif_ui <- function(id) {
         shiny::column(3,
           shiny::div(style = "display: flex; align-items: center; margin-bottom: 10px;",
             shiny::h4("Classification Setup", style = "margin: 0; margin-right: 8px;"),
-            shiny::tags$i(class = "fa fa-info-circle", style = "color: #007bff; cursor: help;",
+            shiny::tags$i(class = "fa fa-info-circle", style = "color: var(--mn-text-3); cursor: help;",
               title = "Supervised classification of soil / land classes from co-sampled covariates. A minimum of ~50 samples with several members per class is recommended.")
           ),
 
@@ -90,10 +90,11 @@ classif_ui <- function(id) {
             shiny::uiOutput(ns("target_num_ui")),
             shiny::sliderInput(ns("n_classes"), "Number of classes", min = 2, max = 6,
                                value = 4, step = 1, ticks = FALSE),
-            shiny::radioButtons(ns("bin_style"), "Break style",
-              choices = c("Quantile" = "quantile", "Equal interval" = "equal",
-                          "Natural (Jenks)" = "jenks"),
-              selected = "quantile", inline = TRUE)
+            shiny::div(class = "mn-seg-grid-3",
+              shinyWidgets::radioGroupButtons(ns("bin_style"), "Break style",
+                choices = c("Quantile" = "quantile", "Equal interval" = "equal",
+                            "Natural (Jenks)" = "jenks"),
+                selected = "quantile", size = "sm"))
           ),
 
           shiny::uiOutput(ns("predictors_ui")),
@@ -105,7 +106,7 @@ classif_ui <- function(id) {
             shiny::tags$span("Balance classes (inverse-frequency weights)",
               shiny::tags$i(class = "fa fa-info-circle",
                 title = "Weights each training sample by n / (k x class count) so rare classes contribute equally to the fit and are not drowned out by dominant ones. Reported metrics stay unweighted. Not supported by Multinomial Logistic Regression (fits unweighted).",
-                style = "color: #007bff; cursor: help; margin-left: 5px;")),
+                style = "color: var(--mn-text-3); cursor: help; margin-left: 5px;")),
             value = FALSE),
           shiny::uiOutput(ns("weights_note")),
 
@@ -114,7 +115,7 @@ classif_ui <- function(id) {
               shiny::tags$b("Spatial Scope"),
               shiny::tags$i(class = "fa fa-info-circle",
                 title = "Restrict where the classifier is trained, evaluated, and mapped. These settings are specific to the Classification Suite and independent of the interpolation sidebar. Polygons drawn on the map or uploaded as a shapefile can restrict the scope further.",
-                style = "color: #007bff; cursor: help; margin-left: 6px;")
+                style = "color: var(--mn-text-3); cursor: help; margin-left: 6px;")
             ),
             shiny::uiOutput(ns("scope_loc_ui")),
             shiny::uiOutput(ns("scope_poly_ui")),
@@ -125,7 +126,7 @@ classif_ui <- function(id) {
               shiny::tags$span("Boundary Type",
                 shiny::tags$i(class = "fa fa-info-circle",
                   title = "How the predicted class surface is cropped around the scoped samples. Concave/Convex hull wrap the points; Wrapped adds a buffer around the hull; Strict buffers each point individually.",
-                  style = "color: #007bff; cursor: help; margin-left: 5px;")),
+                  style = "color: var(--mn-text-3); cursor: help; margin-left: 5px;")),
               choices = c("Concave Hull" = "concave", "Convex Hull" = "convex",
                           "Wrapped (Buffered)" = "wrapped",
                           "Strict Measured (Point Buffer)" = "strict"),
@@ -145,7 +146,7 @@ classif_ui <- function(id) {
               shiny::tags$span("Grid Resolution",
                 shiny::tags$i(class = "fa fa-info-circle",
                   title = "Auto derives a cell size from the scope boundary area (~50k cells). Fixed forces a specific cell size in metres.",
-                  style = "color: #007bff; cursor: help; margin-left: 5px;")),
+                  style = "color: var(--mn-text-3); cursor: help; margin-left: 5px;")),
               choices = c("Auto" = "auto", "Fixed" = "fixed"),
               selected = "auto", inline = TRUE),
             shiny::conditionalPanel(
@@ -162,13 +163,13 @@ classif_ui <- function(id) {
           shiny::radioButtons(ns("cv_strategy"), shiny::tags$span("Cross-validation",
               shiny::tags$i(class = "fa fa-info-circle",
                 title = "Spatial CV clusters nearby points into folds so accuracy reflects prediction into unsampled areas; random k-fold usually reports optimistic accuracy under spatial autocorrelation.",
-                style = "color: #007bff; cursor: help; margin-left: 5px;")),
+                style = "color: var(--mn-text-3); cursor: help; margin-left: 5px;")),
             choices = c("Spatial (blocked)" = "spatial", "Standard (random k-fold)" = "standard"),
             selected = "spatial"),
           shiny::selectInput(ns("tuning_depth"), shiny::tags$span("Hyperparameter tuning",
               shiny::tags$i(class = "fa fa-info-circle",
                 title = "None fits sensible fixed defaults (fast, deterministic). Light/Full search a space-filling grid over the folds.",
-                style = "color: #007bff; cursor: help; margin-left: 5px;")),
+                style = "color: var(--mn-text-3); cursor: help; margin-left: 5px;")),
             choices = stats::setNames(names(classif_tuning_depths()), classif_tuning_depths()),
             selected = "none"),
           # Nested CV is only meaningful when something is tuned, so the
@@ -179,7 +180,7 @@ classif_ui <- function(id) {
               shiny::tags$span("Use nested CV (slower)",
                 shiny::tags$i(class = "fa fa-info-circle",
                   title = "Re-runs the hyperparameter search inside every cross-validation fold (5 inner folds built from that fold's training rows only), so the reported performance honestly includes the tuning step. Without it, the same folds both choose and score the hyperparameters, which is mildly optimistic. Expect roughly 5x the tuning runtime.",
-                  style = "color: #007bff; cursor: help; margin-left: 5px;")),
+                  style = "color: var(--mn-text-3); cursor: help; margin-left: 5px;")),
               value = FALSE)
           ),
 
@@ -187,7 +188,7 @@ classif_ui <- function(id) {
             shiny::tags$span("Feature importance scored on",
               shiny::tags$i(class = "fa fa-info-circle",
                 title = "Out-of-fold reuses each cross-validation fold's own model and permutes predictors in the rows that fold never saw, so importance is measured under the same honest design as the reported accuracy. Training rows is the conventional default (vip), but it rewards a flexible model for memorising its training data and so overstates importance. Both cost the same.",
-                style = "color: #007bff; cursor: help; margin-left: 5px;")),
+                style = "color: var(--mn-text-3); cursor: help; margin-left: 5px;")),
             choices = c("Out-of-fold (recommended)" = "oof", "Training rows" = "training"),
             selected = "oof"),
 
@@ -201,16 +202,16 @@ classif_ui <- function(id) {
         shiny::column(9,
           shinyjs::hidden(
             shiny::div(id = ns("running_panel"),
-              style = "text-align: center; padding: 100px 50px; background-color: rgba(255,255,255,0.02); border-radius: 8px; border: 2px dashed #007bff; margin-bottom: 20px;",
-              shiny::icon("circle-notch", class = "fa-spin fa-4x", style = "color: #007bff; margin-bottom: 20px;"),
-              shiny::h3("Running classification...", style = "color: #007bff; font-weight: bold;"),
-              shiny::p("Fitting the model, running spatial cross-validation, and predicting class / probability / entropy surfaces in the background.", style = "color: #666;"),
+              style = "text-align: center; padding: 100px 50px; background-color: var(--mn-surface); border-radius: 8px; border: 1px dashed var(--mn-line-2); margin-bottom: 20px;",
+              shiny::icon("circle-notch", class = "fa-spin fa-4x", style = "color: var(--mn-text-3); margin-bottom: 20px;"),
+              shiny::h3("Running classification...", style = "color: var(--mn-text-3); font-weight: bold;"),
+              shiny::p("Fitting the model, running spatial cross-validation, and predicting class / probability / entropy surfaces in the background.", style = "color: var(--mn-text-2);"),
               shiny::div(style = "max-width: 420px; margin: 15px auto 0 auto; background-color: rgba(0,123,255,0.15); border-radius: 6px; height: 14px; overflow: hidden;",
                 shiny::div(id = ns("classif_progress_fill"),
-                           style = "width: 0%; height: 100%; background-color: #007bff; border-radius: 6px; transition: width 0.6s ease;")
+                           style = "width: 0%; height: 100%; background-color: var(--mn-text-3); border-radius: 6px; transition: width 0.6s ease;")
               ),
               shiny::div(id = ns("classif_progress_text"),
-                         style = "margin-top: 6px; font-size: 0.9em; color: #666;", "Starting..."),
+                         style = "margin-top: 6px; font-size: 0.9em; color: var(--mn-text-2);", "Starting..."),
               shiny::actionButton(ns("cancel_btn"), "Cancel Run",
                                   icon = shiny::icon("stop"),
                                   class = "btn-danger btn-sm",
@@ -219,8 +220,8 @@ classif_ui <- function(id) {
           ),
           shiny::conditionalPanel(
             condition = sprintf("output['%s'] == 'no'", ns("ready")),
-            shiny::div(style = "text-align: center; padding: 120px 50px; color: #888;",
-              shiny::icon("layer-group", class = "fa-4x", style = "margin-bottom: 20px; color: #ccc;"),
+            shiny::div(style = "text-align: center; padding: 120px 50px; color: var(--mn-text-3);",
+              shiny::icon("layer-group", class = "fa-4x", style = "margin-bottom: 20px; color: var(--mn-line-2);"),
               shiny::h3("Awaiting Classification", style = "font-weight: 300;"),
               shiny::p("Choose a target, predictors, and a method on the left, then click Run Classification.")
             )
@@ -238,7 +239,7 @@ classif_ui <- function(id) {
                       shiny::tags$span("Scale bar & north arrow",
                         shiny::tags$i(class = "fa fa-info-circle",
                           title = "Adds a scale bar (bottom right) and a north arrow (top left) to all three maps, including the expanded views and the styled PNG export.",
-                          style = "color: #007bff; cursor: help; margin-left: 5px;")),
+                          style = "color: var(--mn-text-3); cursor: help; margin-left: 5px;")),
                       value = FALSE)
                   ),
                   shiny::div(style = "margin-right: 15px;",
@@ -246,14 +247,14 @@ classif_ui <- function(id) {
                       shiny::tags$span("Show sample points",
                         shiny::tags$i(class = "fa fa-info-circle",
                           title = "Overlays the scoped training samples (white circles) so you can judge where predictions are supported by data and where they extrapolate.",
-                          style = "color: #007bff; cursor: help; margin-left: 5px;")),
+                          style = "color: var(--mn-text-3); cursor: help; margin-left: 5px;")),
                       value = FALSE)
                   ),
                   shiny::checkboxInput(ns("map_stretch"),
                     shiny::tags$span("Stretch colour scale",
                       shiny::tags$i(class = "fa fa-info-circle",
                         title = "Entropy and class-probability maps are drawn on the absolute 0-1 scale by default, so the per-class probability maps are comparable with each other and entropy is comparable between runs. A weak model keeps every probability near 1/k and every entropy near 1, which renders as one flat colour; stretching the colour scale to the observed range (stated in each map's subtitle) reveals that structure, at the cost of comparability.",
-                        style = "color: #007bff; cursor: help; margin-left: 5px;")),
+                        style = "color: var(--mn-text-3); cursor: help; margin-left: 5px;")),
                     value = FALSE)
                 )
               )
@@ -268,7 +269,7 @@ classif_ui <- function(id) {
                     shiny::tags$span("Confidence threshold (abstain below)",
                       shiny::tags$i(class = "fa fa-info-circle",
                         title = "Cells whose highest class probability falls below this value are left 'Unclassified' (grey) instead of receiving a weak best guess - candidate spots for additional field sampling. 0 disables abstention. Applies instantly to the class map, area table, and class GeoTIFF; no re-run needed. Values at or below 1/(number of classes) can never trigger.",
-                        style = "color: #007bff; cursor: help; margin-left: 5px;")),
+                        style = "color: var(--mn-text-3); cursor: help; margin-left: 5px;")),
                     min = 0, max = 0.95, value = 0, step = 0.05, ticks = FALSE),
                   shiny::uiOutput(ns("abstain_note"))
                 ),
@@ -276,7 +277,7 @@ classif_ui <- function(id) {
                   shiny::uiOutput(ns("prob_class_ui"))
                 )
               ),
-              shiny::tags$small(style = "color:#888; display:block; margin: 2px 0 15px 0;",
+              shiny::tags$small(style = "color: var(--mn-text-3); display:block; margin: 2px 0 15px 0;",
                 shiny::icon("search-plus"),
                 " Click any map (or its expand icon) for a full-size, high-resolution view.")
             ),
@@ -306,7 +307,7 @@ classif_ui <- function(id) {
                                 click_id = ns("entropy_map_click"),
                                 info = shiny::tags$i(class = "fa fa-info-circle",
                                   title = "Normalised Shannon entropy of the class probabilities: 0 = confident single class, 1 = uniform over classes.",
-                                  style = "color: #007bff; cursor: help; margin-left: 5px;"),
+                                  style = "color: var(--mn-text-3); cursor: help; margin-left: 5px;"),
                                 head_min_height = CLASSIF_CARD_HEAD_H)
                 )
               )
@@ -327,7 +328,7 @@ classif_ui <- function(id) {
                               expand_id = ns("importance_expand_btn"), download = FALSE,
                               info = shiny::tags$i(class = "fa fa-info-circle",
                                 title = "Permutation importance: how much the multiclass log-loss worsens when one covariate is randomly shuffled (mean of 5 shuffles). Scored either out-of-fold or on the final model's training rows, following the 'Feature importance scored on' setting - the axis label states which. Shares renormalise the positive importances to 100%. Correlated covariates split their importance between them, so read this alongside the collinearity note.",
-                                style = "color: #007bff; cursor: help; margin-left: 5px;"),
+                                style = "color: var(--mn-text-3); cursor: help; margin-left: 5px;"),
                               head_min_height = CLASSIF_CARD_HEAD_H)
               )
             ),
@@ -356,7 +357,7 @@ classif_ui <- function(id) {
               shiny::h4(shiny::tags$span("Covariate Lift",
                 shiny::tags$i(class = "fa fa-info-circle",
                   title = "Benchmarks the covariate model against two no-covariate baselines on the SAME cross-validation folds: always predicting the most common class (no-information rate), and a spatial-only nearest-neighbour classifier. The McNemar test checks whether the paired accuracy improvement over the spatial baseline is statistically significant.",
-                  style = "color: #007bff; cursor: help; margin-left: 5px;"))),
+                  style = "color: var(--mn-text-3); cursor: help; margin-left: 5px;"))),
               shiny::uiOutput(ns("lift_ui"))
             ),
             shiny::conditionalPanel(
@@ -364,7 +365,7 @@ classif_ui <- function(id) {
               shiny::h4(shiny::tags$span("Performance by Area",
                 shiny::tags$i(class = "fa fa-info-circle",
                   title = "Pooled out-of-fold predictions split by locality (or by polygon in polygons-only scope). NA appears where a metric is undefined for that area, e.g. a class that never occurs there. Small areas carry wide uncertainty.",
-                  style = "color: #007bff; cursor: help; margin-left: 5px;"))),
+                  style = "color: var(--mn-text-3); cursor: help; margin-left: 5px;"))),
               DT::dataTableOutput(ns("group_metrics_table"))
             ),
             shiny::conditionalPanel(
@@ -372,7 +373,7 @@ classif_ui <- function(id) {
               shiny::h4(shiny::tags$span("Class Area Coverage",
                 shiny::tags$i(class = "fa fa-info-circle",
                   title = "Exact cell counts x cell area per predicted class, in hectares. Honours the live confidence threshold (abstained cells appear as 'Unclassified').",
-                  style = "color: #007bff; cursor: help; margin-left: 5px;"))),
+                  style = "color: var(--mn-text-3); cursor: help; margin-left: 5px;"))),
               DT::dataTableOutput(ns("area_table"))
             ),
             shiny::hr(),
@@ -528,7 +529,7 @@ classif_server <- function(id, data_reactive, vars_metadata_reactive, spatial_re
         shiny::tags$span("Localities",
           shiny::tags$i(class = "fa fa-info-circle",
             title = "Localities this classification run is trained, evaluated, and mapped on. Independent of the sidebar Context panel. Empty = all localities.",
-            style = "color: #007bff; cursor: help; margin-left: 5px;")),
+            style = "color: var(--mn-text-3); cursor: help; margin-left: 5px;")),
         choices = ch, selected = sel, multiple = TRUE,
         options = list(`actions-box` = TRUE))
     })
@@ -545,7 +546,7 @@ classif_server <- function(id, data_reactive, vars_metadata_reactive, spatial_re
         shiny::tags$span("Polygon scope",
           shiny::tags$i(class = "fa fa-info-circle",
             title = "Use polygons drawn on the map and/or the uploaded shapefile to bound the run. 'Within localities' keeps points inside BOTH the selected localities and the polygons; 'Polygons only' ignores the locality filter.",
-            style = "color: #007bff; cursor: help; margin-left: 5px;")),
+            style = "color: var(--mn-text-3); cursor: help; margin-left: 5px;")),
         choices = c("Ignore polygons" = "ignore",
                     "Within localities" = "intersect",
                     "Polygons only" = "only"),
@@ -623,7 +624,7 @@ classif_server <- function(id, data_reactive, vars_metadata_reactive, spatial_re
       } else {
         " Redundant covariates dilute feature importance and destabilise multinomial fits."
       }
-      shiny::tags$small(style = "color:#e0a800; display:block; margin: -4px 0 8px 0;",
+      shiny::tags$small(style = "color:var(--mn-warn); display:block; margin: -4px 0 8px 0;",
         shiny::icon("exclamation-triangle"),
         if (length(vif_vars)) {
           sprintf(" Multicollinearity within the current scope (VIF > %s%s): %s.%s You will be asked to drop or keep them at run time.",
@@ -638,14 +639,14 @@ classif_server <- function(id, data_reactive, vars_metadata_reactive, spatial_re
 
     output$weights_note <- shiny::renderUI({
       if (!isTRUE(input$class_weights) || !identical(input$method, "multinom")) return(NULL)
-      shiny::tags$small(style = "color:#e0a800; display:block; margin: -4px 0 8px 0;",
+      shiny::tags$small(style = "color:var(--mn-warn); display:block; margin: -4px 0 8px 0;",
         "Multinomial logistic (nnet) does not accept case weights - this run will fit unweighted.")
     })
 
     output$scope_note <- shiny::renderUI({
       sc <- current_scope()
       if (is.null(sc)) return(NULL)
-      col <- if (sc$n_scoped < 20) "#dc3545" else "#888"
+      col <- if (sc$n_scoped < 20) "var(--mn-danger)" else "var(--mn-text-3)"
       shiny::tagList(
         shiny::tags$small(style = paste0("color:", col, ";"),
           sprintf("In scope: %d of %d georeferenced points.", sc$n_scoped, sc$n_input)),
@@ -666,7 +667,7 @@ classif_server <- function(id, data_reactive, vars_metadata_reactive, spatial_re
         if (is.null(co$epsg) || is.na(co$epsg)) co$Name else
           sprintf("%s (EPSG:%s)", co$Name, co$epsg)
       }, error = function(e) "a metric projection")
-      shiny::tags$small(style = "color:#888; display:block; margin-top: 4px;",
+      shiny::tags$small(style = "color: var(--mn-text-3); display:block; margin-top: 4px;",
         sprintf("Target Mapping CRS is geographic, so this run is computed and mapped in %s.", nm))
     })
 
@@ -701,8 +702,8 @@ classif_server <- function(id, data_reactive, vars_metadata_reactive, spatial_re
       msg <- strict_buffer_message(bs$buff_dist, res_eff)
       if (is.null(msg)) return(NULL)
       shiny::tags$p(style = paste("font-size: 0.78em; margin-top: 8px;",
-                                  "border-left: 3px solid #f59e0b; padding-left: 8px;",
-                                  "color: #b45309; line-height: 1.35;"),
+                                  "border-left: 2px solid var(--mn-warn); padding-left: 8px;",
+                                  "color: var(--mn-warn); line-height: 1.35;"),
                     msg)
     })
 
@@ -764,7 +765,7 @@ classif_server <- function(id, data_reactive, vars_metadata_reactive, spatial_re
         labs <- vapply(flagged, function(v) get_var_label(v, vars_metadata_reactive()), character(1))
         thr <- chk$vif_threshold %||% 10
         shiny::showModal(shiny::modalDialog(
-          title = shiny::tags$div(style = "color: #d9534f; font-weight: bold;",
+          title = shiny::tags$div(style = "color: var(--mn-danger); font-weight: bold;",
             shiny::icon("exclamation-triangle"), "High Multicollinearity In Scope"),
           shiny::tags$p(sprintf("Within the current spatial scope, some covariates are highly collinear (iterative VIF > %s). Near-duplicate covariates add no information, dilute permutation importance across the duplicates, and can destabilise the multinomial logistic fit.", thr)),
           if (thr < 10) shiny::tags$p(
@@ -1043,7 +1044,7 @@ classif_server <- function(id, data_reactive, vars_metadata_reactive, spatial_re
         shiny::tags$span("Results table",
           shiny::tags$i(class = "fa fa-info-circle",
             title = "Choose which results table to display below. The Metrics CSV export always contains the full metric set regardless of this selection.",
-            style = "color: #007bff; cursor: help; margin-left: 5px;")),
+            style = "color: var(--mn-text-3); cursor: help; margin-left: 5px;")),
         choices = ch,
         selected = if (!is.null(prev) && prev %in% ch) prev else "metrics",
         width = "320px")
@@ -1089,7 +1090,7 @@ classif_server <- function(id, data_reactive, vars_metadata_reactive, spatial_re
         sprintf("CV check at %.2f: %.0f%% of validation points retained; accuracy among retained %.3f vs %.3f overall. Grey cells mark candidate re-sampling locations.",
                 tau, 100 * mean(keep), sel, overall)
       }
-      shiny::tags$small(style = "color:#888; display:block; margin: -6px 0 6px 0;", msg)
+      shiny::tags$small(style = "color: var(--mn-text-3); display:block; margin: -6px 0 6px 0;", msg)
     })
 
     # ── Performance outputs ──────────────────────────────────────────────────
@@ -1104,7 +1105,7 @@ classif_server <- function(id, data_reactive, vars_metadata_reactive, spatial_re
       } else ""
       depth_part <- if (isTRUE(res$nested)) paste0(res$depth, " (nested CV)") else res$depth
       shiny::tags$span(class = "badge",
-        style = "background:#007bff; color:#fff; padding:4px 8px; border-radius:4px;",
+        style = "background: var(--mn-accent-weak); color: var(--mn-accent); padding: 4px 8px; border-radius: 4px; font-weight: 500;",
         sprintf("%s | %d folds | n = %d | tuning: %s%s%s",
                 lbl, res$n_folds, res$n, depth_part, scope_part, wt_part))
     })
@@ -1136,7 +1137,7 @@ classif_server <- function(id, data_reactive, vars_metadata_reactive, spatial_re
             shiny::tags$tr(shiny::tags$td("Majority class (no information)",
                              shiny::tags$i(class = "fa fa-info-circle",
                                title = "The accuracy achieved by always predicting the most frequent class in the scoped data - the 'no-information rate'. It is the floor any useful model must clearly exceed; with imbalanced classes it can be high even though the strategy has learnt nothing. Cohen's kappa corrects for exactly this, which is why this row scores kappa = 0 by construction.",
-                               style = "color: #007bff; cursor: help; margin-left: 5px;")),
+                               style = "color: var(--mn-text-3); cursor: help; margin-left: 5px;")),
                            shiny::tags$td(fmt(lf$majority_acc)), shiny::tags$td("0.000"))
           )
         ),
@@ -1232,7 +1233,7 @@ classif_server <- function(id, data_reactive, vars_metadata_reactive, spatial_re
         sprintf(" Collinear covariates dropped: %s.", paste(res$dropped_covariates, collapse = ", "))
       } else ""
       shiny::tagList(
-        shiny::tags$small(style = "color:#888;",
+        shiny::tags$small(style = "color: var(--mn-text-3);",
           sprintf("Last run: %s, %d classes, scope: %s. Accuracy %.3f, kappa %.3f.%s",
                   classif_methods()[[res$method]], length(res$levels),
                   if (is.null(res$scope_label)) "all data" else res$scope_label,

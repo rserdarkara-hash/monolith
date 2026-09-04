@@ -250,7 +250,7 @@ test_that("sci_dt header tooltips attach title attributes to matching headers on
 
   # every Model Performance column except the escaped Moran spans has a tooltip
   tips <- sci_metric_tooltips()
-  perf_cols <- c("Source", "RMSE", "R2 (Corr)", "R2 (NSE/Trad)", "Bias (ME)",
+  perf_cols <- c("Source", "RMSE", "R² (Corr)", "R² (NSE/Trad)", "Bias (ME)",
                  "RPD (Prec)", "SMAPE (%)", "Moran's I", "Moran p")
   expect_true(all(perf_cols %in% names(tips)))
 })

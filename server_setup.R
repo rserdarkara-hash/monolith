@@ -150,7 +150,7 @@
            perf_m_l <- perform_cv(data.frame(var1.observed = df_l_perf$v, var1.pred = df_l_perf$pv),
                                   moran = FALSE)
            perf_l <- data.frame(
-             Metric = c("R2 (Trad)", "R2 (Corr)", "RMSE", "MBE (ML pred - observed)", "CCC", "RPD"),
+             Metric = c("R² (Trad)", "R² (Corr)", "RMSE", "MBE (ML pred - observed)", "CCC", "RPD"),
              Value = c(perf_m_l$nse, perf_m_l$r2, perf_m_l$rmse, -perf_m_l$me, perf_m_l$ccc, perf_m_l$rpd)
            )
            register_export_item(paste0("table_perf_loc_", l), paste(meta$label, "-", l, "- Prediction Performance"), "table", perf_l, meta$category)
@@ -175,7 +175,9 @@
      }
      
      if(isTruthy(input$color_style %in% c("agro", "bin")) && !is.null(rv$rast_list_act[[l]])) {
-       area_l <- calc_area_df(rv$rast_list_act[[l]], paste0("export_act_", l))
+       # same cache id as the Scientific Analysis per-locality table and as the
+       # total that sums it: one expanse() pass per locality per run, not three
+       area_l <- calc_area_df(rv$rast_list_act[[l]], paste0("loc_act_", l))
        if(is.data.frame(area_l)) register_export_item(paste0("table_area_loc_", l), paste(meta$label, "-", l, "- Area Coverage"), "table", area_l, meta$category)
      }
      
@@ -376,28 +378,12 @@
     polygons_reactive = reactive(list(drawn = get_drawn_sf(), shp = rv$shp_bound))
   )
 
-     active_theme_name <- theme_switcher_server("theme_mod")  
-  output$dynamic_theme <- renderUI({
-    req(active_theme_name())
-    theme_obj <- app_themes[[active_theme_name()]]$theme
-    fresh::use_theme(theme_obj)
-  })
-  
-  output$dynamic_manual_style <- renderUI({
-    req(active_theme_name())
-    style_content <- app_themes[[active_theme_name()]]$manual_style
-    tags$style(HTML(style_content))
-  })
-  
-  observeEvent(active_theme_name(), {
-    req(active_theme_name())
-    theme_data <- app_themes[[active_theme_name()]]
-    new_tiles <- theme_data$map_tiles
-    
-    if (!is.null(new_tiles) && new_tiles != "") {
-      updateSelectInput(session, "base_map_layer", selected = new_tiles)
-    }
-  }, ignoreInit = FALSE)
+  # No theme wiring here any more. There is one theme; its light and dark
+  # variants are two token blocks in the single stylesheet emitted from
+  # ui_main.R, and the toggle flips a data-theme attribute client-side. That
+  # removes the two renderUI round-trips a theme change used to cost, and the
+  # observer that re-selected the basemap per theme: the Map Viewer's default
+  # basemap is the selectInput's own `selected` value in ui_main_tabs.R.
 
   # CARTO's Positron and Dark Matter raster basemaps require a free API key
   # (ui_plotting.R, add_base_tiles); the field only appears in the Map Viewer
@@ -417,6 +403,10 @@
   # automatic fill can tell "the user chose this" from "we chose this"
   # (crs_user_chose / crs_has_value, server_data_setup.R).
   session_state$crs_auto <- list(map_crs = character(0), crs_selection = character(0))
+  # The value a selector held when it was cleared, until the clear round-trips.
+  # An upload resets both selectors and then reads them back in the same flush,
+  # where input$<id> still reports the old file's CRS (crs_effective).
+  session_state$crs_stale <- list()
 
   # Bumped by every map renderLeaflet. Overlay observers depend on it so
   # proxy-managed layers (points, borders, controls) are re-applied after each
@@ -468,6 +458,10 @@
     pt_style_colors = NULL, # F2: Named vector group_value -> hex_color
     pt_style_palette = "Set1", # F2: Current qualitative palette name
     auto_archive_choice = "none", # "none", "archive", or "discard"
+    # TRUE between a completed OPTIMIZE ALL VARIOGRAMS and the next run: the
+    # fitted curves on the Scientific Analysis tab belong to the tuning
+    # session, not to whatever run is on screen (see sci_vgm_tuning, chunk C).
+    vgm_preview = FALSE,
     model_running = FALSE, # True when parallel model calculations are active
     opt_running = FALSE, # True while a sidebar optimizer promise is in flight
     run_token = 0L # Incremental run token for async cancellation

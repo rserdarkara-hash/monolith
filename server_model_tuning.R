@@ -208,20 +208,24 @@
     renderUI({
       res <- vals_reactive(); if(is.null(res)) return(NULL)
 
+      # The prediction column only exists when the run actually optimized a
+      # predicted target; without one every cell was "N/A", so the column is
+      # dropped rather than printed empty.
+      has_pre <- "pre" %in% res$targets
+
       rows <- lapply(res$locs, function(l) {
-        act_val <- get_regional_param(engine, l, "act")
-        pre_val <- if("pre" %in% res$targets) get_regional_param(engine, l, "pre") else NA
-        tags$tr(
-          tags$td(l),
-          tags$td(sprintf(fmt, act_val)),
-          tags$td(if(is.na(pre_val)) "N/A" else sprintf(fmt, pre_val))
-        )
+        cells <- list(tags$td(l), tags$td(sprintf(fmt, get_regional_param(engine, l, "act"))))
+        if (has_pre) cells <- c(cells, list(tags$td(sprintf(fmt, get_regional_param(engine, l, "pre")))))
+        do.call(tags$tr, cells)
       })
 
-      div(style = "margin-top: 10px; padding: 10px; background-color: #f8f9fa; color: #495057; border: 1px solid #dee2e6; border-radius: 4px; font-size: 0.8em;",
+      headers <- list(tags$th("Locality"), tags$th("Actual"))
+      if (has_pre) headers <- c(headers, list(tags$th("Predicted")))
+
+      div(style = "margin-top: 10px; padding: 10px; background-color: var(--mn-surface-2); color: var(--mn-text-2); border: 1px solid var(--mn-line); border-radius: 4px; font-size: 0.8em;",
           h5(heading),
-          tags$table(class = "table table-condensed table-bordered", style = "background-color: #ffffff; color: #000000;",
-            tags$thead(tags$tr(tags$th("Locality"), tags$th("Actual"), tags$th("Predicted"))),
+          tags$table(class = "table table-condensed table-bordered", style = "background-color: var(--mn-surface); color: var(--mn-text);",
+            tags$thead(do.call(tags$tr, headers)),
             tags$tbody(rows)
           )
       )
@@ -450,6 +454,7 @@
       busy_msg = "Optimizing variograms in the background; the dashboard stays usable.",
       on_success = function(res_list) {
         results <- list()
+        rv$vgm_preview <- TRUE
         for (res in res_list) {
           l <- res$l
           if (!is.null(res$act$fit)) {

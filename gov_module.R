@@ -7,13 +7,13 @@ gov_factors_ui <- function(id) {
         shiny::column(3,
           shiny::div(style = "display: flex; align-items: center; margin-bottom: 10px;",
             shiny::h4("Analysis Configuration", style = "margin: 0; margin-right: 8px;"),
-            shiny::tags$i(class = "fa fa-info-circle", style = "color: #007bff; cursor: help;", title = "A minimum of 50 samples is required to reliably execute Machine Learning models.")
+            shiny::tags$i(class = "fa fa-info-circle", style = "color: var(--mn-text-3); cursor: help;", title = "A minimum of 50 samples is required to reliably execute Machine Learning models.")
           ),
           shiny::uiOutput(ns("gov_target_ui")),
           shiny::uiOutput(ns("gov_predictors_ui")),
           shiny::sliderInput(ns("gov_permutations"), "Permutations (for RF importance)", min = 10, max = 100, value = 50, step = 10, ticks = FALSE),
           shiny::sliderInput(ns("gov_ntree"), "Number of Trees (ntree)", min = 50, max = 500, value = 100, step = 50, ticks = FALSE),
-          shiny::sliderInput(ns("gov_shap_size"), shiny::tags$span("SHAP Sample Size (Max)", shiny::tags$i(class = "fa fa-info-circle", title = "Lower values calculate faster but are less stable; higher values take longer but represent the dataset better.", style = "color: #007bff; cursor: help; margin-left: 5px;")), min = 50, max = 1000, value = 100, step = 50, ticks = FALSE),
+          shiny::sliderInput(ns("gov_shap_size"), shiny::tags$span("SHAP Sample Size (Max)", shiny::tags$i(class = "fa fa-info-circle", title = "Lower values calculate faster but are less stable; higher values take longer but represent the dataset better.", style = "color: var(--mn-text-3); cursor: help; margin-left: 5px;")), min = 50, max = 1000, value = 100, step = 50, ticks = FALSE),
           shiny::actionButton(ns("gov_run_btn"), "Run Analysis", class = "btn-primary btn-block"),
           shiny::hr(),
           shiny::h4("Plot Settings"),
@@ -27,11 +27,11 @@ gov_factors_ui <- function(id) {
           # spinner would otherwise appear ~10s after the button press.
           shinyjs::hidden(
             shiny::div(id = ns("gov_running_panel"),
-              style = "text-align: center; padding: 100px 50px; background-color: rgba(255,255,255,0.02); border-radius: 8px; border: 2px dashed #007bff; margin-bottom: 20px; transition: all 0.3s ease;",
-              shiny::icon("circle-notch", class = "fa-spin fa-4x", style = "color: #007bff; margin-bottom: 20px;"),
-              shiny::h3("Executing Machine Learning Analytics...", style = "color: #007bff; font-weight: bold; margin-bottom: 10px;"),
-              shiny::p("Fitting high-dimensional Random Forest models and extracting explanatory SHAP, PDP, and ALE profiles in the background.", style = "color: #666; font-size: 1.1em;"),
-              shiny::p("The dashboard remains fully responsive. You can view other tabs or start other operations.", style = "color: #888; font-style: italic; font-size: 0.9em; margin-top: 15px;"),
+              style = "text-align: center; padding: 100px 50px; background-color: var(--mn-surface); border-radius: 8px; border: 2px dashed var(--mn-text-3); margin-bottom: 20px; transition: all 0.3s ease;",
+              shiny::icon("circle-notch", class = "fa-spin fa-4x", style = "color: var(--mn-text-3); margin-bottom: 20px;"),
+              shiny::h3("Executing Machine Learning Analytics...", style = "color: var(--mn-text); font-weight: 600; margin-bottom: 10px;"),
+              shiny::p("Fitting high-dimensional Random Forest models and extracting explanatory SHAP, PDP, and ALE profiles in the background.", style = "color: var(--mn-text-2); font-size: 1.1em;"),
+              shiny::p("The dashboard remains fully responsive. You can view other tabs or start other operations.", style = "color: var(--mn-text-3); font-style: italic; font-size: 0.9em; margin-top: 15px;"),
               shiny::actionButton(ns("gov_cancel_btn"), "Cancel Run",
                                   icon = shiny::icon("stop"),
                                   class = "btn-danger btn-sm",
@@ -41,8 +41,8 @@ gov_factors_ui <- function(id) {
 
           shiny::conditionalPanel(
             condition = sprintf("output['%s'] == 'no'", ns("gov_ready")),
-            shiny::div(id = ns("gov_idle_content"), style = "text-align: center; padding: 120px 50px; color: #888;",
-              shiny::icon("brain", class = "fa-4x", style = "margin-bottom: 20px; color: #ccc;"),
+            shiny::div(id = ns("gov_idle_content"), style = "text-align: center; padding: 120px 50px; color: var(--mn-text-3);",
+              shiny::icon("brain", class = "fa-4x", style = "margin-bottom: 20px; color: var(--mn-line-2);"),
               shiny::h3("Awaiting Machine Learning Analysis", style = "font-weight: 300; margin-bottom: 10px;"),
               shiny::p("Configure target and predictors on the left pane and click 'Run Analysis' to discover governing agronomical factors.")
             )

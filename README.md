@@ -1,8 +1,8 @@
 ![Monolith: Spatial Analysis Dashboard](assets/banner.png)
 
-# Monolith Spatial Analysis Dashboard (v1.0.8b)
+# Monolith Spatial Analysis Dashboard (v1.0.9)
 
-[![Version](https://img.shields.io/badge/version-1.0.8b-6f42c1)](#)
+[![Version](https://img.shields.io/badge/version-1.0.9-6f42c1)](#)
 [![R](https://img.shields.io/badge/R-%E2%89%A5%204.5.0-276DC3?logo=r&logoColor=white)](https://cran.r-project.org/)
 [![Shiny](https://img.shields.io/badge/built%20with-Shiny-1f77b4)](https://shiny.posit.co/)
 [![Tests](https://github.com/rserdarkara-hash/monolith/actions/workflows/tests.yaml/badge.svg)](https://github.com/rserdarkara-hash/monolith/actions/workflows/tests.yaml)
@@ -20,7 +20,7 @@ Whether the target is soil physicochemistry, a topographic interaction, or a man
 1. Install **R 4.5.0 or higher** (see [System Prerequisites](#1-system-prerequisites)).
 2. Download or clone this repository.
 3. Open `monolith.R` in RStudio and click **Run App**, or run `shiny::runApp("monolith.R")` from the project root. Missing packages install automatically on first launch, so expect a wait.
-4. On the **1. Data Setup** tab, upload `sample_data/samp_data_1.xlsx` and, as the optional variable list, `samp_var_list.xlsx`. Confirm the X/Y mapping and CRS, then move to the Spatial Engine in the sidebar and run an interpolation.
+4. On the **1. Data Setup** tab, upload `sample_data/samp_data_1.xlsx` and, as the optional variable list, `samp_var_list.xlsx`. Confirm the X/Y mapping and CRS, then move to the Spatial Engine in the sidebar and run an interpolation. The sample file arrives ready to run: **Locality** preset to Kale and Yorga, the two the accompanying manuscript examines in detail, and both CRS selectors preset to `EPSG:32635` (UTM 35N), the zone those localities are on. Clear the Locality box to map all seven. These presets are keyed on the sample file's own name and never apply to a dataset of your own.
 
 The sample data carries usage restrictions until its associated manuscript is published; see [License](#license).
 
@@ -90,7 +90,7 @@ Sidebar sections 1 and 2 configure the **next** run only. A completed run keeps 
 
 * **Resolution tied to sample support:** The suggested grid spacing is derived from your physical sampling spacing, so the mapped surface cannot fabricate fine, unmeasured detail below the resolution your sampling actually supports.
 
-* **Extrapolation control:** A dynamic buffering engine scales boundary padding to the selected method and resolution, and a **Strict Measured** boundary type disables buffering entirely so coverage is not over-claimed far beyond sample support. In the Classification Suite, predictions are confined to per-locality boundaries and never extend into unsampled corridors between localities.
+* **Extrapolation control:** A dynamic buffering engine scales boundary padding to the selected method and resolution, and a **Point buffer** boundary type disables buffering entirely so coverage is not over-claimed far beyond sample support. In the Classification Suite, predictions are confined to per-locality boundaries and never extend into unsampled corridors between localities.
 
 * **Kriging numerical stability (epsilon-nugget):** For near-zero-variance variables, a tiny nugget is enforced when the empirical nugget is exactly zero, preventing the singular-matrix inversion failures that would otherwise crash Kriging.
 
@@ -255,14 +255,14 @@ The full dependency suite, grouped by function:
 | **Core App / UI** | `shiny`, `shinyjs`, `shinyWidgets`, `shinyFiles`, `shinycssloaders`, `DT` |
 | **Spatial / GIS** | `sf`, `terra`, `tidyterra`, `leaflet`, `leaflet.extras`, `ggspatial`, `fields`, `classInt`, `gstat`, `concaveman`, `spdep`, `FNN` |
 | **Data Wrangling & I/O** | `dplyr`, `tidyr`, `data.table`, `jsonlite`, `readxl`, `openxlsx`, `officer`, `zip`, `fs` |
-| **Visualization & Theming** | `ggplot2`, `ggpubr`, `plotly`, `RColorBrewer`, `viridis`, `patchwork`, `fresh`, `showtext`, `scales`, `commonmark`, `glue` |
+| **Visualization & Theming** | `ggplot2`, `ggpubr`, `plotly`, `RColorBrewer`, `viridis`, `patchwork`, `showtext`, `scales`, `commonmark`, `glue` |
 | **Statistics & Machine Learning** | `randomForest`, `DALEX`, `yardstick`, `agricolae`, `mgcv`, `nortest` |
 | **Classification (tidymodels)** | `parsnip`, `recipes`, `workflows`, `tune`, `rsample`, `dials`, `spatialsample`, `hardhat`, `ranger`, `xgboost`, `nnet` |
 | **Parallelization / Async** | `future`, `furrr`, `promises` |
 | **CRS catalogue** | `DBI`, `RSQLite` |
 
 <details>
-<summary><strong>Tested version matrix</strong>: the exact package versions Monolith 1.0.8b is developed and validated against (click to expand)</summary>
+<summary><strong>Tested version matrix</strong>: the exact package versions Monolith 1.0.9 is developed and validated against (click to expand)</summary>
 
 <br>
 
@@ -280,16 +280,16 @@ Newer CRAN releases are expected to work; if you encounter an inconsistency, mat
 | `terra` | 1.8-93 | `zip` | 2.3.3 | `furrr` | 0.3.1 |
 | `tidyterra` | 1.0.0 | `fs` | 2.1.0 | `promises` | 1.5.0 |
 | `leaflet` | 2.2.3 | `ggplot2` | 4.0.2 | `patchwork` | 1.3.2 |
-| `leaflet.extras` | 2.0.1 | `ggpubr` | 0.6.3 | `fresh` | 0.2.2 |
-| `ggspatial` | 1.1.10 | `plotly` | 4.12.0 | `showtext` | 0.9-7 |
-| `fields` | 17.1 | `RColorBrewer` | 1.1-3 | `scales` | 1.4.0 |
-| `classInt` | 0.4-11 | `viridis` | 0.6.5 | `commonmark` | 2.0.0 |
-| `gstat` | 2.1-5 | `concaveman` | 1.2.0 | `glue` | 1.8.0 |
-| `FNN` | 1.1.4 | `parsnip` | 1.4.1 | `spdep` | 1.4-2 |
-| `workflows` | 1.3.0 | `tune` | 2.0.1 | `recipes` | 1.3.1 |
-| `dials` | 1.4.2 | `spatialsample` | 0.6.1 | `rsample` | 1.3.2 |
-| `ranger` | 0.18.0 | `xgboost` | 3.2.0.1 | `hardhat` | 1.4.2 |
-| `DBI` | 1.3.0 | `RSQLite` | 2.4.1 | `nnet` | 7.3.20 |
+| `leaflet.extras` | 2.0.1 | `ggpubr` | 0.6.3 | `showtext` | 0.9-7 |
+| `ggspatial` | 1.1.10 | `plotly` | 4.12.0 | `scales` | 1.4.0 |
+| `fields` | 17.1 | `RColorBrewer` | 1.1-3 | `commonmark` | 2.0.0 |
+| `classInt` | 0.4-11 | `viridis` | 0.6.5 | `glue` | 1.8.0 |
+| `gstat` | 2.1-5 | `concaveman` | 1.2.0 | `spdep` | 1.4-2 |
+| `FNN` | 1.1.4 | `parsnip` | 1.4.1 | `recipes` | 1.3.1 |
+| `workflows` | 1.3.0 | `tune` | 2.0.1 | `rsample` | 1.3.2 |
+| `dials` | 1.4.2 | `spatialsample` | 0.6.1 | `hardhat` | 1.4.2 |
+| `ranger` | 0.18.0 | `xgboost` | 3.2.0.1 | `nnet` | 7.3.20 |
+| `DBI` | 1.3.0 | `RSQLite` | 2.4.1 |  |  |
 
 **Runtime environment:** R 4.5.2 (ucrt) · GDAL 3.11.4 · GEOS 3.13.1 · PROJ 9.7.0 · Windows 11 (also runs on macOS and Linux).
 
@@ -297,7 +297,7 @@ Newer CRAN releases are expected to work; if you encounter an inconsistency, mat
 
 #### Reproducible installation with `renv` (optional)
 
-For an exact, one-command reproduction of the validated environment, the repository ships a [`renv`](https://rstudio.github.io/renv/) lockfile (`renv.lock`) pinning the dependency tree (including transitive dependencies) to the versions in the matrix above. All 60 packages listed in `global.R` are covered, the Classification Suite's tidymodels stack included. From the project root:
+For an exact, one-command reproduction of the validated environment, the repository ships a [`renv`](https://rstudio.github.io/renv/) lockfile (`renv.lock`) pinning the dependency tree (including transitive dependencies) to the versions in the matrix above. All 59 packages listed in `global.R` are covered, the Classification Suite's tidymodels stack included. From the project root:
 
 ```r
 install.packages("renv")   # once
@@ -418,7 +418,7 @@ Monolith ships with a `testthat` suite of 2,313 assertions across 32 test files,
 Rscript tests/testthat.R
 ```
 
-The first run is slow because the harness sources the full application (all 60 packages); this is expected. Scientific accuracy is treated as the project's primary invariant; changes that alter numeric results are gated on these tests.
+The first run is slow because the harness sources the full application (all 59 packages); this is expected. Scientific accuracy is treated as the project's primary invariant; changes that alter numeric results are gated on these tests.
 
 ## Scope and Limitations
 
@@ -450,7 +450,7 @@ Human oversight remained central throughout: all methodological choices, model f
   title     = {Monolith: A Spatial Analysis Dashboard for Geostatistical Modeling and Mapping},
   author    = {Kara, R. Serdar},
   year      = {2026},
-  version   = {1.0.8b},
+  version   = {1.0.9},
   doi       = {10.5281/zenodo.21130951},
   publisher = {Zenodo},
   url       = {https://github.com/rserdarkara-hash/monolith},

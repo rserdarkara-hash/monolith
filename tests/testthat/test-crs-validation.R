@@ -104,6 +104,57 @@ test_that("calc_metric_spacing returns NA for NULL or single-point input", {
   expect_true(is.na(calc_metric_spacing(pts1)$mean_nn))
 })
 
+# A geographic CRS declared over projected eastings is an ordinary user
+# mistake - it is the first entry in the Input Data CRS list, and the sidebar's
+# plausibility guard exists precisely to catch it. sf answers it by returning a
+# non-finite coordinate for every point rather than by raising, and
+# FNN::get.knn() answers non-finite input with an error. That error was raised
+# inside the grid-resolution observeEvent, where nothing caught it, so choosing
+# WGS 84 for metre coordinates ended the Shiny session. The contract is the one
+# the function already has for too-few points: NA, which every caller tests.
+
+test_that("calc_metric_spacing returns NA rather than raising on unprojectable points", {
+  # Metre eastings/northings declared as degrees, then asked for in a metric
+  # CRS: st_transform yields NA for every point without raising.
+  pts <- sf::st_as_sf(
+    data.frame(x = c(361059, 361500, 361907), y = c(5814546, 5814800, 5815151)),
+    coords = c("x", "y"), crs = 4326
+  )
+  reproj <- suppressWarnings(sf::st_transform(pts, 32633))
+  expect_false(all(is.finite(sf::st_coordinates(reproj))))
+
+  sp <- expect_no_error(calc_metric_spacing(reproj))
+  expect_true(is.na(sp$mean_nn))
+  expect_true(is.na(sp$max_dim))
+})
+
+test_that("calc_metric_spacing returns NA rather than raising on a degree CRS it cannot rescale", {
+  # Same numbers left in the geographic CRS: the coordinates stay finite, but
+  # the Web Mercator rescale the degree branch depends on cannot hold them.
+  pts <- sf::st_as_sf(
+    data.frame(x = c(361059, 361500, 361907), y = c(5814546, 5814800, 5815151)),
+    coords = c("x", "y"), crs = 4326
+  )
+  sp <- expect_no_error(calc_metric_spacing(pts))
+  expect_true(is.na(sp$mean_nn))
+})
+
+test_that("calc_metric_spacing ignores a single unprojectable point among valid ones", {
+  pts <- sf::st_as_sf(
+    data.frame(x = c(500000, 500100, 500200), y = c(5500000, 5500000, 5500000)),
+    coords = c("x", "y"), crs = 32635
+  )
+  sp_all <- calc_metric_spacing(pts)
+  co <- sf::st_coordinates(pts)
+  co[3, 1] <- NA_real_
+  pts_na <- sf::st_as_sf(data.frame(x = co[, 1], y = co[, 2]),
+                         coords = c("x", "y"), crs = 32635, na.fail = FALSE)
+  sp_na <- expect_no_error(calc_metric_spacing(pts_na))
+  # the two surviving points are still 100 m apart
+  expect_equal(sp_na$mean_nn, 100, tolerance = 1e-9)
+  expect_equal(sp_all$mean_nn, 100, tolerance = 1e-9)
+})
+
 test_that("calc_metric_spacing measures projected coordinates directly", {
   # 3 points 100 m apart on a line in UTM 35N
   pts <- sf::st_as_sf(data.frame(x = c(500000, 500100, 500200), y = 5500000),

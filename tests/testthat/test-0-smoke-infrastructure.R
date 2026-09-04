@@ -10,7 +10,7 @@ test_that("testthat infrastructure loads application functions", {
   expect_true(exists("generate_core_plot"),    label = "generate_core_plot from ui_helpers.R")
   expect_true(exists("discretize_numeric_var"),label = "discretize_numeric_var from ui_helpers.R")
   expect_true(exists("compute_normality"),     label = "compute_normality from desc_exploratory_module.R")
-  expect_true(exists("create_app_theme"),      label = "create_app_theme from theme_helpers.R")
+  expect_true(exists("monolith_theme_css"),    label = "monolith_theme_css from theme_helpers.R")
   expect_true(exists("compute_governing_factors"), label = "compute_governing_factors from spatial_helpers.R")
   expect_true(exists("get_nut_key"),           label = "get_nut_key from ui_helpers.R")
   expect_true(exists("validate_crs"),          label = "validate_crs from monolith.R")

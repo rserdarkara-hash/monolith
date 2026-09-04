@@ -197,7 +197,7 @@
     
     for(cat in names(grouped_vars)) {
       cat_vars <- grouped_vars[[cat]]
-      html_content <- paste0(html_content, "<tr style='background-color: #f2f2f2;'><td colspan='2'><b>", cat, "</b></td></tr>")
+      html_content <- paste0(html_content, "<tr style='background-color: var(--mn-surface-2);'><td colspan='2'><b>", cat, "</b></td></tr>")
       for(v in cat_vars) {
         val <- find_val(as.character(v$actual))
         val_str <- if(!is.null(val) && (is.numeric(val) || !is.na(suppressWarnings(as.numeric(val))))) round(as.numeric(val), 3) else as.character(val %||% "N/A")
@@ -207,7 +207,7 @@
     
     other_vars <- setdiff(vars_to_show, meta_actuals)
     if(length(other_vars) > 0) {
-      html_content <- paste0(html_content, "<tr style='background-color: #f2f2f2;'><td colspan='2'><b>Other Variables</b></td></tr>")
+      html_content <- paste0(html_content, "<tr style='background-color: var(--mn-surface-2);'><td colspan='2'><b>Other Variables</b></td></tr>")
       for(ov in other_vars) {
         val <- find_val(as.character(ov))
         val_str <- if(!is.null(val) && (is.numeric(val) || !is.na(suppressWarnings(as.numeric(val))))) round(as.numeric(val), 3) else as.character(val %||% "N/A")
@@ -332,7 +332,7 @@
           .custom-color-row-input .form-group { margin-bottom: 0 !important; margin-top: 0 !important; }
           .custom-color-row-input .shiny-input-container { margin-bottom: 0 !important; margin-top: 0 !important; }
         ")),
-        p("Enter hex color codes (e.g. #FF5733) for each group:", style = "font-size: 12px; color: #888; margin-bottom: 12px;"),
+        p("Enter hex color codes (e.g. #FF5733) for each group:", style = "font-size: 12px; color: var(--mn-text-3); margin-bottom: 12px;"),
         color_inputs
       ),
       footer = tagList(
@@ -395,6 +395,34 @@
     if ((input$method %||% "") %in% c("OK", "RK", "RFK", "CK")) "OK" else ""
   })
   outputOptions(output, "sci_diag_method", suspendWhenHidden = FALSE)
+
+  # Variogram tuning context. TRUE while the sidebar is working on kriging
+  # variograms: Manual mode, or an OPTIMIZE ALL VARIOGRAMS that no later run
+  # has superseded. The Scientific Analysis tab must then show the curves those
+  # controls move whatever engine produced the run currently on screen -
+  # without this, switching to Manual after an IDW/TPS run left the variogram
+  # panels hidden behind the "Diagnostic Mode Active" placeholder.
+  sci_vgm_tuning <- reactive({
+    (input$method %||% "") %in% c("OK", "RK", "RFK", "CK") &&
+      (identical(input$vgm_mode, "manual") || isTRUE(rv$vgm_preview))
+  })
+  output$sci_vgm_tuning <- reactive({ if (isTRUE(sci_vgm_tuning())) "yes" else "no" })
+  outputOptions(output, "sci_vgm_tuning", suspendWhenHidden = FALSE)
+
+  # The displayed run came from an engine that fits no variogram, so while
+  # tuning is active its result cards describe a model that has nothing to do
+  # with what the tab is showing. They are held back, not discarded: the run's
+  # maps and exports are still valid and stay where they are.
+  sci_stale_run <- reactive({
+    isTRUE(sci_vgm_tuning()) && (rv$disp$method %||% "") %in% c("IDW", "TPS")
+  })
+  output$sci_stale_run <- reactive({ if (isTRUE(sci_stale_run())) "yes" else "no" })
+  outputOptions(output, "sci_stale_run", suspendWhenHidden = FALSE)
+
+  observe({
+    shinyjs::toggleClass("sci_stack", "vgm-first", condition = isTRUE(sci_vgm_tuning()))
+    shinyjs::toggleClass("sci_stack", "vgm-only", condition = isTRUE(sci_stale_run()))
+  })
   output$disp_has_pred <- reactive({
     d <- rv$disp
     active <- !is.null(d) && (isTRUE(d$comp_mode) || !identical(d$value_type, "actual"))

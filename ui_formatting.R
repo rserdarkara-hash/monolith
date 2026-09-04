@@ -158,10 +158,12 @@ format_param_val <- function(type, val) {
 # tuning store: a run made without optimizer/manual entries consumes the
 # global slider value, which the store does not hold, so reading the store
 # mislabels e.g. a fixed lambda = 0 run as "Auto (GCV)".
+# has_pre = FALSE means the displayed run mapped no prediction surface, so
+# there is no second parameter to report: the column is dropped rather than
+# filled with a column of "N/A", which read as a failed optimization.
 build_regional_params_df <- function(type, loc, regional_params, has_pre) {
   if (is.null(regional_params) || length(regional_params) == 0) return(NULL)
   fmt <- function(l, tgt) {
-    if (tgt == "pre" && !has_pre) return("N/A")
     key <- paste0(if (type == "IDW") "idw_p_" else "tps_lambda_", tgt)
     val <- regional_params[[l]][[key]]
     if (is.null(val)) return("N/A")
@@ -170,19 +172,21 @@ build_regional_params_df <- function(type, loc, regional_params, has_pre) {
   param_lab <- if (type == "IDW") "Power (p)" else "Lambda"
   if (loc == "Total (Combined)") {
     locs <- names(regional_params)
-    return(data.frame(
+    out <- data.frame(
       Locality = locs,
       Param = param_lab,
-      Actual = unname(vapply(locs, fmt, character(1), tgt = "act")),
-      Predicted = unname(vapply(locs, fmt, character(1), tgt = "pre"))
-    ))
+      Actual = unname(vapply(locs, fmt, character(1), tgt = "act"))
+    )
+    if (has_pre) out$Predicted <- unname(vapply(locs, fmt, character(1), tgt = "pre"))
+    return(out)
   }
   if (!loc %in% names(regional_params)) return(NULL)
-  data.frame(
+  out <- data.frame(
     Param = param_lab,
-    Actual = fmt(loc, "act"),
-    Predicted = fmt(loc, "pre")
+    Actual = fmt(loc, "act")
   )
+  if (has_pre) out$Predicted <- fmt(loc, "pre")
+  out
 }
 
 # --- RK linear-trend presentation --------------------------------------------

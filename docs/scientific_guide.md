@@ -145,13 +145,13 @@ Instead of one universal buffer distance, padding scales with the active resolut
 
 ### 3.3 Strict measured (point buffer) manual enforcement
 
-Dynamic buffering in this mode exaggerates coverage: at a coarse 200 m resolution a 3x multiplier draws 600 m circles around every point, claiming a vast mapped footprint the sampling does not support. **Strict Measured** therefore disables dynamic buffering and operates only under **Fixed (Manual)** settings.
+Dynamic buffering in this mode exaggerates coverage: at a coarse 200 m resolution a 3x multiplier draws 600 m circles around every point, claiming a vast mapped footprint the sampling does not support. **Point buffer** therefore disables dynamic buffering and operates only under **Fixed (Manual)** settings.
 
 **Grid evaluation domain:** the prediction grid is generated over the boundary's bounding box, and nodes outside the boundary are excluded *before* the engines run rather than masked afterwards. All engines predict pointwise, so no within-boundary value changes; this only removes computation the mask would have discarded, a substantial saving for concave or multi-part boundaries.
 
 ### 3.4 Buffer radius and cell size must be coherent
 
-A cell is kept when its **centre** falls inside the boundary. That is the standard raster clip rule (used identically at grid construction and at the final `terra::mask`), but under a Strict Measured boundary it couples the buffer to the cell size, because there the boundary *is* the support claim: the union of circles of radius $D_b$ around the samples.
+A cell is kept when its **centre** falls inside the boundary. That is the standard raster clip rule (used identically at grid construction and at the final `terra::mask`), but under a Point buffer boundary it couples the buffer to the cell size, because there the boundary *is* the support claim: the union of circles of radius $D_b$ around the samples.
 
 A sample lies anywhere within its own cell, so its distance to that cell's centre ranges from 0 to half the cell diagonal, $R/\sqrt{2}$. On a square grid the containing cell's centre is also the *nearest* cell centre (each cell is the Voronoi region of its own centre), so an isolated sample paints no cell anywhere precisely when that one centre escapes its buffer. Every sample therefore keeps the cell it sits in only when
 
@@ -169,7 +169,7 @@ Monolith treats an incoherent pair as an advisory, not an error: the run is scie
 
 The same rule and the same advisory apply to the Classification Suite's Spatial Scope panel, which builds its prediction grid with the identical centre-in-boundary clip.
 
-Hull boundaries are not flagged. The exposure there is confined to the *perimeter*: a concave hull runs through the outermost samples themselves, so an edge sample's cell centre can fall on the outside, but every interior sample is surrounded by hull area and keeps its cell whatever the resolution. Under a Strict Measured boundary the risk instead applies to every isolated sample in the domain, which is what makes it worth naming. A wrapped hull under dynamic buffering is safe by construction, since its buffer is $1.0$ to $3.0 \times R$ and so never below $R/\sqrt{2}$.
+Hull boundaries are not flagged. The exposure there is confined to the *perimeter*: a concave hull runs through the outermost samples themselves, so an edge sample's cell centre can fall on the outside, but every interior sample is surrounded by hull area and keeps its cell whatever the resolution. Under a Point buffer boundary the risk instead applies to every isolated sample in the domain, which is what makes it worth naming. A wrapped hull under dynamic buffering is safe by construction, since its buffer is $1.0$ to $3.0 \times R$ and so never below $R/\sqrt{2}$.
 
 ### 3.5 On-map distance measurement (ruler)
 
@@ -577,11 +577,11 @@ Class limits for the agronomical styling algorithms are computed by `calc_class_
 * **Reproducibility.** Both `classInt` styles draw random numbers internally (k-means starts; Jenks silently switches to an unseeded 3,000-value sample above n = 3,000), so the same map could legitimately produce different class limits on every restyle. `calc_class_breaks` runs under the app's two-sided seed sandbox (seed `12345`, caller RNG restored), making the breaks bit-reproducible.
 * **Tractability.** The exact Jenks algorithm (Jenks 1967) is O(n²) and blocks for seconds on raster-sized vectors, so breaks are estimated on a seeded subsample capped at `max_n = 5000` cells. Estimating breaks from a sample is standard GIS practice, and the class *areas* reported in the Scientific Analysis tab are always computed by classifying the **full-resolution** raster with those breaks. The interactive Leaflet viewer may display a mean-aggregated preview above about 500,000 cells; this is display-only.
 * **Where:** the `max_n = 5000L` default of `calc_class_breaks`, and `LEAFLET_DISPLAY_MAX_CELLS <- 5e5` in `server_setup.R`.
-* **Commit semantics.** Agronomical sub-settings (algorithm, class count, supervised limits) are staged in the sidebar and take effect when **APPLY TO MAPS & STATS** is pressed, so the break computation runs once per commit rather than on every input tick. The computation itself is unaffected by the staging.
+* **Commit semantics.** Agronomical sub-settings (algorithm, class count, supervised limits) are staged in the sidebar and take effect when **Apply to maps and statistics** is pressed, so the break computation runs once per commit rather than on every input tick. The computation itself is unaffected by the staging.
 
 ### 9.5 Class zones as vector polygons
 
-The **Export Class Zones** button writes the displayed classified surface as a GIS vector layer (`build_class_zone_sf`, `spatial_pipeline.R`). It is a change of representation, not of method, and is built from the same two calls the on-screen map and the Area Coverage table already make.
+The **Class zones** export writes the displayed classified surface as a GIS vector layer (`build_class_zone_sf`, `spatial_pipeline.R`). It is a change of representation, not of method, and is built from the same two calls the on-screen map and the Area Coverage table already make.
 
 * **Geometry.** `terra::classify(rcl_mat, right = FALSE)`, the identical classification including the left-closed interval convention, followed by `terra::as.polygons(dissolve = TRUE)`. One feature per class present in the surface. Polygon boundaries are therefore **cell boundaries**: the zones inherit the interpolation grid resolution and are not smoothed, contoured or generalised, because any of those would move the boundary away from where the model places it.
 * **Area.** Taken from `terra::expanse(unit = "ha", byValue = TRUE)`, the function the Area Coverage table calls, rather than measured off the exported geometry, so the exported `area_ha` equals the reported hectares by construction. `expanse` measures on the ellipsoid rather than in grid units, so a class covering thirty 100 × 100 m cells reports about 30.02 ha, not exactly 30.

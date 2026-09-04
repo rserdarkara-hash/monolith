@@ -703,7 +703,7 @@ run_regional_interpolation <- function(item, current_method, current_crs, aux_va
           write_warning_file(l, "act", paste0(
             "Target has no usable variance in this locality (all values equal or ",
             "differing only in noise digits); the surface will be constant and ",
-            "R2 / NSE / CCC / RPD / RPIQ are undefined."))
+            "R² / NSE / CCC / RPD / RPIQ are undefined."))
         }
         lags_a <- calc_scientific_lags(pts_a)
         mp_a <- list(idw_p = m_params$idw_p_act, idw_nmax = m_params$idw_nmax, tps_lambda = m_params$tps_lambda_act, pre_fit = m_params$pre_fit_act, grid_aux = grid_aux, cv_strategy = m_params$cv_strategy, cv_repeats = m_params$cv_repeats, cancel_file = cancel_file_val, rfk_uncertainty = m_params$rfk_uncertainty, rf_ntree = m_params$rf_ntree, ck_nmax = m_params$ck_nmax, aux_kept = aux_kept_a)
@@ -762,7 +762,7 @@ run_regional_interpolation <- function(item, current_method, current_crs, aux_va
               write_warning_file(l, "pre", paste0(
                 "Target has no usable variance in this locality (all values equal or ",
                 "differing only in noise digits); the surface will be constant and ",
-                "R2 / NSE / CCC / RPD / RPIQ are undefined."))
+                "R² / NSE / CCC / RPD / RPIQ are undefined."))
             }
             lags_p <- calc_scientific_lags(pts_p)
             mp_p <- list(idw_p = m_params$idw_p_pre, idw_nmax = m_params$idw_nmax, tps_lambda = m_params$tps_lambda_pre, pre_fit = m_params$pre_fit_pre, grid_aux = grid_aux, cv_strategy = m_params$cv_strategy, cv_repeats = m_params$cv_repeats, cancel_file = cancel_file_val, rfk_uncertainty = m_params$rfk_uncertainty, rf_ntree = m_params$rf_ntree, ck_nmax = m_params$ck_nmax, aux_kept = aux_kept_p)
@@ -898,6 +898,19 @@ calc_metric_spacing <- function(pts) {
     dist_scale <- 1
     coords <- sf::st_coordinates(pts)
   }
+
+  # A CRS that cannot hold the numbers it was declared over - WGS 84 applied to
+  # projected eastings is the routine case, and it is the first entry in the
+  # Input Data CRS list - makes sf return a non-finite coordinate for every
+  # point WITHOUT raising, and leaves the degree branch above rescaling by a
+  # latitude that is not one. FNN::get.knn() answers non-finite input with an
+  # error, and this function is called from an observeEvent where nothing
+  # caught it, so the whole Shiny session ended. Report it as the same NA the
+  # too-few-points case returns: every caller already tests for that, and the
+  # sidebar's own plausibility guard is what tells the user their CRS is wrong.
+  if (!is.finite(dist_scale)) return(list(mean_nn = NA_real_, max_dim = NA_real_))
+  coords <- coords[is.finite(coords[, 1]) & is.finite(coords[, 2]), , drop = FALSE]
+  if (nrow(coords) < 2) return(list(mean_nn = NA_real_, max_dim = NA_real_))
 
   knn_res <- FNN::get.knn(coords, k = 1)
   list(

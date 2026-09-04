@@ -92,8 +92,15 @@ test_that("the app boots and lands on the Data Setup tab", {
   app <- smoke_app()
   expect_equal(app$get_value(input = "main_tabs"), "tab_data")
   html <- app$get_html("body")
-  expect_true(grepl("1. Data Setup", html, fixed = TRUE))
-  expect_true(grepl("2. Spatial Engine", html, fixed = TRUE))
+  expect_true(grepl("Data Setup", html, fixed = TRUE))
+  expect_true(grepl("Spatial Engine", html, fixed = TRUE))
+  # Tabs and sidebar sections carry no ordinal: the exploratory and
+  # classification suites are not steps 5 and 6 of the interpolation workflow,
+  # and the sidebar sections are not a sequence either.
+  expect_false(grepl("1. Data Setup", html, fixed = TRUE))
+  expect_false(grepl("2. Spatial Engine", html, fixed = TRUE))
+  # Where the surface is predicted is its own section, split out of the engine.
+  expect_true(grepl('data-key="domain"', html, fixed = TRUE))
   # Nothing is displayed before the first run: the committed display context
   # (rv$disp) is empty, which every conditionalPanel keys on.
   expect_equal(as.character(app$get_value(output = "disp_method")), "")
@@ -258,6 +265,50 @@ test_that("a companion lon/lat pair identifies the input CRS on upload", {
   # The Target Mapping CRS is filled only because it was still unset.
   expect_equal(app$get_value(input = "crs_selection"), "EPSG:32633")
   expect_true(grepl("Currently plotting at", app$get_html("body"), fixed = TRUE))
+})
+
+test_that("the header context strip names both coordinate systems", {
+  app <- smoke_app()
+  # Inherits the previous test's upload: dataset loaded, both CRS selectors set.
+  strip <- app$get_html(".mn-ctx")
+  skip_if(is.null(strip), "context strip absent (no dataset in session)")
+
+  expect_true(grepl("Points", strip, fixed = TRUE))
+  # The strip is the only always-visible statement of coordinate system, and
+  # every metric quantity the app reports - buffer and range in metres, cell
+  # size, hectares - is computed in the TARGET system. A single item labelled
+  # "CRS" showing the input one invited those metres to be read against the
+  # wrong system, so both roles are named.
+  expect_true(grepl("Input CRS", strip, fixed = TRUE))
+  expect_true(grepl("Target CRS", strip, fixed = TRUE))
+  expect_false(grepl(">CRS<", strip, fixed = TRUE))
+  expect_true(grepl("EPSG:32633", strip, fixed = TRUE))
+})
+
+test_that("variogram tuning context tracks the method and the fitting mode", {
+  app <- smoke_app()
+  # Governs what the Scientific Analysis tab puts next to a variogram, so a
+  # regression here shows one model's curves beside another model's metrics.
+  # Both outputs are suspendWhenHidden = FALSE, so they read from any tab.
+  app$set_inputs(method = "OK", vgm_mode = "auto")
+  app$wait_for_idle()
+  expect_equal(as.character(app$get_value(output = "sci_vgm_tuning")), "no")
+
+  # Manual fitting on a kriging engine IS tuning.
+  app$set_inputs(vgm_mode = "manual")
+  app$wait_for_idle()
+  expect_equal(as.character(app$get_value(output = "sci_vgm_tuning")), "yes")
+  # Nothing has been run, so no displayed run can be stale against it.
+  expect_equal(as.character(app$get_value(output = "sci_stale_run")), "no")
+
+  # IDW fits no variogram, so the tuning layout must not engage for it even
+  # with the fitting mode left on Manual.
+  app$set_inputs(method = "IDW")
+  app$wait_for_idle()
+  expect_equal(as.character(app$get_value(output = "sci_vgm_tuning")), "no")
+
+  app$set_inputs(method = "OK", vgm_mode = "auto")
+  app$wait_for_idle()
 })
 
 # Shut the app down here rather than at suite teardown: global.R sets

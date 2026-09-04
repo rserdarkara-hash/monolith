@@ -4,7 +4,7 @@
   # Shared note box for the per-locality diagnostic panels (same look as the
   # "select a locality" hints these panels already used).
   sci_ui_note <- function(msg) {
-    div(style="padding: 12px; background-color: #f8f9fa; border: 1px dashed #ced4da; border-radius: 6px; color: #6c757d; font-style: italic; text-align: center;",
+    div(style="padding: 12px; background-color: var(--mn-surface-2); border: 1px dashed var(--mn-line-2); border-radius: 6px; color: var(--mn-text-3); font-style: italic; text-align: center;",
         msg)
   }
 
@@ -505,74 +505,119 @@
     sci_dt(res)
   })
 
-  calc_area_df <- function(r_obj, r_id = NULL) {
-    if(is.null(r_obj)) return(NULL)
-    # error-only: catching `condition` here also unwound message() conditions
-    # escaping classification_params(), aborting the reactive mid-evaluation
-    # and poisoning it for the map renderers (Jenks fell back to continuous)
-    params <- tryCatch(classification_params(), error = function(e) NULL)
-    if(is.null(params)) return(data.frame(Status = "Awaiting classification - press APPLY TO MAPS & STATS under Map Styling in the sidebar"))
+  # Hectares per class for ONE surface, UNROUNDED and in class order (0 for a
+  # class that wins no cell). NULL when the surface cannot be classified.
+  #
+  # terra::expanse() defaults to transform = TRUE, which reprojects every cell
+  # to lon/lat to get its geodesic area. That cost is linear in the raster's
+  # TOTAL cell count, NA padding included, so it must never be handed a sparse
+  # grid - see class_area_ha_sum() below.
+  class_area_ha <- function(r_obj, params, r_id = NULL) {
+    if (is.null(r_obj) || is.null(params)) return(NULL)
 
+    cache_key <- NULL
     if (!is.null(r_id)) {
-      brk_str <- if (!is.null(params) && !is.null(params$brks)) paste(params$brks, collapse = "_") else "nobrks"
-      cache_key <- paste0(rv$run_counter, "_", r_id, "_", brk_str)
+      brk_str <- if (!is.null(params$brks)) paste(params$brks, collapse = "_") else "nobrks"
+      # "ha_" namespaces the unrounded vectors apart from anything else the
+      # cache has held under a (run, id, breaks) key.
+      cache_key <- paste0("ha_", rv$run_counter, "_", r_id, "_", brk_str)
       if (exists(cache_key, envir = area_calc_cache)) {
         return(get(cache_key, envir = area_calc_cache))
       }
     }
     # unwrap only on a cache miss (deserializing a packed raster is expensive)
-    if(inherits(r_obj, "PackedSpatRaster")) r_obj <- terra::unwrap(r_obj)
+    if (inherits(r_obj, "PackedSpatRaster")) r_obj <- terra::unwrap(r_obj)
 
-    tryCatch({
+    out <- tryCatch({
       r_class <- classify(r_obj[[1]], params$rcl_mat, right = FALSE)
-      
       area_df <- as.data.frame(expanse(r_class, unit = "ha", byValue = TRUE))
-      
-      class_names <- if(isTruthy(input$color_style == "bin")) params$leg_labels else params$labels
-      full_res <- data.frame(value = as.numeric(1:params$n_c), Class = class_names)
-      
-      if(!"value" %in% names(area_df)) {
-        res_df <- data.frame(Class = class_names, Ha = 0)
-        if (!is.null(r_id)) {
-          assign(cache_key, res_df, envir = area_calc_cache)
-        }
-        return(res_df)
-      }
-      
-      is_label <- any(as.character(area_df$value) %in% class_names)
-      if (is_label) {
-         area_df$value <- match(as.character(area_df$value), class_names)
-      } else {
-         area_df$value <- as.numeric(as.character(area_df$value))
-      }
-      
-      area_df <- area_df[!is.na(area_df$value), ]
-      
-      area_df <- area_df %>%
-        group_by(value) %>%
-        summarise(Ha = round(sum(area, na.rm = TRUE), 2), .groups = "drop")
 
-      res_df <- full_res %>%
-        left_join(area_df, by = "value") %>%
-        mutate(Ha = ifelse(is.na(Ha), 0, Ha)) %>%
-        select(Class, Ha)
-      
-      if (!is.null(r_id)) {
-        assign(cache_key, res_df, envir = area_calc_cache)
+      ha <- rep(0, params$n_c)
+      if ("value" %in% names(area_df)) {
+        class_names <- if (isTruthy(input$color_style == "bin")) params$leg_labels else params$labels
+        # A categorical layer reports `value` as the label rather than the code
+        is_label <- any(as.character(area_df$value) %in% class_names)
+        idx <- if (is_label) {
+          match(as.character(area_df$value), class_names)
+        } else {
+          suppressWarnings(as.numeric(as.character(area_df$value)))
+        }
+        keep <- !is.na(idx) & idx >= 1 & idx <= params$n_c
+        if (any(keep)) {
+          agg <- tapply(area_df$area[keep], idx[keep], sum, na.rm = TRUE)
+          ha[as.integer(names(agg))] <- as.numeric(agg)
+        }
       }
-      return(res_df)
-    }, error = function(e) {
-      return(data.frame(Error = as.character(e$message)))
-    })
+      ha
+    }, error = function(e) structure(character(0), area_error = conditionMessage(e)))
+
+    if (!is.null(cache_key)) assign(cache_key, out, envir = area_calc_cache)
+    out
   }
+
+  # Total across the localities of a run, summed on the UNROUNDED per-locality
+  # hectares so the total is the sum of the rows above it to the last decimal.
+  #
+  # Deliberately NOT computed on the merged rv$rast: terra::merge() spans the
+  # union of the locality extents, so two fields 25 km apart share a grid that
+  # is ~97% NA. expanse() charges for those cells - measured at 109 s and
+  # 1.1 GB of working set on a 13 M-cell merged grid holding 320 k real cells,
+  # against 1.4 s per locality - and four of these run in the flush that
+  # applies a classification. The localities a run produces are disjoint (one
+  # boundary per group, cells assigned to one locality), so their areas add.
+  class_area_ha_sum <- function(r_list, id_prefix, params) {
+    r_list <- Filter(Negate(is.null), r_list)
+    if (length(r_list) == 0) return(NULL)
+    nms <- names(r_list)
+    total <- rep(0, params$n_c)
+    for (i in seq_along(r_list)) {
+      tag <- if (!is.null(nms) && !is.na(nms[i]) && nzchar(nms[i])) nms[i] else as.character(i)
+      ha <- class_area_ha(r_list[[i]], params, paste0(id_prefix, "_", tag))
+      if (is.null(ha) || length(ha) != params$n_c) return(ha)  # NULL, or the error marker
+      total <- total + ha
+    }
+    total
+  }
+
+  # Shapes a hectare vector (or an error marker) into the displayed table.
+  area_ha_to_df <- function(ha, params) {
+    if (is.null(params)) return(data.frame(Status = "Awaiting classification - press Apply to maps and statistics under Map Styling in the sidebar"))
+    if (is.null(ha)) return(NULL)
+    err <- attr(ha, "area_error")
+    if (!is.null(err)) return(data.frame(Error = as.character(err)))
+    class_names <- if (isTruthy(input$color_style == "bin")) params$leg_labels else params$labels
+    data.frame(Class = class_names, Ha = round(ha, 2))
+  }
+
+  calc_area_df <- function(r_obj, r_id = NULL) {
+    if (is.null(r_obj)) return(NULL)
+    # error-only: catching `condition` here also unwound message() conditions
+    # escaping classification_params(), aborting the reactive mid-evaluation
+    # and poisoning it for the map renderers (Jenks fell back to continuous)
+    params <- tryCatch(classification_params(), error = function(e) NULL)
+    if (is.null(params)) return(area_ha_to_df(NULL, NULL))
+    area_ha_to_df(class_area_ha(r_obj, params, r_id), params)
+  }
+
   area_df_total_act <- reactive({
     req(rv$rast)
-    calc_area_df(rv$rast, "total_act")
+    params <- tryCatch(classification_params(), error = function(e) NULL)
+    if (is.null(params)) return(area_ha_to_df(NULL, NULL))
+    ha <- class_area_ha_sum(rv$rast_list_act, "loc_act", params)
+    # Only a run that stored no per-locality surface falls back to the merged
+    # grid; every path that fills rv$rast fills rv$rast_list_act with the
+    # rasters it was merged from.
+    if (is.null(ha)) ha <- class_area_ha(rv$rast, params, "total_act_merged")
+    area_ha_to_df(ha, params)
   })
-  
+
   area_df_total_pre <- reactive({
     req(rv$rast_pred)
-    calc_area_df(rv$rast_pred, "total_pre")
+    params <- tryCatch(classification_params(), error = function(e) NULL)
+    if (is.null(params)) return(area_ha_to_df(NULL, NULL))
+    ha <- class_area_ha_sum(rv$rast_list_pre, "loc_pre", params)
+    if (is.null(ha)) ha <- class_area_ha(rv$rast_pred, params, "total_pre_merged")
+    area_ha_to_df(ha, params)
   })
 
   output$area_table_total_act <- DT::renderDataTable({ req(input$color_style %in% c("agro", "bin")); sci_dt(area_df_total_act()) })
@@ -601,8 +646,8 @@
     # Message only - the computation is deliberately left as it is.
     pooled_note <- if (identical(input$sel_loc_stats, "Total (Combined)")) {
       tags$div(
-        style = "font-size: 0.82em; color: #495057; margin: -4px 0 8px 0;",
-        tags$span(style = "color: #868e96;",
+        style = "font-size: 0.82em; color: var(--mn-text-2); margin: -4px 0 8px 0;",
+        tags$span(style = "color: var(--mn-text-3);",
                   "Pooled R²/NSE are computed against the pooled mean; when localities differ in their means, between-locality variance inflates these scores. Judge model skill on the per-locality rows.")
       )
     }
@@ -610,7 +655,7 @@
     # seed); say where the extra realizations are reported instead.
     n_rep <- rv$cv_repeats_sel %||% 1L
     repeat_note <- if (is.numeric(n_rep) && n_rep > 1) {
-      tags$span(style = "color: #868e96;",
+      tags$span(style = "color: var(--mn-text-3);",
                 sprintf(" Repeated CV is on (%d fold realizations); the values here are realization 1, the spread is in the table below.", n_rep))
     }
     # What a fold refits is engine-dependent, and the shared property is REUSE
@@ -635,17 +680,17 @@
     )
     refit_note <- if (!is.null(reuse_txt)) {
       tags$div(
-        style = "font-size: 0.82em; color: #495057; margin: -4px 0 8px 0;",
-        tags$span(style = "color: #868e96;",
+        style = "font-size: 0.82em; color: var(--mn-text-2); margin: -4px 0 8px 0;",
+        tags$span(style = "color: var(--mn-text-3);",
                   paste0(get_method_label(rv$disp$method), reuse_txt))
       )
     }
     tagList(
       tags$div(
-        style = "font-size: 0.82em; color: #495057; margin: -4px 0 8px 0;",
+        style = "font-size: 0.82em; color: var(--mn-text-2); margin: -4px 0 8px 0;",
         tags$span(style = "font-weight: 600;", "Cross-validation: "),
         tags$span(label),
-        tags$span(style = "color: #868e96;", " (applies to these metrics only, not the map)."),
+        tags$span(style = "color: var(--mn-text-3);", " (applies to these metrics only, not the map)."),
         repeat_note
       ),
       refit_note,
@@ -663,8 +708,8 @@
     # two can be read side by side: perform_cv already computed MAE, NRMSE, CCC
     # and RPIQ, they were simply never displayed. Moran's I / p have no
     # counterpart there (uploaded predictions carry no CV residual field).
-    metric_cols <- c("Source", "RMSE", "NRMSE (%)", "MAE", "R2 (Corr)",
-                     "R2 (NSE/Trad)", "Bias (ME)", "Lin's CCC (Agree)",
+    metric_cols <- c("Source", "RMSE", "NRMSE (%)", "MAE", "R² (Corr)",
+                     "R² (NSE/Trad)", "Bias (ME)", "Lin's CCC (Agree)",
                      "RPD (Prec)", "RPIQ", "SMAPE (%)", "Moran's I", "Moran p")
     # NA in the Moran columns means the statistic could not be computed for this
     # point set (fewer than 3 points, no coordinate columns, or the neighbour
@@ -847,7 +892,7 @@
           nmae_val <- if(is.finite(mae_raw) && abs(mean_v) > 0) round((mae_raw / abs(mean_v)) * 100, 2) else NA
 
               sci_dt(data.frame(
-                Metric = c("R2 (NSE/Traditional)", "R2 (Correlation)", "RMSE", "NRMSE (%)", "MAE", "NMAE (%)", "MBE (ML pred - observed)", "Lin's CCC (Agree)", "RPD (Precision)", "RPIQ", "SMAPE (%)"),
+                Metric = c("R² (NSE/Traditional)", "R² (Correlation)", "RMSE", "NRMSE (%)", "MAE", "NMAE (%)", "MBE (ML pred - observed)", "Lin's CCC (Agree)", "RPD (Precision)", "RPIQ", "SMAPE (%)"),
                 Value = c(m$nse, m$r2, m$rmse, m$nrmse_mean, m$mae, nmae_val, mbe_val, m$ccc, m$rpd, m$rpiq, m$smape)
               ))        })
   output$kappa_table <- DT::renderDataTable({
@@ -864,7 +909,7 @@
 
     if (input$kappa_bin_method == "agro") {
       params <- tryCatch(agro_params(), error = function(e) NULL)
-      if(is.null(params) || input$color_style != "agro") return(sci_dt(data.frame(Status = "Select Agronomical styling and press APPLY TO MAPS & STATS (sidebar) for this method.")))
+      if(is.null(params) || input$color_style != "agro") return(sci_dt(data.frame(Status = "Select Agronomical styling and press Apply to maps and statistics (sidebar) for this method.")))
       
       breaks <- c(-Inf, params$rcl_mat[-1, 1], Inf)
       labels <- params$labels
@@ -991,7 +1036,7 @@
     if (is.null(rv$rast) && is.null(rv$rast_pred))
       return("No interpolated surface yet. Run an interpolation first.")
     if (!isTRUE(input$color_style %in% c("agro", "bin")))
-      return("Class zones exist only under Agronomical or Binned map styling. Switch Map Styling in the sidebar (Agronomical also needs APPLY TO MAPS & STATS).")
+      return("Class zones exist only under Agronomical or Binned map styling. Switch Map Styling in the sidebar (Agronomical also needs Apply to maps and statistics).")
     if (identical(input$map_view, "view_resid"))
       return("The residual view is not classified. Switch the Map Viewer to Actual, Predicted or Comparison to export its class zones.")
     NULL

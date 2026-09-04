@@ -435,7 +435,7 @@ cv_repeat_frame <- function(cv_obj) {
 # Metrics that carry a meaningful spread across fold realizations. Moran's I is
 # deliberately absent (see perform_cv's `moran` argument).
 CV_REPEAT_METRICS <- c(rmse = "RMSE", nrmse_mean = "NRMSE (%)", mae = "MAE",
-                       r2 = "R2 (Corr)", nse = "R2 (NSE/Trad)", me = "Bias (ME)",
+                       r2 = "R² (Corr)", nse = "R² (NSE/Trad)", me = "Bias (ME)",
                        ccc = "Lin's CCC (Agree)", rpd = "RPD (Prec)",
                        rpiq = "RPIQ", smape = "SMAPE (%)")
 

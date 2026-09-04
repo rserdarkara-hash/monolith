@@ -34,10 +34,35 @@
     return(list(
       meta = meta,
       n_locs = n_locs,
+      n_points = sum(loc_sample_counts),
       estimate_text = est_res$estimate_text,
+      # The bare duration, for the one-line statement under the Run button;
+      # estimate_text is the multi-paragraph version the confirmation dialog uses.
+      est_time_str = est_res$est_time_str,
       is_long_run = est_res$is_long_run
     ))
   }
+
+  # What the next run will cost, stated before it is started: duration, how many
+  # locality models, how many points, and the method it would use. Recomputed
+  # from the same estimator the confirmation dialog reads, so the two never
+  # disagree; silent until a dataset has been mapped (calculate_run_estimates
+  # req()s the run metadata).
+  output$run_estimate_line <- renderUI({
+    est <- tryCatch(calculate_run_estimates(), error = function(e) NULL)
+    if (is.null(est)) return(NULL)
+    has_data <- !is.null(rv$user_data)
+    tags$div(
+      class = "mn-dock-est",
+      icon("clock"),
+      tags$span(
+        "Estimated ", tags$b(est$est_time_str),
+        " · ", tags$b(est$n_locs), if (est$n_locs == 1) " locality" else " localities",
+        if (has_data) tagList(" · ", tags$b(format(est$n_points, big.mark = ",")), " points"),
+        " · ", tags$b(get_method_label(input$method))
+      )
+    )
+  })
 
   # Archived registries hold wrapped rasters, so an unbounded archive
   # grows RAM run after run; keep only the most recent few.
@@ -69,12 +94,12 @@
       showModal(modalDialog(
         title = "Ready to Run Interpolation",
         tags$p("You are about to start the spatial interpolation pipeline with the following parameters:"),
-        div(style = "background-color: #f8f9fa; padding: 12px; border-radius: 5px; margin: 10px 0;",
+        div(style = "background-color: var(--mn-surface-2); padding: 12px; border-radius: 5px; margin: 10px 0;",
           tags$strong("Method: "), tags$span(input$method), tags$br(),
           tags$strong("Localities: "), tags$span(n_locs), tags$br(),
           tags$strong("Variables: "), tags$span(meta$label)
         ),
-        div(style = "background-color: #e8f4fd; color: #1d6fa5; padding: 10px; border-radius: 5px; margin: 10px 0;",
+        div(class = "mn-notice",
           icon("hourglass-half"), tags$strong(" Run Estimate: "), tags$span(estimate_text)
         ),
         footer = tagList(
@@ -97,7 +122,7 @@
     if (isTruthy(rv$mapping$crs) && isTruthy(input$crs_selection)) return(TRUE)
     missing <- if (!isTruthy(rv$mapping$crs)) "Input Data CRS" else "Target Mapping CRS"
     showModal(modalDialog(
-      title = tags$div(style = "color: #d9534f; font-weight: bold;", icon("exclamation-triangle"), paste(missing, "Not Set")),
+      title = tags$div(style = "color: var(--mn-danger); font-weight: 600;", icon("exclamation-triangle"), paste(missing, "Not Set")),
       tags$p(paste0("Set the ", missing, " on the Data Setup tab before running. Neither selector has a default: the Input Data CRS is the one your X/Y columns were recorded in and cannot be inferred from the coordinates alone, and the Target Mapping CRS is the one every exported raster and shapefile is written in.")),
       tags$p("Check the position printed under the mini-map once the Input Data CRS is selected: if it is not your study area, the CRS is wrong."),
       easyClose = TRUE,
@@ -124,7 +149,7 @@
     if (!identical(suit$level, "block")) return(TRUE)
     if (identical(rv$crs_gate_ack, crs_gate_key(input$crs_selection, suit$dev))) return(TRUE)
     showModal(modalDialog(
-      title = tags$div(style = "color: #d9534f; font-weight: bold;",
+      title = tags$div(style = "color: var(--mn-danger); font-weight: 600;",
                        icon("exclamation-triangle"), suit$title),
       tags$p(suit$msg),
       tags$p(suit$detail),
@@ -167,7 +192,7 @@
 
        if (length(vif_res$dropped) > 0) {
           showModal(modalDialog(
-            title = tags$div(style = "color: #d9534f; font-weight: bold;", icon("exclamation-triangle"), "High Multicollinearity Detected"),
+            title = tags$div(style = "color: var(--mn-danger); font-weight: 600;", icon("exclamation-triangle"), "High Multicollinearity Detected"),
             tags$p("High correlation / multicollinearity detected among the selected variables within the selected localities. This may destabilize the spatial estimation model."),
             tags$p(tags$b("Variables recommended to be dropped:"), paste(vif_res$dropped, collapse=", ")),
             tags$p("What would you like to do?"),
@@ -262,14 +287,14 @@
         showModal(modalDialog(
           title = "Previous Results Detected",
           tags$p("A previous model run exists. What would you like to do with those results?"),
-          div(style = "background-color: #f8f9fa; padding: 10px; border-radius: 5px; margin: 10px 0;",
+          div(style = "background-color: var(--mn-surface-2); padding: 10px; border-radius: 5px; margin: 10px 0;",
             tags$strong(paste0("Run #", rv$run_config_summary$run_id, ": ",
               rv$run_config_summary$variable, " (", rv$run_config_summary$method, ")")),
             tags$br(),
             tags$small(paste0(rv$run_config_summary$localities, " | ",
               format(rv$run_config_summary$timestamp, "%H:%M:%S")))
           ),
-          div(style = "background-color: #e8f4fd; color: #1d6fa5; padding: 10px; border-radius: 5px; margin: 10px 0;",
+          div(class = "mn-notice",
             icon("hourglass-half"), tags$strong(" Run Estimate: "), tags$span(estimate_text)
           ),
           checkboxInput("auto_archive_remember", "Remember my choice (apply automatically for future runs)", FALSE),
@@ -364,7 +389,7 @@
     
     if (is.null(x_col_name) || is.null(y_col_name) || !(x_col_name %in% colnames(rv$user_data)) || !(y_col_name %in% colnames(rv$user_data))) {
       showModal(modalDialog(
-        title = tags$div(style = "color: #d9534f; font-weight: bold;", icon("exclamation-triangle"), "Coordinate Mapping Error"),
+        title = tags$div(style = "color: var(--mn-danger); font-weight: 600;", icon("exclamation-triangle"), "Coordinate Mapping Error"),
         tags$p("The selected coordinate columns (X, Y) do not exist in the dataset. Please verify your variable mapping in the setup tab."),
         easyClose = TRUE,
         footer = modalButton("Dismiss")
@@ -381,7 +406,7 @@
     
     if (valid_xy_count < 3) {
       showModal(modalDialog(
-        title = tags$div(style = "color: #d9534f; font-weight: bold;", icon("exclamation-triangle"), "Invalid Coordinate Data"),
+        title = tags$div(style = "color: var(--mn-danger); font-weight: 600;", icon("exclamation-triangle"), "Invalid Coordinate Data"),
         tags$p("The selected coordinate columns (X, Y) do not contain sufficient valid numeric values."),
         tags$p(paste0("Total rows with valid numeric coordinates: ", valid_xy_count, " (minimum 3 required).")),
         tags$p("Please verify that your selected coordinate columns are strictly numeric and contain no missing values (NAs) or text."),
@@ -397,9 +422,9 @@
       missing_vars <- setdiff(aux_vars, colnames(rv$user_data))
       if (length(missing_vars) > 0) {
         showModal(modalDialog(
-          title = tags$div(style = "color: #d9534f; font-weight: bold;", icon("exclamation-triangle"), "Missing Covariates"),
+          title = tags$div(style = "color: var(--mn-danger); font-weight: 600;", icon("exclamation-triangle"), "Missing Covariates"),
           tags$p("The following selected covariates do not exist in the dataset:"),
-          tags$pre(style = "background-color: #f8d7da; color: #721c24; border: 1px solid #f5c6cb; padding: 10px; border-radius: 4px;", paste(missing_vars, collapse = ", ")),
+          tags$pre(style = "background-color: var(--mn-surface-2); color: var(--mn-text); border: 1px solid var(--mn-line); border-left: 2px solid var(--mn-danger); padding: 10px; border-radius: 4px;", paste(missing_vars, collapse = ", ")),
           easyClose = TRUE,
           footer = modalButton("Dismiss")
         ))
@@ -416,9 +441,9 @@
       
       if (length(non_numeric_vars) > 0) {
         showModal(modalDialog(
-          title = tags$div(style = "color: #d9534f; font-weight: bold;", icon("exclamation-triangle"), "Non-Numeric Covariates"),
+          title = tags$div(style = "color: var(--mn-danger); font-weight: 600;", icon("exclamation-triangle"), "Non-Numeric Covariates"),
           tags$p("The following selected covariates do not contain sufficient valid numeric values (minimum 3 required):"),
-          tags$pre(style = "background-color: #f8d7da; color: #721c24; border: 1px solid #f5c6cb; padding: 10px; border-radius: 4px;", paste(non_numeric_vars, collapse = ", ")),
+          tags$pre(style = "background-color: var(--mn-surface-2); color: var(--mn-text); border: 1px solid var(--mn-line); border-left: 2px solid var(--mn-danger); padding: 10px; border-radius: 4px;", paste(non_numeric_vars, collapse = ", ")),
           easyClose = TRUE,
           footer = modalButton("Dismiss")
         ))
@@ -487,12 +512,16 @@
     updateActionButton(session, "run", label = "Interpolating...", icon = icon("spinner", class = "fa-spin"))
 
     shinyjs::show("map_processing_overlay")
-    shinyjs::show("map_spinner")
     shinyjs::show("map_progress_bar_container")
+    shinyjs::show("map_run_steps")
     shinyjs::show("cancel_model_btn")
     shinyjs::hide("reveal_maps_btn")
-    shinyjs::html("map_processing_title", "Processing...")
-    update_premium_progress(5, "Initializing Spatial Analysis Engine...")
+    shinyjs::html("map_processing_title",
+                  paste("Interpolating", get_method_label(input$method), "surfaces"))
+    # Only the kriging family fits a variogram; IDW and TPS fit their own model.
+    shinyjs::html("map_step_2",
+                  if (input$method %in% c("OK", "RK", "RFK", "CK")) "Fit variogram" else "Fit model")
+    update_premium_progress(5, "Preparing the run. The interface stays responsive; you can keep working in other tabs.", step = 1)
 
     # Per-RUN flag, not per-session: clearing one shared flag at the start of run
     # N+1 revoked the cancellation of run N's still-in-flight workers, which then
@@ -604,12 +633,12 @@
     rv$cv_strategy_sel <- input$cv_strategy %||% "auto"
     rv$cv_repeats_sel <- cv_repeats_val
     
-    update_premium_progress(15, "Validating and Cleaning Spatial Input Data...")
+    update_premium_progress(15, "Validating and cleaning the spatial input data.", step = 1)
     
     pred_col <- if(input$value_type == "pred_ss") meta$pred_ss else meta$pred
     aux_vars <- input$aux_vars
     
-    update_premium_progress(25, "Preparing Neighborhood Search Grids...")
+    update_premium_progress(25, "Preparing the prediction grid and neighbourhood search.", step = 1)
     
     current_method <- input$method
     current_crs <- rv$mapping$crs
@@ -636,7 +665,7 @@
     idw_nmax_val <- input$idw_nmax
     tps_lambda_val <- input$tps_lambda
     
-    update_premium_progress(35, "Organizing Localized Data Chunks...")
+    update_premium_progress(35, "Organising the per-locality data chunks.", step = 1)
     
     df_list <- lapply(locs, function(l) {
       sub_df <- rv$user_data %>% filter(!!sym(current_loc_col) == l)
@@ -693,7 +722,7 @@
       }
     }
 
-    update_premium_progress(50, "Executing Parallel Interpolation Algorithms...")
+    update_premium_progress(50, "Fitting and predicting per locality in parallel. The interface stays responsive; you can keep working in other tabs.", step = 2)
 
     rv$rast_list_act <- list(); rv$rast_list_pre <- list(); rv$rast_list_res <- list(); rv$rast_list_point_res <- list()
 
@@ -901,13 +930,13 @@
 
       if (length(failed_regions) > 0) {
         showModal(modalDialog(
-          title = tags$div(style = "color: #d9534f; font-weight: bold;", icon("exclamation-circle"),
+          title = tags$div(style = "color: var(--mn-danger); font-weight: 600;", icon("exclamation-circle"),
                            sprintf("%d Region(s) Failed", length(failed_regions))),
           tags$p("An error occurred during modeling of the following localities:"),
           lapply(names(failed_regions), function(l) {
             tagList(
               tags$p(style = "margin-bottom: 4px;", tags$b(l)),
-              tags$pre(style = "background-color: #f8d7da; color: #721c24; border: 1px solid #f5c6cb; padding: 15px; border-radius: 4px; overflow-x: auto; white-space: pre-wrap; font-family: monospace; font-size: 0.9em;", failed_regions[[l]])
+              tags$pre(style = "background-color: var(--mn-surface-2); color: var(--mn-text); border: 1px solid var(--mn-line); border-left: 2px solid var(--mn-danger); padding: 15px; border-radius: 4px; overflow-x: auto; white-space: pre-wrap; font-family: monospace; font-size: 0.9em;", failed_regions[[l]])
             )
           }),
           easyClose = TRUE,
@@ -984,6 +1013,9 @@
       rv$bound <- do.call(rbind, unname(b_list_aligned)) %>% sf::st_union()
     }
     rv$loc_names <- names(valid_a)
+    # This run supersedes any standalone variogram preview: the curves on the
+    # Scientific Analysis tab now belong to a run again.
+    rv$vgm_preview <- FALSE
     # Signals "this run's results are now in rv$..." to the cached Scientific
     # Analysis plots (their cache keys embed it).
     rv$results_rev <- rv$results_rev + 1L
@@ -1027,7 +1059,7 @@
         perf_m <- perform_cv(data.frame(var1.observed = df_perf$v, var1.pred = df_perf$pv),
                              moran = FALSE)
         perf_total <- data.frame(
-          Metric = c("R2 (Trad)", "R2 (Corr)", "RMSE", "MBE (ML pred - observed)", "CCC", "RPD"),
+          Metric = c("R² (Trad)", "R² (Corr)", "RMSE", "MBE (ML pred - observed)", "CCC", "RPD"),
           Value = c(perf_m$nse, perf_m$r2, perf_m$rmse, -perf_m$me, perf_m$ccc, perf_m$rpd)
         )
         register_export_item("table_perf_uploaded_total", paste(meta$label, "- Total Prediction Performance"), "table", perf_total, meta$category)
@@ -1090,14 +1122,17 @@
       " | ", rv$run_config_summary$localities,
       "\n", rv$run_config_summary$method_params)
 
-    shinyjs::hide("map_spinner")
     shinyjs::html("map_processing_title", "Map Generation Complete")
-    update_premium_progress(100, "Click below to reveal the updated geostatistical surfaces.")
+    update_premium_progress(100, "Click below to reveal the updated geostatistical surfaces.", step = 5)
+    shinyjs::hide("cancel_model_btn")
     shinyjs::show("reveal_maps_btn")
-    
-    shinyjs::enable("run")
+
+    # Deliberately NOT re-enabled here. The run finished but its surfaces are
+    # still behind the reveal overlay, and a second run started from this state
+    # would overwrite results the user has not seen. The reveal handler is what
+    # hands the button back.
     updateActionButton(session, "run", label = "Interpolated", icon = icon("check"))
-    
+
     rv$model_running <- FALSE
     old_files <- list.files(path = session_progress_dir, pattern = paste0("^(progress|warn)_", session_id, "_.*_.*\\.txt$"), full.names = TRUE)
     if(length(old_files) > 0) tryCatch(file.remove(old_files), error = function(e) NULL)
@@ -1109,7 +1144,8 @@
         # stays in rv$ — the Reveal button is offered so partial surfaces can be
         # inspected, with the modal warning that they may be incomplete.
         rv$log <- paste0(rv$log, "\n\n[ERROR] Results assembly failed after a successful run: ", conditionMessage(e))
-        shinyjs::hide("map_spinner")
+        shinyjs::hide("map_run_steps")
+        shinyjs::hide("cancel_model_btn")
         shinyjs::html("map_processing_title", "Results Assembly Failed")
         shinyjs::show("reveal_maps_btn")
         shinyjs::enable("run")
@@ -1119,9 +1155,9 @@
         stale <- list.files(path = session_progress_dir, pattern = paste0("^(progress|warn)_", session_id, "_.*_.*\\.txt$"), full.names = TRUE)
         if (length(stale) > 0) tryCatch(file.remove(stale), error = function(e2) NULL)
         showModal(modalDialog(
-          title = tags$div(style = "color: #d9534f; font-weight: bold;", icon("exclamation-triangle"), "Results Assembly Failed"),
+          title = tags$div(style = "color: var(--mn-danger); font-weight: 600;", icon("exclamation-triangle"), "Results Assembly Failed"),
           tags$p("The parallel interpolation finished, but an error occurred while assembling the results (merging rasters, building tables, or registering exports) in the main session:"),
-          tags$pre(style = "background-color: #f8d7da; color: #721c24; border: 1px solid #f5c6cb; padding: 15px; border-radius: 4px; overflow-x: auto; white-space: pre-wrap; font-family: monospace; font-size: 0.9em;", conditionMessage(e)),
+          tags$pre(style = "background-color: var(--mn-surface-2); color: var(--mn-text); border: 1px solid var(--mn-line); border-left: 2px solid var(--mn-danger); padding: 15px; border-radius: 4px; overflow-x: auto; white-space: pre-wrap; font-family: monospace; font-size: 0.9em;", conditionMessage(e)),
           tags$p(style = "margin-top: 15px;", "The model outputs themselves are not in question. Any surfaces already assembled can be revealed, but maps, tables and the export registry may be incomplete for this run."),
           easyClose = TRUE,
           footer = modalButton("Dismiss")
@@ -1129,8 +1165,8 @@
       })
     }) %...!% (function(err) {
       if (this_token != rv$run_token) return()
-      shinyjs::hide("map_spinner")
       shinyjs::hide("map_progress_bar_container")
+      shinyjs::hide("map_run_steps")
       shinyjs::hide("cancel_model_btn")
       shinyjs::hide("reveal_maps_btn")
       
@@ -1145,9 +1181,9 @@
         shinyjs::html("map_processing_title", "Interpolation Failed")
         shinyjs::html("map_progress_text", "An error occurred during parallel modeling. Please check the error message and click 'Run Interpolation' to try again.")
         showModal(modalDialog(
-          title = tags$div(style = "color: #d9534f; font-weight: bold;", icon("exclamation-triangle"), "Parallel Interpolation Failed"),
+          title = tags$div(style = "color: var(--mn-danger); font-weight: 600;", icon("exclamation-triangle"), "Parallel Interpolation Failed"),
           tags$p("An error occurred while executing the parallel interpolation algorithms:"),
-          tags$pre(style = "background-color: #f8d7da; color: #721c24; border: 1px solid #f5c6cb; padding: 15px; border-radius: 4px; overflow-x: auto; white-space: pre-wrap; font-family: monospace; font-size: 0.9em;", err$message),
+          tags$pre(style = "background-color: var(--mn-surface-2); color: var(--mn-text); border: 1px solid var(--mn-line); border-left: 2px solid var(--mn-danger); padding: 15px; border-radius: 4px; overflow-x: auto; white-space: pre-wrap; font-family: monospace; font-size: 0.9em;", err$message),
           tags$p(style = "margin-top: 15px; font-weight: bold;", "Recommended Troubleshooting Steps:"),
           tags$ul(
             tags$li("Verify that your selected coordinate columns (X, Y) are strictly numeric and contain no missing values (NAs)."),
@@ -1165,8 +1201,8 @@
     })
     
     }, error = function(e) {
-      shinyjs::hide("map_spinner")
       shinyjs::hide("map_progress_bar_container")
+      shinyjs::hide("map_run_steps")
       shinyjs::hide("cancel_model_btn")
       shinyjs::html("map_processing_title", "Interpolation Failed")
       shinyjs::html("map_progress_text", paste("Model preparation failed:", e$message))
@@ -1214,7 +1250,14 @@
       bar_width <- 50 + (avg_pct * 0.5)
       bar_width <- max(50, min(99, bar_width)) # Cap at 99% until complete handler resolves
 
-      update_premium_progress(bar_width)
+      # The engines write a common set of checkpoints into their progress
+      # files: entry at 10-20, the fitted model by 50, the surface by 55, then
+      # the CV repeats up to 90. avg_pct is their mean, so these bands say
+      # which phase the run as a whole is in. (IDW and TPS cross-validate
+      # before writing their surface, so for those two the last two entries
+      # light in the reverse order to the work.)
+      run_step <- if (avg_pct < 50) 2L else if (avg_pct < 55) 3L else 4L
+      update_premium_progress(bar_width, step = run_step)
 
       # Header chip: only assign on change so the chip does not re-render at
       # every poll tick.
@@ -1267,7 +1310,7 @@
       
       warn_block <- ""
       if (length(warn_msgs) > 0) {
-        warn_block <- paste0("<br/><span style='font-size: 0.85em; color: #e74c3c; margin-top: 5px; display: inline-block;'>", paste(warn_msgs, collapse = "<br/>"), "</span>")
+        warn_block <- paste0("<br/><span style='font-size: 0.85em; color: var(--mn-danger); margin-top: 5px; display: inline-block;'>", paste(warn_msgs, collapse = "<br/>"), "</span>")
       }
       
       if (length(progress_msgs) > 0) {
@@ -1285,8 +1328,8 @@
     rv$model_running <- FALSE
     rv$run_token <- rv$run_token + 1L
     
-    shinyjs::hide("map_spinner")
     shinyjs::hide("map_progress_bar_container")
+    shinyjs::hide("map_run_steps")
     shinyjs::hide("cancel_model_btn")
     shinyjs::hide("reveal_maps_btn")
     
@@ -1305,6 +1348,9 @@
 
   observeEvent(input$reveal_maps_btn, {
     shinyjs::hide("map_processing_overlay")
+    # The run button was held disabled from the moment the run completed;
+    # revealing the results is what makes starting another run legitimate.
+    shinyjs::enable("run")
     # The displayed widget may still be the view-less placeholder rendered at
     # dispatch time (the raster re-render races with this button appearing);
     # an explicit fit + resize guarantees tiles and surfaces show immediately.

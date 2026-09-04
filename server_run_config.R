@@ -87,13 +87,14 @@
     m <- rv$mapping$vars[[idx[1]]]
 
     has_col <- is_valid_col_ref
-    choices <- c("Actual Values" = "actual")
-    if (has_col(m$pred)) choices <- c(choices, "Best ML Predictions (_cve)" = "pred")
-    if (has_col(m$pred_ss)) choices <- c(choices, "Single Split ML Predictions (_ss)" = "pred_ss")
-    if (has_col(m$pred)) choices <- c(choices, "Residuals (v - pv) of ML Predictions" = "resid")
+    choices <- c("Actual values" = "actual")
+    if (has_col(m$pred)) choices <- c(choices, "ML predictions" = "pred")
+    if (has_col(m$pred_ss)) choices <- c(choices, "Single split" = "pred_ss")
+    if (has_col(m$pred)) choices <- c(choices, "Residuals" = "resid")
 
     sel <- if (isTruthy(input$value_type) && input$value_type %in% choices) input$value_type else "actual"
-    updateSelectInput(session, "value_type", choices = choices, selected = sel)
+    shinyWidgets::updateRadioGroupButtons(session, "value_type", choices = choices,
+                                          selected = sel, size = "sm")
 
     # No prediction columns at all: Comparison Mode has nothing to compare,
     # so clear it even though its (hidden) checkbox keeps its last state.
@@ -129,10 +130,10 @@
           p("Supported with the Descriptive and Exploratory Suite with dynamic visualizations and statistics."),
           hr(),
           p(strong("A product of `that` couple of months following the loss of institutional e-mail address.")),
-          p(style = "color: #666; font-size: 0.9em;", paste0("  by Recep Serdar Kara in cooperation with Antigravity CLI and Claude Code - 2026 (v", app_version, ")")),
+          p(style = "color: var(--mn-text-2); font-size: 0.9em;", paste0("  by Recep Serdar Kara in cooperation with Antigravity CLI and Claude Code - 2026 (v", app_version, ")")),
           hr(),
           tags$details(
-            tags$summary(style = "cursor: pointer; color: #007bff;", "Session Info (reproducibility)"),
+            tags$summary(style = "cursor: pointer; color: var(--mn-accent);", "Session Info (reproducibility)"),
             tags$pre(style = "text-align: left; font-size: 0.72em; max-height: 250px; overflow-y: auto; margin-top: 8px;",
                      paste(utils::capture.output(utils::sessionInfo()), collapse = "\n"))
           ),
@@ -174,7 +175,7 @@
 
   # ── Agronomical styling commit flow ─────────────────────────────────────
   # Agro sub-settings (algorithm, class count, supervised limits) are edited
-  # freely and only take effect when APPLY TO MAPS & STATS is pressed: every
+  # freely and only take effect when Apply to maps and statistics is pressed: every
   # input tick used to trigger a raster re-encode of all visible map layers
   # plus the class-area / kappa recomputes, so the controls felt frozen while
   # the maps caught up. Continuous and Binned styling stay immediate - they
@@ -210,12 +211,12 @@
     # that is the honest end point, because the work is spread over several
     # independent reactives rather than one observable result.
     shinyjs::disable("agro_apply")
-    updateActionButton(session, "agro_apply", label = "APPLYING...")
+    updateActionButton(session, "agro_apply", label = "Applying...")
     session$onFlushed(function() {
       shinyjs::enable("agro_apply")
       # Label must match ui_sidebar.R exactly: the button never comes back
       # with different wording.
-      updateActionButton(session, "agro_apply", label = "APPLY TO MAPS & STATS")
+      updateActionButton(session, "agro_apply", label = "Apply to maps and statistics")
     }, once = TRUE)
     agro_applied(live)
   })
@@ -227,11 +228,11 @@
     ap <- agro_applied()
     if (identical(agro_signature(ap), agro_signature(live))) return(NULL)
     msg <- if (is.null(ap)) {
-      "Class settings are staged: press APPLY TO MAPS & STATS to classify the displayed maps and statistics."
+      "Class settings are staged: press Apply to maps and statistics to classify the displayed maps and statistics."
     } else {
-      "Class settings changed: press APPLY TO MAPS & STATS to reflect them on the maps and statistics."
+      "Class settings changed: press Apply to maps and statistics to reflect them on the maps and statistics."
     }
-    div(style = "background-color: #fff3cd; border: 1px solid #ffc107; border-radius: 4px; padding: 6px 8px; margin-bottom: 6px; color: #664d03; font-size: 0.82em;",
+    div(style = "background-color: var(--mn-surface-2); border: 1px solid var(--mn-line); border-left: 2px solid var(--mn-warn); color: var(--mn-text-2); border-radius: var(--mn-radius); padding: 6px 8px; margin-bottom: 6px; font-size: 0.82em;",
         icon("triangle-exclamation"), msg,
         tags$div(style = "margin-top: 4px; font-style: italic;",
           "Applying re-encodes every visible map layer and recomputes class areas - expect a few seconds, longer for multi-locality or comparison views."))
@@ -424,15 +425,15 @@
       
       if (!is.null(cfg$var_category)) updateSelectInput(session, "var_category", selected = cfg$var_category)
       if (!is.null(cfg$var_id)) shinyWidgets::updatePickerInput(session, "var_id", selected = cfg$var_id)
-      if (!is.null(cfg$value_type)) updateSelectInput(session, "value_type", selected = cfg$value_type)
+      if (!is.null(cfg$value_type)) shinyWidgets::updateRadioGroupButtons(session, "value_type", selected = cfg$value_type)
       
-      if (!is.null(cfg$method)) updateSelectInput(session, "method", selected = cfg$method)
-      if (!is.null(cfg$boundary_type)) updateSelectInput(session, "boundary_type", selected = cfg$boundary_type)
+      if (!is.null(cfg$method)) shinyWidgets::updateRadioGroupButtons(session, "method", selected = cfg$method)
+      if (!is.null(cfg$boundary_type)) shinyWidgets::updateRadioGroupButtons(session, "boundary_type", selected = cfg$boundary_type)
       if (!is.null(cfg$buff_mode)) shinyWidgets::updateRadioGroupButtons(session, "buff_mode", selected = cfg$buff_mode)
       if (!is.null(cfg$buff_dist)) updateNumericInput(session, "buff_dist", value = cfg$buff_dist)
       if (!is.null(cfg$res_mode)) shinyWidgets::updateRadioGroupButtons(session, "res_mode", selected = cfg$res_mode)
       if (!is.null(cfg$grid_res)) updateSliderInput(session, "grid_res", value = cfg$grid_res)
-      if (!is.null(cfg$color_style)) updateSelectInput(session, "color_style", selected = cfg$color_style)
+      if (!is.null(cfg$color_style)) shinyWidgets::updateRadioGroupButtons(session, "color_style", selected = cfg$color_style)
       
       showNotification("Configuration loaded successfully!", type = "message", duration = 5)
     }, error = function(e) {
@@ -528,7 +529,7 @@
       vv <- classification_values(get_display_meta() %||% get_current_meta(), 2)
       if (is.null(vv)) NULL else {
         rng <- range(vv, na.rm = TRUE)
-        tags$small(style = "display:block; color:#888; margin-bottom:4px;",
+        tags$small(style = "display:block; color: var(--mn-text-3); margin-bottom:4px;",
                    sprintf("Displayed surface range: %.3g - %.3g", rng[1], rng[2]))
       }
     }, error = function(e) NULL)
@@ -696,7 +697,7 @@
           # subset they refer to explicit even if the locality selection has
           # changed since (press Calculate again to refresh).
           if (!is.null(rv$cor_scope_label))
-            tags$p(style = "font-size: 0.78em; color: #888; margin: 0 0 4px 0;",
+            tags$p(style = "font-size: 0.78em; color: var(--mn-text-3); margin: 0 0 4px 0;",
                    paste0("Scope: ", rv$cor_scope_label)),
           tags$div(style = "overflow-x: auto; white-space: nowrap; border-bottom: 1px solid #ddd; margin-bottom: 5px;",
             do.call(tabsetPanel, c(list(id = "cor_tabs", type = "pills"), tabs))

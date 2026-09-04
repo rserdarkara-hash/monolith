@@ -328,9 +328,9 @@ desc_exploratory_server <- function(id, data_reactive, vars_metadata_reactive,
       
       shiny::tagList(
         if (!(p_type %in% c("parallel", "radar"))) {
-          shiny::div(style = "display: flex; align-items: center; gap: 5px;",
-              shiny::selectInput(ns("desc_var_x"), "Primary Variable (X)", choices = valid_named, selected = sel_x, width = "calc(100% - 40px)"),
-              shiny::actionButton(ns("clear_desc_vars"), "", icon = shiny::icon("times"), class = "btn-danger btn-sm", style = "margin-top: 10px;", title = "Clear selections", "aria-label" = "Clear variable selections")
+          shiny::div(class = "mn-input-with-clear",
+              shiny::selectInput(ns("desc_var_x"), "Primary Variable (X)", choices = valid_named, selected = sel_x, width = "100%"),
+              shiny::actionButton(ns("clear_desc_vars"), NULL, icon = shiny::icon("times"), class = "btn-danger btn-sm mn-clear-btn", title = "Clear selections", "aria-label" = "Clear variable selections")
           )
         },
         if (p_type %in% c("boxplot", "violin", "sinaplot", "scatter", "density_heatmap", "xyz_surface")) {
@@ -339,8 +339,8 @@ desc_exploratory_server <- function(id, data_reactive, vars_metadata_reactive,
           shiny::selectInput(ns("desc_var_y"), "Secondary Variable (Y)", choices = choices_y, selected = sel_y)
         },
         if (p_type %in% c("boxplot", "violin", "sinaplot")) {
-          shiny::div(style="background-color: #f0f8ff; padding: 10px; border-radius: 5px; border: 1px solid #b8daff; margin-bottom: 10px;",
-              shiny::h5(style="margin-top:0; color: #0056b3;",
+          shiny::div(style="background-color: var(--mn-surface-2); padding: 10px; border-radius: 6px; border: 1px solid var(--mn-line); margin-bottom: 10px;",
+              shiny::h5(style="margin-top:0; color: var(--mn-text);",
                   "Statistical Significance Tests",
                   shiny::uiOutput(ns("desc_normality_indicator"), inline = TRUE)
               ),
@@ -351,11 +351,15 @@ desc_exploratory_server <- function(id, data_reactive, vars_metadata_reactive,
               # matters, substituting a parametric post-hoc for a deliberately
               # chosen Kruskal-Wallis. "None" is the empty string, which
               # add_stat_layer/get_stat_letters treat as "draw nothing".
-              shiny::radioButtons(ns("desc_stat_tests"),
-                                 shiny::HTML("Group comparison test <span title='For non-normal data distributions, non-parametric Kruskal-Wallis is highly recommended. Duncan is liberal: it controls the comparison-wise, not the family-wise, error rate.'>\u2139\uFE0F</span>:"),
+              shiny::div(class = "mn-seg-grid",
+                shinyWidgets::radioGroupButtons(ns("desc_stat_tests"),
+                                 shiny::HTML(paste0("Group comparison test", info_tooltip(ns("desc_stat_test_info"), "For non-normal data distributions, the non-parametric Kruskal-Wallis test is recommended. Duncan is liberal: it controls the comparison-wise, not the family-wise, error rate."), ":")),
                                  choices = c("None" = "", "ANOVA" = "anova", "Duncan's (liberal)" = "duncan", "Tukey's HSD" = "tukey", "Kruskal-Wallis" = "kruskal"),
-                                 selected = "", inline = TRUE),
-              shiny::radioButtons(ns("desc_stat_letter_pos"), "Letter Placement:", choices = c("Above Data" = "above", "Top of Plot" = "top"), inline = TRUE)
+                                 selected = "", size = "sm")),
+              shiny::div(class = "mn-seg-grid",
+                shinyWidgets::radioGroupButtons(ns("desc_stat_letter_pos"), "Letter Placement:",
+                                 choices = c("Above Data" = "above", "Top of Plot" = "top"),
+                                 selected = "above", size = "sm"))
           )
         },
         if (p_type %in% c("scatter")) {
@@ -435,14 +439,14 @@ desc_exploratory_server <- function(id, data_reactive, vars_metadata_reactive,
       res_suffix <- if (used_residuals) " (on residuals)" else if (!is.null(residual_err)) paste0(" (on raw values - Residual extraction failed: ", residual_err, ")") else " (on raw values)"
       
       if (res$status == "insufficient") {
-        icon_element <- shiny::icon("question-circle", style = "color: #6c757d; font-size: 14px; cursor: help;")
+        icon_element <- shiny::icon("circle-question", style = "color: var(--mn-text-3); font-size: 13px; cursor: help;")
         tooltip_title <- sprintf(
           "Normality Test: Insufficient data (n = %d). Typically n >= 3 is required.%s",
           res$n,
           group_breakdown
         )
       } else if (res$status == "normal") {
-        icon_element <- shiny::icon("check-circle", style = "color: #28a745; font-size: 14px; cursor: help;")
+        icon_element <- shiny::icon("circle-check", style = "color: var(--mn-ok); font-size: 13px; cursor: help;")
         tooltip_title <- sprintf(
           "Normality Passed: %s%s\nStatistic: %s = %.4f\np-value = %.4f\nSample Size: n = %d\nWithin-group residuals appear to be normally distributed (p >= 0.05).%s",
           res$method,
@@ -454,7 +458,7 @@ desc_exploratory_server <- function(id, data_reactive, vars_metadata_reactive,
           group_breakdown
         )
       } else {
-        icon_element <- shiny::icon("exclamation-triangle", style = "color: #dc3545; font-size: 14px; cursor: help;")
+        icon_element <- shiny::icon("circle-exclamation", style = "color: var(--mn-warn); font-size: 13px; cursor: help;")
         p_str <- if (res$p_value < 0.0001) "< 0.0001" else sprintf("= %.4f", res$p_value)
         tooltip_title <- sprintf(
           "Normality Failed: %s%s\nStatistic: %s = %.4f\np-value %s\nSample Size: n = %d\nWithin-group residuals deviate significantly from normality (p < 0.05).%s",

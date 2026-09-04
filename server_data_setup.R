@@ -11,6 +11,23 @@
     }
   )
   
+  # The dataset shipped in sample_data/, recognised by its OWN FILE NAME. Every
+  # preset below is gated on this and on nothing else, so none of them can ever
+  # reach a dataset of the user's: a file called anything else takes the normal
+  # route, whatever it happens to contain.
+  is_sample_upload <- function() {
+    nm <- isolate(input$user_file$name)
+    isTruthy(nm) && grepl("^samp_data_1", tools::file_path_sans_ext(nm), ignore.case = TRUE)
+  }
+  # The zone the sample data is on. It is NOT derivable from the file: bare
+  # eastings read the same in every UTM zone, and 34N, 35N and 36N each place
+  # these numbers inside their own span (22.9E, 28.9E and 34.9E). What settles
+  # it is the locality names - Acipayam, Beyagac, Kale, Karacasu, Tavas are
+  # Denizli districts, and only 35N puts them there. So this is a documented
+  # fact about one shipped file, not a guess about coordinates, which is why it
+  # is allowed to stand where identify_input_crs() correctly refuses to answer.
+  SAMPLE_CRS <- "EPSG:32635"
+
   observeEvent(input$user_file, {
     req(input$user_file)
     ext <- tools::file_ext(input$user_file$name)
@@ -70,6 +87,38 @@
     # the freshly guessed column instead of the stale input.
     new_choices <- c("ALL", unique(df[[loc_guess]]))
     selected_locs <- intersect(curr_locs, new_choices)
+    # A new dataset is a new CRS question, so both selectors go back to empty on
+    # EVERY upload and identification runs from scratch. That includes a CRS the
+    # user typed for the previous file: it was established for that file, never
+    # for this one, and leaving it standing over different coordinates is how a
+    # survey ends up silently in the wrong country. Within a dataset the rule is
+    # unchanged - once a CRS is set here, a boundary shapefile or a column remap
+    # never overrides it (crs_user_chose, in the identification observer).
+    clear_input_crs()
+    clear_target_crs()
+
+    # The one exception, and the only preset in the app: the dataset shipped in
+    # sample_data/ opens ready to run - the two localities the accompanying
+    # manuscript examines in detail rather than all seven, and the UTM zone
+    # those localities are actually on. Written with record = TRUE, so the
+    # standing CRS advisor still judges it and none of it counts as a user
+    # choice. Clearing the Locality box still means every locality.
+    if (is_sample_upload()) {
+      preset <- character(0)
+      if (length(selected_locs) == 0) {
+        selected_locs <- intersect(c("Kale", "Yorga"), new_choices)
+        if (length(selected_locs) > 0) {
+          preset <- c(preset, paste0("Locality to ", paste(selected_locs, collapse = " and "),
+                                     " (the two the accompanying manuscript examines in detail; clear the box for all ",
+                                     length(new_choices) - 1L, ")"))
+        }
+      }
+      set_input_crs(SAMPLE_CRS)
+      set_target_crs(SAMPLE_CRS)
+      preset <- c(preset, paste0("Input and Target CRS to ", SAMPLE_CRS, " (UTM 35N)"))
+      showNotification(paste0("Sample dataset recognised - preset ", paste(preset, collapse = "; "), "."),
+                       type = "message", duration = 12)
+    }
     updateSelectInput(session, "locality", choices = new_choices, selected = selected_locs)
 
     subset_col <- find_subset_column(cols)
@@ -141,23 +190,37 @@
     if (isTRUE(record)) {
       session_state$crs_auto[[id]] <- unique(c(session_state$crs_auto[[id]], value))
     }
+    # A real write supersedes any pending clear: whatever the browser is still
+    # showing, this is the value the selector now holds.
+    session_state$crs_stale[[id]] <- NULL
     updateSelectizeInput(session, id, choices = ch, selected = value,
                          options = list(create = TRUE, placeholder = placeholder))
   }
-  # Did the USER put the current value there, or did the app?
+  # What the selector effectively holds, for the two predicates below.
   #
-  # A plain `input$<id>` read cannot answer that. An updateSelectizeInput
-  # message has not round-tripped when a second write lands in the same flush -
-  # the shapefile observer writes rv$shp_bound and then the .prj's CRS, and the
-  # identification observer that rv$shp_bound invalidates runs before either
-  # reaches the browser - so the record is the set of every value the app has
-  # written, not the last one.
+  # Neither can be answered from a plain `input$<id>` read. An
+  # updateSelectizeInput message has not round-tripped when the next read lands
+  # in the same flush, so after clear_crs_choice() the input still reports the
+  # PREVIOUS dataset's CRS - and taking that reading at face value is what would
+  # let a value established for one file silently govern the next. The cleared
+  # value is therefore remembered and read as empty until the browser confirms
+  # it, at which point the normalisation observers below drop the marker so a
+  # user who deliberately picks that same CRS again is heard.
+  crs_effective <- function(id) {
+    v <- as.character(input[[id]] %||% "")
+    if (nzchar(v) && identical(v, session_state$crs_stale[[id]] %||% "")) "" else v
+  }
+  # Did the USER put the current value there, or did the app? The record is the
+  # set of every value the app has written, not the last one, for the same
+  # round-trip reason: the shapefile observer writes rv$shp_bound and then the
+  # .prj's CRS, and the identification observer that rv$shp_bound invalidates
+  # runs before either reaches the browser.
   crs_user_chose <- function(id) {
-    v <- input[[id]]
-    isTruthy(v) && !(v %in% session_state$crs_auto[[id]])
+    v <- crs_effective(id)
+    nzchar(v) && !(v %in% session_state$crs_auto[[id]])
   }
   crs_has_value <- function(id) {
-    isTruthy(input[[id]]) || length(session_state$crs_auto[[id]]) > 0
+    nzchar(crs_effective(id)) || length(session_state$crs_auto[[id]]) > 0
   }
   # Two base lists: Web Mercator is offered for the input side only. A saved
   # config or a free-typed entry still travels with its own choice entry, so
@@ -165,18 +228,38 @@
   # not the dropdown, is what decides whether it may be run.
   set_input_crs  <- function(value, record = TRUE) set_crs_choice("map_crs", value, "Select the CRS your coordinates were recorded in", common_crs_input, record)
   set_target_crs <- function(value, record = TRUE) set_crs_choice("crs_selection", value, "Select the CRS for output maps and exports", common_crs_target, record)
+  # Back to the pristine state of the two selectors: base choices, nothing
+  # selected, placeholder showing. Not set_crs_choice(id, ""), which would
+  # append an empty option to the list. The recorded auto-values go with it so
+  # the next identification starts from a clean slate, and the value being
+  # cleared is remembered for crs_effective() above until the clear lands.
+  clear_crs_choice <- function(id, placeholder, base) {
+    session_state$crs_auto[[id]] <- character(0)
+    cur <- as.character(isolate(input[[id]]) %||% "")
+    session_state$crs_stale[[id]] <- if (nzchar(cur)) cur else NULL
+    updateSelectizeInput(session, id, choices = base, selected = "",
+                         options = list(create = TRUE, placeholder = placeholder))
+  }
+  clear_input_crs  <- function() clear_crs_choice("map_crs", "Select the CRS your coordinates were recorded in", common_crs_input)
+  clear_target_crs <- function() clear_crs_choice("crs_selection", "Select the CRS for output maps and exports", common_crs_target)
 
   # A bare EPSG number typed into either selector (`32633`) is rejected by
   # sf::st_crs(); promote it to `EPSG:32633` in place so the free-text route
   # works the way users expect. No-ops for anything already parseable, so the
   # re-entry this update causes settles after one pass.
+  # These also retire the pending-clear marker. A clear lands as an empty value,
+  # which req() drops; a NON-empty value arriving afterwards is a real
+  # selection, so the marker has done its job and must not go on masking the
+  # user's own choice of the CRS the previous dataset happened to use.
   observeEvent(input$map_crs, {
     req(input$map_crs)
+    session_state$crs_stale$map_crs <- NULL
     norm <- normalize_crs_input(input$map_crs)
     if (!identical(norm, input$map_crs)) set_input_crs(norm, record = FALSE)
   })
   observeEvent(input$crs_selection, {
     req(input$crs_selection)
+    session_state$crs_stale$crs_selection <- NULL
     norm <- normalize_crs_input(input$crs_selection)
     if (!identical(norm, input$crs_selection)) set_target_crs(norm, record = FALSE)
   })
@@ -198,6 +281,15 @@
 
     ident <- identify_input_crs(rv$user_data, input$map_x, input$map_y, rv$shp_bound)
     if (is.null(ident)) {
+      # The shipped sample carries no evidence either - bare eastings, no
+      # boundary - but its zone is known from its documentation and the upload
+      # observer has already applied it. Asking the user to locate a study area
+      # the app has just filled in would contradict itself.
+      if (is_sample_upload() && crs_has_value("map_crs")) {
+        crs_pick$no_evidence <- FALSE
+        crs_pick$rows <- NULL
+        return()
+      }
       # Tier 3 takes over: the picker below asks where the data is and lists
       # the projections that put it there, instead of leaving the user to
       # supply an EPSG code they may not know.
@@ -249,7 +341,7 @@
 
   output$crs_picker_ui <- renderUI({
     req(crs_picker_visible())
-    div(style = "margin-top: 14px; border-top: 1px solid #e3e6ea; padding-top: 12px;",
+    div(style = "margin-top: 14px; border-top: 1px solid var(--mn-line); padding-top: 12px;",
         h5("Locate your study area", style = "font-weight: 600; margin-bottom: 4px;"),
         p(class = "setup-hint",
           "Bare eastings and northings do not carry their grid: the same pair is valid in every UTM zone, six degrees of longitude apart. Click roughly where the data was collected, or name the country, and Monolith will list the projections that put it there together with the position each one produces."),
@@ -365,12 +457,12 @@
     # The text filter is capped (it does not bound the search the way a point
     # does), so a capped result must say so rather than read as exhaustive.
     capped <- if (isTRUE(attr(rows, "truncated")))
-      p(class = "setup-hint", style = "margin-top: 8px; color: #b9770e;",
+      p(class = "setup-hint", style = "margin-top: 8px; color: var(--mn-warn);",
         "Your country or region text matches more projections than can be searched at once, so only the first 120 were tried. Narrow the text, or click the map to bound the search by position.") else NULL
     if (!nrow(rows)) {
       return(tagList(
         capped,
-        p(class = "setup-hint", style = "margin-top: 10px; color: #c0392b;",
+        p(class = "setup-hint", style = "margin-top: 10px; color: var(--mn-danger);",
           if (isTRUE(attr(rows, "text_no_match")))
             "No projection covering the point you indicated matches that country or region text. Clear the text to see everything that reads these coordinates as a position there, or check the spelling."
           else
@@ -385,11 +477,11 @@
         eq <- rows$equivalent[[i]]
         d <- rows$distance_km[i]
         nm <- if (is.na(rows$name[i])) "" else rows$name[i]
-        div(style = "border: 1px solid #dfe6e9; border-radius: 6px; padding: 8px 10px; margin-bottom: 6px; background: #fbfcfd;",
+        div(style = "border: 1px solid var(--mn-line); border-radius: 6px; padding: 8px 10px; margin-bottom: 6px; background: var(--mn-surface-2);",
             div(style = "display: flex; align-items: baseline; gap: 8px; flex-wrap: wrap;",
-                tags$span(style = "display: inline-block; min-width: 20px; text-align: center; background: #e17055; color: #fff; border-radius: 10px; font-size: 11px; font-weight: 700; padding: 1px 6px;", i),
+                tags$span(style = "display: inline-block; min-width: 20px; text-align: center; background: var(--mn-accent-weak); color: var(--mn-accent); border-radius: 10px; font-size: 11px; font-weight: 700; padding: 1px 6px;", i),
                 tags$b(paste0("EPSG:", rows$epsg[i])),
-                tags$span(style = "font-size: 12px; color: #636e72;", nm)),
+                tags$span(style = "font-size: 12px; color: var(--mn-text-3);", nm)),
             div(style = "font-size: 12px; margin: 4px 0;",
                 "Plots at ", tags$b(rows$text[i]),
                 if (is.finite(d)) sprintf(" - %s from the point you indicated",
@@ -398,7 +490,7 @@
             # few hundred metres of each other - too close for a map click to
             # separate, but not nothing - so the row says how far apart they
             # are instead of implying they are interchangeable.
-            if (length(eq)) div(style = "font-size: 11px; color: #636e72; margin-bottom: 4px;",
+            if (length(eq)) div(style = "font-size: 11px; color: var(--mn-text-3); margin-bottom: 4px;",
                                 sprintf("Same place to within %.0f m: EPSG:%s",
                                         rows$spread_m[i], paste(eq, collapse = ", EPSG:"))),
             # One shared input id rather than an observer per row: the rows are
@@ -746,7 +838,14 @@
   })
 
   observeEvent(input$meta_file, {
-    req(input$meta_file, rv$user_data)
+    req(input$meta_file)
+    # The field sits beside the dataset upload, so it can be filled first. The
+    # list is matched against the dataset's column names and has nothing to
+    # match until that dataset is loaded - say so rather than fail silently.
+    if (is.null(rv$user_data)) {
+      showNotification("Upload your dataset first - the variable list is matched against its column names.", type = "warning")
+      return()
+    }
     ext <- tools::file_ext(input$meta_file$name)
     
     if (!(tolower(ext) %in% c("csv", "xls", "xlsx"))) {
@@ -832,7 +931,7 @@
       )
     }, error = function(e) {
       warning(paste("Error in var_mapping_ui:", e$message))
-      h4(paste("Error rendering UI:", e$message), style="color:red;")
+      h4(paste("Error rendering UI:", e$message), style = "color: var(--mn-danger);")
     })
   })
 
@@ -999,3 +1098,34 @@
     m
   })
 
+  # Header context strip: what the whole session is operating on. This is the
+  # only place the dataset, its size, its coordinate system and its locality
+  # count are stated together, and it stays visible from every tab.
+  output$dataset_context <- renderUI({
+    df <- rv$user_data
+    if (is.null(df)) return(NULL)
+    fname <- tryCatch(input$user_file$name, error = function(e) NULL)
+    loc_col <- rv$mapping$loc
+    n_locs <- if (!is.null(loc_col) && loc_col %in% colnames(df)) {
+      length(unique(stats::na.omit(df[[loc_col]])))
+    } else {
+      NA_integer_
+    }
+    # Both systems, each named. Every metric quantity the app reports - buffer
+    # and range in metres, cell size, area in hectares - is computed in the
+    # target CRS, so a strip that said only "CRS" and showed the input one
+    # invited those metres to be read against the wrong system.
+    crs_in <- normalize_crs_input(input$map_crs)
+    crs_out <- normalize_crs_input(input$crs_selection)
+    item <- function(label, value) {
+      tags$span(class = "mn-ctx-item", label, tags$b(value))
+    }
+    tags$div(
+      class = "mn-ctx",
+      if (!is.null(fname)) item("Dataset", fname),
+      item("Points", format(nrow(df), big.mark = ",")),
+      if (isTruthy(crs_in)) item("Input CRS", crs_in),
+      if (isTruthy(crs_out)) item("Target CRS", crs_out),
+      if (!is.na(n_locs)) item("Localities", format(n_locs))
+    )
+  })

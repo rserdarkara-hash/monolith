@@ -29,19 +29,32 @@
   output$export_registry_ui <- renderUI({
     req(rv$export_registry)
     reg <- rv$export_registry
-    if (length(reg) == 0) return(tags$p("Registry is empty. Run models to populate."))
-    
-    choices <- setNames(names(reg), sapply(reg, function(x) {
-      sprintf("%s [%s] - %s", x$label, x$type, format(x$timestamp, "%H:%M:%S"))
-    }))
-    
-    checkboxGroupInput("selected_assets", NULL, choices = choices, width = "100%")
+    if (length(reg) == 0) {
+      return(tags$p(class = "mn-empty-line", "Registry is empty. Run models to populate."))
+    }
+
+    # choiceNames/choiceValues rather than a named character vector: the values
+    # stay exactly names(reg), so every downstream reader of
+    # input$selected_assets is untouched, while the label becomes a row -- kind
+    # chip, name, timestamp -- instead of one run-on string.
+    checkboxGroupInput(
+      "selected_assets", NULL, width = "100%",
+      choiceValues = names(reg),
+      choiceNames = unname(lapply(reg, function(x) {
+        tags$span(
+          class = "mn-asset",
+          tags$span(class = "mn-asset-kind", x$type),
+          tags$span(class = "mn-asset-label", x$label),
+          tags$span(class = "mn-asset-time mn-num", format(x$timestamp, "%H:%M:%S"))
+        )
+      }))
+    )
   })
 
   output$run_config_display <- renderUI({
     cfg <- rv$run_config_summary
     if (is.null(cfg)) return(NULL)
-    div(style = "background-color: #e8f4fd; padding: 12px 15px; border-left: 4px solid #2196F3; border-radius: 4px; margin-bottom: 10px; font-family: monospace; font-size: 0.85em;",
+    div(class = "mn-notice mn-notice-mono",
       tags$strong(icon("info-circle"), paste0(" Run #", cfg$run_id, " Configuration (", format(cfg$timestamp, "%Y-%m-%d %H:%M:%S"), ")")),
       tags$br(),
       tags$span(paste0("Variable: ", cfg$variable, " | Method: ", cfg$method, " | Localities: ", cfg$localities)),
@@ -117,7 +130,7 @@
   output$run_config_display_map <- renderUI({
     cfg <- rv$run_config_summary
     if (is.null(cfg)) return(NULL)
-    div(style = "background-color: #e8f4fd; padding: 8px 12px; border-left: 4px solid #2196F3; border-radius: 4px; margin-bottom: 8px; font-size: 0.82em;",
+    div(class = "mn-notice mn-notice-mono",
       tags$strong(paste0("Run #", cfg$run_id, ": ")),
       tags$span(paste0(cfg$variable, " | ", cfg$method, " | ", cfg$localities, " | ", format(cfg$timestamp, "%H:%M:%S")))
     )
@@ -125,18 +138,18 @@
 
   output$run_history_ui <- renderUI({
     hist <- rv$run_history
-    if (length(hist) == 0) return(tags$p(style="color: #888;", "No archived runs yet. Previous runs will appear here when a new model generation begins."))
+    if (length(hist) == 0) return(tags$p(class = "mn-empty-line", "No archived runs yet. Previous runs will appear here when a new model generation begins."))
 
     run_panels <- lapply(seq_along(hist), function(i) {
       run <- hist[[i]]
       cfg <- run$config
       n_items <- length(run$registry)
-      div(style = "background-color: #fff; padding: 12px; border: 1px solid #ddd; border-radius: 6px; margin-bottom: 8px;",
+      div(style = "background-color: var(--mn-surface-2); padding: 12px; border: 1px solid var(--mn-line); border-radius: 6px; margin-bottom: 8px;",
         fluidRow(
           column(8,
             tags$strong(paste0("Run #", cfg$run_id, " - ", cfg$variable, " (", cfg$method, ")")),
             tags$br(),
-            tags$small(style="color: #666;", paste0(
+            tags$small(style="color: var(--mn-text-2);", paste0(
               format(cfg$timestamp, "%Y-%m-%d %H:%M:%S"),
               " | ", cfg$localities,
               " | ", n_items, " registry items"
@@ -308,7 +321,7 @@
          # scales into the pane instead of spilling out of it. Scaling keeps the
          # layout exact - only the pixel count changes.
          style = paste0("max-width: 100%; height: auto; display: block; margin: 0 auto;",
-                        " background-color: #ffffff; box-shadow: 0 4px 8px rgba(0,0,0,0.2);"),
+                        " background-color: var(--mn-surface); box-shadow: var(--mn-shadow);"),
          alt = "Preview of the figure as it will be exported")
   }, deleteFile = TRUE)
   
@@ -402,12 +415,12 @@
                             selectInput("styler_format", "File Format", choices = fmt_choices),
                             conditionalPanel(
                               condition = "input.styler_format == 'gtiff'",
-                              tags$p(style = "font-size: 0.8em; color: #31708f; background: #d9edf7; border: 1px solid #bce8f1; padding: 8px; border-radius: 3px;",
+                              tags$p(style = "font-size: 0.8em; color: var(--mn-text-2); background: var(--mn-surface-2); border: 1px solid var(--mn-line); border-left: 2px solid var(--mn-accent); padding: 8px; border-radius: 3px;",
                                      icon("info-circle"),
                                      " GeoTIFF writes the raster values, coordinate reference system and extent as computed, for use in QGIS or ArcGIS. Typography, palette, DPI and layout settings do not apply to it. Kriging surfaces are written as multi-band files (prediction, then variance).")
                             ),
                             if (image_only_map) {
-                              tags$p(style = "font-size: 0.8em; color: #8a6d3b; background: #fcf8e3; border: 1px solid #faebcc; padding: 8px; border-radius: 3px;",
+                              tags$p(style = "font-size: 0.8em; color: var(--mn-text-2); background: var(--mn-surface-2); border: 1px solid var(--mn-line); border-left: 2px solid var(--mn-warn); padding: 8px; border-radius: 3px;",
                                      icon("exclamation-triangle"),
                                      " This item is not a single raster surface (a paired comparison map, or point geometry), so it exports as an image only. For GIS layers of point and polygon geometry, use the Export Class Zones and Export Drawn Polygons buttons on the Map Viewer toolbar.")
                             },
@@ -430,7 +443,7 @@
                                                       "Spectral" = "Spectral", "Red-Yellow-Green" = "RdYlGn",
                                                       "Red-Grey" = "RdGy"),
                                           selected = "RdBu"),
-                              tags$p(style = "font-size: 0.8em; color: #666; margin-top: -8px;",
+                              tags$p(style = "font-size: 0.8em; color: var(--mn-text-2); margin-top: -8px;",
                                      "Applies to residual and point error maps only. Zero is always centered.")
                             )
                           )
@@ -439,7 +452,7 @@
                           conditionalPanel(
                             condition = "input.styler_format == 'gtiff'",
                             wellPanel(
-                              tags$p(style = "margin: 0; color: #666;",
+                              tags$p(style = "margin: 0; color: var(--mn-text-2);",
                                      "Styling does not apply to a GeoTIFF export. Choose an image format on the Basic tab to use these controls.")
                             )
                           ),
@@ -503,20 +516,20 @@
                  # min-width: 0 on the image output lets it report (and take)
                  # the pane's real width; overflow: hidden is a guard, nothing
                  # should reach it now that the canvas is fitted to the pane.
-                 div(style = paste0("background-color: #f0f0f0; border: 1px solid #ccc; height: 600px;",
+                 div(style = paste0("background-color: var(--mn-surface-2); border: 1px solid var(--mn-line); height: 600px;",
                                     " padding: 10px; display: flex; justify-content: center;",
                                     " align-items: center; overflow: hidden;"),
                      div(style = "width: 100%; min-width: 0;",
                          imageOutput("styler_preview_plot", height = "auto", width = "100%")
                      )
                  ),
-                 tags$p(style="font-size: 0.85em; color: #666; margin-top: 5px;",
+                 tags$p(style="font-size: 0.85em; color: var(--mn-text-2); margin-top: 5px;",
                         "The preview is the export figure at screen resolution: same size, typography and margins. Only the pixel count differs.")
                ),
                conditionalPanel(
                  condition = "input.styler_format == 'gtiff'",
-                 div(style = "background-color: #f0f0f0; border: 1px solid #ccc; height: 600px; display: flex; flex-direction: column; justify-content: center; align-items: center; text-align: center; padding: 40px; color: #555;",
-                     icon("layer-group", class = "fa-3x", style = "margin-bottom: 20px; color: #888;"),
+                 div(style = "background-color: var(--mn-surface-2); border: 1px solid var(--mn-line); height: 600px; display: flex; flex-direction: column; justify-content: center; align-items: center; text-align: center; padding: 40px; color: var(--mn-text-2);",
+                     icon("layer-group", class = "fa-3x", style = "margin-bottom: 20px; color: var(--mn-text-3);"),
                      tags$h4("GeoTIFF export", style = "margin-top: 0;"),
                      tags$p("There is nothing to preview: the file carries the raster values themselves, georeferenced in the run's analysis CRS, not a rendering of them."),
                      tags$p(style = "font-size: 0.9em;", "Open it in a GIS to symbolise it there.")

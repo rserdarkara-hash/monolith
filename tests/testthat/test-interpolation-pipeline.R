@@ -142,6 +142,49 @@ test_that("calc_scientific_lags cutoff is half the bounding-box diagonal", {
   expect_equal(as.numeric(lags$cutoff), as.numeric(max_dist / 2))
 })
 
+# ── class areas: per-locality sum vs the merged grid ──────────────────────
+# The Area Coverage total is summed over the per-locality surfaces rather than
+# computed on merge_wrapped_rasters()'s output, because terra::expanse() costs
+# O(total cells) - NA padding included - and two localities far apart share a
+# merged grid that is almost entirely padding. This pins the equality that
+# makes the cheap route the same answer.
+
+test_that("class areas of disjoint localities sum to the merged surface's", {
+  mk <- function(x0, y0) {
+    r <- terra::rast(xmin = x0, xmax = x0 + 400, ymin = y0, ymax = y0 + 400,
+                     resolution = 20, crs = "EPSG:32636")
+    terra::values(r) <- seq(0, 10, length.out = terra::ncell(r))
+    names(r) <- "var1.pred"
+    r
+  }
+  # 5 km apart: the merged grid is mostly NA, which is the case at issue
+  a <- mk(500000, 4300000)
+  b <- mk(505000, 4304000)
+
+  rcl <- matrix(c(-Inf, 3, 1,
+                  3,    7, 2,
+                  7,  Inf, 3), ncol = 3, byrow = TRUE)
+
+  class_ha <- function(r) {
+    e <- as.data.frame(terra::expanse(terra::classify(r[[1]], rcl, right = FALSE),
+                                      unit = "ha", byValue = TRUE))
+    ha <- rep(0, 3)
+    ha[as.numeric(as.character(e$value))] <- e$area
+    ha
+  }
+
+  merged <- merge_wrapped_rasters(list(terra::wrap(a), terra::wrap(b)))
+  expect_gt(terra::ncell(merged), 4 * (terra::ncell(a) + terra::ncell(b)))
+
+  # 1e-6 relative, not exact: terra computes each cell's geodesic area from its
+  # own transformed corners, and a cell sits in a different row of the merged
+  # grid than of its locality's. Measured at 1.1e-7 relative, which is ~3e-5 ha
+  # on the areas here - four orders below the table's 2-decimal display.
+  per_locality <- class_ha(a) + class_ha(b)
+  expect_equal(per_locality, class_ha(merged), tolerance = 1e-6)
+  expect_equal(sum(per_locality), sum(class_ha(merged)), tolerance = 1e-6)
+})
+
 # ── merge_wrapped_rasters ─────────────────────────────────────────────────
 
 test_that("merge_wrapped_rasters returns NULL for empty or NULL input", {

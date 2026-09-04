@@ -76,10 +76,14 @@ test_that("Total (Combined) lists every run locality with committed values", {
   expect_equal(df$Predicted, c("Auto (GCV)", "0"))
 })
 
-test_that("Predicted column is N/A when the run had no predicted surface", {
+test_that("Predicted column is dropped when the run had no predicted surface", {
   df <- build_regional_params_df("TPS", "LocB", make_rp(), has_pre = FALSE)
-  expect_equal(df$Predicted, "N/A")
+  expect_false("Predicted" %in% names(df))
   expect_equal(df$Actual, "0.01")
+
+  df_tot <- build_regional_params_df("IDW", "Total (Combined)", make_rp(), has_pre = FALSE)
+  expect_equal(names(df_tot), c("Locality", "Param", "Actual"))
+  expect_equal(df_tot$Actual, c("2.5", "2"))
 })
 
 test_that("IDW uses its own keys and label", {
