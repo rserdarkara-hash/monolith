@@ -1878,11 +1878,17 @@ test_that("the whole regional driver still produces the surface it produced befo
   # unseeded and would not reproduce), and sequential, so it does NOT cover the
   # future/PSOCK dispatch layer.
   #
-  # Tolerance is 1e-6 relative, not machine epsilon: the chain runs through
-  # gstat's weighted-least-squares fit and a linear solve, so a different BLAS,
-  # CPU or gstat build moves the last few digits without anything being wrong.
-  # If this fails on a machine where nothing in the repository changed, compare
-  # package versions before suspecting the code.
+  # The variogram is PINNED by golden_pin_vgm() rather than fitted. Fitted, this
+  # lock is not portable: on this scope all sixteen of robust_vgm_fit()'s
+  # candidates fail to converge and the single survivor of the sanity window
+  # follows the platform's floating-point path, which moved the range 12%
+  # between Windows and Linux and every value downstream with it. What remains
+  # is a linear solve on a matrix with condition number 5.8, so the 1e-6
+  # relative tolerance is comfortable rather than tight, and the vgm_* entries
+  # are constants confirming the pin reached the engine. robust_vgm_fit() keeps
+  # its own coverage in test-robust-vgm-fit.R.
+  # If this fails where nothing in the repository changed, compare package
+  # versions before suspecting the code.
   recorded <- golden_baseline("ok_surface_digest")
   skip_if(is.null(recorded), "no baselines recorded for this golden set")
 

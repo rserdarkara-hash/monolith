@@ -361,6 +361,35 @@ golden_baseline <- function(key) {
   b[[key]]
 }
 
+#' The variogram the surface digest is pinned to.
+#'
+#' The digest exists to lock the DRIVER - grid construction, the kriging solve,
+#' the CV loop, raster assembly - so it must not also depend on which of
+#' robust_vgm_fit()'s 16 screened candidates happens to win. On the `tiny` scope
+#' all 16 fail to converge and exactly one clears the sanity window, so the
+#' winner is an artefact of the platform's floating-point path: Windows lands on
+#' Sph(range 312.9), Linux on Sph(range 274.7), and the whole digest moves with
+#' it. robust_vgm_fit() is covered on its own in test-robust-vgm-fit.R; pinning
+#' here removes that ambiguity without losing the coverage.
+#'
+#' The pinned model is read off the golden data, not invented:
+#'   - total sill 0.0617 = var(ph) on the `tiny` scope, the usual sill anchor
+#'     for a second-order stationary field;
+#'   - nugget 0.035 = the lowest empirical bin (min gamma 0.0351 at 746 m),
+#'     i.e. gamma extrapolated back to the origin;
+#'   - partial sill 0.0267 = the remainder;
+#'   - range 1200 m: above the 197 m mean nearest-neighbour spacing, so the
+#'     surface interpolates instead of reverting to the mean; inside the
+#'     trustworthy half of the 3233 m cutoff; and consistent with the 1335 m
+#'     the better-sampled `core` scope converges to cleanly.
+#'
+#' Nugget:sill is 57%, moderate spatial dependence on the Cambardella et al.
+#' (1994) scale, which is what this variable actually shows. It is a fixed test
+#' input, not a claim that this is the best attainable fit.
+golden_pin_vgm <- function() {
+  gstat::vgm(psill = 0.0267, model = "Sph", range = 1200, nugget = 0.035)
+}
+
 #' Summary digest of a full regional interpolation run.
 #'
 #' The end-to-end alarm: it says "this pipeline no longer produces the surface
@@ -370,12 +399,17 @@ golden_baseline <- function(key) {
 #' same way. Ordinary Kriging on purpose - it is fully seed-sandboxed, whereas
 #' RFK's forest is unseeded and would not reproduce.
 #'
+#' The variogram is pinned by golden_pin_vgm() rather than fitted, so the digest
+#' measures the driver and not the screening tie-break; the vgm_* entries are
+#' therefore constants that confirm the pin reached the engine.
+#'
 #' Runs sequentially, so it does NOT cover the future/PSOCK dispatch layer.
 #'
 #' @return A named numeric vector, ready to paste into a baseline.
 run_surface_digest <- function(pts, target = "ph", method = "OK",
                                grid_res = 300, b_type = "wrapped",
-                               b_dist = 300, crs = NULL) {
+                               b_dist = 300, crs = NULL,
+                               pre_fit = golden_pin_vgm()) {
   crs <- crs %||% golden_meta()$crs
   co <- sf::st_coordinates(pts)
   pts_data <- data.frame(x = co[, 1], y = co[, 2],
@@ -384,7 +418,7 @@ run_surface_digest <- function(pts, target = "ph", method = "OK",
   item <- list(l = "golden", pts_data = pts_data,
                m_params = list(idw_p_act = 2, idw_p_pre = 2, idw_nmax = 12,
                                tps_lambda_act = -1, tps_lambda_pre = -1,
-                               pre_fit_act = NULL, pre_fit_pre = NULL,
+                               pre_fit_act = pre_fit, pre_fit_pre = NULL,
                                cv_strategy = "auto", rfk_uncertainty = "jackknife"))
   res <- suppressWarnings(run_regional_interpolation(
     item, method, crs, character(0), NULL, b_type, "fixed", b_dist,

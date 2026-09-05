@@ -49,7 +49,10 @@ Running the suite and getting `FAIL 0` establishes that, on this fixture:
   equal intervals; reported hectares are ground area, not projected area;
   post-hoc letters agree with `agricolae`.
 - **The pipeline as a whole** still assembles the same surface from those parts
-  (`ok_surface_digest`).
+  (`ok_surface_digest`). Its variogram is pinned by `golden_pin_vgm()`, not
+  fitted, so the lock measures the driver rather than which of the sixteen
+  screened candidates wins a tie-break that follows the platform's
+  floating-point path; `helper.R` derives the pinned model from the data.
 
 ### What it does not prove
 
