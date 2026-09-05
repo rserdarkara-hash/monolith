@@ -1887,6 +1887,16 @@ test_that("the whole regional driver still produces the surface it produced befo
   # relative tolerance is comfortable rather than tight, and the vgm_* entries
   # are constants confirming the pin reached the engine. robust_vgm_fit() keeps
   # its own coverage in test-robust-vgm-fit.R.
+  #
+  # The BOUNDARY is pinned the same way, by golden_pin_boundary(). The
+  # point-derived hull put two cell centres 1.2 m and 2.0 m from its edge on a
+  # 300 m grid, so a sub-metre GEOS or concaveman difference decided whether
+  # they were in: moving the buffer 0.5 m locally reproduced the CI failure's
+  # exact signature, the same five surface entries moving while cells, vgm_* and
+  # cv_* stayed bit-identical. The pinned boundary is a union of whole lattice
+  # cells, so every candidate centre sits exactly 150 m from an edge and the
+  # mask survives +/- 20 m of vertex noise unchanged. It still clips - 294
+  # candidate cells, 127 kept - so the mask remains under test.
   # If this fails where nothing in the repository changed, compare package
   # versions before suspecting the code.
   recorded <- golden_baseline("ok_surface_digest")

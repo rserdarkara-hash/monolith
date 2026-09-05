@@ -390,6 +390,43 @@ golden_pin_vgm <- function() {
   gstat::vgm(psill = 0.0267, model = "Sph", range = 1200, nugget = 0.035)
 }
 
+#' The boundary the surface digest is pinned to.
+#'
+#' Same problem as the variogram, one step further down the driver. The
+#' point-derived boundary (`concaveman` hull, then a 300 m buffer) puts cell
+#' centres 1.2 m and 2.0 m from its edge on a 300 m grid, so a sub-metre
+#' difference in either library decides whether those cells are inside. Measured
+#' locally: moving the buffer 0.5 m changes the mask by one cell and moves
+#' pred_min 1.6e-2, pred_max 2.0e-3, pred_sd 3.5e-4 - the same five entries, in
+#' the same direction and magnitude, that Linux CI reported while `cells`,
+#' `vgm_*` and `cv_*` stayed bit-identical.
+#'
+#' So the digest supplies its own boundary: the union of the `res`-metre lattice
+#' cells whose centre lies within `reach` of a sample. Every edge falls on a
+#' cell boundary, which puts EVERY candidate cell centre exactly res/2 = 150 m
+#' from the nearest edge - there is no near-tie left for a GEOS or concaveman
+#' build to decide differently. It still clips (the study area follows the
+#' sampling pattern rather than covering the bounding box), so the mask stays
+#' under test; what it no longer covers is hull construction, which
+#' `run_regional_interpolation`'s own boundary tests exercise.
+#'
+#' Returned with a `Locality` column so the driver's shapefile branch matches it
+#' by name, which is the same path a user-supplied boundary takes.
+golden_pin_boundary <- function(pts, res = 300, reach = 600) {
+  bb <- sf::st_bbox(pts)
+  lo <- function(v) floor((v - res) / res) * res
+  hi <- function(v) ceiling((v + res) / res) * res
+  g <- terra::rast(terra::ext(lo(bb[["xmin"]]), hi(bb[["xmax"]]),
+                              lo(bb[["ymin"]]), hi(bb[["ymax"]])),
+                   resolution = res, crs = sf::st_crs(pts)$wkt)
+  ctr <- terra::xyFromCell(g, seq_len(terra::ncell(g)))
+  co <- sf::st_coordinates(pts)
+  d2 <- outer(ctr[, 1], co[, 1], "-")^2 + outer(ctr[, 2], co[, 2], "-")^2
+  terra::values(g) <- ifelse(apply(d2, 1, min) <= reach^2, 1L, NA_integer_)
+  p <- sf::st_as_sf(terra::as.polygons(g, dissolve = TRUE))
+  sf::st_sf(Locality = "golden", geometry = sf::st_union(sf::st_geometry(p)))
+}
+
 #' Summary digest of a full regional interpolation run.
 #'
 #' The end-to-end alarm: it says "this pipeline no longer produces the surface
@@ -403,13 +440,18 @@ golden_pin_vgm <- function() {
 #' measures the driver and not the screening tie-break; the vgm_* entries are
 #' therefore constants that confirm the pin reached the engine.
 #'
+#' `b_type` / `b_dist` are inert while `boundary` is supplied: the driver takes
+#' its shapefile branch and never reaches the hull switch. Pass `boundary = NULL`
+#' to exercise the point-derived path instead.
+#'
 #' Runs sequentially, so it does NOT cover the future/PSOCK dispatch layer.
 #'
 #' @return A named numeric vector, ready to paste into a baseline.
 run_surface_digest <- function(pts, target = "ph", method = "OK",
                                grid_res = 300, b_type = "wrapped",
                                b_dist = 300, crs = NULL,
-                               pre_fit = golden_pin_vgm()) {
+                               pre_fit = golden_pin_vgm(),
+                               boundary = golden_pin_boundary(pts)) {
   crs <- crs %||% golden_meta()$crs
   co <- sf::st_coordinates(pts)
   pts_data <- data.frame(x = co[, 1], y = co[, 2],
@@ -421,7 +463,7 @@ run_surface_digest <- function(pts, target = "ph", method = "OK",
                                pre_fit_act = pre_fit, pre_fit_pre = NULL,
                                cv_strategy = "auto", rfk_uncertainty = "jackknife"))
   res <- suppressWarnings(run_regional_interpolation(
-    item, method, crs, character(0), NULL, b_type, "fixed", b_dist,
+    item, method, crs, character(0), boundary, b_type, "fixed", b_dist,
     "fixed", grid_res, paste0("EPSG:", crs), FALSE, "actual"))
 
   r <- terra::unwrap(res$r_a)

@@ -49,10 +49,12 @@ Running the suite and getting `FAIL 0` establishes that, on this fixture:
   equal intervals; reported hectares are ground area, not projected area;
   post-hoc letters agree with `agricolae`.
 - **The pipeline as a whole** still assembles the same surface from those parts
-  (`ok_surface_digest`). Its variogram is pinned by `golden_pin_vgm()`, not
-  fitted, so the lock measures the driver rather than which of the sixteen
-  screened candidates wins a tie-break that follows the platform's
-  floating-point path; `helper.R` derives the pinned model from the data.
+  (`ok_surface_digest`). Its variogram and its boundary are pinned by
+  `golden_pin_vgm()` and `golden_pin_boundary()` rather than fitted and derived,
+  so the lock measures the driver rather than two floating-point near-ties that
+  follow the platform: which of sixteen screened variogram candidates wins, and
+  whether a cell centre 1.2 m from the hull edge falls inside it. `helper.R`
+  derives both pins from the data and records the measurements behind them.
 
 ### What it does not prove
 
