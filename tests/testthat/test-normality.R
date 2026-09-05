@@ -165,3 +165,23 @@ test_that("normality tooltip shows (on residuals) only when groups are present",
     expect_false(grepl("(on raw values)", html_str, fixed = TRUE))
   })
 })
+
+test_that("compute_normality reports the test's own statistic and p-value", {
+  x <- golden_soil("core")$ph
+  res <- compute_normality(x)
+  ref <- shapiro.test(x)
+
+  # No rescaling, no rounding, no partial extraction: what the panel shows is
+  # what the test returned, unnamed.
+  expect_equal(res$statistic, unname(ref$statistic), tolerance = 1e-12)
+  expect_equal(res$p_value, ref$p.value, tolerance = 1e-12)
+  expect_null(names(res$statistic))
+  expect_equal(res$n, length(x))
+  expect_match(res$method, "Shapiro-Wilk")
+
+  # The 0.05 threshold is applied in the documented direction, checked from
+  # both sides so a flipped comparison cannot pass.
+  expect_equal(res$status, if (ref$p.value >= 0.05) "normal" else "not_normal")
+  expect_equal(compute_normality(qnorm(ppoints(60)))$status, "normal")
+  expect_equal(compute_normality(exp(qnorm(ppoints(60)) * 2))$status, "not_normal")
+})

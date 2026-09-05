@@ -1568,3 +1568,346 @@ test_that("run_regional_interpolation names an incoherent strict buffer", {
     "fixed", 350, "EPSG:4326", FALSE, "actual"))
   expect_false(grepl("Strict Measured buffer", res_wrap$log_msg))
 })
+
+# ── Numeric contracts: the engines' arithmetic ─────────────────────────────
+#
+# Everything above tests behaviour: branches, guards, fallbacks, invariance.
+# This block tests the numbers themselves, against the definitions rather than
+# against our own output. Where a golden constant is used it is derived in the
+# comment; where a theorem is available it is preferred to a constant, because
+# a theorem survives a gstat upgrade and a refactor.
+
+test_that("IDW reproduces the hand-computed Shepard weighted mean", {
+  pts <- golden_sf("tiny")
+  # A single prediction location, with nmax = n so no neighbourhood truncation
+  # stands between the engine and the plain Shepard sum.
+  tgt <- sf::st_as_sf(data.frame(x = mean(pts$x), y = mean(pts$y)),
+                      coords = c("x", "y"), crs = 32635)
+  d <- as.numeric(sf::st_distance(tgt, pts))
+
+  for (p in c(1, 2, 3.5)) {
+    res <- apply_IDW(pts, "ph", tgt, list(idw_p = p, idw_nmax = nrow(pts)))
+    # Shepard (1968): z(s0) = sum(w_i z_i) / sum(w_i), w_i = d_i^-p
+    w <- d^(-p)
+    expect_equal(res$res_sf$var1.pred, sum(w * pts$ph) / sum(w),
+                 tolerance = 1e-10)
+  }
+})
+
+test_that("IDW with nmax = 1 returns the nearest observation", {
+  pts <- golden_sf("tiny")
+  tgt <- sf::st_as_sf(data.frame(x = mean(pts$x), y = mean(pts$y)),
+                      coords = c("x", "y"), crs = 32635)
+  d <- as.numeric(sf::st_distance(tgt, pts))
+
+  res <- apply_IDW(pts, "ph", tgt, list(idw_p = 2, idw_nmax = 1))
+  # One neighbour makes the weighted mean that neighbour, whatever the power.
+  expect_equal(res$res_sf$var1.pred, pts$ph[which.min(d)])
+})
+
+test_that("raising the IDW power pulls the prediction toward the nearest point", {
+  pts <- golden_sf("tiny")
+  tgt <- sf::st_as_sf(data.frame(x = mean(pts$x), y = mean(pts$y)),
+                      coords = c("x", "y"), crs = 32635)
+  nearest <- pts$ph[which.min(as.numeric(sf::st_distance(tgt, pts)))]
+
+  gap <- vapply(c(0.5, 1, 2, 4, 8), function(p) {
+    r <- apply_IDW(pts, "ph", tgt, list(idw_p = p, idw_nmax = nrow(pts)))
+    abs(r$res_sf$var1.pred - nearest)
+  }, numeric(1))
+  # The weight of the nearest point dominates as p grows, so the prediction
+  # approaches it monotonically.
+  expect_true(all(diff(gap) < 0))
+})
+
+test_that("OK reproduces the observation and reports zero variance at a data location", {
+  pts <- golden_sf("tiny")
+  lags <- calc_scientific_lags(pts)
+  # Predict AT the sample locations: kriging is an exact interpolator, so the
+  # prediction must be the observation and the kriging variance must vanish.
+  # This holds for a fitted model with a nugget too - gstat does not filter the
+  # nugget - so it is a property of the method, not of this variogram.
+  res <- suppressWarnings(apply_OK(pts, "ph", pts[1:6, ], lags, list()))
+
+  expect_equal(res$res_sf$var1.pred, pts$ph[1:6], tolerance = 1e-8)
+  expect_true(all(abs(res$res_sf$var1.var) < 1e-8))
+})
+
+test_that("OK under a pure nugget returns the global mean and nugget(1 + 1/n)", {
+  pts <- golden_sf("tiny")
+  lags <- calc_scientific_lags(pts)
+  nug <- 0.05
+  tgt <- sf::st_as_sf(data.frame(x = mean(pts$x), y = mean(pts$y)),
+                      coords = c("x", "y"), crs = 32635)
+
+  res <- suppressWarnings(
+    apply_OK(pts, "ph", tgt, lags, list(pre_fit = gstat::vgm(nug, "Nug", 0))))
+
+  # With no spatial correlation every weight is 1/n, so ordinary kriging
+  # degenerates to the sample mean, and its variance is the nugget plus the
+  # variance of the estimated mean: C0 + C0/n.
+  n <- nrow(pts)
+  expect_equal(res$res_sf$var1.pred, mean(pts$ph), tolerance = 1e-10)
+  expect_equal(res$res_sf$var1.var, nug * (1 + 1 / n), tolerance = 1e-10)
+})
+
+test_that("RK prediction is the lm trend plus the kriged residual", {
+  pts  <- golden_sf("tiny")
+  grid <- make_test_grid_safe(pts, res = 800)
+  lags <- calc_scientific_lags(pts)
+  # Supply grid_aux so the covariate surface is fixed and the test isolates the
+  # recomposition rather than re-kriging the covariate.
+  grid_aux <- grid
+  grid_aux$v82 <- seq(min(pts$v82), max(pts$v82), length.out = nrow(grid))
+
+  res <- suppressWarnings(
+    apply_RK(pts, "ph", grid, lags, list(grid_aux = grid_aux), c("v82")))
+  skip_if(grepl("Falling back to OK", res$log_msg, fixed = TRUE),
+          "RK fell back to OK on this fixture")
+
+  # Rebuild the decomposition by hand, reusing the engine's OWN fitted
+  # variogram so what is under test is the recomposition, not the fit.
+  lm_mod <- lm(ph ~ v82, data = pts)
+  dat <- pts
+  dat$residuals <- residuals(lm_mod)
+  kr <- gstat::krige(residuals ~ 1, dat, grid, model = res$fit, debug.level = 0)
+  tr <- predict(lm_mod, newdata = sf::st_drop_geometry(grid_aux), se.fit = TRUE)
+
+  expect_equal(res$res_sf$var1.pred, as.vector(tr$fit + kr$var1.pred),
+               tolerance = 1e-8)
+  expect_equal(res$res_sf$var1.var, as.vector(tr$se.fit^2 + kr$var1.var),
+               tolerance = 1e-8)
+})
+
+test_that("RFK prediction is the forest trend plus the kriged residual", {
+  pts  <- golden_sf("tiny")
+  grid <- make_test_grid_safe(pts, res = 1500)
+  lags <- calc_scientific_lags(pts)
+  grid_aux <- grid
+  grid_aux$v82 <- seq(min(pts$v82), max(pts$v82), length.out = nrow(grid))
+
+  res <- suppressWarnings(
+    apply_RFK(pts, "ph", grid, lags,
+              list(grid_aux = grid_aux, rf_ntree = 60), c("v82")))
+  skip_if(grepl("Falling back to OK", res$log_msg, fixed = TRUE),
+          "RFK fell back to OK on this fixture")
+
+  # The forest is unseeded here, so the reference is built from the engine's
+  # own fitted forest and its own OOB residuals: the claim under test is the
+  # decomposition, not the forest.
+  #
+  # The trend residual is recomputed from the returned forest rather than read
+  # from res$residuals: the engine kriges the OOB residual, then the CV stage
+  # overwrites res$residuals with the cross-validation residual, so the two are
+  # not the same vector.
+  dat <- pts
+  dat$residuals <- pts$ph - res$rf_model$predicted
+  kr <- gstat::krige(residuals ~ 1, dat, grid, model = res$fit, debug.level = 0)
+  ga <- sf::st_drop_geometry(grid_aux)
+  pa <- predict(res$rf_model, ga, predict.all = TRUE)
+
+  expect_equal(res$res_sf$var1.pred, as.vector(pa$aggregate + kr$var1.pred),
+               tolerance = 1e-8)
+  # The uncertainty band is the infinitesimal-jackknife trend variance plus the
+  # residual kriging variance.
+  ij <- rf_infinitesimal_jackknife_var(pa$individual, res$rf_model$inbag)
+  expect_equal(res$res_sf$var1.var, as.vector(ij + kr$var1.var),
+               tolerance = 1e-8)
+})
+
+test_that("TPS at a large lambda collapses onto the least-squares plane", {
+  pts  <- golden_sf("tiny")
+  grid <- make_test_grid_safe(pts, res = 800)
+
+  res <- apply_TPS(pts, "ph", grid, list(tps_lambda = 1e8))
+  expect_false(grepl("Falling back to IDW", res$log_msg, fixed = TRUE))
+
+  # The thin-plate penalty annihilates only the linear null space, so as the
+  # smoothing parameter grows the fit converges to the OLS plane in x and y.
+  # The engine fits on rescaled coordinates, but rescaling is affine and maps
+  # planes to planes, so the raw-coordinate OLS plane is the right reference.
+  gc_ <- sf::st_coordinates(grid)
+  plane <- lm(ph ~ x + y, data = sf::st_drop_geometry(pts))
+  ref <- as.vector(predict(plane, newdata = data.frame(x = gc_[, 1],
+                                                       y = gc_[, 2])))
+  expect_equal(res$res_sf$var1.pred, ref, tolerance = 1e-3)
+})
+
+test_that("CK is invariant to a linear rescaling of a covariate", {
+  pts  <- golden_sf("tiny")
+  grid <- make_test_grid_safe(pts, res = 800)
+  lags <- calc_scientific_lags(pts)
+  ga <- grid
+  ga$v82 <- seq(min(pts$v82), max(pts$v82), length.out = nrow(grid))
+
+  base <- suppressWarnings(
+    apply_CK(pts, "ph", grid, lags, list(grid_aux = ga), "v82"))
+
+  # Co-kriging standardizes the covariates before building the LMC, so a change
+  # of units (metres to millimetres, plus a datum offset) cannot move the
+  # predictions. Without that step the cross-variograms would live on a
+  # different scale and the surface would change with the unit the user
+  # happened to upload.
+  p2 <- pts;  p2$v82 <- p2$v82 * 1000 + 5e5
+  g2 <- ga;   g2$v82 <- g2$v82 * 1000 + 5e5
+  rescaled <- suppressWarnings(
+    apply_CK(p2, "ph", grid, lags, list(grid_aux = g2), "v82"))
+
+  expect_equal(rescaled$res_sf$var1.pred, base$res_sf$var1.pred,
+               tolerance = 1e-8)
+  expect_equal(rescaled$res_sf$var1.var, base$res_sf$var1.var,
+               tolerance = 1e-8)
+})
+
+test_that("CK is an exact interpolator at the sample locations", {
+  pts  <- golden_sf("tiny")
+  lags <- calc_scientific_lags(pts)
+  # Predicting at the samples themselves: co-kriging, like ordinary kriging,
+  # must return the observation and no uncertainty there.
+  res <- suppressWarnings(
+    apply_CK(pts, "ph", pts, lags, list(grid_aux = pts), "v82"))
+  skip_if(grepl("OK fallback", res$log_msg, fixed = TRUE),
+          "CK fell back to OK on this fixture")
+
+  expect_equal(res$res_sf$var1.pred, pts$ph, tolerance = 1e-8)
+  expect_true(all(abs(res$res_sf$var1.var) < 1e-8))
+})
+
+test_that("TPS roughness decreases monotonically with lambda", {
+  pts  <- golden_sf("tiny")
+  grid <- make_test_grid_safe(pts, res = 800)
+
+  # lambda is the weight on the bending-energy penalty, so a larger lambda buys
+  # smoothness at the cost of fidelity. Roughness is measured as the spread of
+  # first differences along the grid's raster order - a crude but monotone proxy
+  # for bending energy, which is all this claim needs.
+  rough <- vapply(c(1e-6, 1e-4, 1e-2, 1, 1e3), function(lam) {
+    r <- apply_TPS(pts, "ph", grid, list(tps_lambda = lam))
+    sd(diff(r$res_sf$var1.pred))
+  }, numeric(1))
+
+  expect_true(all(diff(rough) < 0))
+  expect_gt(rough[1] / rough[length(rough)], 5)
+})
+
+test_that("the GCV optimum agrees with the curve the panel plots", {
+  pts <- golden_sf("tiny")
+  item <- list(l = "Kale", df = data.frame(x = pts$x, y = pts$y, v = pts$ph))
+  tg <- tps_gcv_item(item, "EPSG:32635")
+
+  expect_false(is.null(tg$gcv_data))
+  expect_gt(tg$best_lam, 0)
+  # fields optimises lambda continuously while the plotted curve is its coarse
+  # GCV grid, so the two agree to the grid's resolution rather than exactly.
+  # A reported optimum sitting off the visible minimum would be a real defect.
+  argmin <- tg$gcv_data$lambda[which.min(tg$gcv_data$gcv)]
+  expect_lt(abs(log10(tg$best_lam) - log10(argmin)), 0.1)
+})
+
+test_that("a one-square-kilometre surface reports its ground area, not its projected area", {
+  # A 1 km x 1 km block in UTM 35N, placed at a realistic easting for this
+  # survey. terra::expanse reprojects each cell to compute geodesic area, so
+  # what the Area Coverage table reports is ground hectares.
+  r <- terra::rast(xmin = 650000, xmax = 651000,
+                   ymin = 4150000, ymax = 4151000,
+                   resolution = 100, crs = "EPSG:32635")
+  terra::values(r) <- 5
+  names(r) <- "var1.pred"
+  params <- list(brks = c(0, 10),
+                 rcl_mat = matrix(c(-Inf, 10, 1), ncol = 3, byrow = TRUE),
+                 labels = "One", n_c = 1)
+
+  z <- build_class_zone_sf(r, params)
+  expect_equal(nrow(z), 1L)
+
+  poly <- sf::st_sfc(sf::st_polygon(list(rbind(
+    c(650000, 4150000), c(651000, 4150000), c(651000, 4151000),
+    c(650000, 4151000), c(650000, 4150000)))), crs = 32635)
+  expect_equal(as.numeric(sf::st_area(poly)) / 1e4, 100)      # planar, by construction
+  # Ground area, computed independently from the polygon rather than the raster.
+  expect_equal(z$area_ha, terra::expanse(terra::vect(poly), unit = "ha"),
+               tolerance = 1e-3)
+  # Within a tenth of a hectare of the planar figure at this easting, but not
+  # identical to it: the projection is not area-true.
+  expect_lt(abs(z$area_ha - 100), 0.1)
+})
+
+test_that("calc_class_breaks reproduces the quantile and equal-interval definitions", {
+  x <- golden_soil("full")$ph
+
+  # Interior breaks only: n_c classes need n_c - 1 cuts, and the outer edges
+  # are the data's own extremes.
+  q <- calc_class_breaks(x, 4, "quantile")
+  expect_length(q, 3L)
+  expect_equal(q, unname(quantile(x, probs = c(0.25, 0.50, 0.75))),
+               tolerance = 1e-10)
+
+  e <- calc_class_breaks(x, 4, "equal")
+  expect_length(e, 3L)
+  expect_equal(e, min(x) + (1:3) * diff(range(x)) / 4, tolerance = 1e-10)
+
+  # Fewer values than classes has no answer.
+  expect_null(calc_class_breaks(c(1, 2), 5, "quantile"))
+})
+
+test_that("the Jenks break path is pinned", {
+  # No closed form to check Jenks against, so this is a regression lock, valid
+  # only because the quantile and equal paths above establish that the slicing
+  # and the seed sandbox are right. The expected values are recorded for this
+  # golden set by make_baselines.R; if they move, classInt changed or the
+  # fixture did.
+  x <- golden_soil("full")[[golden_meta()$columns$target]]
+  recorded <- golden_baseline("jenks_target_5")
+  skip_if(is.null(recorded), "no baselines recorded for this golden set")
+
+  expect_equal(calc_class_breaks(x, 5, "jenks"), recorded, tolerance = 1e-9)
+  # Seed-sandboxed: repeated calls agree and the caller's stream is untouched.
+  set.seed(99); before <- .Random.seed
+  expect_equal(calc_class_breaks(x, 5, "jenks"), recorded, tolerance = 1e-9)
+  expect_identical(.Random.seed, before)
+})
+
+test_that("the whole regional driver still produces the surface it produced before", {
+  # The end-to-end alarm. Every test above proves a component computes what its
+  # method defines; this one asks whether the driver still assembles them into
+  # the same map - the question an edit anywhere in the pipeline actually raises.
+  #
+  # It is a regression lock, and it is only legitimate because the component
+  # tests establish correctness first: on its own it would say "unchanged", not
+  # "right". Ordinary Kriging on purpose (fully seed-sandboxed; RFK's forest is
+  # unseeded and would not reproduce), and sequential, so it does NOT cover the
+  # future/PSOCK dispatch layer.
+  #
+  # Tolerance is 1e-6 relative, not machine epsilon: the chain runs through
+  # gstat's weighted-least-squares fit and a linear solve, so a different BLAS,
+  # CPU or gstat build moves the last few digits without anything being wrong.
+  # If this fails on a machine where nothing in the repository changed, compare
+  # package versions before suspecting the code.
+  recorded <- golden_baseline("ok_surface_digest")
+  skip_if(is.null(recorded), "no baselines recorded for this golden set")
+
+  digest <- run_surface_digest(golden_sf("tiny"))
+  expect_named(digest, names(recorded))
+  expect_equal(digest, recorded, tolerance = 1e-6)
+})
+
+test_that("calc_metric_spacing is the mean nearest-neighbour distance in metres", {
+  pts <- golden_sf("tiny")
+  co <- sf::st_coordinates(pts)
+  D <- as.matrix(dist(co))
+  diag(D) <- Inf
+
+  sp <- calc_metric_spacing(pts)
+  expect_equal(sp$mean_nn, mean(apply(D, 1, min)), tolerance = 1e-8)
+  expect_equal(sp$max_dim,
+               max(diff(range(co[, 1])), diff(range(co[, 2]))),
+               tolerance = 1e-8)
+
+  # The same points in degrees must still be measured in metres: the geographic
+  # branch projects to Web Mercator and divides out its 1/cos(latitude)
+  # inflation, so it has to land on the projected answer, not 1.24x it (the
+  # factor at this latitude).
+  sp_ll <- calc_metric_spacing(golden_sf("tiny", crs = 4326))
+  expect_equal(sp_ll$mean_nn / sp$mean_nn, 1, tolerance = 0.05)
+  expect_equal(sp_ll$max_dim / sp$max_dim, 1, tolerance = 0.05)
+})

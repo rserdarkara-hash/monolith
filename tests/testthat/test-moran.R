@@ -141,3 +141,82 @@ test_that("calc_moran stays reproducible for duplicate coordinates", {
   expect_equal(suppressWarnings(calc_moran(resid, coords)),
                suppressWarnings(calc_moran(resid, coords)))
 })
+
+# ── Numeric contract: Moran's I ────────────────────────────────────────────
+#
+# Everything above pins the guards and the NA branches. These pin the statistic
+# against its definition, on the neighbour graph the function documents:
+# symmetric k = 8 nearest neighbours, row-standardised.
+
+test_that("calc_moran matches the hand-computed statistic on its own kNN graph", {
+  pts <- golden_sf("tiny")
+  co <- sf::st_coordinates(pts)
+  z <- residuals(lm(ph ~ v82, data = sf::st_drop_geometry(pts)))
+
+  # Rebuild the documented graph from the distance matrix alone, without spdep:
+  # i ~ j when j is among i's 8 nearest OR i is among j's (sym = TRUE is the
+  # union), then row-standardise.
+  n <- nrow(co)
+  k <- 8L
+  D <- as.matrix(dist(co))
+  A <- matrix(0, n, n)
+  for (i in seq_len(n)) A[i, order(D[i, ])[2:(k + 1)]] <- 1
+  A <- pmax(A, t(A))
+  W <- A / rowSums(A)
+
+  # I = (n / S0) * (z' W z) / (z' z), z centred (Moran 1950; Cliff & Ord 1981)
+  zc <- z - mean(z)
+  i_hand <- (n / sum(W)) * as.numeric(t(zc) %*% W %*% zc) / sum(zc^2)
+
+  got <- calc_moran(z, co)
+  expect_equal(got$i, i_hand, tolerance = 1e-10)
+})
+
+test_that("calc_moran reports E[I] = -1/(n-1) exactly", {
+  # One locality: a slice spanning two distant survey areas gives a
+  # disconnected kNN graph, which is a real condition but not the one under
+  # test here.
+  alt <- golden_sf("full", localities = "Altinova")
+  for (n in c(12, 40, 137)) {
+    pts <- alt[seq_len(n), ]
+    got <- calc_moran(pts$ph, sf::st_coordinates(pts))
+    # The null expectation depends on n alone, not on the weight matrix, and is
+    # negative - which is why reporting I without it is misleading.
+    expect_equal(got$e_i, -1 / (n - 1), tolerance = 1e-12)
+  }
+})
+
+test_that("calc_moran agrees with spdep on the graph it builds", {
+  skip_if_not_installed("spdep")
+  pts <- golden_sf("tiny")
+  co <- sf::st_coordinates(pts)
+  z <- residuals(lm(ph ~ v82, data = sf::st_drop_geometry(pts)))
+
+  nb <- suppressWarnings(
+    spdep::knn2nb(spdep::knearneigh(co, k = 8L), sym = TRUE))
+  lw <- spdep::nb2listw(nb, style = "W", zero.policy = TRUE)
+  ref <- spdep::moran.test(z, lw, zero.policy = TRUE, randomisation = FALSE,
+                           alternative = "two.sided")
+
+  got <- calc_moran(z, co)
+  expect_equal(got$i, as.numeric(ref$estimate[1]), tolerance = 1e-12)
+  expect_equal(got$p, ref$p.value, tolerance = 1e-12)
+})
+
+test_that("structure raises I above E[I] and shuffling collapses it back", {
+  pts <- golden_sf("core", localities = "Yorga")
+  co <- sf::st_coordinates(pts)
+  # A smooth planar field is maximally autocorrelated at this scale.
+  grad <- co[, 1] * 1e-3 + co[, 2] * 1e-3
+  got <- calc_moran(grad, co)
+  expect_gt(got$i, 0.5)
+  expect_lt(got$p, 0.05)
+
+  # The same values at shuffled locations carry no spatial structure, so I must
+  # fall back toward its null expectation. Asserted relative to the structured
+  # run rather than against an absolute band, so the test does not depend on one
+  # permutation happening to land close to E[I].
+  shuffled <- with_seed(7, sample(grad))
+  got_s <- calc_moran(shuffled, co)
+  expect_lt(abs(got_s$i - got_s$e_i), abs(got$i - got$e_i) / 3)
+})

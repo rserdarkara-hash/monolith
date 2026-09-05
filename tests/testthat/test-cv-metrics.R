@@ -741,3 +741,72 @@ test_that("NRMSE normalises by the absolute mean, so negative-mean variables rep
   pos <- augment_metrics(-obs, -pre)
   expect_equal(neg$nrmse_mean, pos$nrmse_mean)
 })
+
+# ── Numeric contract: the CV numbers and the folds under them ──────────────
+
+test_that("perform_cv agrees with yardstick on the metrics they share", {
+  pts <- golden_sf("tiny")
+  lags <- calc_scientific_lags(pts)
+  fit <- suppressWarnings(
+    robust_vgm_fit(gstat::variogram(ph ~ 1, pts, width = lags$width,
+                                    cutoff = lags$cutoff), pts$ph))
+  cv <- gstat::krige.cv(ph ~ 1, pts, model = fit, nfold = nrow(pts),
+                        debug.level = 0)
+
+  m <- perform_cv(cv, round_values = FALSE)
+  o <- cv$observed
+  p <- cv$var1.pred
+  # An independent implementation of the same three conventions: RMSE is the
+  # root of the mean squared residual, MAE the mean absolute residual, and R2
+  # the squared Pearson correlation (not 1 - SSE/SST, which is NSE and is
+  # reported separately).
+  expect_equal(m$rmse, yardstick::rmse_vec(o, p), tolerance = 1e-10)
+  expect_equal(m$mae, yardstick::mae_vec(o, p), tolerance = 1e-10)
+  expect_equal(m$r2, yardstick::rsq_vec(o, p), tolerance = 1e-10)
+  expect_equal(m$n, length(o))
+})
+
+test_that("krige.cv LOOCV equals a hand-written leave-one-out loop", {
+  pts <- golden_sf("tiny")
+  lags <- calc_scientific_lags(pts)
+  fit <- suppressWarnings(
+    robust_vgm_fit(gstat::variogram(ph ~ 1, pts, width = lags$width,
+                                    cutoff = lags$cutoff), pts$ph))
+
+  cv <- gstat::krige.cv(ph ~ 1, pts, model = fit, nfold = nrow(pts),
+                        debug.level = 0)
+  # Refit the whole system n times, each without one point. LOOCV means exactly
+  # this and nothing else, so any short cut in the engine's fold handling shows
+  # up here.
+  hand <- vapply(seq_len(nrow(pts)), function(i) {
+    gstat::krige(ph ~ 1, pts[-i, ], pts[i, ], model = fit,
+                 debug.level = 0)$var1.pred
+  }, numeric(1))
+
+  expect_equal(cv$var1.pred, hand, tolerance = 1e-10)
+  expect_equal(cv$observed, pts$ph)
+})
+
+test_that("spatial block folds are spatially compact and random folds are not", {
+  pts <- golden_sf("core")
+  co <- sf::st_coordinates(pts)
+  D <- as.matrix(dist(co))
+  ut <- upper.tri(D)
+
+  ratio <- function(f) {
+    same <- outer(f, f, "==") & ut
+    mean(D[same]) / mean(D[!outer(f, f, "==") & ut])
+  }
+
+  block <- make_cv_folds(co, "block", nrow(co))
+  rand <- make_cv_folds(co, "auto", nrow(co))
+
+  expect_length(unique(block), 10L)
+  expect_length(unique(rand), 10L)
+  # A spatial block holds points that are near each other, so the mean distance
+  # within a fold is a fraction of the mean distance between folds. A random
+  # fold is a random subset of the same cloud, so the two are the same - which
+  # is precisely why random k-fold over-reports skill on autocorrelated data.
+  expect_lt(ratio(block), 0.4)
+  expect_equal(ratio(rand), 1, tolerance = 0.05)
+})

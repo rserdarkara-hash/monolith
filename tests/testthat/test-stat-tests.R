@@ -201,3 +201,54 @@ test_that("get_stat_letters returns NULL when N <= k (zero error df)", {
   result <- get_stat_letters(df, "value", "group", "tukey")
   expect_null(result)
 })
+
+# ── Numeric contract: the post-hoc letters ─────────────────────────────────
+
+test_that("Tukey letters reproduce agricolae's own grouping", {
+  skip_if_not_installed("agricolae")
+  df <- with_seed(3, data.frame(
+    v = c(rnorm(10, 10, 1), rnorm(10, 10.2, 1), rnorm(10, 20, 1)),
+    g = rep(c("a", "b", "c"), each = 10)))
+
+  got <- get_stat_letters(df, "v", "g", "tukey")
+  ref <- agricolae::HSD.test(aov(v ~ g, data = df), "g", console = FALSE)
+  ref_df <- data.frame(g = rownames(ref$groups),
+                       letter = as.character(ref$groups$groups),
+                       stringsAsFactors = FALSE)
+
+  # Joined on the group name, not on row order: what must match is the letter
+  # each group carries, not the order agricolae happens to sort them in.
+  m <- merge(got, ref_df, by = "g", suffixes = c("_got", "_ref"))
+  expect_equal(nrow(m), 3L)
+  expect_equal(m$letter_got, m$letter_ref)
+
+  # The two near-identical groups share a letter; the distant one does not.
+  lut <- setNames(got$letter, got$g)
+  expect_equal(lut[["a"]], lut[["b"]])
+  expect_false(lut[["c"]] == lut[["a"]])
+})
+
+test_that("the Kruskal path uses BH-adjusted comparisons on ranks", {
+  skip_if_not_installed("agricolae")
+  df <- with_seed(3, data.frame(
+    v = c(rnorm(10, 10, 1), rnorm(10, 10.2, 1), rnorm(10, 20, 1)),
+    g = rep(c("a", "b", "c"), each = 10)))
+
+  got <- get_stat_letters(df, "v", "g", "kruskal")
+  ref <- agricolae::kruskal(df$v, factor(df$g), p.adj = "BH", console = FALSE)
+  ref_df <- data.frame(g = rownames(ref$groups),
+                       letter = as.character(ref$groups$groups),
+                       stringsAsFactors = FALSE)
+
+  m <- merge(got, ref_df, by = "g", suffixes = c("_got", "_ref"))
+  expect_equal(nrow(m), 3L)
+  expect_equal(m$letter_got, m$letter_ref)
+
+  # Rank-based, so a monotone transform of the response cannot change the
+  # letters - which is what separates this path from the parametric one.
+  df_log <- df
+  df_log$v <- log(df$v - min(df$v) + 1)
+  got_log <- get_stat_letters(df_log, "v", "g", "kruskal")
+  expect_equal(got_log[order(got_log$g), ], got[order(got$g), ],
+               ignore_attr = TRUE)
+})

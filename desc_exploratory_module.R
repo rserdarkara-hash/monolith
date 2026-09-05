@@ -589,79 +589,21 @@ desc_exploratory_server <- function(id, data_reactive, vars_metadata_reactive,
       var <- input$desc_var_x
       if(!is.numeric(df[[var]])) return(data.frame(Message="Selected primary variable is not numeric."))
       
-      # One grouped pass for all five statistics; the formula interface
-      # na.omit()s beforehand, so each x arrives NA-free (same numbers as the
-      # former five separate aggregate() calls).
-      agg <- aggregate(df[[var]] ~ df$group_id,
-                       FUN = function(x) c(n = length(x), mean = mean(x), sd = sd(x),
-                                           min = min(x), max = max(x)))
-      stats_mat <- agg[, 2]
-      res <- data.frame(
-        Group = agg[, 1],
-        Count = as.integer(stats_mat[, "n"]),
-        Mean = round(stats_mat[, "mean"], 3),
-        SD = round(stats_mat[, "sd"], 3),
-        Min = round(stats_mat[, "min"], 3),
-        Max = round(stats_mat[, "max"], 3)
-      )
-      
-      tot_mean <- mean(df[[var]], na.rm=TRUE)
-      tot_sd <- sd(df[[var]], na.rm=TRUE)
-      tot_n <- nrow(df[!is.na(df[[var]]), ])
-      tot_min <- min(df[[var]], na.rm=TRUE)
-      tot_max <- max(df[[var]], na.rm=TRUE)
-      
-      res <- rbind(res, data.frame(Group="TOTAL", Count=tot_n, Mean=round(tot_mean,3), SD=round(tot_sd,3), Min=round(tot_min,3), Max=round(tot_max,3)))
+      # Arithmetic (per-group n/mean/sd/min/max, the TOTAL row and the trend
+      # fits) lives in ui_formatting.R; this block selects the data and formats.
+      res <- desc_summary_table(df[[var]], df$group_id)
       
       if (input$desc_plot_type == "scatter" && !is.null(input$desc_scatter_fit) && input$desc_scatter_fit != "none") {
         y_var <- if(!is.null(input$desc_var_y) && input$desc_var_y != "") input$desc_var_y else NULL
         if (!is.null(y_var)) {
-           r2_vals <- sapply(as.character(res$Group), function(g) {
-              if (g == "TOTAL") sub_df <- df else sub_df <- df[as.character(df$group_id) == g,]
-              if (nrow(sub_df) < 5) return(NA)
-              f <- input$desc_scatter_fit
-              tryCatch({
-                 form_lin <- as.formula(paste0("`", y_var, "` ~ `", var, "`"))
-                 form_poly <- as.formula(paste0("`", y_var, "` ~ poly(`", var, "`, 2)"))
-                 form_gam <- as.formula(paste0("`", y_var, "` ~ s(`", var, "`, bs = 'cs')"))
-                 
-                 if (f == "linear") summary(lm(form_lin, data = sub_df))$r.squared
-                 else if (f == "polynomial") { if(length(unique(sub_df[[var]])) > 3) summary(lm(form_poly, data = sub_df))$r.squared else NA }
-                 else if (f == "loess") { mod <- loess(form_lin, data = sub_df, span=0.7); cor(sub_df[[y_var]], fitted(mod))^2 }
-                 else if (f == "gam") { if(requireNamespace("mgcv", quietly=TRUE)) summary(mgcv::gam(form_gam, data = sub_df))$r.sq else NA }
-                 else NA
-              }, error = function(e) NA)
-           })
-           
-           p_vals <- sapply(as.character(res$Group), function(g) {
-              if (g == "TOTAL") sub_df <- df else sub_df <- df[as.character(df$group_id) == g,]
-              if (nrow(sub_df) < 5) return(NA)
-              f <- input$desc_scatter_fit
-              tryCatch({
-                 form_lin <- as.formula(paste0("`", y_var, "` ~ `", var, "`"))
-                 form_poly <- as.formula(paste0("`", y_var, "` ~ poly(`", var, "`, 2)"))
-                 form_gam <- as.formula(paste0("`", y_var, "` ~ s(`", var, "`, bs = 'cs')"))
-                 
-                 if (f == "linear") {
-                     mod <- summary(lm(form_lin, data = sub_df))
-                     if(!is.null(mod$fstatistic)) pf(mod$fstatistic[1], mod$fstatistic[2], mod$fstatistic[3], lower.tail=FALSE) else NA
-                 } else if (f == "polynomial") { 
-                     if(length(unique(sub_df[[var]])) > 3) {
-                         mod <- summary(lm(form_poly, data = sub_df))
-                         if(!is.null(mod$fstatistic)) pf(mod$fstatistic[1], mod$fstatistic[2], mod$fstatistic[3], lower.tail=FALSE) else NA
-                     } else NA 
-                 }
-                 else if (f == "gam") { if(requireNamespace("mgcv", quietly=TRUE)) summary(mgcv::gam(form_gam, data = sub_df))$s.table[1, "p-value"] else NA }
-                 else NA
-              }, error = function(e) NA)
-           })
+           fits <- desc_group_fit_stats(df, var, y_var, input$desc_scatter_fit, res$Group)
            
            if (input$desc_scatter_fit == "loess") {
-               res$`Squared Correlation (Not true R²)` <- round(as.numeric(r2_vals), 3)
+               res$`Squared Correlation (Not true R²)` <- round(fits$r2, 3)
            } else {
-               res$Trend_R2 <- round(as.numeric(r2_vals), 3)
+               res$Trend_R2 <- round(fits$r2, 3)
            }
-           res$Trend_PVal <- format.pval(as.numeric(p_vals), digits = 3, eps = 0.001)
+           res$Trend_PVal <- format.pval(fits$p, digits = 3, eps = 0.001)
         }
       }
       
@@ -979,22 +921,18 @@ desc_exploratory_server <- function(id, data_reactive, vars_metadata_reactive,
         pca_rv$collinear_pairs <- NULL
         
         vars_lab <- get_var_labels(input$pca_vars, vmeta())
-        keep <- stats::complete.cases(df[, input$pca_vars, drop=FALSE])
-        df_clean <- df[keep, input$pca_vars, drop=FALSE]
-
-        dropped_rows <- nrow(df) - nrow(df_clean)
-        if (dropped_rows > 0) {
-            showNotification(sprintf("Warning: %d rows were dropped due to missing values (NA) in the selected variables.", dropped_rows), type = "warning", duration = 10)
-        }
-
-        colnames(df_clean) <- vars_lab
 
         tryCatch({
-          pca_rv$res <- prcomp(df_clean, scale. = input$pca_scale, center = TRUE)
+          # Complete-case filter + prcomp live in desc_pca_fit (ui_formatting.R).
+          fit <- desc_pca_fit(df, input$pca_vars, vars_lab, scale = input$pca_scale)
+          if (fit$dropped > 0) {
+              showNotification(sprintf("Warning: %d rows were dropped due to missing values (NA) in the selected variables.", fit$dropped), type = "warning", duration = 10)
+          }
+          pca_rv$res <- fit$res
           pca_rv$scaled <- isTRUE(input$pca_scale)
-          pca_rv$data <- df_clean
+          pca_rv$data <- fit$data
           pca_rv$cols <- vars_lab
-          pca_rv$groups <- if ("group_id" %in% colnames(df)) df$group_id[keep] else NULL
+          pca_rv$groups <- if ("group_id" %in% colnames(df)) df$group_id[fit$keep] else NULL
           shiny::updateTextInput(session, "pca_ready_flag", value = "yes")
         }, error = function(e) {
           showNotification(paste("PCA Failed:", e$message), type="error")
@@ -1023,16 +961,14 @@ desc_exploratory_server <- function(id, data_reactive, vars_metadata_reactive,
       df <- rv_filtered_analytics_data()
       
       vars_lab <- get_var_labels(input$pca_vars, vmeta())
-      keep <- stats::complete.cases(df[, input$pca_vars, drop=FALSE])
-      df_clean <- df[keep, input$pca_vars, drop=FALSE]
-      colnames(df_clean) <- vars_lab
 
       tryCatch({
-        pca_rv$res <- prcomp(df_clean, scale. = input$pca_scale, center = TRUE)
+        fit <- desc_pca_fit(df, input$pca_vars, vars_lab, scale = input$pca_scale)
+        pca_rv$res <- fit$res
         pca_rv$scaled <- isTRUE(input$pca_scale)
-        pca_rv$data <- df_clean
+        pca_rv$data <- fit$data
         pca_rv$cols <- vars_lab
-        pca_rv$groups <- if ("group_id" %in% colnames(df)) df$group_id[keep] else NULL
+        pca_rv$groups <- if ("group_id" %in% colnames(df)) df$group_id[fit$keep] else NULL
         pca_rv$collinearity_warn <- FALSE
         shiny::updateTextInput(session, "pca_ready_flag", value = "yes")
       }, error = function(e) {

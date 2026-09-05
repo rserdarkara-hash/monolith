@@ -1086,22 +1086,14 @@
       # poisoning the cached value for every later consumer (the Jenks bug)
       params_k <- tryCatch(agro_params(), error = function(e) NULL)
       if(!is.null(params_k) && (comp_mode || val_type != "actual")) {
-        df_k <- df_perf
-        brks_k <- c(-Inf, params_k$rcl_mat[-1, 1], Inf)
-        # right = FALSE matches the map classification (terra::classify with
-        # right = FALSE): classes are [low, high)
-        df_k$act_bin <- cut(df_k$v, breaks = brks_k, labels = params_k$labels, include.lowest = TRUE, right = FALSE)
-        df_k$pred_bin <- cut(df_k$pv, breaks = brks_k, labels = params_k$labels, include.lowest = TRUE, right = FALSE)
-        df_k <- df_k[!is.na(df_k$act_bin) & !is.na(df_k$pred_bin), ]
-        if(nrow(df_k) >= 3) {
+        # Same binning and arithmetic as the on-screen Agreement table
+        # (compute_agreement_metrics, spatial_metrics.R) so the export and the
+        # Scientific Analysis tab can never report different agreement figures.
+        ag_k <- compute_agreement_metrics(df_perf$v, df_perf$pv, method = "agro", params = params_k)
+        if(is.null(ag_k$status)) {
           kappa_total <- data.frame(
             Metric = c("Accuracy", "Kappa (Unweighted)", "Weighted Kappa (Linear)", "MCC"),
-            Value = c(
-              round(yardstick::accuracy_vec(df_k$act_bin, df_k$pred_bin), 4),
-              round(yardstick::kap_vec(df_k$act_bin, df_k$pred_bin), 4),
-              round(yardstick::kap_vec(df_k$act_bin, df_k$pred_bin, weighting = "linear"), 4),
-              round(yardstick::mcc_vec(df_k$act_bin, df_k$pred_bin), 4)
-            )
+            Value = round(c(ag_k$accuracy, ag_k$kappa, ag_k$kappa_linear, ag_k$mcc), 4)
           )
           register_export_item("table_kappa_total", paste(meta$label, "- Total Classification Performance - Map in Agro or Binned styling to see the stats"), "table", kappa_total, meta$category)
         }

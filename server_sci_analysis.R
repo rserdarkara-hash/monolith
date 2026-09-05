@@ -904,55 +904,22 @@
     if(loc != "Total (Combined)") {
       df <- df %>% filter(loc == !!loc)
     }
-    
-    if(nrow(df) < 3) return(sci_dt(data.frame(Status = "Not enough data points for Kappa.")))
 
+    params <- NULL
     if (input$kappa_bin_method == "agro") {
       params <- tryCatch(agro_params(), error = function(e) NULL)
       if(is.null(params) || input$color_style != "agro") return(sci_dt(data.frame(Status = "Select Agronomical styling and press Apply to maps and statistics (sidebar) for this method.")))
-      
-      breaks <- c(-Inf, params$rcl_mat[-1, 1], Inf)
-      labels <- params$labels
-      
-      # right = FALSE matches the map classification (terra::classify with
-      # right = FALSE): classes are [low, high)
-      df$act_bin <- cut(df$v, breaks = breaks, labels = labels, include.lowest = TRUE, right = FALSE)
-      df$pred_bin <- cut(df$pv, breaks = breaks, labels = labels, include.lowest = TRUE, right = FALSE)
-      
-      df <- df[!is.na(df$act_bin) & !is.na(df$pred_bin), ]
-      df$act_bin <- factor(df$act_bin, levels = labels)
-      df$pred_bin <- factor(df$pred_bin, levels = labels)
-      
-    } else {
-      brks <- unique(quantile(df$v, probs = seq(0, 1, 0.25), na.rm = TRUE))
-      if(length(brks) < 2) return(sci_dt(data.frame(Status = "Not enough variance for quartiles.")))
-      
-      brks_ext <- brks
-      brks_ext[1] <- -Inf
-      brks_ext[length(brks_ext)] <- Inf
-      
-      lvl <- paste0("Q", 1:(length(brks)-1))
-      df$act_bin <- cut(df$v, breaks = brks_ext, include.lowest = TRUE, labels = lvl)
-      df$pred_bin <- cut(df$pv, breaks = brks_ext, include.lowest = TRUE, labels = lvl)
-      
-      df <- df[!is.na(df$act_bin) & !is.na(df$pred_bin), ]
-      df$act_bin <- factor(df$act_bin, levels = lvl)
-      df$pred_bin <- factor(df$pred_bin, levels = lvl)
     }
-    
-    if(nrow(df) < 3) return(sci_dt(data.frame(Status = "Not enough data after binning.")))
-    
-    k_unw <- tryCatch(yardstick::kap_vec(df$act_bin, df$pred_bin), error = function(e) NA)
-    k_lin <- tryCatch(yardstick::kap_vec(df$act_bin, df$pred_bin, weighting = "linear"), error = function(e) NA)
-    acc   <- tryCatch(yardstick::accuracy_vec(df$act_bin, df$pred_bin), error = function(e) NA)
-    b_acc <- tryCatch(yardstick::bal_accuracy_vec(df$act_bin, df$pred_bin), error = function(e) NA)
-    mcc   <- tryCatch(yardstick::mcc_vec(df$act_bin, df$pred_bin), error = function(e) NA)
-    
-    off_by_one_acc <- tryCatch(sum(abs(as.integer(df$act_bin) - as.integer(df$pred_bin)) <= 1, na.rm = TRUE) / sum(!is.na(df$act_bin) & !is.na(df$pred_bin)), error = function(e) NA)
-    
+
+    # All binning and confusion-matrix arithmetic lives in
+    # compute_agreement_metrics() (spatial_metrics.R); this block only chooses
+    # the data and formats the answer.
+    ag <- compute_agreement_metrics(df$v, df$pv, method = input$kappa_bin_method, params = params)
+    if(!is.null(ag$status)) return(sci_dt(data.frame(Status = ag$status)))
+
     sci_dt(data.frame(
       Metric = c("Overall Accuracy", "Balanced Accuracy", "Off-by-one Accuracy", "Matthews Corr. Coef. (MCC)", "Kappa (Unweighted)", "Weighted Kappa (Linear)"),
-      Value = c(round(acc, 4), round(b_acc, 4), round(off_by_one_acc, 4), round(mcc, 4), round(k_unw, 4), round(k_lin, 4))
+      Value = round(c(ag$accuracy, ag$bal_accuracy, ag$off_by_one, ag$mcc, ag$kappa, ag$kappa_linear), 4)
     ))
   })
 

@@ -274,3 +274,145 @@ test_that("build_directional_variogram_ggplot labels bearings with compass names
   expect_null(build_directional_variogram_ggplot(NULL))
   expect_null(build_directional_variogram_ggplot(data.frame(dist = 1, gamma = 1)))
 })
+
+test_that("the practical-range factor is the 95 % correlation-decay solution", {
+  # The practical range is where the correlation has decayed to 0.05. Each
+  # factor below is that solution for its family, re-derived here rather than
+  # copied from the implementation.
+  decay_root <- function(rho) {
+    stats::uniroot(function(t) rho(t) - 0.05, c(1e-6, 30))$root
+  }
+
+  # Spherical reaches the sill exactly at the range.
+  expect_equal(.vgm_practical_range_factor("Sph"), 1)
+
+  # Exponential: exp(-t) = 0.05
+  expect_equal(.vgm_practical_range_factor("Exp"), 3)
+  expect_equal(decay_root(function(t) exp(-t)), 3, tolerance = 2e-3)
+
+  # Gaussian: exp(-t^2) = 0.05
+  expect_equal(.vgm_practical_range_factor("Gau"), sqrt(3))
+  expect_equal(decay_root(function(t) exp(-t^2)), sqrt(3), tolerance = 2e-3)
+
+  # Matern nu = 0.5 IS the exponential, so it must report the same factor.
+  expect_equal(.vgm_practical_range_factor("Mat", 0.5), 3)
+  # nu = 1.5 (the screen's fixed smoothness): (1 + t) exp(-t) = 0.05
+  # 4.75 is the rounded solution (4.7439), so the tolerance has to admit the
+  # rounding the implementation deliberately applies.
+  expect_equal(.vgm_practical_range_factor("Mat", 1.5),
+               decay_root(function(t) (1 + t) * exp(-t)), tolerance = 2e-3)
+  # nu = 2.5: (1 + t + t^2/3) exp(-t) = 0.05
+  expect_equal(.vgm_practical_range_factor("Mat", 2.5),
+               decay_root(function(t) (1 + t + t^2 / 3) * exp(-t)),
+               tolerance = 1e-3)
+  # An unrecognised family falls back to the range itself rather than erroring.
+  expect_equal(.vgm_practical_range_factor("Lin"), 1)
+})
+
+# ── Numeric contract: the variogram itself ─────────────────────────────────
+
+test_that("the empirical variogram is the binned mean of half squared differences", {
+  pts <- golden_sf("tiny")
+  lags <- calc_scientific_lags(pts)
+  v <- gstat::variogram(ph ~ 1, pts, width = lags$width, cutoff = lags$cutoff)
+
+  # Matheron's estimator, computed from every pair without gstat:
+  # gamma(h) = (1 / 2N(h)) * sum (z_i - z_j)^2 over the pairs in the bin.
+  co <- sf::st_coordinates(pts)
+  D <- as.matrix(dist(co))
+  S <- outer(pts$ph, pts$ph, "-")^2
+  ut <- upper.tri(D)
+  d_v <- D[ut]
+  s_v <- S[ut]
+  bin <- ceiling(d_v / lags$width)
+  keep <- d_v <= lags$cutoff & bin >= 1
+  f <- factor(bin[keep], levels = seq_len(nrow(v)))
+
+  expect_equal(as.integer(v$np), as.integer(table(f)))
+  expect_equal(v$gamma,
+               as.numeric(tapply(s_v[keep], f, function(x) 0.5 * mean(x))),
+               tolerance = 1e-10)
+})
+
+test_that("robust_vgm_fit recovers the model a field was simulated from", {
+  # Unconditional simulation from a KNOWN model, then refit. Bands are wide on
+  # purpose: one realization of a random field does not reproduce its own
+  # generating parameters exactly, and a band tight enough to be violated by
+  # sampling noise would be a flaky test rather than a strict one.
+  truth <- gstat::vgm(psill = 1, model = "Sph", range = 1200, nugget = 0.2)
+  sim <- with_seed(11, {
+    g <- expand.grid(x = seq(0, 4000, by = 200), y = seq(0, 4000, by = 200))
+    s <- gstat::krige(z ~ 1, locations = NULL,
+                      newdata = sf::st_as_sf(g, coords = c("x", "y"), crs = 32635),
+                      dummy = TRUE, beta = 0, model = truth, nmax = 25,
+                      nsim = 1, debug.level = 0)
+    names(s)[1] <- "z"
+    s
+  })
+
+  lags <- calc_scientific_lags(sim)
+  v <- gstat::variogram(z ~ 1, sim, width = lags$width, cutoff = lags$cutoff)
+  fit <- suppressWarnings(robust_vgm_fit(v, sim$z))
+
+  nugget <- fit$psill[1]
+  total_sill <- sum(fit$psill)
+  practical <- fit$range[nrow(fit)] *
+    .vgm_practical_range_factor(fit$model[nrow(fit)])
+
+  expect_gt(nugget, 0.05)          # truth 0.2
+  expect_lt(nugget, 0.45)
+  expect_gt(total_sill, 0.6)       # truth 1.2
+  expect_lt(total_sill, 2.4)
+  expect_gt(practical, 600)        # truth 1200
+  expect_lt(practical, 2400)
+})
+
+test_that("the fitted total sill tracks the sample variance", {
+  # For a second-order stationary field sampled well past its range, the sill
+  # estimates the process variance, so the fitted total sill and the sample
+  # variance must be of the same size. A fit that reports a sill orders away
+  # from var(z) is not describing this data.
+  truth <- gstat::vgm(psill = 1, model = "Exp", range = 400, nugget = 0.1)
+  sim <- with_seed(23, {
+    g <- expand.grid(x = seq(0, 4000, by = 200), y = seq(0, 4000, by = 200))
+    s <- gstat::krige(z ~ 1, locations = NULL,
+                      newdata = sf::st_as_sf(g, coords = c("x", "y"), crs = 32635),
+                      dummy = TRUE, beta = 0, model = truth, nmax = 25,
+                      nsim = 1, debug.level = 0)
+    names(s)[1] <- "z"
+    s
+  })
+
+  lags <- calc_scientific_lags(sim)
+  fit <- suppressWarnings(
+    robust_vgm_fit(gstat::variogram(z ~ 1, sim, width = lags$width,
+                                    cutoff = lags$cutoff), sim$z))
+  ratio <- sum(fit$psill) / var(sim$z)
+  expect_gt(ratio, 0.6)
+  expect_lt(ratio, 1.7)
+})
+
+test_that("the four directional variograms pool back to the omnidirectional one", {
+  pts <- golden_sf("core", localities = "Yorga")
+  lags <- calc_scientific_lags(pts)
+  omni <- as.data.frame(gstat::variogram(ph ~ 1, pts, width = lags$width,
+                                         cutoff = lags$cutoff))
+  dv <- calc_directional_variogram(pts, "ph", lags)
+  expect_false(is.null(dv))
+  expect_setequal(unique(dv$dir.hor), c(0, 45, 90, 135))
+
+  # The four 45-degree cones partition every pair, and each direction's gamma is
+  # the Matheron estimator over its own share of them. So the pair counts add up
+  # and the count-weighted mean of the directional gammas has to return the
+  # omnidirectional value in every lag bin. A cone that double-counted, dropped
+  # or misbinned pairs could not satisfy both at once.
+  edges <- c(0, seq_len(nrow(omni)) * lags$width)
+  pooled <- do.call(rbind, lapply(split(dv, cut(dv$dist, breaks = edges)),
+    function(g) {
+      if (nrow(g) == 0) return(NULL)
+      data.frame(np = sum(g$np), gamma = sum(g$np * g$gamma) / sum(g$np))
+    }))
+
+  expect_equal(as.integer(pooled$np), as.integer(omni$np))
+  expect_equal(pooled$gamma, omni$gamma, tolerance = 1e-10)
+})

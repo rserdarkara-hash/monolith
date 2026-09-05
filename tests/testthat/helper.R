@@ -250,3 +250,194 @@ make_hostile_vgm_input <- function(n = 9, seed = 1) {
   v_emp <- gstat::variogram(v ~ 1, pts, width = lags$width, cutoff = lags$cutoff)
   list(v_emp = v_emp, v_data = df$v)
 }
+
+# ── Golden fixture (real survey data, frozen) ───────────────────────────────
+#
+# tests/testthat/fixtures/ holds a frozen extract of the repository's own sample
+# data (see GOLDEN_MANIFEST.md for provenance, licence, the column roles and the
+# properties it is relied on for). Use it wherever a test needs REAL spatial
+# structure, real multicollinearity or real class imbalance; the synthetic
+# make_*() factories above stay the right tool for degenerate and edge inputs,
+# which real data does not contain.
+#
+# Nothing here uses RNG. The reduced scopes are every-k-th-row systematic
+# samples of a coordinate-sorted table, so they are stable across R versions
+# and spatially spread by construction.
+#
+# A different golden set can be substituted without touching a single test:
+# build one with fixtures/make_golden.R, point `monolith_golden_dir` at it, and
+# regenerate its baselines with fixtures/make_baselines.R. Only the handful of
+# tests that pin recorded values need those baselines; every other test
+# recomputes its reference from whatever data it is given and is therefore
+# fixture-agnostic by construction.
+
+.golden_cache <- new.env(parent = emptyenv())
+
+#' Directory the golden fixture is read from.
+#'
+#' Defaults to the shipped `fixtures/`. Override with
+#' `options(monolith_golden_dir = "path")` or the `MONOLITH_GOLDEN_DIR`
+#' environment variable to run the suite against your own golden set.
+golden_dir <- function() {
+  d <- getOption("monolith_golden_dir", Sys.getenv("MONOLITH_GOLDEN_DIR", ""))
+  if (nzchar(d)) return(normalizePath(d, winslash = "/", mustWork = TRUE))
+  testthat::test_path("fixtures")
+}
+
+.golden_read <- function(file, required = TRUE) {
+  dir <- golden_dir()
+  if (!identical(.golden_cache$dir, dir)) {
+    rm(list = ls(.golden_cache), envir = .golden_cache)
+    .golden_cache$dir <- dir
+  }
+  if (!is.null(.golden_cache[[file]])) return(.golden_cache[[file]])
+  path <- file.path(dir, file)
+  if (!file.exists(path)) {
+    if (required) stop("golden fixture file not found: ", path)
+    return(NULL)
+  }
+  .golden_cache[[file]] <- readRDS(path)
+  .golden_cache[[file]]
+}
+
+#' The fixture's own description: CRS, column roles, scope definitions, source
+#' provenance. Written by make_golden.R.
+golden_meta <- function() .golden_read("golden_meta.rds")
+
+#' The golden soil table.
+#'
+#' @param scope "full" (every row), "core" (the three largest localities,
+#'   thinned) or "tiny" (one compact locality, thinned). The reduced scopes are
+#'   defined by the fixture itself, not by this file.
+#' @return A plain data.frame with the fixture's canonical columns.
+golden_soil <- function(scope = c("core", "full", "tiny")) {
+  scope <- match.arg(scope)
+  full <- .golden_read("golden_soil.rds")
+  if (scope == "full") return(full)
+
+  spec <- golden_meta()$scopes[[scope]]
+  if (is.null(spec)) stop("the golden fixture defines no '", scope, "' scope")
+  out <- do.call(rbind, lapply(names(spec), function(l) {
+    d <- full[full$locality == l, , drop = FALSE]
+    d[seq(1L, nrow(d), by = spec[[l]]), , drop = FALSE]
+  }))
+  rownames(out) <- NULL
+  out
+}
+
+#' The golden soil table as sf POINTs.
+#'
+#' Column names are the fixture's canonical ones (`ph`, `som`, `v82`, ...), so
+#' tests pass them straight to the engines as `target_var` / `aux_vars`.
+#'
+#' @param scope Passed to golden_soil().
+#' @param localities Optional character vector to filter to.
+#' @param crs Target CRS; the fixture's own is the default.
+golden_sf <- function(scope = c("core", "full", "tiny"),
+                      localities = NULL, crs = NULL) {
+  df <- golden_soil(scope)
+  if (!is.null(localities)) df <- df[df$locality %in% localities, , drop = FALSE]
+  native <- golden_meta()$crs
+  pts <- sf::st_as_sf(df, coords = c("x", "y"), crs = native, remove = FALSE)
+  if (!is.null(crs) && !identical(crs, native)) pts <- sf::st_transform(pts, crs)
+  pts
+}
+
+#' The frozen variable dictionary (id, label, category), or NULL if the fixture
+#' ships none.
+golden_varlist <- function() .golden_read("golden_varlist.rds", required = FALSE)
+
+#' A value recorded for THIS golden set by make_baselines.R.
+#'
+#' Returns NULL when no baseline has been recorded (a freshly built fixture, or
+#' the deliberate bypass make_baselines.R sets while it runs the suite to decide
+#' whether recording is safe). Tests that pin a recorded value must skip on
+#' NULL rather than fail: a golden set with no baselines is an unfinished
+#' fixture, not a broken code base.
+golden_baseline <- function(key) {
+  if (isTRUE(getOption("monolith_golden_baselines_bypass", FALSE))) return(NULL)
+  b <- .golden_read("golden_baselines.rds", required = FALSE)
+  if (is.null(b)) return(NULL)
+  b[[key]]
+}
+
+#' Summary digest of a full regional interpolation run.
+#'
+#' The end-to-end alarm: it says "this pipeline no longer produces the surface
+#' it produced before", not "the surface is wrong". Its standing rests on the
+#' component tests above, which establish that each engine computes what its
+#' method defines; this only pins that the whole driver still assembles them the
+#' same way. Ordinary Kriging on purpose - it is fully seed-sandboxed, whereas
+#' RFK's forest is unseeded and would not reproduce.
+#'
+#' Runs sequentially, so it does NOT cover the future/PSOCK dispatch layer.
+#'
+#' @return A named numeric vector, ready to paste into a baseline.
+run_surface_digest <- function(pts, target = "ph", method = "OK",
+                               grid_res = 300, b_type = "wrapped",
+                               b_dist = 300, crs = NULL) {
+  crs <- crs %||% golden_meta()$crs
+  co <- sf::st_coordinates(pts)
+  pts_data <- data.frame(x = co[, 1], y = co[, 2],
+                         v = pts[[target]], pv = pts[[target]],
+                         Locality = "golden")
+  item <- list(l = "golden", pts_data = pts_data,
+               m_params = list(idw_p_act = 2, idw_p_pre = 2, idw_nmax = 12,
+                               tps_lambda_act = -1, tps_lambda_pre = -1,
+                               pre_fit_act = NULL, pre_fit_pre = NULL,
+                               cv_strategy = "auto", rfk_uncertainty = "jackknife"))
+  res <- suppressWarnings(run_regional_interpolation(
+    item, method, crs, character(0), NULL, b_type, "fixed", b_dist,
+    "fixed", grid_res, paste0("EPSG:", crs), FALSE, "actual"))
+
+  r <- terra::unwrap(res$r_a)
+  pred <- terra::values(r[["var1.pred"]])
+  vv <- if ("var1.var" %in% names(r)) terra::values(r[["var1.var"]]) else NA_real_
+  fit <- res$v_fit_act
+  cv <- res$cv_act
+
+  c(cells      = sum(!is.na(pred)),
+    pred_min   = min(pred, na.rm = TRUE),
+    pred_mean  = mean(pred, na.rm = TRUE),
+    pred_max   = max(pred, na.rm = TRUE),
+    pred_sd    = stats::sd(pred, na.rm = TRUE),
+    var_mean   = mean(vv, na.rm = TRUE),
+    vgm_nugget = if (is.null(fit)) NA_real_ else fit$psill[1],
+    vgm_sill   = if (is.null(fit)) NA_real_ else sum(fit$psill),
+    vgm_range  = if (is.null(fit)) NA_real_ else fit$range[nrow(fit)],
+    cv_rmse    = if (is.null(cv)) NA_real_ else cv$rmse,
+    cv_r2      = if (is.null(cv)) NA_real_ else cv$r2)
+}
+
+# ── Known-answer confusion matrix ──────────────────────────────────────────
+
+#' A 3x3 confusion matrix small enough to check by hand: rows = truth,
+#' columns = prediction, n = 20, trace = 15 (accuracy 0.75). The classes are
+#' deliberately unbalanced so macro and weighted-macro averages differ.
+make_cm_known <- function() {
+  matrix(c(5, 1, 0,
+           2, 4, 1,
+           0, 1, 6),
+         nrow = 3, byrow = TRUE,
+         dimnames = list(c("A", "B", "C"), c("A", "B", "C")))
+}
+
+#' Expand a confusion matrix into the predictions data.frame the classification
+#' metric helpers consume: the truth column (named `soil`) plus `.pred_class`,
+#' both factors on the same levels. No probability columns, so probability
+#' metrics are skipped and only the class metrics are computed.
+make_cm_pred_df <- function(cm = make_cm_known(), target = "soil") {
+  levs <- colnames(cm)
+  idx <- which(cm > 0, arr.ind = TRUE)
+  out <- do.call(rbind, lapply(seq_len(nrow(idx)), function(r) {
+    i <- idx[r, 1]; j <- idx[r, 2]
+    data.frame(truth = rep(levs[i], cm[i, j]),
+               .pred_class = rep(levs[j], cm[i, j]),
+               stringsAsFactors = FALSE)
+  }))
+  names(out)[1] <- target
+  out[[target]] <- factor(out[[target]], levels = levs)
+  out$.pred_class <- factor(out$.pred_class, levels = levs)
+  out
+}
+

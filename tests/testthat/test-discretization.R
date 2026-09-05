@@ -89,3 +89,46 @@ test_that("discretize_numeric_var handles Inf values", {
   result <- discretize_numeric_var(x, method = "median")
   expect_s3_class(result, "factor")
 })
+
+# ── Numeric contract: where the split actually falls ───────────────────────
+
+test_that("tertile and quintile splits cut at the sample quantiles", {
+  x <- golden_soil("full")$ph
+
+  f3 <- discretize_numeric_var(x, "tertiles")
+  q3 <- unname(quantile(x, probs = c(0, 1 / 3, 2 / 3, 1), na.rm = TRUE))
+  expect_equal(levels(f3), c("Low", "Medium", "High"))
+  # The boundary is read off the data rather than off cut(): the largest value
+  # in a class must not exceed its upper quantile, and the smallest value in
+  # the next class must exceed it.
+  expect_lte(max(x[f3 == "Low"]), q3[2])
+  expect_gt(min(x[f3 == "Medium"]), q3[2])
+  expect_lte(max(x[f3 == "Medium"]), q3[3])
+  expect_gt(min(x[f3 == "High"]), q3[3])
+
+  f5 <- discretize_numeric_var(x, "quintiles")
+  q5 <- unname(quantile(x, probs = seq(0, 1, by = 0.2), na.rm = TRUE))
+  expect_equal(levels(f5), paste0("Q", 1:5))
+  for (j in 1:4) {
+    expect_lte(max(x[f5 == paste0("Q", j)]), q5[j + 1])
+    expect_gt(min(x[f5 == paste0("Q", j + 1)]), q5[j + 1])
+  }
+})
+
+test_that("the median and mean splits cut at median() and mean()", {
+  x <- golden_soil("full")$som
+
+  fm <- discretize_numeric_var(x, "median")
+  med <- median(x)
+  expect_lte(max(x[as.integer(fm) == 1L]), med)
+  expect_gt(min(x[as.integer(fm) == 2L]), med)
+
+  fa <- discretize_numeric_var(x, "mean")
+  mu <- mean(x)
+  expect_lte(max(x[as.integer(fa) == 1L]), mu)
+  expect_gt(min(x[as.integer(fa) == 2L]), mu)
+
+  # A skewed variable puts the two splits in different places; if these agreed
+  # the test could not tell median from mean.
+  expect_false(identical(as.integer(fm), as.integer(fa)))
+})

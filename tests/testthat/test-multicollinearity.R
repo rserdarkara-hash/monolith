@@ -194,3 +194,94 @@ test_that("check_vif default threshold drops highly collinear vars", {
   expect_true("v3" %in% res$kept)
   expect_true("v4" %in% res$kept)
 })
+
+# ── Numeric contract: the VIF itself ───────────────────────────────────────
+#
+# Everything above pins which column the gate drops. These pin the arithmetic
+# behind that decision: the engine computes VIF as diag(solve(cor(X))), and the
+# reference recomputes it the long way, as 1/(1 - R2_j) from an actual
+# regression of each covariate on the others.
+
+test_that("the VIF gate drops exactly what an lm-based VIF says it should", {
+  cov <- golden_meta()$columns$covariates
+  X <- golden_soil("full")[cov]
+
+  # Independent reference: the same iterative rule (drop the worst, refit,
+  # repeat) with every VIF obtained from a regression rather than from a
+  # matrix inverse.
+  ref_kept <- cov
+  ref_dropped <- character(0)
+  repeat {
+    if (length(ref_kept) < 2) break
+    vif <- vapply(ref_kept, function(v) {
+      r2 <- summary(lm(reformulate(setdiff(ref_kept, v), v), data = X))$r.squared
+      1 / (1 - r2)
+    }, numeric(1))
+    if (max(vif) <= 10) break
+    ref_dropped <- c(ref_dropped, ref_kept[which.max(vif)])
+    ref_kept <- setdiff(ref_kept, ref_dropped[length(ref_dropped)])
+  }
+
+  res <- detect_multicollinearity_engine(X, vif_threshold = 10)
+  # Same covariates, dropped in the same order: the engine's VIF ranking is the
+  # regression VIF ranking at every step, not merely at the first one.
+  expect_equal(res$dropped_vif, ref_dropped)
+  expect_setequal(res$kept, ref_kept)
+  # Recorded for this golden set, so a change of gate rule is visible even if
+  # someone weakens the reference above. On the shipped survey the two
+  # temperature variables and one of the slope/ruggedness pair go.
+  recorded <- golden_baseline("vif_drop_order")
+  if (!is.null(recorded)) expect_equal(ref_dropped, recorded)
+})
+
+test_that("an orthogonal design has VIF exactly 1 and survives the gate", {
+  # A full 2^3 factorial in +-1 has exactly zero sample correlation, so its
+  # correlation matrix is the identity and every VIF is exactly 1 - not 1.0008,
+  # which is what a random "uncorrelated" design actually gives.
+  O <- data.frame(
+    a = c(-1, -1, -1, -1, 1, 1, 1, 1),
+    b = c(-1, -1,  1,  1, -1, -1, 1, 1),
+    c = c(-1,  1, -1,  1, -1,  1, -1, 1)
+  )
+  expect_equal(unname(diag(solve(cor(O)))), c(1, 1, 1), tolerance = 1e-12)
+
+  res <- detect_multicollinearity_engine(O, vif_threshold = 10)
+  expect_length(res$dropped, 0)
+  expect_false(res$has_collinearity)
+  expect_setequal(res$kept, c("a", "b", "c"))
+})
+
+test_that("the VIF gate is invariant to rescaling and to column order", {
+  cov <- golden_meta()$columns$covariates
+  X <- golden_soil("full")[cov]
+  base <- detect_multicollinearity_engine(X, vif_threshold = 10)
+
+  # VIF is a correlation-matrix quantity, so an affine change of units cannot
+  # move it.
+  Xs <- X
+  Xs$v82 <- Xs$v82 * 1000 + 5e5     # metres -> millimetres, plus an offset
+  Xs$v12 <- Xs$v12 / 25.4
+  expect_setequal(detect_multicollinearity_engine(Xs, vif_threshold = 10)$kept,
+                  base$kept)
+
+  # And the outcome must be a property of the data, not of the file layout.
+  expect_setequal(detect_multicollinearity_engine(X[rev(cov)],
+                                                  vif_threshold = 10)$kept,
+                  base$kept)
+})
+
+test_that("an infinite threshold keeps every covariate however collinear", {
+  # The two most collinear pairs this golden set carries.
+  all_cov <- golden_meta()$columns$covariates
+  cm <- cor(golden_soil("full")[all_cov]); diag(cm) <- 0
+  hits <- which(abs(cm) > 0.99, arr.ind = TRUE)
+  cov <- unique(all_cov[as.vector(hits)])
+  X <- golden_soil("full")[cov]
+  expect_gte(length(cov), 2L)
+  res <- detect_multicollinearity_engine(X, vif_threshold = Inf)
+  expect_length(res$dropped, 0)
+  expect_setequal(res$kept, cov)
+  # The pairwise report still fires: "keep all" is a modelling choice, not a
+  # reason to stop telling the user the covariates are collinear.
+  expect_true(res$has_collinearity)
+})

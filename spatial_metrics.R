@@ -325,6 +325,79 @@ perform_cv <- function(cv_obj, moran = TRUE, round_values = TRUE) {
   return(res)
 }
 
+# ── Class-agreement metrics (the "Agreement (Kappa)" table) ──────────────────
+# Bins a continuous observed/predicted pair into ordered classes and reports the
+# confusion-matrix agreement statistics. Two binning conventions, deliberately
+# DIFFERENT in interval closure:
+#   "agro"     - the applied agronomical/binned class limits, right = FALSE, so
+#                classes are [low, high) exactly as terra::classify(rcl_mat,
+#                right = FALSE) paints them on the map. A value sitting on a
+#                break must get the same class in this table as on the map.
+#   "quartile" - the observed quartiles, cut()'s default right = TRUE. These
+#                breaks are data order statistics with no map counterpart, so
+#                there is nothing to align with and the conventional
+#                right-closed reading applies.
+# `params` is the classification_params() snapshot (rcl_mat + labels); it is
+# only read for method = "agro". The UI-level question of whether agro styling
+# is selected and applied belongs to the caller, not here.
+#
+# Returns a list whose `status` is a non-NULL message when the metrics are not
+# computable (too few points, no variance for quartiles, nothing left after
+# binning) and NULL otherwise; the binned factors travel back alongside the
+# metrics so a caller can inspect the classification it was scored on.
+compute_agreement_metrics <- function(actual, predicted,
+                                      method = c("quartile", "agro"),
+                                      params = NULL) {
+  method <- match.arg(method)
+
+  keep <- !is.na(actual) & !is.na(predicted)
+  actual <- actual[keep]
+  predicted <- predicted[keep]
+  if (length(actual) < 3) return(list(status = "Not enough data points for Kappa."))
+
+  if (method == "agro") {
+    if (is.null(params$rcl_mat) || is.null(params$labels)) {
+      return(list(status = "No applied classification limits for Kappa."))
+    }
+    brks <- c(-Inf, params$rcl_mat[-1, 1], Inf)
+    lvl <- params$labels
+    act_bin  <- cut(actual,    breaks = brks, labels = lvl, include.lowest = TRUE, right = FALSE)
+    pred_bin <- cut(predicted, breaks = brks, labels = lvl, include.lowest = TRUE, right = FALSE)
+  } else {
+    brks <- unique(stats::quantile(actual, probs = seq(0, 1, 0.25), na.rm = TRUE))
+    if (length(brks) < 2) return(list(status = "Not enough variance for quartiles."))
+    brks_ext <- brks
+    brks_ext[1] <- -Inf
+    brks_ext[length(brks_ext)] <- Inf
+    lvl <- paste0("Q", seq_len(length(brks) - 1))
+    act_bin  <- cut(actual,    breaks = brks_ext, include.lowest = TRUE, labels = lvl)
+    pred_bin <- cut(predicted, breaks = brks_ext, include.lowest = TRUE, labels = lvl)
+  }
+
+  ok <- !is.na(act_bin) & !is.na(pred_bin)
+  act_bin  <- factor(act_bin[ok],  levels = lvl)
+  pred_bin <- factor(pred_bin[ok], levels = lvl)
+  if (length(act_bin) < 3) return(list(status = "Not enough data after binning."))
+
+  safe <- function(expr) tryCatch(expr, error = function(e) NA_real_)
+  list(
+    status        = NULL,
+    n             = length(act_bin),
+    levels        = lvl,
+    actual_bin    = act_bin,
+    predicted_bin = pred_bin,
+    accuracy      = safe(yardstick::accuracy_vec(act_bin, pred_bin)),
+    bal_accuracy  = safe(yardstick::bal_accuracy_vec(act_bin, pred_bin)),
+    # Off-by-one accuracy: the classes are ORDERED, so a prediction landing in
+    # an adjacent class is a different kind of error from one landing two
+    # classes away. Counts |rank(actual) - rank(predicted)| <= 1 as agreement.
+    off_by_one    = safe(sum(abs(as.integer(act_bin) - as.integer(pred_bin)) <= 1) / length(act_bin)),
+    mcc           = safe(yardstick::mcc_vec(act_bin, pred_bin)),
+    kappa         = safe(yardstick::kap_vec(act_bin, pred_bin)),
+    kappa_linear  = safe(yardstick::kap_vec(act_bin, pred_bin, weighting = "linear"))
+  )
+}
+
 # ── Cross-validation fold planning ──────────────────────────────────────────
 # Single source of truth for the CV strategy so the fold builder
 # (make_cv_folds) and the UI label (cv_type_label) can never drift.

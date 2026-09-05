@@ -503,6 +503,117 @@ process_grouping_vars <- function(df, vars, types) {
 }
 
 
+# --- Descriptive Suite statistics ---------------------------------------------
+# Pure counterparts of the Descriptive/Exploratory module's summary table,
+# per-group trend fits and PCA. The module keeps the reactive reads and the
+# formatting; the arithmetic lives here so it is reachable from the test suite.
+
+# Per-group n / mean / sd / min / max plus a TOTAL row.
+# `x` and `group` are parallel vectors. Groups are formed the way aggregate()'s
+# formula interface does (rows with an NA in either vector are dropped), so
+# every group statistic is computed on complete pairs, while the TOTAL row
+# summarises every non-NA x regardless of its group.
+desc_summary_table <- function(x, group, digits = 3) {
+  agg <- stats::aggregate(x ~ group, data = data.frame(x = x, group = group),
+                          FUN = function(v) c(n = length(v), mean = mean(v), sd = stats::sd(v),
+                                              min = min(v), max = max(v)))
+  m <- agg[, 2]
+  # unname(): with a single group m[, "mean"] drops to a length-1 vector that
+  # still carries the COLUMN name, which data.frame() would then adopt as the
+  # row name - and DT renders row names, so the default "All" grouping showed a
+  # leading column reading "mean". Every column is stripped for symmetry.
+  res <- data.frame(
+    Group = agg[, 1],
+    Count = as.integer(m[, "n"]),
+    Mean = unname(round(m[, "mean"], digits)),
+    SD = unname(round(m[, "sd"], digits)),
+    Min = unname(round(m[, "min"], digits)),
+    Max = unname(round(m[, "max"], digits)),
+    row.names = NULL
+  )
+  ok <- !is.na(x)
+  rbind(res, data.frame(
+    Group = "TOTAL",
+    Count = sum(ok),
+    Mean = round(mean(x[ok]), digits),
+    SD = round(stats::sd(x[ok]), digits),
+    Min = round(min(x[ok]), digits),
+    Max = round(max(x[ok]), digits)
+  ))
+}
+
+# Trend statistic per group for the scatter panel's fitted curve.
+# `groups` is the label vector to report on, in order; the literal "TOTAL"
+# means the whole frame rather than a subset. Groups with fewer than `min_n`
+# rows, and any fit that errors, return NA for both columns.
+#
+# What each fit reports, and why they are not interchangeable:
+#   linear / polynomial - summary(lm)$r.squared with the model's overall F test.
+#   loess               - cor(y, fitted)^2. A loess has no R^2: this is the
+#                         squared correlation between observed and fitted, which
+#                         is why the caller labels it as such, and there is no
+#                         F test to report with it.
+#   gam                 - summary(gam)$r.sq (adjusted) and the smooth's p-value.
+desc_group_fit_stats <- function(df, x_var, y_var, fit, groups,
+                                 group_col = "group_id", min_n = 5) {
+  f_pval <- function(s) {
+    if (is.null(s$fstatistic)) return(NA_real_)
+    unname(stats::pf(s$fstatistic[1], s$fstatistic[2], s$fstatistic[3], lower.tail = FALSE))
+  }
+  none <- c(r2 = NA_real_, p = NA_real_)
+
+  out <- lapply(as.character(groups), function(g) {
+    sub_df <- if (identical(g, "TOTAL")) df else df[as.character(df[[group_col]]) == g, , drop = FALSE]
+    if (nrow(sub_df) < min_n) return(none)
+    tryCatch({
+      form_lin  <- stats::as.formula(paste0("`", y_var, "` ~ `", x_var, "`"))
+      form_poly <- stats::as.formula(paste0("`", y_var, "` ~ poly(`", x_var, "`, 2)"))
+      form_gam  <- stats::as.formula(paste0("`", y_var, "` ~ s(`", x_var, "`, bs = 'cs')"))
+      if (fit == "linear") {
+        s <- summary(stats::lm(form_lin, data = sub_df))
+        c(r2 = s$r.squared, p = f_pval(s))
+      } else if (fit == "polynomial") {
+        if (length(unique(sub_df[[x_var]])) <= 3) return(none)
+        s <- summary(stats::lm(form_poly, data = sub_df))
+        c(r2 = s$r.squared, p = f_pval(s))
+      } else if (fit == "loess") {
+        mod <- stats::loess(form_lin, data = sub_df, span = 0.7)
+        # The response must come back from the FIT (y = fitted + residual), not
+        # from the unfiltered column: loess's na.action drops incomplete rows,
+        # so fitted() is shorter than sub_df whenever the group carries a
+        # missing x or y, and cor() on two different lengths errors - which the
+        # tryCatch below would report as a blank column rather than a number.
+        fv <- stats::fitted(mod)
+        c(r2 = stats::cor(fv + stats::residuals(mod), fv)^2, p = NA_real_)
+      } else if (fit == "gam") {
+        if (!requireNamespace("mgcv", quietly = TRUE)) return(none)
+        s <- summary(mgcv::gam(form_gam, data = sub_df))
+        c(r2 = s$r.sq, p = s$s.table[1, "p-value"])
+      } else none
+    }, error = function(e) none)
+  })
+
+  data.frame(Group = as.character(groups),
+             r2 = vapply(out, function(v) unname(v[["r2"]]), numeric(1)),
+             p  = vapply(out, function(v) unname(v[["p"]]), numeric(1)))
+}
+
+# Complete-case PCA on `vars`, with the fitted frame relabelled to `labels`.
+# Returns the prcomp object, the frame it was fitted on, the row mask (so the
+# caller can align a grouping vector to it) and how many rows the complete-case
+# filter removed. `scale = TRUE` is a correlation PCA, FALSE a covariance PCA;
+# both centre.
+desc_pca_fit <- function(df, vars, labels = vars, scale = TRUE) {
+  keep <- stats::complete.cases(df[, vars, drop = FALSE])
+  df_clean <- df[keep, vars, drop = FALSE]
+  colnames(df_clean) <- labels
+  list(res = stats::prcomp(df_clean, scale. = isTRUE(scale), center = TRUE),
+       data = df_clean,
+       keep = keep,
+       dropped = nrow(df) - nrow(df_clean))
+}
+
+
 
 # Human-readable label for the CV actually applied to a locality of n_obs
 # points under the chosen strategy. Delegates to resolve_cv_plan

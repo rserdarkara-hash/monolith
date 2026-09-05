@@ -1419,3 +1419,95 @@ test_that("the pipeline reprojects a geographic boundary onto the working CRS", 
   # The surface is spatially structured, not one flat class.
   expect_gt(length(unique(res$surface_df$.pred_class)), 1)
 })
+
+# ── Numeric contract: the reported classification metrics ──────────────────
+#
+# Everything above pins pooling, alignment and labelling. These pin the numbers
+# against a confusion matrix small enough to check by hand, with every formula
+# written out rather than taken from the implementation.
+
+test_that("pooled metrics reproduce a hand-built 3x3 confusion matrix", {
+  cm <- make_cm_known()
+  pred_df <- make_cm_pred_df(cm)
+  expect_equal(nrow(pred_df), sum(cm))
+
+  m <- classif_compute_metrics(pred_df, "soil")
+  get <- function(id) m$.estimate[m$.metric == id]
+  n <- sum(cm)
+
+  # Overall accuracy = trace / n
+  expect_equal(get("accuracy"), sum(diag(cm)) / n, tolerance = 1e-12)
+  expect_equal(get("accuracy"), 0.75)
+
+  # Cohen (1960): (po - pe) / (1 - pe), pe from the marginal products.
+  po <- sum(diag(cm)) / n
+  pe <- sum(rowSums(cm) * colSums(cm)) / n^2
+  expect_equal(get("kap"), (po - pe) / (1 - pe), tolerance = 1e-12)
+  expect_equal(get("kap"), 0.4175 / 0.6675)   # = (0.75 - 0.3325) / (1 - 0.3325)
+
+  # Macro averaging: the metric is computed per class, then averaged unweighted.
+  prec <- diag(cm) / colSums(cm)
+  rec <- diag(cm) / rowSums(cm)
+  f1 <- 2 * prec * rec / (prec + rec)
+  expect_equal(get("precision"), mean(prec), tolerance = 1e-12)
+  expect_equal(get("recall"), mean(rec), tolerance = 1e-12)
+  expect_equal(get("f_meas"), mean(f1), tolerance = 1e-12)
+
+  # Balanced accuracy: macro mean of (sensitivity + specificity) / 2.
+  spec <- vapply(seq_len(ncol(cm)), function(i) {
+    fp <- sum(cm[-i, i])
+    tn <- n - sum(cm[i, ]) - fp
+    tn / (tn + fp)
+  }, numeric(1))
+  expect_equal(get("bal_accuracy"), mean((rec + spec) / 2), tolerance = 1e-12)
+})
+
+test_that("per-class accuracy is producer = recall and user = precision", {
+  cm <- make_cm_known()
+  pc <- classif_per_class_accuracy(make_cm_pred_df(cm), "soil")
+
+  expect_equal(pc$class, colnames(cm))
+  expect_equal(pc$n, as.integer(rowSums(cm)))       # n counts ACTUAL samples
+  # Producer accuracy is the omission-error complement (recall, by truth row);
+  # user accuracy is the commission-error complement (precision, by predicted
+  # column). Swapping them is the classic reporting error, so both are pinned.
+  expect_equal(pc$producer_accuracy, unname(diag(cm) / rowSums(cm)),
+               tolerance = 1e-12)
+  expect_equal(pc$user_accuracy, unname(diag(cm) / colSums(cm)),
+               tolerance = 1e-12)
+  expect_equal(pc$producer_accuracy, c(5 / 6, 4 / 7, 6 / 7), tolerance = 1e-12)
+  expect_equal(pc$user_accuracy, c(5 / 7, 4 / 6, 6 / 7), tolerance = 1e-12)
+})
+
+test_that("the reported estimator is the averaging actually performed", {
+  pred_df <- make_cm_pred_df()
+  m <- classif_label_metrics(classif_compute_metrics(pred_df, "soil"))
+  est <- function(id) m$.estimator[m$.metric == id]
+
+  expect_equal(est("accuracy"), "multiclass")
+  expect_equal(est("kap"), "multiclass")
+  expect_equal(est("f_meas"), "macro")
+  expect_equal(m$.estimator_label[m$.metric == "f_meas"], "Macro average")
+
+  # Macro, not weighted macro. The fixture's classes are unbalanced enough that
+  # the two averages differ, so this cannot pass by coincidence.
+  wm <- yardstick::f_meas_vec(pred_df$soil, pred_df$.pred_class,
+                              estimator = "macro_weighted")
+  expect_false(isTRUE(all.equal(m$.estimate[m$.metric == "f_meas"], wm)))
+})
+
+test_that("scope adequacy names the rare texture classes in the golden survey", {
+  gs <- golden_soil("full")
+  msg <- classif_scope_adequacy(gs$texture, nrow(gs))
+
+  # Real survey imbalance: one class with a single sample, one with two.
+  expect_match(msg, "2 classes with fewer than 3 samples", fixed = TRUE)
+  expect_match(msg, "'Silty clay loam' (n = 1)", fixed = TRUE)
+  expect_match(msg, "'Loamy sand' (n = 2)", fixed = TRUE)
+  # The well-sampled classes must not be named.
+  expect_no_match(msg, "'Loam' (n =", fixed = TRUE)
+
+  # A scope holding only the two largest classes raises nothing at all.
+  big <- gs$texture[gs$texture %in% c("Loam", "Sandy clay loam")]
+  expect_null(classif_scope_adequacy(big, length(big)))
+})

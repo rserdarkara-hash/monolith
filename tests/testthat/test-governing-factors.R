@@ -160,3 +160,63 @@ test_that("compute_governing_factors is unchanged when no cancel file is given",
   expect_equal(a$shap, b$shap)
   expect_identical(a$top_var, b$top_var)
 })
+
+# ── Numeric contract: what the explanation plots actually show ─────────────
+
+test_that("the PDP is the mean prediction with the feature held fixed", {
+  d <- sf::st_drop_geometry(golden_sf("core", localities = "Yorga"))[
+    , c("ph", "v82", "v87", "v43")]
+  res <- compute_governing_factors(d, "ph", c("v82", "v87", "v43"),
+                                   n_permutations = 5, rf_ntree = 60,
+                                   shap_sample_size = 40)
+  expect_equal(res$n_used, nrow(d))
+
+  # Friedman (2001): the partial dependence at v is the average prediction with
+  # the feature set to v across the whole sample. Recomputed here from the
+  # returned forest, on all rows - DALEX samples at most N = 100 rows and this
+  # fixture has 40, so the two see the same data.
+  xs <- res$pdp[["_x_"]]
+  ref <- vapply(xs, function(v) {
+    dd <- d[, c("v82", "v87", "v43")]
+    dd[[res$top_var]] <- v
+    mean(predict(res$model, dd))
+  }, numeric(1))
+
+  expect_gt(length(xs), 5L)
+  expect_equal(res$pdp[["_yhat_"]], ref, tolerance = 1e-8)
+})
+
+test_that("the SHAP sample is the documented deterministic draw", {
+  d <- sf::st_drop_geometry(golden_sf("core", localities = "Yorga"))[
+    , c("ph", "v82", "v87", "v43")]
+  res <- compute_governing_factors(d, "ph", c("v82", "v87", "v43"),
+                                   n_permutations = 5, rf_ntree = 60,
+                                   shap_sample_size = 25)
+
+  # The sampled rows come from a fixed seed, so the plotted feature values are
+  # reproducible and are the sampled rows' own values - not a re-sort, not a
+  # different subset.
+  idx <- with_seed(12345, sample(seq_len(nrow(d)), 25))
+  expect_equal(res$shap$feature_value, d[[res$top_var]][idx])
+  expect_equal(nrow(res$shap), 25L)
+})
+
+test_that("SHAP contributions do not scale with the permutation count", {
+  d <- sf::st_drop_geometry(golden_sf("core", localities = "Yorga"))[
+    , c("ph", "v82", "v87", "v43")]
+  mag <- function(B) {
+    r <- compute_governing_factors(d, "ph", c("v82", "v87", "v43"),
+                                   n_permutations = B, rf_ntree = 60,
+                                   shap_sample_size = 25)
+    mean(abs(r$shap$contribution))
+  }
+
+  # predict_parts(type = "shap") returns B + 1 rows per variable: the aggregated
+  # attribution plus one per permutation. Summing them instead of taking the
+  # aggregate inflates every contribution by a factor of B + 1, which would show
+  # up here as a threefold jump between B = 4 and B = 14.
+  m4 <- mag(4)
+  m14 <- mag(14)
+  expect_gt(m4, 0)
+  expect_lt(abs(m14 / m4 - 1), 0.5)
+})
