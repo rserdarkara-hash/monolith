@@ -401,7 +401,7 @@ On first launch, expect a delay while the Auto-Installation Hook downloads any m
 
 ## Documentation
 
-Detailed guides live in the [docs/](docs/) directory:
+Detailed guides live in the [docs/](docs/) directory. Each carries its own reference list, and every work cited is given with a DOI, ISBN or proceedings reference:
 
 | Guide | Contents |
 |---|---|

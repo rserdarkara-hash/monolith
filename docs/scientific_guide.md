@@ -2,7 +2,7 @@
 
 Monolith gives agronomists, soil scientists and geostatisticians a toolkit for mapping and explaining spatial variability. This guide states the mathematics behind each method, the modelling choices Monolith makes, and what the resulting numbers do and do not support.
 
-> *Scope of this document: the methods implemented here (kriging variants, IDW, TPS, cross-validation metrics, PCA, statistical tests, supervised classification) are established published methods and are not original contributions of this software or its author. This guide describes how they are implemented in Monolith, not their theoretical origins. Works cited in the text are listed in Section 11 and cover the estimators and conventions actually in use; for anything beyond those, consult the primary literature directly.*
+> *Scope of this document: the methods implemented here (kriging variants, IDW, TPS, cross-validation metrics, PCA, statistical tests, supervised classification) are established published methods and are not original contributions of this software or its author. This guide describes how they are implemented in Monolith, not their theoretical origins. Works cited in the text are listed in Section 11, each with a DOI or stable identifier.*
 
 ---
 
@@ -18,7 +18,7 @@ Spatial interpolation builds continuous prediction surfaces from discrete point 
 <br><br>
 <div style="text-align:center;"><i>Z<sup>*</sup>(x<sub>0</sub>) = &sum; &lambda;<sub>i</sub> Z(x<sub>i</sub>)</i></div>
 <br>
-Unlike simple kriging, OK assumes an unknown but constant global mean (<i>&mu;</i>). The weights <i>&lambda;<sub>i</sub></i> minimize the estimation variance subject to <i>&sum; &lambda;<sub>i</sub> = 1</i>, and the covariance matrix that solves for them comes directly from the fitted theoretical variogram.
+Unlike simple kriging, OK assumes an unknown but constant global mean (<i>&mu;</i>). The weights <i>&lambda;<sub>i</sub></i> minimize the estimation variance subject to <i>&sum; &lambda;<sub>i</sub> = 1</i>, and the covariance matrix that solves for them comes directly from the fitted theoretical variogram (Matheron 1963; Goovaerts 1997).
 
 **Agronomical example:** predicting soil pH across a relatively uniform field where variation is driven by soil-forming processes rather than abrupt topography or management.
 
@@ -40,13 +40,13 @@ An ordinary least-squares linear model (`lm`) fits the trend <i>m(x)</i> from se
 
 ### 1.3 Random Forest Kriging (RFK)
 
-**Mathematical intuition:** RFK follows the same two-step logic as RK but replaces the linear trend with a random forest ensemble, which captures non-linear interactions among covariates without a parametric functional form. Ordinary Kriging is then applied to the forest's residuals.
+**Mathematical intuition:** RFK follows the same two-step logic as RK but replaces the linear trend with a random forest ensemble, which captures non-linear interactions among covariates without a parametric functional form. Ordinary Kriging is then applied to the forest's residuals (Hengl et al. 2015).
 
 **Agronomical example:** predicting crop yield across a heterogeneous landscape where the relationship between yield, slope, aspect and electrical conductivity is non-linear and interactive.
 
 ### 1.4 Co-Kriging (CK)
 
-**Mathematical intuition:** CK extends OK by using one or more secondary variables to improve prediction of a primary variable, through the cross-variogram that models how the two co-vary in space:
+**Mathematical intuition:** CK extends OK by using one or more secondary variables to improve prediction of a primary variable, through the cross-variogram that models how the two co-vary in space (Wackernagel 2003):
 <br><br>
 <div style="text-align:center;"><i>&gamma;<sub>12</sub>(h) = (1 / 2N(h)) &sum; [Z<sub>1</sub>(x) - Z<sub>1</sub>(x+h)][Z<sub>2</sub>(x) - Z<sub>2</sub>(x+h)]</i></div>
 <br>
@@ -59,13 +59,13 @@ An ordinary least-squares linear model (`lm`) fits the trend <i>m(x)</i> from se
 
 **Cross-validation holdout convention (full-row removal):** CK cross-validation removes the entire held-out row, the primary observation *and* its co-located covariate observations, from the co-kriging system (`gstat.cv(..., remove.all = TRUE)`). The gstat default removes only the primary variable, which is right when secondary data are exhaustively available (a collocated sensor raster). Here the covariates are co-sampled laboratory measurements, so at real grid locations CK has no covariate values and predicts them jointly through the LMC. Scoring with the covariates left in would evaluate the model under an information regime the map never enjoys, and would be inconsistent with RK/RFK, whose leave-one-out procedure removes full rows. CK metrics are therefore honest with respect to the prediction task, and correspondingly lower than under the gstat default.
 
-**The LMC fits sills only; one range is shared and held fixed.** A linear model of coregionalization requires a *common* range across every direct and cross variogram, so `fit.lmc()` runs with `fit.ranges = FALSE`. Two consequences follow, and they point in opposite directions. The starting **sill** is inert: with model type and range held fixed the variogram is *linear in its sill parameters*, so the weighted-least-squares solution does not depend on it (verified empirically, starting sills spanning 1e-6 to 1e12 on one empirical variogram return a bit-identical fitted sill). The starting **range**, by contrast, is not fitted and therefore *is* the final range of every variogram in the LMC. It is set to the range that weighted least squares fitted to the primary variable's own omnidirectional variogram, so the coregionalization length reflects the data's measured spatial structure. When that fit is itself the heuristic fallback, or returns no usable range, the seed falls back to the extent heuristic (half the variogram cutoff, i.e. a quarter of the bounding-box diagonal) and the run log says so. Read the CK range as the primary variable's range imposed on the whole system, not as a separately fitted quantity per covariate.
+**The LMC fits sills only; one range is shared and held fixed.** A linear model of coregionalization requires a *common* range across every direct and cross variogram (Goovaerts 1997; Wackernagel 2003), so `fit.lmc()` runs with `fit.ranges = FALSE` (Pebesma 2004). Two consequences follow, and they point in opposite directions. The starting **sill** is inert: with model type and range held fixed the variogram is *linear in its sill parameters*, so the weighted-least-squares solution does not depend on it (verified empirically, starting sills spanning 1e-6 to 1e12 on one empirical variogram return a bit-identical fitted sill). The starting **range**, by contrast, is not fitted and therefore *is* the final range of every variogram in the LMC. It is set to the range that weighted least squares fitted to the primary variable's own omnidirectional variogram, so the coregionalization length reflects the data's measured spatial structure. When that fit is itself the heuristic fallback, or returns no usable range, the seed falls back to the extent heuristic (half the variogram cutoff, i.e. a quarter of the bounding-box diagonal) and the run log says so. Read the CK range as the primary variable's range imposed on the whole system, not as a separately fitted quantity per covariate.
 
 **Local search neighbourhood (nmax):** CK solves the system using only the nearest `nmax` observations of every variable, exposed as the **CK Max Neighbors** slider (5 to 60, default 15) in the Spatial Engine panel. This is a modelling choice, not a speed setting: `nmax` sets how local the stationarity assumption is. A small neighbourhood assumes the mean and covariance structure are constant only within a short radius (appropriate for non-stationary fields, and it avoids the matrix growth of global co-kriging); a large neighbourhood approaches a global system and suits genuinely stationary, sparsely sampled fields. Because the right value depends on point density and the fitted cross-variogram range, no single number is defensible across datasets; 15 is a default, not a recommendation. OK, RK and RFK krige with a global neighbourhood; IDW has its own **Max Neighbors** control. The applied value is recorded in the run-configuration summary.
 
 ### 1.5 Inverse Distance Weighting (IDW)
 
-**Mathematical intuition:** a purely deterministic weighted average in which the weight falls off with distance <i>d</i> raised to a power <i>p</i> (commonly <i>p</i> = 2):
+**Mathematical intuition:** a purely deterministic weighted average in which the weight falls off with distance <i>d</i> raised to a power <i>p</i> (commonly <i>p</i> = 2; Shepard 1968):
 <br><br>
 <div style="text-align:center;"><i>&lambda;<sub>i</sub> = (1 / d<sub>i</sub><sup>p</sup>) / &sum; (1 / d<sub>i</sub><sup>p</sup>)</i></div>
 <br>
@@ -75,7 +75,7 @@ IDW assumes nearer points are more similar. It does not account for data cluster
 
 ### 1.6 Thin Plate Spline (TPS)
 
-**Mathematical intuition:** TPS bends a notional sheet to pass through the sampled points while minimizing bending energy (the integral of the squared second derivatives). It yields very smooth surfaces but overshoots badly in areas devoid of data.
+**Mathematical intuition:** TPS bends a notional sheet to pass through the sampled points while minimizing bending energy, the integral of the squared second derivatives (Duchon 1977). It yields very smooth surfaces but overshoots badly in areas devoid of data.
 
 **Agronomical example:** smooth elevation contours or temperature gradients where abrupt discontinuities are physically implausible.
 
@@ -262,13 +262,13 @@ Geostatistical models require a theoretical curve fitted to this empirical scatt
 - **Partial sill (<i>C</i>):** the structured spatial variance. The total sill (<i>C<sub>0</sub> + C</i>) is the a priori variance of the data, where the variogram flattens.
 - **Range (<i>a</i>):** the distance beyond which points are statistically independent.
 
-**Auto-fit engine.** To avoid singular fits on difficult datasets, the auto-fit screens a grid of candidates rather than trusting a single fit. It fits four families, Sph (spherical), Exp (exponential), Gau (Gaussian) and Mat (Matern, &nu; = 1.5), from each of four starting ranges (`max_dist/10`, `/5`, `/4`, `/2`), and keeps the eligible candidate with the lowest weighted-least-squares error, preferring converged fits over singular or non-converged ones. If no candidate qualifies, a heuristic spherical model is returned rather than an error: nugget-dominated (95% nugget, range `max_dist/10`) when the empirical nugget already exceeds 80% of the sample variance, otherwise structured (80% partial sill, range `max_dist/2`). An empirical variogram with fewer than five lag bins skips fitting and takes the structured fallback directly, because `gstat::fit.variogram` can crash on one that short.
+**Auto-fit engine.** To avoid singular fits on difficult datasets, the auto-fit screens a grid of candidates rather than trusting a single fit. It fits four families, Sph (spherical), Exp (exponential), Gau (Gaussian) and Mat (Matern, &nu; = 1.5), from each of four starting ranges (`max_dist/10`, `/5`, `/4`, `/2`), and keeps the eligible candidate with the lowest weighted-least-squares error (Cressie 1985), preferring converged fits over singular or non-converged ones. If no candidate qualifies, a heuristic spherical model is returned rather than an error: nugget-dominated (95% nugget, range `max_dist/10`) when the empirical nugget already exceeds 80% of the sample variance, otherwise structured (80% partial sill, range `max_dist/2`). An empirical variogram with fewer than five lag bins skips fitting and takes the structured fallback directly, because `gstat::fit.variogram` can crash on one that short.
 
-**Matern smoothness is fixed, not estimated.** The search fits nugget, partial sill and range by weighted least squares but holds the Matern smoothness &nu; (kappa) at **1.5**, the Matern 3/2 model. `gstat::fit.variogram` estimates &nu; only when asked (`fit.kappa = TRUE`), and it is deliberately not asked: a free smoothness parameter would give the Matern candidate one more degree of freedom than the other three, making the cross-candidate residual-sum-of-squares comparison an unequal contest. Read the "Mat" candidate as "Matern with &nu; = 1.5". If the empirical variogram suggests a markedly smoother or rougher process near the origin, use **Manual Tuning** to compare families directly: Gaussian is smoothest at the origin and exponential roughest, with spherical and Matern (&nu; = 1.5) between them, so short-lag behaviour can be bracketed without freeing a smoothness parameter.
+**Matern smoothness is fixed, not estimated.** The search fits nugget, partial sill and range by weighted least squares but holds the Matern smoothness &nu; (kappa) at **1.5**, the Matern 3/2 model (Minasny & McBratney 2005). `gstat::fit.variogram` estimates &nu; only when asked (`fit.kappa = TRUE`), and it is deliberately not asked: a free smoothness parameter would give the Matern candidate one more degree of freedom than the other three, making the cross-candidate residual-sum-of-squares comparison an unequal contest. Read the "Mat" candidate as "Matern with &nu; = 1.5". If the empirical variogram suggests a markedly smoother or rougher process near the origin, use **Manual Tuning** to compare families directly: Gaussian is smoothest at the origin and exponential roughest, with spherical and Matern (&nu; = 1.5) between them, so short-lag behaviour can be bracketed without freeing a smoothness parameter.
 
 **The nugget must be non-negative.** A candidate whose fitted nugget <i>C<sub>0</sub></i> is below zero is refused outright, before any error comparison. Such a model makes <i>&gamma;(h)</i> negative for small <i>h</i>, so it is not a valid (conditionally negative definite) covariance model and the kriging system built from it has no solution. The failure is silent rather than loud: `gstat` does not raise there, it returns an undefined prediction at every location, which would surface as a blank locality and an empty metrics row behind a variogram panel reporting a clean converged fit. This is an *eligibility* rule, not a preference: an invalid model must not be comparable on fit error at all.
 
-**Candidates are screened on the practical range.** Each fitted candidate must fall inside a sanity window (between one hundredth and twice the largest empirical lag distance) before it can win, and the test is applied to the **practical range**, the distance at which the model reaches about 95% of its sill. gstat's range parameter *a* means a different ground distance in every family: the practical range is *a* for spherical, 3*a* for exponential, &radic;3·*a* for Gaussian and about 4.75·*a* for Matern with &nu; = 1.5. A window applied to the raw *a* would therefore judge families by different standards, admitting an exponential structure extending three times further than a spherical one on the same test, so eligibility would depend on the family rather than on fit quality. Converting first makes the window mean the same physical distance for every candidate. This affects only which candidates are *eligible*; the winner among them is still the lowest weighted-least-squares error, converged fits preferred.
+**Candidates are screened on the practical range.** Each fitted candidate must fall inside a sanity window (between one hundredth and twice the largest empirical lag distance) before it can win, and the test is applied to the **practical range**, the distance at which the model reaches about 95% of its sill. gstat's range parameter *a* means a different ground distance in every family: the practical range is *a* for spherical, 3*a* for exponential, &radic;3·*a* for Gaussian and about 4.75·*a* for Matern with &nu; = 1.5 (Goovaerts 1997). A window applied to the raw *a* would therefore judge families by different standards, admitting an exponential structure extending three times further than a spherical one on the same test, so eligibility would depend on the family rather than on fit quality. Converting first makes the window mean the same physical distance for every candidate. This affects only which candidates are *eligible*; the winner among them is still the lowest weighted-least-squares error, converged fits preferred.
 
 **Manual override.** Automated fits can settle in local minima or chase outliers at long lags. **Manual Tuning** lets you prioritize the fit at short lags, which carry the greatest weight in kriging.
 
@@ -285,7 +285,7 @@ Geostatistical models require a theoretical curve fitted to this empirical scatt
 ### 4.3 TPS optimization
 
 * **Logic:** the **smoothing parameter** balances honouring individual points against a generalized regional trend. The lambda slider defaults to `< 0` (Auto GCV), applying generalized cross-validation natively during interpolation.
-* **GCV diagnostics:** the optimum is found by generalized cross-validation inside `fields::Tps`. The best lambda is the value with the lowest GCV score. Lambda = 0 is an exact interpolator (zero error at sample points); higher values give a smoothing spline, usually better for noisy sensor data.
+* **GCV diagnostics:** the optimum is found by generalized cross-validation inside `fields::Tps` (Craven & Wahba 1978; Nychka et al. 2021). The best lambda is the value with the lowest GCV score. Lambda = 0 is an exact interpolator (zero error at sample points); higher values give a smoothing spline, usually better for noisy sensor data.
 * **Visualization:** clicking "Optimize TPS Lambda" runs an explicit grid search that overrides Auto mode and plots the **GCV curve** in the Scientific Analysis tab, so you can check whether the search reached a clear minimum.
 * **Projected search:** as with IDW, a geographic upload is projected to its local UTM zone before coordinates are normalized to the unit square, so the spline geometry and its GCV-optimal lambda reflect ground distances and agree with the run.
 * **Deduplicated search set:** co-located points are removed before the search, matching the run's point set. `fields::Tps` handles exact replicates through its pure-error machinery, which shifts the GCV curve, so without deduplication the stored lambda would be optimized on a different point set than the run.
@@ -349,11 +349,11 @@ Dropping points according to the chosen partition yields the predicted-versus-ac
 
 - **CCC (Lin's concordance correlation coefficient; Lin 1989):** how closely the paired data fall on the 45-degree line of perfect agreement, combining precision (Pearson's r) with accuracy (bias shift). Computed on **population** second moments, <i>&rho;<sub>c</sub> = 2s<sub>xy</sub> / (s<sub>x</sub><sup>2</sup> + s<sub>y</sub><sup>2</sup> + (&mu;<sub>x</sub> - &mu;<sub>y</sub>)<sup>2</sup>)</i> with each moment scaled by <i>(n-1)/n</i>, as Lin defines it and as `DescTools::CCC` computes it. The scaling matters because the squared bias term in the denominator is a population quantity: mixing it with sample <i>(n-1)</i> variances gives a statistic that is always at least as large as Lin's, by a margin that grows with bias relative to total variance and shrinks as 1/n. That margin falls exactly on the systematic offset CCC exists to penalise, so the population form is the honest one. Reported as **NA when either vector is constant**: the correlation term does not exist there, and for two identical constant vectors the formula degenerates to 0/0.
 
-- **RPD (ratio of performance to deviation):** <i>RPD = SD<sub>actual</sub> / RMSE</i>. Dimensionless. Above 2.0 indicates an excellent predictive model, below 1.4 poor predictive capacity.
+- **RPD (ratio of performance to deviation):** <i>RPD = SD<sub>actual</sub> / RMSE</i>. Dimensionless. Above 2.0 indicates an excellent predictive model, below 1.4 poor predictive capacity (Chang et al. 2001).
 
-- **RPIQ (ratio of performance to interquartile distance):** <i>RPIQ = (Q3 - Q1) / RMSE</i>. More robust than RPD on skewed data, common in soil properties such as salinity.
+- **RPIQ (ratio of performance to interquartile distance):** <i>RPIQ = (Q3 - Q1) / RMSE</i>. More robust than RPD on skewed data, common in soil properties such as salinity (Bellon-Maurel et al. 2010).
 
-- **SMAPE (symmetric mean absolute percentage error):** absolute errors as percentages, avoiding the extreme inflation that arises when actual values approach zero. Where an observation and its prediction are *both* exactly zero the summand is 0/0; that term is defined as **0** by the usual convention rather than dropped, so sMAPE is averaged over the same sample count as every other metric in the table.
+- **SMAPE (symmetric mean absolute percentage error; Makridakis 1993):** absolute errors as percentages, avoiding the extreme inflation that arises when actual values approach zero. Where an observation and its prediction are *both* exactly zero the summand is 0/0; that term is defined as **0** by the usual convention rather than dropped, so sMAPE is averaged over the same sample count as every other metric in the table.
 
 **Undefined metrics are reported as NA, never as infinity.** Every ratio metric above has an input configuration that zeroes its denominator, and in each case the quantity is genuinely undefined rather than infinitely good or bad:
 
@@ -369,13 +369,13 @@ Reporting `Inf` would propagate into the Model Performance table, the exported m
 **The two performance tables share one metric dictionary.** Every statistic in both is computed by the same function (`perform_cv`), so a definition can never differ between them. The **Model Performance** table (interpolation cross-validation) reports, in order: RMSE, NRMSE (%), MAE, R² (Corr), R² (NSE/Trad), Bias (ME), Lin's CCC (Agree), RPD (Prec), RPIQ, SMAPE (%), Moran's I and Moran p. The **uploaded-prediction** table reports the same statistics under the same labels with three deliberate differences: it adds NMAE (%), it reports MBE in the *predicted minus observed* direction, and it carries **no Moran's I or p**. That omission is substantive. Moran's I here diagnoses *cross-validation* residuals, the errors a spatial model makes at held-out locations; the residuals of an externally supplied prediction column come from a model this application neither fitted nor resampled, so a spatial-autocorrelation test on them would validate nothing the dashboard controls.
 
 - **Moran's I (spatial autocorrelation of residuals; Moran 1950):**
-  Tests whether cross-validation errors are randomly distributed across the field. Significantly positive I means errors are clustered (consistent underestimation in the north, overestimation in the south, for example), indicating the model missed a macroscopic spatial trend and that RK or RFK may be required. The neighbour structure is a **symmetric k-nearest-neighbour contiguity** (`k = 8`, capped at n − 1 for small samples), row-standardised (`spdep::nb2listw(style = "W")`). A kNN definition is scale-stable and avoids an arbitrary distance-band cutoff, which at typical field spacings is wide enough to dilute local autocorrelation toward zero. Because Moran's I is sensitive to the neighbour definition, read the reported value as *the residual autocorrelation under this fixed 8-NN weighting*. Duplicated coordinates are separated by a negligible, data-scaled jitter under a fixed internal seed, so the statistic is exactly reproducible between runs and the global RNG state is untouched (Section 9.2 explains why the displacement must scale with coordinate magnitude). The neighbour count is hardcoded; see Section 9.2 to change it.
+  Tests whether cross-validation errors are randomly distributed across the field. Significantly positive I means errors are clustered (consistent underestimation in the north, overestimation in the south, for example), indicating the model missed a macroscopic spatial trend and that RK or RFK may be required. The neighbour structure is a **symmetric k-nearest-neighbour contiguity** (`k = 8`, capped at n − 1 for small samples), row-standardised (`spdep::nb2listw(style = "W")`; Bivand & Wong 2018). A kNN definition is scale-stable and avoids an arbitrary distance-band cutoff, which at typical field spacings is wide enough to dilute local autocorrelation toward zero. Because Moran's I is sensitive to the neighbour definition, read the reported value as *the residual autocorrelation under this fixed 8-NN weighting*. Duplicated coordinates are separated by a negligible, data-scaled jitter under a fixed internal seed, so the statistic is exactly reproducible between runs and the global RNG state is untouched (Section 9.2 explains why the displacement must scale with coordinate magnitude). The neighbour count is hardcoded; see Section 9.2 to change it.
 
   **What the table reports.** Moran's I appears with its two-sided p-value in a separate column, and hovering the I cell reveals that row's null expectation, E[I] = −1/(n − 1). Reading I against zero is wrong: under the no-autocorrelation null the statistic is centred slightly *below* zero (−0.034 at n = 30, −0.010 at n = 100), so a marginally positive I is not by itself evidence of clustered errors. The p-value comes from `spdep::moran.test` under the **normality assumption** (`randomisation = FALSE`) and is **two-sided** (a deliberate departure from spdep's one-sided default): this is a diagnostic, and strongly *negative* residual autocorrelation, a checkerboard pattern typical of over-smoothing, is as much a misspecification signal as positive clustering. When the spdep neighbour search fails and the all-pairs 1/d fallback computes I instead (possible only at n ≤ 500), that weighting carries no sampling distribution, so the p column reports `NA*` while I and E[I] are still shown.
 
   **`NA*` means "not computable", never "no structure".** Both Moran cells fall back to `NA*` when the statistic could not be computed at all: fewer than three cross-validated points, no coordinate columns on the cross-validation object, or a neighbour-search failure the fallback could not rescue. This is a *missing measurement*, not a finding of spatial randomness, and the run log records which condition applied.
 
-- **Classification performance of a continuous prediction.** Observed and predicted values are binned into classes and compared as a confusion problem, reporting overall accuracy, balanced accuracy, off-by-one accuracy, Matthews correlation coefficient (Matthews 1975), unweighted Cohen's kappa (Cohen 1960) and linearly weighted kappa. For **agronomical classes** the bin intervals are left-closed `[low, high)`, identical to the map classification (`terra::classify(..., right = FALSE)`), so a value lying exactly on a class boundary receives the same class in the tables and on the map. **Quartile** binning uses the conventional right-closed intervals on the observed quartiles. The two closures are deliberate and differ only on a value sitting exactly on a break: the agronomical breaks are class limits a map paints, while the quartile breaks are order statistics of the data with no map counterpart. The on-screen Agreement table and the exported *Total Classification Performance* table are computed by the same function, so they cannot report different agreement figures for the same run.
+- **Classification performance of a continuous prediction.** Observed and predicted values are binned into classes and compared as a confusion problem, reporting overall accuracy, balanced accuracy, off-by-one accuracy, Matthews correlation coefficient (Matthews 1975), unweighted Cohen's kappa (Cohen 1960) and linearly weighted kappa (Cohen 1968). For **agronomical classes** the bin intervals are left-closed `[low, high)`, identical to the map classification (`terra::classify(..., right = FALSE)`), so a value lying exactly on a class boundary receives the same class in the tables and on the map. **Quartile** binning uses the conventional right-closed intervals on the observed quartiles. The two closures are deliberate and differ only on a value sitting exactly on a break: the agronomical breaks are class limits a map paints, while the quartile breaks are order statistics of the data with no map counterpart. The on-screen Agreement table and the exported *Total Classification Performance* table are computed by the same function, so they cannot report different agreement figures for the same run.
 
   **Quartile breaks come from the observed values and are unbounded at the ends.** The four classes are defined by the quartiles of the **observed** column, and that one set of breaks is applied to *both* vectors, because a confusion matrix requires a common class definition (breaks re-derived separately from each would compare different classes and make kappa meaningless). The outermost intervals extend to −∞ and +∞, so a prediction outside the observed range lands in Q1 or Q4 rather than being dropped. This keeps every point in the comparison, at the cost that extreme over- or under-predictions are clamped into the end classes: the matrix cannot show *how far* beyond the observed range a prediction went. Read RMSE and Bias alongside the kappa table when extrapolation is a concern.
 
@@ -446,9 +446,9 @@ Switching methods changes **only** the RFK uncertainty surface. The prediction m
 
 **The kriged covariate surfaces are treated as error-free.** The trend term at a grid cell is evaluated on covariate values that are themselves kriging estimates (Section 8.1). Those surfaces carry their own kriging variance, but it is discarded: the trend variance in the Total is computed **as if the covariate values at each cell were measured without error**. The term a full error budget would add, roughly `Σ (∂trend/∂xⱼ)² · Var(x̂ⱼ)` plus covariate cross-terms, is therefore missing, and the reported RK/RFK uncertainty is **optimistic away from the sample points**, where the covariate surfaces are least certain. The effect is smallest near samples, where covariate kriging variance approaches its nugget, and grows into unsampled territory, which is exactly where the uncertainty map matters most. This is standard practice for two-step regression kriging with interpolated covariates and is the reason the Total surface should be read as a *relative* reliability map rather than a calibrated absolute interval. It does not apply where covariates come from an exhaustive raster such as a DEM.
 
-**The RFK trend forest is not hyperparameter-tuned.** It is grown with `randomForest`'s regression defaults apart from the tree count, which is pinned at `ntree = 200`: `mtry = max(⌊p/3⌋, 1)` and `nodesize = 5`, with `importance = TRUE` and `keep.inbag = TRUE` for the variable-importance panel and the jackknife term. No search over `mtry`, `nodesize` or depth is performed and none adapts to sample size. This is a deliberate asymmetry with the Classification Suite (Section 10.6), whose learners do have a tuning registry: the RFK trend is one component of a two-step estimator whose residual variogram is refitted inside every cross-validation fold, so an inner tuning search would multiply an already heavy cost, and untuned forest defaults are the standard reference configuration in the regression-kriging literature (Hengl et al. 2015). RFK's trend is therefore a *reasonable default* forest rather than an optimized one; where the covariate set is large relative to n, `mtry = p/3` may be conservative. Adding trend tuning would be a design change, not a parameter tweak.
+**The RFK trend forest is not hyperparameter-tuned.** It is grown with the `randomForest` package's regression defaults (Liaw & Wiener 2002) apart from the tree count, which is pinned at `ntree = 200`: `mtry = max(⌊p/3⌋, 1)` and `nodesize = 5`, with `importance = TRUE` and `keep.inbag = TRUE` for the variable-importance panel and the jackknife term. No search over `mtry`, `nodesize` or depth is performed and none adapts to sample size. This is a deliberate asymmetry with the Classification Suite (Section 10.6), whose learners do have a tuning registry: the RFK trend is one component of a two-step estimator whose residual variogram is refitted inside every cross-validation fold, so an inner tuning search would multiply an already heavy cost, and the reference random-forest soil maps of Hengl et al. (2015) likewise report no tuning search over the `randomForest` defaults. RFK's trend is therefore a *reasonable default* forest rather than an optimized one; where the covariate set is large relative to n, `mtry = p/3` may be conservative. Adding trend tuning would be a design change, not a parameter tweak.
 
-**RFK residuals are out-of-bag while the trend surface is in-bag.** The residuals whose variogram RFK fits and kriges come from the forest's **out-of-bag** predictions (`randomForest$predicted`), whereas the trend surface at grid cells uses the **full in-bag ensemble**. This asymmetry is deliberate and standard (Hengl et al. 2015): in-bag training residuals are near zero by construction, so a residual variogram fitted to them would be pure nugget and residual kriging would contribute nothing. Two consequences follow. First, `trend + kriged residual` is not an exact decomposition of the measured value at a sample point, because the two terms come from different ensembles of trees. Second, out-of-bag residuals are slightly inflated relative to the in-bag fit, so the residual variogram's sill, and with it the residual component of the uncertainty, is conservative. RK has no equivalent asymmetry.
+**RFK residuals are out-of-bag while the trend surface is in-bag.** The residuals whose variogram RFK fits and kriges come from the forest's **out-of-bag** predictions (`randomForest$predicted`), whereas the trend surface at grid cells uses the **full in-bag ensemble**. This asymmetry is deliberate: in-bag training residuals are near zero by construction, so a residual variogram fitted to them would be pure nugget and residual kriging would contribute nothing. Two consequences follow. First, `trend + kriged residual` is not an exact decomposition of the measured value at a sample point, because the two terms come from different ensembles of trees. Second, out-of-bag residuals are slightly inflated relative to the in-bag fit, so the residual variogram's sill, and with it the residual component of the uncertainty, is conservative. RK has no equivalent asymmetry.
 
 **Covariate surfaces are fitted independently of target missingness.** The covariate surfaces RK and RFK evaluate their trend on are kriged from the **full covariate-complete point set** (co-located points deduplicated, samples with a missing target retained), with lag width and cutoff from that same set. The target model is fitted on the point set for its own surface (target-`NA` rows removed first, then deduplicated), with lags derived from *that* set, so the two lag definitions can differ slightly. This is deliberate: a sample lacking a laboratory value for the target still carries valid covariate measurements, and discarding it would needlessly weaken the covariate surfaces. Because the bounding-box diagonal drives the cutoff the difference is usually negligible.
 
@@ -476,7 +476,7 @@ Severe multicollinearity destabilizes multivariate models, so three gates screen
 
 ### 8.2 Multivariate outlier screening (Mahalanobis distance)
 
-The PCA panel's outlier diagnostic computes the Mahalanobis distance of each observation in the space of the retained principal components. Because PC scores are uncorrelated by construction their covariance is the diagonal matrix of squared component standard deviations, and the distance over the retained components equals the full-space Mahalanobis distance restricted to that subspace. Components with numerically zero variance, which appear when PCA is force-executed on collinear inputs, are excluded from both the distance and the degrees of freedom of the &chi;<sup>2</sup> reference line (97.5% quantile, df = number of retained components).
+The PCA panel's outlier diagnostic computes the Mahalanobis distance (Mahalanobis 1936) of each observation in the space of the retained principal components. Because PC scores are uncorrelated by construction their covariance is the diagonal matrix of squared component standard deviations, and the distance over the retained components equals the full-space Mahalanobis distance restricted to that subspace. Components with numerically zero variance, which appear when PCA is force-executed on collinear inputs, are excluded from both the distance and the degrees of freedom of the &chi;<sup>2</sup> reference line (97.5% quantile, df = number of retained components).
 
 **The estimator is the classical one, and that is a real limitation.** The centre and scatter are the ordinary sample mean and covariance, which the candidate outliers themselves help define. A single extreme point inflates the covariance in its own direction, and a small cluster of outliers can inflate it enough to pull their distances back under the threshold. This is the classical **masking** effect. The standard remedy is a high-breakdown estimator such as the minimum covariance determinant (Rousseeuw & Van Driessen 1999), which the panel deliberately does not use, since it would introduce a further modelling dependency for a screening plot. The panel names its estimator in the title and subtitle. Read a flagged point as "worth inspecting", and treat an *unflagged* point in a suspicious cluster with caution rather than as evidence of normality.
 
@@ -500,7 +500,7 @@ Under second-order stationarity the cross variogram and cross-covariance are rel
 
 <div style="text-align:center;"><i>&rho;<sub>12</sub>(h) = r<sub>12</sub> − &gamma;<sub>12</sub>(h)</i></div>
 
-with *r*<sub>12</sub> the ordinary non-spatial correlation, drawn as a dashed reference line. See Goovaerts (1997, Section 4.2.3) and Isaaks & Srivastava (1989, Ch. 4).
+with *r*<sub>12</sub> the ordinary non-spatial correlation, drawn as a dashed reference line. See Goovaerts (1997) and Isaaks & Srivastava (1989).
 
 **How to read it.** A curve starting near *r*<sub>12</sub> at short lags and decaying toward zero means the two variables co-vary *locally*, sharing spatial structure at the scale where the curve stays above zero, which is the co-regionalization Co-Kriging exploits. A flat curve at roughly *r*<sub>12</sub> across all lags means the association carries no distance structure; a flat curve near zero means the variables are spatially unrelated at the sampled scales. The distance at which the curve reaches zero is the practical range of the cross-structure.
 
@@ -516,7 +516,7 @@ with *r*<sub>12</sub> the ordinary non-spatial correlation, drawn as a dashed re
 Both panels are built from the **variable coordinates** *c*<sub>jk</sub> = *v*<sub>jk</sub> &middot; *s*<sub>k</sub>, where *v*<sub>jk</sub> is the loading of variable *j* on component *k* and *s*<sub>k</sub> that component's standard deviation.
 
 * **Contribution** is the share of a *component* attributable to a variable: *v*<sub>jk</sub><sup>2</sup> &times; 100, summing to 100% over the variables of a component, since eigenvectors are unit-length in both PCA modes. The dashed reference line marks the uniform expectation 100/*p*.
-* **cos<sup>2</sup>** is the share of a *variable* captured by the selected components: &sum;<sub>k &isin; axes</sub> *c*<sub>jk</sub><sup>2</sup> &divide; &sum;<sub>k</sub> *c*<sub>jk</sub><sup>2</sup>. The denominator is the variable's total variance, since &sum;<sub>k</sub> *c*<sub>jk</sub><sup>2</sup> = (**V S**<sup>2</sup> **V**<sup>T</sup>)<sub>jj</sub> = Var(*x*<sub>j</sub>), so the value is bounded in [0, 1] and reaches 1 across all components. This is the standard definition (Abdi & Williams 2010; `FactoMineR` / `factoextra`).
+* **cos<sup>2</sup>** is the share of a *variable* captured by the selected components: &sum;<sub>k &isin; axes</sub> *c*<sub>jk</sub><sup>2</sup> &divide; &sum;<sub>k</sub> *c*<sub>jk</sub><sup>2</sup>. The denominator is the variable's total variance, since &sum;<sub>k</sub> *c*<sub>jk</sub><sup>2</sup> = (**V S**<sup>2</sup> **V**<sup>T</sup>)<sub>jj</sub> = Var(*x*<sub>j</sub>), so the value is bounded in [0, 1] and reaches 1 across all components. This is the standard definition (Abdi & Williams 2010; Lê et al. 2008).
 
 **Why the denominator matters.** For a correlation-matrix PCA (**Scale & Center Data** checked) every variable has unit variance, the denominator is 1, and the normalisation changes nothing. For a covariance-matrix PCA it is essential: the unnormalised sum is an absolute variance in the variable's own squared units, so a variable in mg&nbsp;kg<sup>-1</sup> and one on a 0-1 scale would be plotted against each other on an axis labelled cos<sup>2</sup> where the taller bar means nothing but the larger unit. With the normalisation, cos<sup>2</sup> answers the same question in both modes.
 
@@ -574,7 +574,7 @@ The strategy itself (Auto / Standard LOOCV / Spatial Block CV) is selectable in 
 
 Class limits for the agronomical styling algorithms are computed by `calc_class_breaks` (`spatial_pipeline.R`) rather than a bare `classInt::classIntervals` call, for two reasons.
 
-* **Reproducibility.** Both `classInt` styles draw random numbers internally (k-means starts; Jenks silently switches to an unseeded 3,000-value sample above n = 3,000), so the same map could legitimately produce different class limits on every restyle. `calc_class_breaks` runs under the app's two-sided seed sandbox (seed `12345`, caller RNG restored), making the breaks bit-reproducible.
+* **Reproducibility.** Both `classInt` styles draw random numbers internally (k-means starts, Hartigan & Wong 1979; Jenks silently switches to an unseeded 3,000-value sample above n = 3,000), so the same map could legitimately produce different class limits on every restyle. `calc_class_breaks` runs under the app's two-sided seed sandbox (seed `12345`, caller RNG restored), making the breaks bit-reproducible.
 * **Tractability.** The exact Jenks algorithm (Jenks 1967) is O(n²) and blocks for seconds on raster-sized vectors, so breaks are estimated on a seeded subsample capped at `max_n = 5000` cells. Estimating breaks from a sample is standard GIS practice, and the class *areas* reported in the Scientific Analysis tab are always computed by classifying the **full-resolution** raster with those breaks. The interactive Leaflet viewer may display a mean-aggregated preview above about 500,000 cells; this is display-only.
 * **Where:** the `max_n = 5000L` default of `calc_class_breaks`, and `LEAFLET_DISPLAY_MAX_CELLS <- 5e5` in `server_setup.R`.
 * **Commit semantics.** Agronomical sub-settings (algorithm, class count, supervised limits) are staged in the sidebar and take effect when **Apply to maps and statistics** is pressed, so the break computation runs once per commit rather than on every input tick. The computation itself is unaffected by the staging.
@@ -600,19 +600,19 @@ The Classification Suite is a separate modelling paradigm from the interpolation
 The target is either an existing categorical column (soil class, land-use label) or a continuous variable discretised into ordered classes with `classInt` break styles (quantile, equal-interval, or Jenks), using left-closed `[low, high)` intervals for consistency with the app's agronomic-class convention. **Numeric columns are never auto-detected as categorical:** coarse-resolution environmental covariates such as climate-raster precipitation metrics legitimately carry very few distinct values, and treating an ordered quantity as nominal both dummy-encodes it in the recipe and switches its grid transfer from kriging to nearest-neighbour assignment. Numeric class codes should be recoded to text or run through the binned-target mode.
 
 Three learners share a common tidymodels (`parsnip` / `workflows`) backbone:
-* **Multinomial logistic regression** (`nnet`), the parametric baseline. For **two-class targets** the engine substitutes binomial logistic regression (`glm`): the multinomial model with K = 2 reduces exactly to it, and parsnip's `multinom_reg` / `nnet` wrapper produces malformed probability output in the binary case. The substitution is statistically equivalent at the default `penalty = 0`, and penalty tuning is skipped for binary targets.
-* **Random Forest** (`ranger`, probability forest), the de-facto standard in categorical DSM.
-* **Extreme gradient boosting** (`xgboost`).
+* **Multinomial logistic regression** (`nnet`; Venables & Ripley 2002), the parametric baseline. For **two-class targets** the engine substitutes binomial logistic regression (`glm`): the multinomial model with K = 2 reduces exactly to it, and parsnip's `multinom_reg` / `nnet` wrapper produces malformed probability output in the binary case. The substitution is statistically equivalent at the default `penalty = 0`, and penalty tuning is skipped for binary targets.
+* **Random Forest** (`ranger`, probability forest; Breiman 2001; Wright & Ziegler 2017), the de-facto standard in categorical DSM.
+* **Extreme gradient boosting** (`xgboost`; Chen & Guestrin 2016).
 
 All three share one preprocessing recipe: novel-level absorption, median and mode imputation, dummy encoding of categorical covariates, zero-variance removal, and standardisation of numeric predictors (monotonic, so it aids multinomial convergence without affecting the tree learners).
 
 ### 10.2 Spatial cross-validation and pooled metrics
 
-The default validation is **spatial blocked CV** (`spatialsample::spatial_clustering_cv`, k-means on the projected coordinates), for the same reason Spatial Block CV exists in Section 5: random folds place a test point's near neighbours in the training set and overstate skill under spatial autocorrelation (Roberts et al. 2017; Ploton et al. 2020). Standard class-stratified random k-fold remains available for in-domain estimates. Fold assignment uses the app-wide seed (`12345`) under the two-sided RNG sandbox.
+The default validation is **spatial blocked CV** (`spatialsample::spatial_clustering_cv`, k-means on the projected coordinates), for the same reason Spatial Block CV exists in Section 5: random folds place a test point's near neighbours in the training set and overstate skill under spatial autocorrelation (Roberts et al. 2017; Ploton et al. 2020; Mahoney et al. 2023). Standard class-stratified random k-fold remains available for in-domain estimates. Fold assignment uses the app-wide seed (`12345`) under the two-sided RNG sandbox.
 
 Predictions are collected **out-of-fold and pooled** before any metric is computed: each fold's model predicts hard classes *and* full class-probability vectors on its held-out points, and metrics are evaluated once on the pooled set. Pooling avoids the undefined per-fold macro-metrics that arise when a spatially contiguous fold contains a single class, and it lets every metric, probability metrics included, be evaluated once over the full class set.
 
-Reported metrics: overall accuracy, Cohen's kappa (Cohen 1960), balanced accuracy, macro-averaged precision, recall and F1 (so minority classes are not masked), multiclass ROC AUC (Hand & Till 2001), multiclass log-loss, and the Brier score. The confusion matrix is accompanied by per-class **producer accuracy** (recall, the omission-error complement) and **user accuracy** (precision, the commission-error complement), the standard per-class report in soil and land-cover classification.
+Reported metrics: overall accuracy, Cohen's kappa (Cohen 1960), balanced accuracy (Brodersen et al. 2010), macro-averaged precision, recall and F1 (so minority classes are not masked), multiclass ROC AUC (Hand & Till 2001), multiclass log-loss, and the Brier score (Brier 1950). The confusion matrix is accompanied by per-class **producer accuracy** (recall, the omission-error complement) and **user accuracy** (precision, the commission-error complement), the standard per-class report in soil and land-cover classification (Congalton 1991).
 
 **Classes absent from a fold's training rows.** Spatial folds are not class-stratified, since the blocks are defined by geometry, so a spatially clustered class can fall entirely inside one held-out block; class-stratified random folds have the same hole for a singleton class, which necessarily lands in one fold. That fold's model is then fitted on data containing none of that class and can never predict it. The suite treats this as a property of the validation design rather than an error: the absent class receives probability **0** from that fold, which is the model's genuine posterior since a class it never saw carries no mass, the held-out samples of that class score as misses, and the run reports which classes were affected. The reported producer accuracy for such a class is therefore pessimistic by construction and the pooled log-loss carries the corresponding penalty; overall accuracy and kappa are depressed only in proportion to the affected sample count. The remedies are the usual ones: fewer classes, quantile rather than equal-interval breaks (which distribute samples evenly and rarely strand a class), standard random k-fold when an in-domain estimate is wanted, or a wider spatial scope.
 
@@ -620,7 +620,7 @@ Reported metrics: overall accuracy, Cohen's kappa (Cohen 1960), balanced accurac
 
 ### 10.3 Prediction uncertainty: normalised Shannon entropy
 
-The classifier analogue of the kriging-variance map is the normalised Shannon entropy of the predicted class probabilities at each grid cell:
+The classifier analogue of the kriging-variance map is the normalised Shannon entropy (Shannon 1948) of the predicted class probabilities at each grid cell:
 
 <div style="text-align:center;"><i>H* = - &sum;<sub>k</sub> p<sub>k</sub> ln p<sub>k</sub> / ln K</i></div>
 
@@ -701,7 +701,7 @@ To answer "did the covariates actually buy anything?", every run scores two refe
 * **Majority-class baseline,** always predict the most frequent class. Its accuracy is the no-information rate and its kappa is 0 by construction.
 * **Spatial 1-NN baseline,** each held-out point receives the class of its nearest analysis-set point (Euclidean distance, projected coordinates): the categorical analogue of nearest-neighbour interpolation, that is, what pure spatial proximity achieves with no covariate information. Under spatial blocked CV this is a demanding, honest baseline, since it must transfer across fold boundaries exactly like the model.
 
-**Covariate lift** is the accuracy difference between the covariate model and the spatial baseline, reported in accuracy points on identical folds. Significance of the paired improvement is assessed with **McNemar's test** on the discordant pairs, the standard test for comparing two classifiers evaluated on the same samples (Dietterich 1998). Below 25 discordant pairs the exact binomial form is used, above it the continuity-corrected chi-square approximation; the discordant total is often small here, and the approximation is unreliable in that regime. A non-significant lift is a substantive scientific finding: the covariates add little beyond spatial position, and a simpler spatial model, or better covariates, should be considered. The test is reported as NA when no discordant pairs exist.
+**Covariate lift** is the accuracy difference between the covariate model and the spatial baseline, reported in accuracy points on identical folds. Significance of the paired improvement is assessed with **McNemar's test** on the discordant pairs, the standard test for comparing two classifiers evaluated on the same samples (McNemar 1947; Dietterich 1998). Below 25 discordant pairs the exact binomial form is used, above it the continuity-corrected chi-square approximation; the discordant total is often small here, and the approximation is unreliable in that regime. A non-significant lift is a substantive scientific finding: the covariates add little beyond spatial position, and a simpler spatial model, or better covariates, should be considered. The test is reported as NA when no discordant pairs exist.
 
 ### 10.10 Confidence thresholding (abstention)
 
@@ -732,76 +732,128 @@ predict(b$workflow, new_data, type = "prob")   # or type = "class"
 
 ## 11. References
 
-Works cited in this guide, covering the estimators and conventions Monolith implements. For the wider theory behind any method, consult the primary literature directly.
+Every work below is cited somewhere in this guide, and every citation in the text resolves here. Each entry carries a DOI, or an ISBN or proceedings reference where no DOI exists.
 
-Abdi, H., & Williams, L. J. (2010). Principal component analysis. WIREs Computational Statistics, 2(4), 433-459.
+Abdi, H., & Williams, L. J. (2010). Principal component analysis. *WIREs Computational Statistics*, 2(4), 433-459. https://doi.org/10.1002/wics.101
 
-Benjamini, Y., & Hochberg, Y. (1995). Controlling the false discovery rate: a practical and powerful approach to multiple testing. Journal of the Royal Statistical Society, Series B, 57(1), 289-300.
+Bellon-Maurel, V., Fernandez-Ahumada, E., Palagos, B., Roger, J.-M., & McBratney, A. (2010). Critical review of chemometric indicators commonly used for assessing the quality of the prediction of soil attributes by NIR spectroscopy. *TrAC Trends in Analytical Chemistry*, 29(9), 1073-1081. https://doi.org/10.1016/j.trac.2010.05.006
 
-Breiman, L. (2001). Random forests. Machine Learning, 45(1), 5-32.
+Benjamini, Y., & Hochberg, Y. (1995). Controlling the false discovery rate: a practical and powerful approach to multiple testing. *Journal of the Royal Statistical Society, Series B*, 57(1), 289-300. https://doi.org/10.1111/j.2517-6161.1995.tb02031.x
 
-Cawley, G. C., & Talbot, N. L. C. (2010). On over-fitting in model selection and subsequent selection bias in performance evaluation. Journal of Machine Learning Research, 11, 2079-2107.
+Bivand, R. S., & Wong, D. W. S. (2018). Comparing implementations of global and local indicators of spatial association. *TEST*, 27(3), 716-748. https://doi.org/10.1007/s11749-018-0599-x
 
-Chang, C.-W., Laird, D. A., Mausbach, M. J., & Hurburgh, C. R. (2001). Near-infrared reflectance spectroscopy: principal components regression analyses of soil properties. Soil Science Society of America Journal, 65(2), 480-490.
+Breiman, L. (2001). Random forests. *Machine Learning*, 45(1), 5-32. https://doi.org/10.1023/A:1010933404324
 
-Chow, C. K. (1970). On optimum recognition error and reject tradeoff. IEEE Transactions on Information Theory, 16(1), 41-46.
+Brier, G. W. (1950). Verification of forecasts expressed in terms of probability. *Monthly Weather Review*, 78(1), 1-3. https://doi.org/10.1175/1520-0493(1950)078%3C0001:VOFEIT%3E2.0.CO;2
 
-Cohen, J. (1960). A coefficient of agreement for nominal scales. Educational and Psychological Measurement, 20(1), 37-46.
+Brodersen, K. H., Ong, C. S., Stephan, K. E., & Buhmann, J. M. (2010). The balanced accuracy and its posterior distribution. *Proceedings of the 20th International Conference on Pattern Recognition*, 3121-3124. https://doi.org/10.1109/ICPR.2010.764
 
-Dietterich, T. G. (1998). Approximate statistical tests for comparing supervised classification learning algorithms. Neural Computation, 10(7), 1895-1923.
+Cawley, G. C., & Talbot, N. L. C. (2010). On over-fitting in model selection and subsequent selection bias in performance evaluation. *Journal of Machine Learning Research*, 11, 2079-2107.
 
-Duncan, D. B. (1955). Multiple range and multiple F tests. Biometrics, 11(1), 1-42.
+Chang, C.-W., Laird, D. A., Mausbach, M. J., & Hurburgh, C. R. (2001). Near-infrared reflectance spectroscopy: principal components regression analyses of soil properties. *Soil Science Society of America Journal*, 65(2), 480-490. https://doi.org/10.2136/sssaj2001.652480x
 
-Fisher, A., Rudin, C., & Dominici, F. (2019). All models are wrong, but many are useful: learning a variable's importance by studying an entire class of prediction models simultaneously. Journal of Machine Learning Research, 20(177), 1-81.
+Chen, T., & Guestrin, C. (2016). XGBoost: a scalable tree boosting system. *Proceedings of the 22nd ACM SIGKDD International Conference on Knowledge Discovery and Data Mining*, 785-794. https://doi.org/10.1145/2939672.2939785
 
-Goovaerts, P. (1997). Geostatistics for Natural Resources Evaluation. Oxford University Press, New York.
+Chow, C. K. (1970). On optimum recognition error and reject tradeoff. *IEEE Transactions on Information Theory*, 16(1), 41-46. https://doi.org/10.1109/TIT.1970.1054406
 
-Hand, D. J., & Till, R. J. (2001). A simple generalisation of the area under the ROC curve for multiple class classification problems. Machine Learning, 45(2), 171-186.
+Cohen, J. (1960). A coefficient of agreement for nominal scales. *Educational and Psychological Measurement*, 20(1), 37-46. https://doi.org/10.1177/001316446002000104
 
-Hengl, T., Heuvelink, G. B. M., & Rossiter, D. G. (2007). About regression-kriging: from equations to case studies. Computers & Geosciences, 33(10), 1301-1315.
+Cohen, J. (1968). Weighted kappa: nominal scale agreement with provision for scaled disagreement or partial credit. *Psychological Bulletin*, 70(4), 213-220. https://doi.org/10.1037/h0026256
 
-Hengl, T., Heuvelink, G. B. M., Kempen, B., Leenaars, J. G. B., Walsh, M. G., Shepherd, K. D., Sila, A., MacMillan, R. A., Mendes de Jesus, J., Tamene, L., & Tondoh, J. E. (2015). Mapping soil properties of Africa at 250 m resolution: random forests significantly improve current predictions. PLoS ONE, 10(6), e0125814.
+Congalton, R. G. (1991). A review of assessing the accuracy of classifications of remotely sensed data. *Remote Sensing of Environment*, 37(1), 35-46. https://doi.org/10.1016/0034-4257(91)90048-B
 
-Isaaks, E. H., & Srivastava, R. M. (1989). An Introduction to Applied Geostatistics. Oxford University Press, New York.
+Craven, P., & Wahba, G. (1978). Smoothing noisy data with spline functions: estimating the correct degree of smoothing by the method of generalized cross-validation. *Numerische Mathematik*, 31(4), 377-403. https://doi.org/10.1007/BF01404567
 
-James, G., Witten, D., Hastie, T., & Tibshirani, R. (2013). An Introduction to Statistical Learning. Springer, New York.
+Cressie, N. (1985). Fitting variogram models by weighted least squares. *Journal of the International Association for Mathematical Geology*, 17(5), 563-586. https://doi.org/10.1007/BF01032109
 
-Jenks, G. F. (1967). The data model concept in statistical mapping. International Yearbook of Cartography, 7, 186-190.
+Dietterich, T. G. (1998). Approximate statistical tests for comparing supervised classification learning algorithms. *Neural Computation*, 10(7), 1895-1923. https://doi.org/10.1162/089976698300017197
 
-Journel, A. G., & Huijbregts, C. J. (1978). Mining Geostatistics. Academic Press, London.
+Duchon, J. (1977). Splines minimizing rotation-invariant semi-norms in Sobolev spaces. In W. Schempp & K. Zeller (Eds.), *Constructive Theory of Functions of Several Variables* (Lecture Notes in Mathematics 571, pp. 85-100). Springer. https://doi.org/10.1007/BFb0086566
 
-Kim, S. (2015). ppcor: an R package for a fast calculation to semi-partial correlation coefficients. Communications for Statistical Applications and Methods, 22(6), 665-674.
+Duncan, D. B. (1955). Multiple range and multiple F tests. *Biometrics*, 11(1), 1-42. https://doi.org/10.2307/3001478
 
-King, G., & Zeng, L. (2001). Logistic regression in rare events data. Political Analysis, 9(2), 137-163.
+Fisher, A., Rudin, C., & Dominici, F. (2019). All models are wrong, but many are useful: learning a variable's importance by studying an entire class of prediction models simultaneously. *Journal of Machine Learning Research*, 20(177), 1-81.
 
-Kohavi, R. (1995). A study of cross-validation and bootstrap for accuracy estimation and model selection. Proceedings of the 14th International Joint Conference on Artificial Intelligence, 1137-1143.
+Goovaerts, P. (1997). *Geostatistics for Natural Resources Evaluation*. Oxford University Press, New York. https://doi.org/10.1093/oso/9780195115383.001.0001
 
-Kruskal, W. H., & Wallis, W. A. (1952). Use of ranks in one-criterion variance analysis. Journal of the American Statistical Association, 47(260), 583-621.
+Hand, D. J., & Till, R. J. (2001). A simple generalisation of the area under the ROC curve for multiple class classification problems. *Machine Learning*, 45(2), 171-186. https://doi.org/10.1023/A:1010920819831
 
-Lin, L. I.-K. (1989). A concordance correlation coefficient to evaluate reproducibility. Biometrics, 45(1), 255-268.
+Hartigan, J. A., & Wong, M. A. (1979). Algorithm AS 136: a k-means clustering algorithm. *Journal of the Royal Statistical Society, Series C (Applied Statistics)*, 28(1), 100-108. https://doi.org/10.2307/2346830
 
-Matthews, B. W. (1975). Comparison of the predicted and observed secondary structure of T4 phage lysozyme. Biochimica et Biophysica Acta (BBA) - Protein Structure, 405(2), 442-451.
+Hengl, T., Heuvelink, G. B. M., & Rossiter, D. G. (2007). About regression-kriging: from equations to case studies. *Computers & Geosciences*, 33(10), 1301-1315. https://doi.org/10.1016/j.cageo.2007.05.001
 
-Molinaro, A. M., Simon, R., & Pfeiffer, R. M. (2005). Prediction error estimation: a comparison of resampling methods. Bioinformatics, 21(15), 3301-3307.
+Hengl, T., Heuvelink, G. B. M., Kempen, B., Leenaars, J. G. B., Walsh, M. G., Shepherd, K. D., Sila, A., MacMillan, R. A., Mendes de Jesus, J., Tamene, L., & Tondoh, J. E. (2015). Mapping soil properties of Africa at 250 m resolution: random forests significantly improve current predictions. *PLoS ONE*, 10(6), e0125814. https://doi.org/10.1371/journal.pone.0125814
 
-Moran, P. A. P. (1950). Notes on continuous stochastic phenomena. Biometrika, 37(1/2), 17-23.
+Isaaks, E. H., & Srivastava, R. M. (1989). *An Introduction to Applied Geostatistics*. Oxford University Press, New York. ISBN 978-0-19-505013-4.
 
-Nash, J. E., & Sutcliffe, J. V. (1970). River flow forecasting through conceptual models part I: a discussion of principles. Journal of Hydrology, 10(3), 282-290.
+James, G., Witten, D., Hastie, T., & Tibshirani, R. (2013). *An Introduction to Statistical Learning*. Springer, New York. https://doi.org/10.1007/978-1-4614-7138-7
 
-O'Brien, R. M. (2007). A caution regarding rules of thumb for variance inflation factors. Quality & Quantity, 41(5), 673-690.
+Jenks, G. F. (1967). The data model concept in statistical mapping. *International Yearbook of Cartography*, 7, 186-190.
 
-Ploton, P., Mortier, F., Réjou-Méchain, M., Barbier, N., Picard, N., Rossi, V., Dormann, C., Cornu, G., Viennois, G., Bayol, N., Lyapustin, A., Gourlet-Fleury, S., & Pélissier, R. (2020). Spatial validation reveals poor predictive performance of large-scale ecological mapping models. Nature Communications, 11, 4540.
+Journel, A. G., & Huijbregts, C. J. (1978). *Mining Geostatistics*. Academic Press, London. ISBN 978-0-12-391050-1.
 
-Roberts, D. R., Bahn, V., Ciuti, S., Boyce, M. S., Elith, J., Guillera-Arroita, G., Hauenstein, S., Lahoz-Monfort, J. J., Schröder, B., Thuiller, W., Warton, D. I., Wintle, B. A., Hartig, F., & Dormann, C. F. (2017). Cross-validation strategies for data with temporal, spatial, hierarchical, or phylogenetic structure. Ecography, 40(8), 913-929.
+Kim, S. (2015). ppcor: an R package for a fast calculation to semi-partial correlation coefficients. *Communications for Statistical Applications and Methods*, 22(6), 665-674. https://doi.org/10.5351/CSAM.2015.22.6.665
 
-Rousseeuw, P. J., & Van Driessen, K. (1999). A fast algorithm for the minimum covariance determinant estimator. Technometrics, 41(3), 212-223.
+King, G., & Zeng, L. (2001). Logistic regression in rare events data. *Political Analysis*, 9(2), 137-163. https://doi.org/10.1093/oxfordjournals.pan.a004868
 
-Schratz, P., Muenchow, J., Iturritxa, E., Richter, J., & Brenning, A. (2019). Hyperparameter tuning and performance assessment of statistical and machine-learning algorithms using spatial data. Ecological Modelling, 406, 109-120.
+Kohavi, R. (1995). A study of cross-validation and bootstrap for accuracy estimation and model selection. *Proceedings of the 14th International Joint Conference on Artificial Intelligence (IJCAI'95)*, Vol. 2, 1137-1143.
 
-Strobl, C., Boulesteix, A.-L., Kneib, T., Augustin, T., & Zeileis, A. (2008). Conditional variable importance for random forests. BMC Bioinformatics, 9, 307.
+Kruskal, W. H., & Wallis, W. A. (1952). Use of ranks in one-criterion variance analysis. *Journal of the American Statistical Association*, 47(260), 583-621. https://doi.org/10.1080/01621459.1952.10483441
 
-Tukey, J. W. (1949). Comparing individual means in the analysis of variance. Biometrics, 5(2), 99-114.
+Lê, S., Josse, J., & Husson, F. (2008). FactoMineR: an R package for multivariate analysis. *Journal of Statistical Software*, 25(1), 1-18. https://doi.org/10.18637/jss.v025.i01
 
-Varma, S., & Simon, R. (2006). Bias in error estimation when using cross-validation for model selection. BMC Bioinformatics, 7, 91.
+Liaw, A., & Wiener, M. (2002). Classification and regression by randomForest. *R News*, 2(3), 18-22.
 
-Wager, S., Hastie, T., & Efron, B. (2014). Confidence intervals for random forests: the jackknife and the infinitesimal jackknife. Journal of Machine Learning Research, 15, 1625-1651.
+Lin, L. I.-K. (1989). A concordance correlation coefficient to evaluate reproducibility. *Biometrics*, 45(1), 255-268. https://doi.org/10.2307/2532051
+
+Mahalanobis, P. C. (1936). On the generalised distance in statistics. *Proceedings of the National Institute of Sciences of India*, 2(1), 49-55. (Reprinted in *Sankhya A*, 80(S1), 1-7. https://doi.org/10.1007/s13171-019-00164-5)
+
+Mahoney, M. J., Johnson, L. K., Silge, J., Frick, H., Kuhn, M., & Beier, C. M. (2023). Assessing the performance of spatial cross-validation approaches for models of spatially structured data. *arXiv*:2303.07334. https://doi.org/10.48550/arXiv.2303.07334
+
+Makridakis, S. (1993). Accuracy measures: theoretical and practical concerns. *International Journal of Forecasting*, 9(4), 527-529. https://doi.org/10.1016/0169-2070(93)90079-3
+
+Matheron, G. (1963). Principles of geostatistics. *Economic Geology*, 58(8), 1246-1266. https://doi.org/10.2113/gsecongeo.58.8.1246
+
+Matthews, B. W. (1975). Comparison of the predicted and observed secondary structure of T4 phage lysozyme. *Biochimica et Biophysica Acta (BBA) - Protein Structure*, 405(2), 442-451. https://doi.org/10.1016/0005-2795(75)90109-9
+
+McNemar, Q. (1947). Note on the sampling error of the difference between correlated proportions or percentages. *Psychometrika*, 12(2), 153-157. https://doi.org/10.1007/BF02295996
+
+Minasny, B., & McBratney, A. B. (2005). The Matérn function as a general model for soil variograms. *Geoderma*, 128(3-4), 192-207. https://doi.org/10.1016/j.geoderma.2005.04.003
+
+Molinaro, A. M., Simon, R., & Pfeiffer, R. M. (2005). Prediction error estimation: a comparison of resampling methods. *Bioinformatics*, 21(15), 3301-3307. https://doi.org/10.1093/bioinformatics/bti499
+
+Moran, P. A. P. (1950). Notes on continuous stochastic phenomena. *Biometrika*, 37(1/2), 17-23. https://doi.org/10.2307/2332142
+
+Nash, J. E., & Sutcliffe, J. V. (1970). River flow forecasting through conceptual models part I: a discussion of principles. *Journal of Hydrology*, 10(3), 282-290. https://doi.org/10.1016/0022-1694(70)90255-6
+
+Nychka, D., Furrer, R., Paige, J., & Sain, S. (2021). *fields: Tools for Spatial Data*. R package, University Corporation for Atmospheric Research, Boulder, CO. https://doi.org/10.5065/D6W957CT
+
+O'Brien, R. M. (2007). A caution regarding rules of thumb for variance inflation factors. *Quality & Quantity*, 41(5), 673-690. https://doi.org/10.1007/s11135-006-9018-6
+
+Pebesma, E. J. (2004). Multivariable geostatistics in S: the gstat package. *Computers & Geosciences*, 30(7), 683-691. https://doi.org/10.1016/j.cageo.2004.03.012
+
+Ploton, P., Mortier, F., Réjou-Méchain, M., Barbier, N., Picard, N., Rossi, V., Dormann, C., Cornu, G., Viennois, G., Bayol, N., Lyapustin, A., Gourlet-Fleury, S., & Pélissier, R. (2020). Spatial validation reveals poor predictive performance of large-scale ecological mapping models. *Nature Communications*, 11, 4540. https://doi.org/10.1038/s41467-020-18321-y
+
+Roberts, D. R., Bahn, V., Ciuti, S., Boyce, M. S., Elith, J., Guillera-Arroita, G., Hauenstein, S., Lahoz-Monfort, J. J., Schröder, B., Thuiller, W., Warton, D. I., Wintle, B. A., Hartig, F., & Dormann, C. F. (2017). Cross-validation strategies for data with temporal, spatial, hierarchical, or phylogenetic structure. *Ecography*, 40(8), 913-929. https://doi.org/10.1111/ecog.02881
+
+Rousseeuw, P. J., & Van Driessen, K. (1999). A fast algorithm for the minimum covariance determinant estimator. *Technometrics*, 41(3), 212-223. https://doi.org/10.1080/00401706.1999.10485670
+
+Schratz, P., Muenchow, J., Iturritxa, E., Richter, J., & Brenning, A. (2019). Hyperparameter tuning and performance assessment of statistical and machine-learning algorithms using spatial data. *Ecological Modelling*, 406, 109-120. https://doi.org/10.1016/j.ecolmodel.2019.06.002
+
+Shannon, C. E. (1948). A mathematical theory of communication. *Bell System Technical Journal*, 27(3), 379-423. https://doi.org/10.1002/j.1538-7305.1948.tb01338.x
+
+Shepard, D. (1968). A two-dimensional interpolation function for irregularly-spaced data. *Proceedings of the 1968 23rd ACM National Conference*, 517-524. https://doi.org/10.1145/800186.810616
+
+Strobl, C., Boulesteix, A.-L., Kneib, T., Augustin, T., & Zeileis, A. (2008). Conditional variable importance for random forests. *BMC Bioinformatics*, 9, 307. https://doi.org/10.1186/1471-2105-9-307
+
+Tukey, J. W. (1949). Comparing individual means in the analysis of variance. *Biometrics*, 5(2), 99-114. https://doi.org/10.2307/3001913
+
+Varma, S., & Simon, R. (2006). Bias in error estimation when using cross-validation for model selection. *BMC Bioinformatics*, 7, 91. https://doi.org/10.1186/1471-2105-7-91
+
+Venables, W. N., & Ripley, B. D. (2002). *Modern Applied Statistics with S* (4th ed.). Springer, New York. https://doi.org/10.1007/978-0-387-21706-2
+
+Wackernagel, H. (2003). *Multivariate Geostatistics: An Introduction with Applications* (3rd ed.). Springer, Berlin. https://doi.org/10.1007/978-3-662-05294-5
+
+Wager, S., Hastie, T., & Efron, B. (2014). Confidence intervals for random forests: the jackknife and the infinitesimal jackknife. *Journal of Machine Learning Research*, 15(48), 1625-1651.
+
+Wright, M. N., & Ziegler, A. (2017). ranger: a fast implementation of random forests for high dimensional data in C++ and R. *Journal of Statistical Software*, 77(1), 1-17. https://doi.org/10.18637/jss.v077.i01
