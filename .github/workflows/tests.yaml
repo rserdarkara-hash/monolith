@@ -21,13 +21,23 @@ jobs:
           # Every library below comes from Ubuntu's own archives. The runner
           # image also configures third-party repos (Google Chrome, Microsoft)
           # that apt-get update insists on refreshing, and a hash mismatch
-          # there - Google republishing mid-fetch - aborts the whole step with
-          # exit 100 before anything is installed. Drop those lists first: this
-          # removes the repositories, not the packages, so the Chrome binary
-          # shinytest2 drives stays where it is.
-          sudo rm -f /etc/apt/sources.list.d/google-chrome.list \
-                     /etc/apt/sources.list.d/microsoft-prod.list
-          sudo apt-get update -o Acquire::Retries=3
+          # there - Google republishing its index mid-fetch - aborts the whole
+          # step with exit 100 before anything is installed. Drop those two
+          # sources: this removes the repositories, not the packages, so the
+          # Chrome binary shinytest2 drives stays where it is.
+          #
+          # Match on content, not filename. Chrome ships a deb822
+          # google-chrome.sources on noble, so deleting google-chrome.list
+          # alone silently misses it. Ubuntu's own archives live in
+          # /etc/apt/sources.list here and are untouched either way.
+          sudo find /etc/apt/sources.list.d -maxdepth 1 -type f \
+            \( -name '*.list' -o -name '*.sources' \) \
+            -exec grep -lE 'dl\.google\.com|packages\.microsoft\.com' {} + \
+            | sudo xargs -r rm -f
+          # A surviving third-party repo must not fail the build: apt still
+          # writes the Ubuntu lists ("old ones used instead") and the install
+          # below fails loudly on its own if they are genuinely unusable.
+          sudo apt-get update -o Acquire::Retries=3 || true
           sudo apt-get install -y --no-install-recommends \
             libgdal-dev libgeos-dev libproj-dev libudunits2-dev \
             libcurl4-openssl-dev libssl-dev libxml2-dev \
