@@ -18,7 +18,16 @@ jobs:
 
       - name: Install system libraries for the spatial stack
         run: |
-          sudo apt-get update
+          # Every library below comes from Ubuntu's own archives. The runner
+          # image also configures third-party repos (Google Chrome, Microsoft)
+          # that apt-get update insists on refreshing, and a hash mismatch
+          # there - Google republishing mid-fetch - aborts the whole step with
+          # exit 100 before anything is installed. Drop those lists first: this
+          # removes the repositories, not the packages, so the Chrome binary
+          # shinytest2 drives stays where it is.
+          sudo rm -f /etc/apt/sources.list.d/google-chrome.list \
+                     /etc/apt/sources.list.d/microsoft-prod.list
+          sudo apt-get update -o Acquire::Retries=3
           sudo apt-get install -y --no-install-recommends \
             libgdal-dev libgeos-dev libproj-dev libudunits2-dev \
             libcurl4-openssl-dev libssl-dev libxml2-dev \
