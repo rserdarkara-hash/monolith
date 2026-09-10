@@ -2,7 +2,7 @@
 
 All notable changes to Monolith are documented in this file.
 
-## 1.1.0 [Unreleased]
+## [1.1.0] - 2026-09-10 - Golden fixture testing of arithmetics / Updated reference list / In-place stylized export of data
 
 Numeric-correctness test layer. **No result changes**: the spatial core, the classification engine and the run pipeline are untouched, and the maths moved out of four reactive blocks so the suite could reach it was verified to return byte-identical output. The one non-test data change is a missing row in the shipped variable list.
 
