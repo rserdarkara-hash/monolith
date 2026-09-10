@@ -187,3 +187,104 @@ test_that("PCA eigenvalues and variance shares match the correlation/covariance 
   expect_equal(which(!na_fit$keep), c(2L, 5L, 9L))
   expect_equal(unname(na_fit$data[, 1]), d$ph[na_fit$keep])
 })
+
+# ── summary_stats_df ──────────────────────────────────────────────────────
+# The descriptive-statistics card and its export. The fixed row set is the
+# point: summary() appends an "NA's" element only for a vector that has
+# missing values, and building the second column by assignment onto a frame
+# sized from the first raised whenever exactly one side had them.
+
+test_that("summary_stats_df reproduces summary() and stays numeric", {
+  x <- c(2, 4, 4, 5, 9, 12)
+  out <- summary_stats_df(x)
+  s <- summary(x)
+
+  expect_equal(names(out), c("Metric", "Value"))
+  expect_true(is.numeric(out$Value))
+  expect_equal(out$Metric, c("Min.", "1st Qu.", "Median", "Mean", "3rd Qu.", "Max."))
+  expect_equal(out$Value, unname(as.numeric(s)))
+})
+
+test_that("summary_stats_df keeps small-unit statistics at full precision", {
+  x <- c(0.0175, 0.031, 0.052, 0.0874, 0.214)   # total N, %
+  out <- summary_stats_df(x)
+  expect_equal(out$Value[out$Metric == "Min."], 0.0175)
+  expect_equal(out$Value[out$Metric == "Mean"], mean(x))
+
+  # the card: four significant digits below 1, three decimals above
+  shown <- summary_stats_df(x, round_values = TRUE)
+  expect_equal(shown$Value[shown$Metric == "Min."], 0.0175)
+  expect_equal(shown$Value[shown$Metric == "Mean"], signif(mean(x), 4))
+  big <- summary_stats_df(c(2, 1234.5678), round_values = TRUE)
+  expect_equal(big$Value[big$Metric == "Max."], 1234.568)
+})
+
+test_that("summary_stats_df pairs the columns when only the SECOND carries NAs", {
+  a <- c(2, 3, 4, 5, 6, 7)
+  b <- c(1, 2, 3, NA, 5, 6)
+  out <- summary_stats_df(a, b, labels = c("Actual", "Predicted"))
+
+  expect_equal(nrow(out), 7)
+  expect_equal(out$Actual[out$Metric == "NA's"], 0)
+  expect_equal(out$Predicted[out$Metric == "NA's"], 1)
+  expect_equal(out$Predicted[out$Metric == "Mean"], mean(b, na.rm = TRUE))
+  expect_equal(out$Actual[out$Metric == "Max."], 7)
+})
+
+test_that("summary_stats_df keeps an all-missing second column instead of dropping it", {
+  out <- summary_stats_df(1:4, rep(NA_real_, 4), labels = c("Actual", "Predicted"))
+  expect_true("Predicted" %in% names(out))
+  expect_true(all(is.na(out$Predicted[out$Metric != "NA's"])))
+  expect_equal(out$Predicted[out$Metric == "NA's"], 4)
+  expect_equal(out$Actual[out$Metric == "Mean"], 2.5)
+})
+
+test_that("stats_table_vectors reads the uploaded rows the card reads", {
+  # rows 1-2 are co-located: the run's point set de-duplicates them, the
+  # descriptive table (card and export alike) must not.
+  df <- data.frame(site = c("A", "A", "A", "B"), x = c(1, 1, 2, 3), y = c(1, 1, 2, 3),
+                   tn = c(0.1, 0.3, 0.2, 0.9), tn_cve = c(0.12, 0.28, 0.21, 0.8),
+                   tn_ss = c(9, 9, 9, 7))
+  meta <- list(actual = "tn", pred = "tn_cve", pred_ss = "tn_ss",
+               comp_mode = FALSE, value_type = "actual")
+
+  sv <- stats_table_vectors(df, meta, "site", "A")
+  expect_equal(sv$act, c(0.1, 0.3, 0.2))
+  expect_null(sv$pre)                     # the run mapped no predictions
+
+  meta$comp_mode <- TRUE
+  expect_equal(stats_table_vectors(df, meta, "site", NULL)$pre, df$tn_cve)
+  meta$value_type <- "pred_ss"            # a Single-Split run describes _ss
+  expect_equal(stats_table_vectors(df, meta, "site", "B")$pre, 7)
+
+  meta$actual <- "absent"
+  expect_null(stats_table_vectors(df, meta, "site", NULL))
+})
+
+test_that("summary_stats_df pairs two columns even when only one carries NAs", {
+  a <- c(1, 2, 3, NA, 5, 6)
+  b <- c(2, 3, 4, 5, 6, 7)
+
+  out <- summary_stats_df(a, b, labels = c("Actual", "Predicted"))
+
+  expect_equal(names(out), c("Metric", "Actual", "Predicted"))
+  expect_equal(nrow(out), 7)
+  expect_true("NA's" %in% out$Metric)
+  expect_equal(out$Actual[out$Metric == "NA's"], 1)
+  expect_equal(out$Predicted[out$Metric == "NA's"], 0)
+  # the statistics themselves are summary()'s, computed on the complete values
+  expect_equal(out$Actual[out$Metric == "Mean"], round(mean(a, na.rm = TRUE), 3))
+  expect_equal(out$Predicted[out$Metric == "Max."], round(max(b), 3))
+})
+
+test_that("summary_stats_df hides the missing-value row when there is none", {
+  out <- summary_stats_df(1:10, 2:11, labels = c("A", "B"))
+  expect_false("NA's" %in% out$Metric)
+  expect_equal(nrow(out), 6)
+})
+
+test_that("summary_stats_df returns NULL for an all-missing or empty vector", {
+  expect_null(summary_stats_df(c(NA, NA)))
+  expect_null(summary_stats_df(numeric(0)))
+  expect_null(summary_stats_df(NULL))
+})

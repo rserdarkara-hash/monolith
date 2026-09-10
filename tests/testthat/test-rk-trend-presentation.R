@@ -116,3 +116,55 @@ test_that("shiny::validate is never called unqualified (jsonlite masks it)", {
   }))
   expect_equal(as.character(hits), character(0))
 })
+
+# ── rk_fit_stats_df ───────────────────────────────────────────────────────
+# The export flavour of the fit-statistic chips: those six numbers are the
+# only place the trend model's fit is reported, and the coefficient export
+# alone loses them.
+
+test_that("rk_fit_stats_df carries every chip the panel shows", {
+  fit <- make_rk_fixture()
+  s <- summary(fit)
+  out <- rk_fit_stats_df(s)
+
+  expect_equal(names(out), c("Statistic", "Value"))
+  val <- function(nm) out$Value[out$Statistic == nm]
+  expect_equal(val("R²"), s$r.squared)
+  expect_equal(val("Adj. R²"), s$adj.r.squared)
+  expect_equal(val("Residual SE"), s$sigma)
+  expect_equal(val("Residual df"), s$df[2])
+  expect_equal(val("F statistic"), unname(s$fstatistic[1]))
+  expect_equal(val("n"), sum(s$df[1:2]))
+  expect_equal(val("Model p"),
+               unname(stats::pf(s$fstatistic[1], s$fstatistic[2], s$fstatistic[3],
+                                lower.tail = FALSE)))
+  expect_true(is.numeric(out$Value))
+  expect_null(rk_fit_stats_df(NULL))
+})
+
+# ── rk_coef_export_df ─────────────────────────────────────────────────────
+# The exported coefficient sheet: the panel's table in numbers, so a p below
+# 0.001 is a p and not the string "< 0.001", and the CI is two columns.
+
+test_that("rk_coef_export_df carries every statistic as a full-precision number", {
+  fit <- make_rk_fixture()
+  s <- summary(fit)
+  out <- rk_coef_export_df(s)
+
+  expect_equal(names(out), c("Term", "Estimate", "Std. Error", "CI Lower (95%)",
+                             "CI Upper (95%)", "t value", "p value", "Sig."))
+  num_cols <- setdiff(names(out), c("Term", "Sig."))
+  expect_true(all(vapply(out[num_cols], is.numeric, logical(1))))
+
+  ci <- confint(fit)
+  expect_equal(out$Estimate, unname(coef(fit)))
+  expect_equal(out$`Std. Error`, unname(s$coefficients[, "Std. Error"]))
+  expect_equal(out[["CI Lower (95%)"]], unname(ci[, 1]))
+  expect_equal(out[["CI Upper (95%)"]], unname(ci[, 2]))
+  expect_equal(out[["t value"]], unname(s$coefficients[, "t value"]))
+  expect_equal(out[["p value"]], unname(s$coefficients[, "Pr(>|t|)"]))
+  expect_true(any(out[["p value"]] < 1e-3))            # stays a number
+  expect_equal(out$Sig., unname(vapply(s$coefficients[, "Pr(>|t|)"], signif_stars, character(1))))
+  expect_equal(out$Term, rk_coef_table(s)$Term)        # same labels as the panel
+  expect_null(rk_coef_export_df(NULL))
+})

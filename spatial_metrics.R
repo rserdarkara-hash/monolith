@@ -319,7 +319,10 @@ perform_cv <- function(cv_obj, moran = TRUE, round_values = TRUE) {
       # too, the way every other metric in `res` already does.
       res$moran_i <- rnd(mor$i, 4)
       res$moran_e <- rnd(mor$e_i, 4)
-      res$moran_p <- rnd(mor$p, 4)
+      # The p-value is never rounded: at 4 dp a p below 5e-5 becomes exactly
+      # 0, an impossible value that then sits in an exported numeric column.
+      # Every display formats it through format_p_value() anyway.
+      res$moran_p <- mor$p
   }
   
   return(res)
@@ -511,6 +514,16 @@ CV_REPEAT_METRICS <- c(rmse = "RMSE", nrmse_mean = "NRMSE (%)", mae = "MAE",
                        r2 = "R² (Corr)", nse = "R² (NSE/Trad)", me = "Bias (ME)",
                        ccc = "Lin's CCC (Agree)", rpd = "RPD (Prec)",
                        rpiq = "RPIQ", smape = "SMAPE (%)")
+
+# Column order and labels of the Model Performance table and its export: the
+# repeat dictionary plus the three Moran fields. Built FROM CV_REPEAT_METRICS so
+# the Fold-Realization Stability table cannot relabel a metric the Model
+# Performance table still shows under its old name. It lives here rather than in
+# ui_formatting.R because global.R sources ui_helpers.R BEFORE spatial_helpers.R,
+# so a top-level reference from there would not resolve.
+CV_METRIC_LABELS <- c(CV_REPEAT_METRICS,
+                      moran_i = "Moran's I", moran_e = "Moran E[I]",
+                      moran_p = "Moran p")
 
 # mean / SD across fold realizations. A metric that is undefined in ANY repeat
 # (NA by the augment_metrics convention) is reported as NA rather than averaged

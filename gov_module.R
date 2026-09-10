@@ -84,8 +84,7 @@ gov_factors_ui <- function(id) {
               )
             ),
             shiny::hr(),
-            shiny::h4("Tabular Data Metrics"),
-            DT::dataTableOutput(ns("gov_summary_table"))
+            sci_table(ns("gov_summary_table"), "Tabular Data Metrics", title_tag = shiny::h4)
           )
         )
       )
@@ -384,7 +383,9 @@ gov_factors_server <- function(id, data_reactive, vars_metadata_reactive) {
       }
       colnames(vip_df) <- c("Governing Factor / Metric", "Value (Dropout Loss | OOB %)")
 
-      DT::datatable(vip_df, options = list(pageLength = 6, dom = 't', scrollX = TRUE), rownames = FALSE)
+      # paging off: dom = 't' shows no paging controls, so rows past the first
+      # page would be unreachable on screen and missing from a copy.
+      DT::datatable(vip_df, options = list(dom = 't', paging = FALSE, scrollX = TRUE), rownames = FALSE)
     })
     
     gov_build_imp_plot <- function() { shiny::req(gov_rv$res); gov_create_plot("importance", expanded = TRUE) }

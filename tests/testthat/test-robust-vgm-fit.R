@@ -416,3 +416,148 @@ test_that("the four directional variograms pool back to the omnidirectional one"
   expect_equal(as.integer(pooled$np), as.integer(omni$np))
   expect_equal(pooled$gamma, omni$gamma, tolerance = 1e-10)
 })
+
+
+# ── fitted-parameter presentation (ui_formatting.R) ────────────────────────
+# The Variogram Parameters card and its export read one builder. Sill is the
+# TOTAL sill C0 + C; structural dependency is the partial-sill share of it,
+# C / (C0 + C) x 100 — the complement of Cambardella's nugget-to-sill ratio,
+# so 100% is a pure spatial structure and 0% a pure nugget.
+
+test_that("vgm_params_row reports the total sill and the partial-sill share", {
+  m <- gstat::vgm(psill = 0.75, model = "Sph", range = 400, nugget = 0.25)
+  p <- vgm_params_row(m)
+
+  expect_equal(p$model, "Sph")
+  expect_equal(p$nugget, 0.25)
+  expect_equal(p$sill, 1.00)                     # C0 + C, not the partial sill
+  expect_equal(p$range, 400)
+  expect_equal(p$practical_range, 400)           # Sph reaches its sill at a
+  expect_true(is.na(p$kappa))                    # smoothness is Matern-only
+  expect_equal(p$sdep, 75)                       # 0.75 / 1.00 x 100
+  expect_true(is.numeric(p$sdep))
+})
+
+test_that("vgm_params_row keeps small-unit parameters at full precision", {
+  # Total N: a fitted nugget of 2.151e-4 on a total sill of 3.722e-4. At a
+  # fixed 4 dp these exported as 2e-04 / 4e-04, and the SD% a reader
+  # recomputed from that pair read 50% where the fit says 42.2%.
+  m <- gstat::vgm(psill = 3.722e-4 - 2.151e-4, model = "Exp", range = 250,
+                  nugget = 2.151e-4)
+  p <- vgm_params_row(m)
+  expect_equal(p$nugget, 2.151e-4)
+  expect_equal(p$sill, 3.722e-4)
+  expect_equal(p$sdep, (3.722e-4 - 2.151e-4) / 3.722e-4 * 100)
+  expect_equal((p$sill - p$nugget) / p$sill * 100, p$sdep)
+
+  out <- vgm_params_export_df(list(A_act = m))
+  expect_equal(out$Nugget, 2.151e-4)
+  expect_equal(out$Sill, 3.722e-4)
+
+  # the card: four significant digits below 1, not a fixed number of decimals
+  shown <- vgm_params_row(m, round_values = TRUE)
+  expect_equal(shown$nugget, 2.151e-4)
+  expect_equal(shown$sdep, round(p$sdep, 1))
+})
+
+test_that("the practical range makes families comparable; kappa travels with Matern", {
+  # 95%-of-sill distance: a (Sph), 3a (Exp), sqrt(3)a (Gau), ~4.75a (Mat nu 1.5)
+  mk <- function(model, ...) gstat::vgm(psill = 1, model = model, range = 100, nugget = 0.1, ...)
+  expect_equal(vgm_params_row(mk("Exp"))$practical_range, 300)
+  expect_equal(vgm_params_row(mk("Gau"))$practical_range, 100 * sqrt(3))
+  mat <- vgm_params_row(mk("Mat", kappa = 1.5))
+  expect_equal(mat$practical_range, 475)
+  expect_equal(mat$kappa, 1.5)
+  expect_equal(mat$range, 100)                   # the parameter a itself is kept
+  # the definition behind 3a: an exponential structure is at 1 - e^-3 = 95.0%
+  # of its sill there
+  e <- gstat::variogramLine(gstat::vgm(1, "Exp", 100), dist_vector = 300)
+  expect_equal(e$gamma, 1 - exp(-3), tolerance = 1e-12)
+})
+
+test_that("vgm_params_row reports a pure-nugget and a nested model", {
+  pure <- gstat::vgm(psill = 0.8, model = "Nug", range = 0)
+  p <- vgm_params_row(pure)
+  expect_equal(p$model, "Nug")
+  expect_equal(p$nugget, 0.8)
+  expect_equal(p$sill, 0.8)
+  expect_true(is.na(p$range))
+  expect_equal(p$sdep, 0)
+
+  nested <- gstat::vgm(psill = 0.5, model = "Sph", range = 900,
+                       add.to = gstat::vgm(psill = 0.3, model = "Exp", range = 100,
+                                           nugget = 0.2))
+  q <- vgm_params_row(nested)
+  expect_equal(q$nugget, 0.2)
+  expect_equal(q$sill, 1.0)
+  expect_equal(q$sdep, 80)
+  expect_match(q$model, "Sph", fixed = TRUE)
+  expect_match(q$model, "Exp", fixed = TRUE)
+  # the structure that reaches its sill last: Sph at 900 m, not Exp at 3 x 100 m
+  expect_equal(q$range, 900)
+  expect_equal(q$practical_range, 900)
+})
+
+test_that("vgm_params_row gives a pure nugget 0% and a nugget-free fit 100%", {
+  pure_nug <- gstat::vgm(psill = 0, model = "Sph", range = 100, nugget = 1)
+  expect_equal(vgm_params_row(pure_nug)$sdep, 0)
+
+  no_nug <- gstat::vgm(psill = 2, model = "Exp", range = 100, nugget = 0)
+  expect_equal(vgm_params_row(no_nug)$sdep, 100)
+
+  absent <- vgm_params_row(NULL)
+  expect_true(is.na(absent$model))
+  expect_true(is.na(absent$sdep))
+})
+
+test_that("vgm_params_export_df is one tidy numeric row per fitted target", {
+  fits <- list(
+    A_act = gstat::vgm(psill = 0.6, model = "Sph", range = 300, nugget = 0.4),
+    A_pre = gstat::vgm(psill = 0.9, model = "Exp", range = 500, nugget = 0.1),
+    B_act = gstat::vgm(psill = 1.0, model = "Gau", range = 200, nugget = 0.0)
+  )
+  out <- vgm_params_export_df(fits)
+
+  expect_equal(names(out), c("Locality", "Target", "Model", "Kappa", "Nugget", "Sill",
+                             "Range (a)", "Practical Range", "Structural Dep. (%)"))
+  expect_equal(nrow(out), 3)
+  expect_equal(out$Locality, c("A", "A", "B"))
+  expect_equal(out$Target, c("Actual", "Predicted", "Actual"))
+  expect_true(all(vapply(out[4:9], is.numeric, logical(1))))
+  expect_equal(out$Sill, c(1.0, 1.0, 1.0))
+  expect_equal(out$`Range (a)`, c(300, 500, 200))
+  # Sph 300 x 1, Exp 500 x 3, Gau 200 x sqrt(3): comparable across the rows
+  expect_equal(out$`Practical Range`, c(300, 1500, 200 * sqrt(3)))
+  expect_equal(out$`Structural Dep. (%)`, c(60, 90, 100))
+
+  # one locality only
+  expect_equal(nrow(vgm_params_export_df(fits, locs = "B")), 1)
+  expect_null(vgm_params_export_df(list()))
+})
+
+test_that("vgm_params_table_df transposes a named locality and pools the total", {
+  fits <- list(
+    A_act = gstat::vgm(psill = 0.6, model = "Sph", range = 300, nugget = 0.4),
+    A_pre = gstat::vgm(psill = 0.9, model = "Exp", range = 500, nugget = 0.1)
+  )
+
+  one <- vgm_params_table_df(fits, "A")
+  expect_equal(names(one), c("Param", "Actual", "Predicted"))
+  expect_equal(one$Param, c("Model", "Nugget", "Sill", "Range (a)",
+                            "Practical Range", "Structural Dep."))
+  expect_equal(one$Actual, c("Sph", "0.4", "1", "300", "300", "60%"))
+  expect_equal(one$Predicted[5], "1500")         # Exp: 3 x 500
+
+  # a fit with no predicted counterpart drops the column rather than filling NA
+  act_only <- vgm_params_table_df(fits["A_act"], "A")
+  expect_equal(names(act_only), c("Param", "Actual"))
+
+  # the combined card is the export frame at display rounding
+  total <- vgm_params_table_df(fits, "Total (Combined)")
+  expect_equal(total, vgm_params_export_df(fits, round_values = TRUE))
+
+  mat <- vgm_params_table_df(list(M_act = gstat::vgm(1, "Mat", 100, 0.2, kappa = 1.5)), "M")
+  expect_equal(mat$Actual[1], "Mat (kappa = 1.5)")
+
+  expect_null(vgm_params_table_df(fits, "Missing"))
+})

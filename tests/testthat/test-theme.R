@@ -342,6 +342,11 @@ test_that("no UI file paints a colour outside the token set", {
     "(#[0-9A-Fa-f]{3,8}|white|black|red|silver|gray|grey|whitesmoke)\\b"
   )
 
+  # NOT an exemption list entry, but deliberately outside this scan:
+  # server_export.R's `fgFill = "#EFEFEF"` is the exported worksheet's header
+  # fill. Excel has no access to the interface tokens, so a literal is correct
+  # there. The pattern does not match `fgFill =`; if it is ever widened to
+  # catch hex values in any argument, exempt that line rather than "fixing" it.
   # The north arrow is drawn ON basemap tiles by leaflet's addControl(), not on
   # an app surface, so it is white-over-shadow in both variants by design.
   exempt <- "text-shadow: 1px 1px 2px black"
@@ -392,4 +397,110 @@ test_that("export_plot_to_file writes at the requested size and format", {
 
   expect_true(file.exists(path))
   expect_gt(file.info(path)$size, 0)
+})
+
+# ── copy a result table to the clipboard ──────────────────────────────────
+# The button is the table's counterpart to a figure card's PNG download. The
+# script is shipped as a string from ui_components.R so its contract is
+# testable without a browser.
+
+test_that("copy_table_btn is a plain button, not a Shiny input", {
+  html <- as.character(copy_table_btn("metrics_table", "Model Performance"))
+
+  expect_match(html, "mnCopyTable(&#39;metrics_table&#39;, this);", fixed = TRUE)
+  expect_match(html, "mn-copy-btn", fixed = TRUE)
+  expect_match(html, 'aria-label="Copy the Model Performance table to the clipboard"',
+               fixed = TRUE)
+  # a copy needs no server round-trip, so it must not bind as an action button
+  expect_false(grepl("action-button", html, fixed = TRUE))
+  # a non-character title (an HTML tag) must not leak into the aria-label
+  expect_match(as.character(copy_table_btn("t", shiny::tags$span("x"))),
+               'aria-label="Copy the table to the clipboard"', fixed = TRUE)
+})
+
+test_that("sci_table pairs a table output with its copy button", {
+  html <- as.character(sci_table("metrics_table", "Model Performance",
+                                 shiny::uiOutput("cv_strategy_badge")))
+
+  expect_match(html, 'id="metrics_table"', fixed = TRUE)
+  expect_match(html, "sci-table-head", fixed = TRUE)
+  expect_match(html, "table-container", fixed = TRUE)
+  expect_match(html, "mnCopyTable(&#39;metrics_table&#39;, this);", fixed = TRUE)
+  # extra content sits between the title strip and the table
+  expect_match(html, "cv_strategy_badge", fixed = TRUE)
+  expect_lt(regexpr("cv_strategy_badge", html, fixed = TRUE),
+            regexpr("table-container", html, fixed = TRUE))
+
+  # a renderUI that emits its own <table> supplies its own content
+  lift <- as.character(sci_table("lift_ui", content = shiny::uiOutput("lift_ui")))
+  expect_match(lift, "mnCopyTable(&#39;lift_ui&#39;, this);", fixed = TRUE)
+  expect_false(grepl("table-container", lift, fixed = TRUE))
+})
+
+test_that("the copy script writes both clipboard flavours and handles scrollX", {
+  js <- copy_table_js()
+
+  # both flavours, or the paste lands as a single cell in Excel
+  expect_match(js, "'text/html'", fixed = TRUE)
+  expect_match(js, "'text/plain'", fixed = TRUE)
+  # DataTables splits the header into a cloned table under scrollX
+  expect_match(js, "dataTables_scrollHead thead", fixed = TRUE)
+  expect_match(js, "dataTables_scrollBody tbody", fixed = TRUE)
+  # async API first, execCommand fallback for an insecure origin
+  expect_match(js, "navigator.clipboard.write", fixed = TRUE)
+  expect_match(js, "document.execCommand('copy')", fixed = TRUE)
+  # tab-separated rows, CRLF-terminated, is what a spreadsheet parses
+  expect_match(js, "r.join('\\t')", fixed = TRUE)
+  expect_match(js, "lines.join('\\r\\n')", fixed = TRUE)
+  expect_match(js, "mn_copy_live", fixed = TRUE)
+})
+
+test_that("the copy script reads a paginated DataTable through its API", {
+  js <- copy_table_js()
+  # the tbody of a paged DataTable holds the current page only
+  expect_match(js, "jq.fn.dataTable.isDataTable(bodyTable)", fixed = TRUE)
+  expect_match(js, "search: 'applied'", fixed = TRUE)
+  expect_match(js, "render('display')", fixed = TRUE)
+  # server-side paging leaves rows unreachable: report it, never claim the whole
+  expect_match(js, "recordsDisplay", fixed = TRUE)
+  expect_match(js, "Copied only ", fixed = TRUE)
+  # status messages are reported, not copied as a 1 x 1 table
+  expect_match(js, "table.mn-status-table", fixed = TRUE)
+  # focus returns to the button after the execCommand fallback
+  expect_match(js, "btn.focus()", fixed = TRUE)
+})
+
+test_that("sci_dt marks a status message so the copy button reports it", {
+  cls <- function(w) w$x$container
+  expect_match(cls(sci_dt(NULL)), "mn-status-table", fixed = TRUE)
+  expect_match(cls(sci_dt(data.frame(Status = "Awaiting classification"))),
+               "mn-status-table", fixed = TRUE)
+  expect_false(grepl("mn-status-table", cls(sci_dt(data.frame(a = 1, b = 2))), fixed = TRUE))
+  expect_false(grepl("mn-status-table",
+                     cls(sci_dt(data.frame(Status = c("x", "y")))), fixed = TRUE))
+})
+
+test_that("the clipboard payload carries no colour of its own", {
+  # It is a document bound for Word or Excel, which supply their own palette;
+  # a literal here would also be a one-variant colour in a shipped .R file.
+  js <- copy_table_js()
+  expect_false(grepl("(background|background-color|border-color)\\s*:", js, perl = TRUE))
+  expect_false(grepl("#[0-9A-Fa-f]{3,8}", js, perl = TRUE))
+  # borders and the bold header come from the receiving application instead
+  expect_match(js, 'border="1"', fixed = TRUE)
+  expect_match(js, "<th style=", fixed = TRUE)
+})
+
+test_that("the copy script is mounted in the shipped UI", {
+  # htmltools hoists tags$head content out of the body, so the script has to be
+  # read from renderTags()$head rather than from as.character(ui).
+  rendered <- htmltools::renderTags(ui)
+  head_html <- paste(as.character(rendered$head), collapse = "")
+  body_html <- as.character(rendered$html)
+
+  expect_match(head_html, "window.mnCopyTable", fixed = TRUE)
+  expect_match(head_html, "window.mnTablePayload", fixed = TRUE)
+  # the live region and the copy buttons live in the body
+  expect_match(body_html, 'id="mn_copy_live"', fixed = TRUE)
+  expect_match(body_html, "mn-copy-btn", fixed = TRUE)
 })

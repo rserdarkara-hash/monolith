@@ -232,6 +232,231 @@ sci_plot_card <- function(id, title, height = "350px",
   )
 }
 
+# ── Copy-a-table-to-the-clipboard ────────────────────────────────────────────
+# The counterpart to the PNG button on every figure card: a result table is
+# read off the DOM and put on the clipboard in two flavours at once - an HTML
+# table (Word, Google Docs, and the flavour Excel prefers, so it lands in
+# cells) and tab-separated plain text (anything else, and Excel's own fallback
+# parser). Reading the rendered table rather than round-tripping to the server
+# means the clipboard carries exactly what the reader is looking at, including
+# the displayed rounding, and costs no reactive traffic.
+#
+# NO colour literals in the emitted markup: the payload is a document bound for
+# another application, not app chrome, and the receiving program supplies its
+# own palette. border="1" plus <th> is all the formatting Word and Excel need.
+copy_table_js <- function() {
+  "
+window.mnTableRows = function (targetId) {
+  var root = document.getElementById(targetId);
+  if (!root) return null;
+  // A status message rendered as a one-cell table (sci_dt(NULL), a module's
+  // empty state) is not a result: say what it says instead of copying it.
+  var status = root.querySelector('table.mn-status-table tbody td');
+  if (status) return { status: (status.textContent || '').trim() };
+  // DataTables in scrollX mode clones the header into a table of its own, so
+  // a single querySelector('table') would return a header with no body.
+  var thead = root.querySelector('.dataTables_scrollHead thead, .dt-scroll-head thead');
+  var tbody = root.querySelector('.dataTables_scrollBody tbody, .dt-scroll-body tbody');
+  if (!thead || !tbody) {
+    var t = root.querySelector('table');
+    if (!t) return null;
+    thead = t.querySelector('thead');
+    tbody = t.querySelector('tbody');
+  }
+  var text = function (s) { return String(s == null ? '' : s).replace(/\\s+/g, ' ').trim(); };
+  var cell = function (el) { return text(el.textContent); };
+  var rowCells = function (tr) { return Array.prototype.map.call(tr.cells, cell); };
+  var rows = function (sect) {
+    if (!sect) return [];
+    return Array.prototype.map.call(sect.rows, rowCells);
+  };
+  var head = rows(thead);
+  var body;
+  var total = null;
+  // The tbody of a paginated DataTable holds the CURRENT PAGE only, so rows
+  // are read through the DataTables API instead: every row that passes the
+  // search, in display order, across all pages. A row not yet drawn has no
+  // node, so its cells come from the API's display rendering.
+  var bodyTable = tbody ? tbody.parentNode : null;
+  var jq = window.jQuery;
+  if (bodyTable && jq && jq.fn.dataTable && jq.fn.dataTable.isDataTable(bodyTable)) {
+    var api = jq(bodyTable).DataTable();
+    var sel = { search: 'applied', order: 'applied' };
+    var cols = api.columns().indexes().toArray().filter(function (c) {
+      return api.column(c).visible();
+    });
+    var scratch = document.createElement('div');
+    body = api.rows(sel).indexes().toArray().map(function (r) {
+      var node = api.row(r).node();
+      if (node) return rowCells(node);
+      return cols.map(function (c) {
+        scratch.innerHTML = String(api.cell(r, c).render('display'));
+        return text(scratch.textContent);
+      });
+    });
+    // Server-side processing keeps other pages on the server; say so rather
+    // than presenting one page as the whole table.
+    total = api.page.info().recordsDisplay;
+  } else {
+    body = rows(tbody);
+    // DT's empty state is one full-width 'No data available in table' cell.
+    if (body.length === 1 && body[0].length === 1 && head.length && head[0].length > 1) body = [];
+  }
+  if (!head.length && !body.length) return null;
+  return { head: head, body: body, total: total };
+};
+
+window.mnTablePayload = function (targetId) {
+  var d = window.mnTableRows(targetId);
+  if (!d) return null;
+  if (d.status !== undefined) return { status: d.status };
+  var esc = function (s) {
+    return String(s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+  };
+  var isNum = function (s) { return /^-?(\\d+(\\.\\d+)?|\\.\\d+)([eE][-+]?\\d+)?$/.test(s); };
+  var html = ['<table border=\"1\" cellspacing=\"0\" cellpadding=\"4\" style=\"border-collapse:collapse;font-family:Calibri,Arial,sans-serif;font-size:11pt;\">'];
+  var lines = [];
+  if (d.head.length) {
+    html.push('<thead>');
+    d.head.forEach(function (r) {
+      html.push('<tr>' + r.map(function (c) {
+        return '<th style=\"text-align:left;\">' + esc(c) + '</th>';
+      }).join('') + '</tr>');
+      lines.push(r.join('\\t'));
+    });
+    html.push('</thead>');
+  }
+  html.push('<tbody>');
+  d.body.forEach(function (r) {
+    html.push('<tr>' + r.map(function (c) {
+      return '<td style=\"text-align:' + (isNum(c) ? 'right' : 'left') + ';\">' + esc(c) + '</td>';
+    }).join('') + '</tr>');
+    lines.push(r.join('\\t'));
+  });
+  html.push('</tbody></table>');
+  return {
+    html: html.join(''),
+    text: lines.join('\\r\\n'),
+    rows: d.body.length,
+    total: d.total,
+    cols: d.head.length ? d.head[0].length : (d.body[0] || []).length
+  };
+};
+
+window.mnCopyFlash = function (btn, ok, msg) {
+  var live = document.getElementById('mn_copy_live');
+  // Clear first: a live region does not re-announce identical text, so a
+  // second copy of the same table would otherwise pass in silence.
+  if (live) {
+    live.textContent = '';
+    setTimeout(function () { live.textContent = msg; }, 60);
+  }
+  if (!btn) return;
+  var ic = btn.querySelector('i');
+  if (ic && !btn.getAttribute('data-mn-icon')) btn.setAttribute('data-mn-icon', ic.className);
+  if (ic) ic.className = ok ? 'fa fa-check' : 'fa fa-exclamation-triangle';
+  btn.classList.add(ok ? 'mn-copied' : 'mn-copy-failed');
+  clearTimeout(btn.mnCopyTimer);
+  btn.mnCopyTimer = setTimeout(function () {
+    if (ic) ic.className = btn.getAttribute('data-mn-icon') || 'fa fa-copy';
+    btn.classList.remove('mn-copied');
+    btn.classList.remove('mn-copy-failed');
+  }, 1600);
+};
+
+window.mnCopyTable = function (targetId, btn) {
+  var p = window.mnTablePayload(targetId);
+  if (!p) { window.mnCopyFlash(btn, false, 'Nothing to copy: this table is empty.'); return; }
+  if (p.status !== undefined) {
+    window.mnCopyFlash(btn, false, 'Nothing to copy: ' + (p.status || 'this table is empty.'));
+    return;
+  }
+  var partial = p.total != null && p.total > p.rows;
+  var done = function (ok) {
+    window.mnCopyFlash(btn, ok && !partial, !ok
+      ? 'Copy failed. Select the table and press Ctrl+C.'
+      : partial
+        ? ('Copied only ' + p.rows + ' of ' + p.total + ' rows: the rest are on other pages of this table.')
+        : ('Copied ' + p.rows + ' rows x ' + p.cols + ' columns to the clipboard.'));
+  };
+  // execCommand path: the only one that reaches an insecure-origin session
+  // (an app served over plain http from anything but localhost), and the
+  // fallback whenever the async API is refused. The copy handler supplies both
+  // flavours; the throwaway textarea exists because Chrome refuses
+  // execCommand('copy') with no selection.
+  var legacy = function () {
+    var handler = function (e) {
+      e.clipboardData.setData('text/html', p.html);
+      e.clipboardData.setData('text/plain', p.text);
+      e.preventDefault();
+    };
+    document.addEventListener('copy', handler);
+    var ta = document.createElement('textarea');
+    ta.value = p.text;
+    ta.setAttribute('aria-hidden', 'true');
+    ta.style.cssText = 'position:fixed;top:-1000px;left:-1000px;opacity:0;';
+    document.body.appendChild(ta);
+    ta.select();
+    var ok = false;
+    try { ok = document.execCommand('copy'); } catch (err) { ok = false; }
+    document.removeEventListener('copy', handler);
+    document.body.removeChild(ta);
+    // The textarea held focus; removing it would drop keyboard focus to <body>.
+    if (btn && btn.focus) btn.focus();
+    done(ok);
+  };
+  if (navigator.clipboard && window.ClipboardItem && window.isSecureContext) {
+    try {
+      navigator.clipboard.write([new ClipboardItem({
+        'text/html': new Blob([p.html], { type: 'text/html' }),
+        'text/plain': new Blob([p.text], { type: 'text/plain' })
+      })]).then(function () { done(true); }, legacy);
+      return;
+    } catch (err) { /* fall through to legacy */ }
+  }
+  legacy();
+};
+"
+}
+
+# Icon-only copy control. Deliberately NOT an action-button: nothing about a
+# clipboard copy needs the server, so it stays a plain <button> and sends no
+# input. `target_id` is the DOM id of the element that CONTAINS the table -
+# for a DT output that is the output id itself, already namespaced inside a
+# module.
+copy_table_btn <- function(target_id, label = NULL) {
+  what <- if (is.character(label) && length(label) == 1 && nzchar(label)) {
+    paste0(label, " table")
+  } else {
+    "table"
+  }
+  tags$button(
+    type = "button",
+    class = "btn btn-xs btn-light mn-copy-btn",
+    title = "Copy this table to the clipboard (paste into Word or Excel)",
+    "aria-label" = paste("Copy the", what, "to the clipboard"),
+    onclick = sprintf("mnCopyTable('%s', this);", target_id),
+    icon("copy")
+  )
+}
+
+# A result table with the same title-and-tools strip a figure card carries.
+# `...` is anything that belongs between the title and the table (a badge, a
+# binning selector); `content` overrides the default DT output for a table that
+# is emitted by a renderUI instead.
+sci_table <- function(id, title = NULL, ..., title_tag = h5, label = NULL,
+                      content = div(class = "table-container", DT::dataTableOutput(id))) {
+  copy_label <- label %||% (if (is.character(title) && length(title) == 1) title else NULL)
+  div(class = "sci-table-block",
+      div(class = "sci-table-head",
+          if (!is.null(title)) title_tag(title, class = "sci-table-title") else tags$span(),
+          copy_table_btn(id, copy_label)
+      ),
+      ...,
+      content
+  )
+}
+
 # Unified results-card container: one plain surface with a hairline border.
 # Cards used to carry a coloured left bar to tell them apart; the title does
 # that, and a bar of colour per card competed with the class-break and
@@ -285,7 +510,7 @@ build_rk_trend_ui <- function(lm_sum, dt_id, raw_id) {
         chip("Model p", format_p_value(stats$f_p)),
         chip("n", as.character(stats$n))
     ),
-    div(class = "table-container", DT::dataTableOutput(dt_id)),
+    sci_table(dt_id, label = "regression coefficients"),
     tags$p(style = "font-size: 0.72em; opacity: 0.65; margin-top: 6px;",
            "Signif. codes: *** p ≤ 0.001, ** p ≤ 0.01, * p ≤ 0.05, . p ≤ 0.1. CI = 95% confidence interval (t-based)."),
     # The trend is fitted by OLS and its residuals are then kriged BECAUSE they
@@ -537,6 +762,10 @@ sci_dt <- function(df, escape = TRUE, header_tooltips = NULL) {
     header_tooltips <- NULL
     escape <- TRUE
   }
+  # A one-cell Status/Error frame is a message, not a result: the class tells
+  # the copy button to report it instead of copying a 1 x 1 "table".
+  status_like <- ncol(df) == 1 && nrow(df) == 1 && names(df)[1] %in% c("Status", "Error")
+  tbl_class <- if (status_like) "display mn-status-table" else "display"
   opts <- list(dom = 't', paging = FALSE, scrollX = TRUE)
   if (!is.null(header_tooltips)) {
     ths <- lapply(names(df), function(nm) {
@@ -547,12 +776,12 @@ sci_dt <- function(df, escape = TRUE, header_tooltips = NULL) {
         htmltools::tags$th(nm)
       }
     })
-    container <- htmltools::tags$table(class = "display",
+    container <- htmltools::tags$table(class = tbl_class,
                                        htmltools::tags$thead(do.call(htmltools::tags$tr, ths)))
     return(DT::datatable(df, options = opts, rownames = FALSE, escape = escape,
-                         container = container))
+                         container = container, class = tbl_class))
   }
-  DT::datatable(df, options = opts, rownames = FALSE, escape = escape)
+  DT::datatable(df, options = opts, rownames = FALSE, escape = escape, class = tbl_class)
 }
 
 # `step` is the 1-4 index of the phase strip entry currently running; earlier

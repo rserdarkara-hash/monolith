@@ -1170,6 +1170,41 @@ export_raster_payload <- function(item) {
   NULL
 }
 
+#' Excel sheet name for an export-registry table: at most 31 characters, only
+#' letters, digits and spaces (anything else becomes "_"), and unique within
+#' `used` ignoring case, which is how Excel and openxlsx compare sheet names.
+#' Every label in a run opens with "<variable label> - " and a workbook holds
+#' one variable's run, so exactly that prefix is dropped and the part that tells
+#' the sheets apart (locality and table name) is kept. The prefix is matched as a
+#' whole string, never up to the first " - ": a variable label can contain
+#' " - " itself. A clash gets "_Pre" for a predicted-surface item, else a counter.
+export_sheet_name <- function(label, id = "", used = character(0), var_label = NULL) {
+  label <- label %||% ""
+  id <- id %||% ""
+  taken <- function(x) tolower(x) %in% tolower(used)
+  if (is.character(var_label) && length(var_label) == 1 && !is.na(var_label) &&
+      nzchar(var_label) && startsWith(label, paste0(var_label, " - "))) {
+    label <- substring(label, nchar(var_label) + 4L)
+  }
+  clean <- function(s) trimws(gsub("[^a-zA-Z0-9 ]", "_", s))
+  name <- clean(label)
+  if (!nzchar(name)) name <- clean(id)
+  if (!nzchar(name)) name <- paste0("Table_", length(used) + 1L)
+  fit <- function(base, suffix) paste0(trimws(substr(base, 1, 31 - nchar(suffix))), suffix)
+  name <- fit(name, "")
+  if (taken(name)) {
+    suffix <- if (grepl("_pre_|_pre$", id)) "_Pre" else "_2"
+    counter <- 2
+    candidate <- fit(name, suffix)
+    while (taken(candidate)) {
+      counter <- counter + 1
+      candidate <- fit(name, paste0("_", counter))
+    }
+    name <- candidate
+  }
+  name
+}
+
 #' File extension for a styler format token ("gtiff" writes a .tif).
 styler_format_ext <- function(fmt) {
   switch(fmt %||% "png",

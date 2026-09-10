@@ -21,7 +21,9 @@ unscaled_pca_note <- function(panel = c("contrib", "cos2")) {
 # NULL (the app-wide convention behind sci_dt's placeholder, ui_components.R);
 # a silent blank table also hides WHY there is nothing to show.
 desc_empty_dt <- function(msg = "No data for this selection.") {
-  DT::datatable(data.frame(Message = msg), options = list(dom = "t"), rownames = FALSE)
+  # mn-status-table: the copy button reports the message instead of copying it
+  DT::datatable(data.frame(Message = msg), options = list(dom = "t"), rownames = FALSE,
+                class = "display mn-status-table")
 }
 
 compute_normality <- function(x) {
@@ -129,8 +131,7 @@ desc_exploratory_ui <- function(id) {
                       shiny::plotOutput(ns("desc_main_plot"), height = "500px")
                   ),
                   shiny::hr(),
-                  shiny::h4("Group Statistics"),
-                  DT::dataTableOutput(ns("desc_summary_table"))
+                  sci_table(ns("desc_summary_table"), "Group Statistics", title_tag = shiny::h4)
                 )
               )
             )
@@ -154,8 +155,7 @@ desc_exploratory_ui <- function(id) {
                       shiny::plotOutput(ns("corr_main_plot"), height = "500px")
                   ),
                   shiny::hr(),
-                  shiny::h4("Correlation Matrix"),
-                  DT::dataTableOutput(ns("corr_summary_table"))
+                  sci_table(ns("corr_summary_table"), "Correlation Matrix", title_tag = shiny::h4)
                 )
               )
             )
@@ -191,8 +191,7 @@ desc_exploratory_ui <- function(id) {
                   shiny::hr(),
                   shiny::conditionalPanel(
                     condition = sprintf("input['%s'] == 'yes'", ns("pca_ready_flag")),
-                    shiny::h4("PCA Results"),
-                    DT::dataTableOutput(ns("pca_summary_table"))
+                    sci_table(ns("pca_summary_table"), "PCA Results", title_tag = shiny::h4)
                   )
                 )
               )
@@ -608,7 +607,9 @@ desc_exploratory_server <- function(id, data_reactive, vars_metadata_reactive,
       }
       
       DT::datatable(res, options = list(pageLength = 10, dom = 'tip', scrollX = TRUE))
-    })
+      # server = FALSE: every page is in the browser, so the copy button can
+      # read the whole table rather than the page on screen.
+    }, server = FALSE)
     
     output$corr_vars_ui <- shiny::renderUI({
       req(data_reactive())
@@ -876,10 +877,14 @@ desc_exploratory_server <- function(id, data_reactive, vars_metadata_reactive,
         cormat <- round(cormat, 3)
         cormat_df <- as.data.frame(cormat)
 
-        return(DT::datatable(cormat_df, options = list(pageLength = 10, dom = 't', scrollX = TRUE),
+        # paging off: dom = 't' shows no paging controls, so a matrix of more
+        # than ten variables lost its lower rows on screen and in a copy.
+        return(DT::datatable(cormat_df, options = list(dom = 't', paging = FALSE, scrollX = TRUE),
                              caption = complete_case_note(nrow(df_clean), nrow(df))))
       }
-    })
+      # server = FALSE: the paged cross-correlogram and pairwise tables keep
+      # every page in the browser, so the copy button reads them whole.
+    }, server = FALSE)
     
     output$pca_vars_ui <- shiny::renderUI({
       req(data_reactive())
@@ -1075,7 +1080,9 @@ desc_exploratory_server <- function(id, data_reactive, vars_metadata_reactive,
           Cumulative_Variance_Pct = round(cum_var * 100, 2)
        )
   
-       DT::datatable(df_res, options = list(pageLength = 10, dom = 't', scrollX = TRUE), rownames = FALSE)
+       # paging off: dom = 't' shows no paging controls (components past the
+       # tenth were unreachable on screen and missing from a copy)
+       DT::datatable(df_res, options = list(dom = 't', paging = FALSE, scrollX = TRUE), rownames = FALSE)
     })
     
     register_expanded_modal(

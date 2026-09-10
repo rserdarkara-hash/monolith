@@ -216,53 +216,14 @@
   output$ck_variogram_plot_act <- render_ck_variogram_plot("act")
   output$ck_variogram_plot_pred <- render_ck_variogram_plot("pre")
 
+  # Table shape and the parameter arithmetic both live in vgm_params_table_df()
+  # (ui_formatting.R), shared with the export registry so a downloaded sheet
+  # cannot report a different sill or structural dependency than this card.
+  # sci_dt(NULL) is the empty state, not a NULL payload: a DT output must never
+  # be handed NULL (see sci_dt() in ui_components.R).
   output$vgm_params_table <- DT::renderDataTable({
     loc <- input$sel_loc_stats; req(loc)
-
-    get_vgm_params <- function(f) {
-      if(is.null(f)) return(rep("NA", 5))
-      mod <- as.character(f$model[2])
-      nug <- f$psill[1]
-      sill <- sum(f$psill)
-      rng <- f$range[2]
-      str_dep <- if(sill > 0) ((sill - nug) / sill) * 100 else 0
-      c(mod, round(nug, 4), round(sill, 4), round(rng, 1), paste0(round(str_dep, 1), "%"))
-    }
-
-    if(loc == "Total (Combined)") {
-      # Variograms are fitted per locality; the combined view lists every
-      # fitted locality (one row per fitted target) instead of showing nothing
-      fits <- rv$v_fit_list
-      locs <- unique(sub("_(act|pre)$", "", names(fits)))
-      rows <- list()
-      for (l in locs) {
-        for (tgt in c("act", "pre")) {
-          f <- fits[[paste0(l, "_", tgt)]]
-          if(is.null(f)) next
-          pr <- get_vgm_params(f)
-          rows[[length(rows) + 1]] <- data.frame(
-            Locality = l, Target = if(tgt == "act") "Actual" else "Predicted",
-            Model = pr[1], Nugget = pr[2], Sill = pr[3], Range = pr[4],
-            Structural.Dep. = pr[5], check.names = FALSE)
-        }
-      }
-      # sci_dt(NULL) is the empty state, not a NULL payload: a DT output must
-      # never be handed NULL (see sci_dt() in ui_components.R).
-      if(length(rows) == 0) return(sci_dt(NULL))
-      res <- do.call(rbind, rows)
-      names(res)[7] <- "Structural Dep."
-      return(sci_dt(res))
-    }
-
-    f_a <- rv$v_fit_list[[paste0(loc, "_act")]]; f_p <- rv$v_fit_list[[paste0(loc, "_pre")]]
-    if(is.null(f_a) && is.null(f_p)) return(sci_dt(NULL))
-
-    res <- data.frame(Param = c("Model", "Nugget", "Sill", "Range", "Structural Dep."),
-                      Actual = get_vgm_params(f_a))
-    # Predicted column only when a predicted-surface fit exists: an all-"NA"
-    # column for a run that never mapped predictions is just noise.
-    if (!is.null(f_p)) res$Predicted <- get_vgm_params(f_p)
-    sci_dt(res)
+    sci_dt(vgm_params_table_df(rv$v_fit_list, loc))
   })
   build_tps_gcv_diag <- function(target) {
     loc <- input$sel_loc_stats; req(loc, identical(rv$disp$method, "TPS"))
@@ -442,40 +403,18 @@
     sci_dt(build_regional_params_df(rv$disp$method, loc, rv$disp$regional_params, has_pre))
   })
 
+  # Both descriptive cards read stats_table_vectors() (ui_formatting.R), the
+  # frame their exports read too: the uploaded rows of the DISPLAYED run's
+  # localities ("Total (Combined)" = the localities that run covered), and
+  # the prediction column that run mapped, only when it mapped predictions.
   output$stats_table_total <- DT::renderDataTable({
     req(rv$user_data)
     meta <- get_display_meta()
     req(meta)
-    
-    df <- rv$user_data
-    # "Total (Combined)" means the localities covered by the DISPLAYED run,
-    # so a partial-locality run summarises only the data it interpolated
-    # (matching the run-scoped area and CV tables in this panel)
-    loc_col <- rv$mapping$loc
-    if (!is.null(meta$localities) && !is.null(loc_col) && loc_col %in% colnames(df)) {
-      df <- df %>% filter(!!sym(loc_col) %in% meta$localities)
-    }
-    v_act <- if(!is.null(meta$actual) && !is.na(meta$actual) && meta$actual %in% colnames(df)) df[[meta$actual]] else NULL
-    if (is.null(v_act)) return(sci_dt(NULL))
-
-    # Predicted summary only when the displayed run actually mapped
-    # predictions (user's choice), not merely because a prediction column
-    # exists in the uploaded data.
-    disp_has_pred <- isTRUE(meta$comp_mode) || (!is.null(meta$value_type) && !identical(meta$value_type, "actual"))
-    # Summarise the SAME prediction column the displayed run mapped: a
-    # Single-Split run must describe _ss, not fall back to the _cve column
-    # the map / CV / performance tables are not showing.
-    pv_col <- if (identical(meta$value_type, "pred_ss")) meta$pred_ss else meta$pred
-    v_pre <- if(disp_has_pred && is_valid_col_ref(pv_col) && pv_col %in% colnames(df)) df[[pv_col]] else NULL
-
-    s_a <- summary(v_act)
-    res <- data.frame(Metric = names(s_a), Total_Actual = as.character(round(as.numeric(s_a), 3)))
-
-    if(!is.null(v_pre)) {
-      s_p <- summary(v_pre)
-      res$Total_Predicted <- as.character(round(as.numeric(s_p), 3))
-    }
-    sci_dt(res)
+    sv <- stats_table_vectors(rv$user_data, meta, rv$mapping$loc, meta$localities)
+    if (is.null(sv)) return(sci_dt(NULL))
+    sci_dt(summary_stats_df(sv$act, sv$pre, labels = c("Total_Actual", "Total_Predicted"),
+                            round_values = TRUE))
   })
 
   output$stats_table_loc <- DT::renderDataTable({
@@ -483,26 +422,10 @@
     if(input$sel_loc_stats == "Total (Combined)") return(sci_dt(NULL))
     meta <- get_display_meta()
     req(meta)
-    
-    df <- rv$user_data %>% filter(!!sym(rv$mapping$loc) == input$sel_loc_stats)
-    v_act <- if(!is.null(meta$actual) && !is.na(meta$actual) && meta$actual %in% colnames(df)) df[[meta$actual]] else NULL
-    if (is.null(v_act)) return(sci_dt(NULL))
-
-    # Same gate as stats_table_total: Predicted column only when the run
-    # mapped predictions.
-    disp_has_pred <- isTRUE(meta$comp_mode) || (!is.null(meta$value_type) && !identical(meta$value_type, "actual"))
-    # Same column rule as stats_table_total: honour the displayed value_type.
-    pv_col <- if (identical(meta$value_type, "pred_ss")) meta$pred_ss else meta$pred
-    v_pre <- if(disp_has_pred && is_valid_col_ref(pv_col) && pv_col %in% colnames(df)) df[[pv_col]] else NULL
-
-    s_a <- summary(v_act)
-    res <- data.frame(Metric = names(s_a), Selected_Actual = as.character(round(as.numeric(s_a), 3)))
-    
-    if(!is.null(v_pre)) {
-      s_p <- summary(v_pre)
-      res$Selected_Predicted <- as.character(round(as.numeric(s_p), 3))
-    }
-    sci_dt(res)
+    sv <- stats_table_vectors(rv$user_data, meta, rv$mapping$loc, input$sel_loc_stats)
+    if (is.null(sv)) return(sci_dt(NULL))
+    sci_dt(summary_stats_df(sv$act, sv$pre, labels = c("Selected_Actual", "Selected_Predicted"),
+                            round_values = TRUE))
   })
 
   # Hectares per class for ONE surface, UNROUNDED and in class order (0 for a
@@ -632,6 +555,78 @@
     if(loc == "Total (Combined)") sci_dt(NULL) else sci_dt(calc_area_df(rv$rast_list_pre[[loc]], paste0("loc_pre_", loc)))
   })
 
+  # Class-area and class-agreement exports follow the CLASSIFICATION, not the
+  # run. Both tables come into existence only once the surface is classified,
+  # and Apply is normally pressed after a run - the sidebar hint says so - so
+  # registering them only at run completion left the Export panel without the
+  # two tables the Scientific Analysis tab had just gained. They are now
+  # (re-)registered whenever the committed classification changes, and
+  # calc_area_df's per-run cache means this costs nothing the on-screen tables
+  # have not already paid. Every previous area/agreement sheet is dropped
+  # first: a class system that changed (Agronomical -> Binned), a surface that
+  # went Continuous, or an agreement that became non-computable must not leave
+  # sheets from the old classification beside the new ones.
+  # classification_params() is read under tryCatch here as at every other call
+  # site: an error in an event expression is an unhandled observer error and
+  # ends the session.
+  observeEvent(list(tryCatch(classification_params(), error = function(e) NULL),
+                    rv$results_rev), {
+    req(rv$disp)
+    reg <- isolate(rv$export_registry)
+    stale <- grepl("^table_(area|kappa)_", names(reg))
+    if (any(stale)) rv$export_registry <- reg[!stale]
+
+    params_now <- tryCatch(classification_params(), error = function(e) NULL)
+    if (is.null(params_now) || !isTruthy(input$color_style %in% c("agro", "bin"))) return()
+    meta <- get_display_meta()
+    req(meta, !is.null(rv$rast))
+    has_pre <- isTRUE(rv$disp$comp_mode) || !identical(rv$disp$value_type, "actual")
+
+    reg_if_df <- function(id, label, df) {
+      if (is.data.frame(df) && nrow(df) > 0) {
+        register_export_item(id, paste(meta$label, "-", label), "table", df, meta$category)
+      }
+    }
+
+    reg_if_df("table_area_total", "Total Area Coverage",
+              tryCatch(area_df_total_act(), error = function(e) NULL))
+    if (has_pre && !is.null(rv$rast_pred)) {
+      reg_if_df("table_area_pre_total", "Total Area Coverage (Predicted)",
+                tryCatch(area_df_total_pre(), error = function(e) NULL))
+    }
+    for (l in names(rv$rast_list_act)) {
+      if (is.null(rv$rast_list_act[[l]])) next
+      reg_if_df(paste0("table_area_loc_", l), paste(l, "- Area Coverage"),
+                tryCatch(calc_area_df(rv$rast_list_act[[l]], paste0("loc_act_", l)),
+                         error = function(e) NULL))
+    }
+    if (has_pre) {
+      for (l in names(rv$rast_list_pre)) {
+        if (is.null(rv$rast_list_pre[[l]])) next
+        reg_if_df(paste0("table_area_pre_loc_", l), paste(l, "- Area Coverage (Predicted)"),
+                  tryCatch(calc_area_df(rv$rast_list_pre[[l]], paste0("loc_pre_", l)),
+                           error = function(e) NULL))
+      }
+    }
+
+    # Agreement needs an uploaded prediction column AND agronomical classes;
+    # quartile binning is a screen-side choice with no map counterpart, so the
+    # export follows the map's own class limits.
+    params_k <- tryCatch(agro_params(), error = function(e) NULL)
+    if (has_pre && !is.null(params_k) && !is.null(rv$sf)) {
+      df_k <- rv$sf %>% st_drop_geometry() %>% filter(!is.na(v), !is.na(pv))
+      reg_if_df("table_kappa_total", "Total Classification Performance (Agronomical)",
+                agreement_metrics_df(compute_agreement_metrics(df_k$v, df_k$pv,
+                                                               method = "agro", params = params_k)))
+      for (l in unique(df_k$loc)) {
+        d_l <- df_k[df_k$loc == l, , drop = FALSE]
+        reg_if_df(paste0("table_kappa_loc_", l), paste(l, "- Classification Performance (Agronomical)"),
+                  agreement_metrics_df(compute_agreement_metrics(d_l$v, d_l$pv,
+                                                                 method = "agro", params = params_k)))
+      }
+    }
+  }, ignoreInit = TRUE)
+
   output$cv_strategy_badge <- renderUI({
     req(length(rv$cv_metrics_act) > 0)
     strat <- rv$cv_strategy_sel %||% "auto"
@@ -708,9 +703,11 @@
     # two can be read side by side: perform_cv already computed MAE, NRMSE, CCC
     # and RPIQ, they were simply never displayed. Moran's I / p have no
     # counterpart there (uploaded predictions carry no CV residual field).
-    metric_cols <- c("Source", "RMSE", "NRMSE (%)", "MAE", "R² (Corr)",
-                     "R² (NSE/Trad)", "Bias (ME)", "Lin's CCC (Agree)",
-                     "RPD (Prec)", "RPIQ", "SMAPE (%)", "Moran's I", "Moran p")
+    # CV_METRIC_LABELS (ui_formatting.R) is that one definition; the export
+    # flavour of this table reads the same vector. Moran's null expectation is
+    # dropped here because it rides along as a per-row tooltip below - a file
+    # cannot carry a tooltip, so the export keeps it as a column.
+    metric_cols <- c("Source", unname(CV_METRIC_LABELS[setdiff(names(CV_METRIC_LABELS), "moran_e")]))
     # NA in the Moran columns means the statistic could not be computed for this
     # point set (fewer than 3 points, no coordinate columns, or the neighbour
     # search failed) - it never means "no spatial structure was detected".
@@ -868,33 +865,17 @@
           }
           
           if(nrow(df) < 3) return(sci_dt(data.frame(Status = "Not enough data points for numeric metrics.")))
-          
-          # ONE metric dictionary: perform_cv() is the app's metric authority, so
-          # this table and Model Performance cannot drift apart. It carries
-          # calc_ccc's population moments (yardstick's ccc_vec defaults to the
-          # sample-moment variant removed in 1.0.8), NRMSE against |mean| (a
-          # signed denominator reports a negative error percentage for an
-          # anomaly variable), and NA - never Inf or NaN - for every degenerate
-          # ratio. moran = FALSE: an externally supplied prediction column
-          # carries no cross-validation residual field.
-          m <- perform_cv(data.frame(var1.observed = df$v, var1.pred = df$pv),
-                          moran = FALSE)
 
-          # The remaining documented departures from Model Performance
-          # (Scientific Guide 5, which lists three - the third is the moran =
-          # FALSE above): MBE is reported predicted-minus-observed, and NMAE has
-          # no CV counterpart. NMAE comes off the raw residuals rather than the
-          # display-rounded m$mae, so a small-mean variable does not carry that
-          # rounding into a percentage.
-          mbe_val <- -m$me
-          mean_v <- mean(df$v, na.rm = TRUE)
-          mae_raw <- mean(abs(df$v - df$pv), na.rm = TRUE)
-          nmae_val <- if(is.finite(mae_raw) && abs(mean_v) > 0) round((mae_raw / abs(mean_v)) * 100, 2) else NA
-
-              sci_dt(data.frame(
-                Metric = c("R² (NSE/Traditional)", "R² (Correlation)", "RMSE", "NRMSE (%)", "MAE", "NMAE (%)", "MBE (ML pred - observed)", "Lin's CCC (Agree)", "RPD (Precision)", "RPIQ", "SMAPE (%)"),
-                Value = c(m$nse, m$r2, m$rmse, m$nrmse_mean, m$mae, nmae_val, mbe_val, m$ccc, m$rpd, m$rpiq, m$smape)
-              ))        })
+          # ONE metric dictionary: pred_perf_df() (ui_formatting.R) wraps
+          # perform_cv(), the app's metric authority, so this table, the Total
+          # and per-locality exports, and Model Performance cannot drift apart.
+          # It carries calc_ccc's population moments (yardstick's ccc_vec
+          # defaults to the sample-moment variant removed in 1.0.8), NRMSE
+          # against |mean| (a signed denominator reports a negative error
+          # percentage for an anomaly variable), and NA - never Inf or NaN -
+          # for every degenerate ratio.
+          sci_dt(pred_perf_df(df$v, df$pv, round_values = TRUE))
+        })
   output$kappa_table <- DT::renderDataTable({
     req(rv$sf, input$sel_loc_stats, input$kappa_bin_method)
     
@@ -917,10 +898,7 @@
     ag <- compute_agreement_metrics(df$v, df$pv, method = input$kappa_bin_method, params = params)
     if(!is.null(ag$status)) return(sci_dt(data.frame(Status = ag$status)))
 
-    sci_dt(data.frame(
-      Metric = c("Overall Accuracy", "Balanced Accuracy", "Off-by-one Accuracy", "Matthews Corr. Coef. (MCC)", "Kappa (Unweighted)", "Weighted Kappa (Linear)"),
-      Value = round(c(ag$accuracy, ag$bal_accuracy, ag$off_by_one, ag$mcc, ag$kappa, ag$kappa_linear), 4)
-    ))
+    sci_dt(agreement_metrics_df(ag, round_values = TRUE))
   })
 
   output$log_output <- renderText({ rv$log })

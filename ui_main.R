@@ -93,8 +93,16 @@ ui <- fluidPage(
     # DT tables in this app pre-render while their tab is hidden
     # (suspendWhenHidden = FALSE); with scrollX the cloned header is then
     # sized against a zero-width container, so realign columns on tab reveal.
-    tags$script(HTML("$(document).on('shown.bs.tab', 'a[data-toggle=\"tab\"]', function () { setTimeout(function () { if ($.fn.dataTable) { $.fn.dataTable.tables({ visible: true, api: true }).columns.adjust(); } }, 60); });"))
+    tags$script(HTML("$(document).on('shown.bs.tab', 'a[data-toggle=\"tab\"]', function () { setTimeout(function () { if ($.fn.dataTable) { $.fn.dataTable.tables({ visible: true, api: true }).columns.adjust(); } }, 60); });")),
+    # Copy-a-result-table-to-the-clipboard: reads the rendered table off the
+    # DOM and puts HTML + tab-separated text on the clipboard together, so one
+    # click pastes into Word as a table and into Excel as cells. Kept in
+    # ui_components.R so the shipped script is testable.
+    tags$script(HTML(copy_table_js()))
   ),
+
+  # Announces the result of a clipboard copy; visually hidden.
+  div(id = "mn_copy_live", class = "mn-copy-live", role = "status", "aria-live" = "polite"),
 
   # The wordmark is live text rather than the banner raster: it inverts with
   # the dark variant, stays crisp at any pixel density, and is read out as the

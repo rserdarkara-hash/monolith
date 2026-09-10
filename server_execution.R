@@ -1040,70 +1040,85 @@
       }, error = function(e) NULL)
     }
 
-    # NOTE: a hand-rolled "Global Performance Metrics" export table used to sit
-    # here. It reported four of the statistics "Total Prediction Performance"
-    # reports below, off the same rv$sf filter, under near-identical labels; it
-    # went once that table moved onto perform_cv(). Do not re-add a second
-    # dictionary here.
     # NOTE: intentionally no get_current_meta() re-read here - the export
     # labels below must use the meta captured at dispatch, not whatever the
     # sidebar points at when the run finishes.
 
-    if(!is.null(rv$sf)) {
-      df_perf <- rv$sf %>% st_drop_geometry() %>% filter(!is.na(v), !is.na(pv))
-      if(nrow(df_perf) >= 3) {
-        # Same metric dictionary as the on-screen Prediction Performance card
-        # (server_sci_analysis.R) and as Model Performance: perform_cv() owns
-        # every definition, so an export cannot report a different CCC or an
-        # Inf RPD than the screen. moran = FALSE: no CV residual field here.
-        perf_m <- perform_cv(data.frame(var1.observed = df_perf$v, var1.pred = df_perf$pv),
-                             moran = FALSE)
-        perf_total <- data.frame(
-          Metric = c("R² (Trad)", "R² (Corr)", "RMSE", "MBE (ML pred - observed)", "CCC", "RPD"),
-          Value = c(perf_m$nse, perf_m$r2, perf_m$rmse, -perf_m$me, perf_m$ccc, perf_m$rpd)
-        )
-        register_export_item("table_perf_uploaded_total", paste(meta$label, "- Total Prediction Performance"), "table", perf_total, meta$category)
+    # Pooled per-locality cross-validation: the "Total (Combined)" row of the
+    # Model Performance card. Only the per-locality rows were exportable
+    # before, so the figure a reader quotes for the whole run had to be
+    # retyped off the screen. Pooling happens in pool_cv_sf()'s auto-UTM zone,
+    # the same way the card does it.
+    pooled_cv <- function(data_list, label) {
+      all_cv <- pool_cv_sf(data_list)
+      if(is.null(all_cv) || nrow(all_cv) == 0) return(NULL)
+      cv_metrics_export_df(perform_cv(all_cv), label, "pooled per-locality CV")
+    }
+    cv_tot_a <- pooled_cv(rv$cv_data_act, "Actual Model")
+    if(!is.null(cv_tot_a)) {
+      register_export_item("table_cv_total", paste(meta$label, "- Total Model CV Metrics (Actual)"), "table", cv_tot_a, meta$category)
+    }
+    if(comp_mode || val_type != "actual") {
+      cv_tot_p <- pooled_cv(rv$cv_data_pre, "Predicted Model")
+      if(!is.null(cv_tot_p)) {
+        register_export_item("table_cv_pre_total", paste(meta$label, "- Total Model CV Metrics (Predicted)"), "table", cv_tot_p, meta$category)
       }
-      
-      v_all <- rv$sf$v[!is.na(rv$sf$v)]
-      if(length(v_all) > 0) {
-        s_a <- summary(v_all)
-        stats_total <- data.frame(Metric = names(s_a), Value = as.character(round(as.numeric(s_a), 3)))
-        register_export_item("table_stats_total", paste(meta$label, "- Total Descriptive Statistics (Actual)"), "table", stats_total, meta$category)
-      }
-      
-      if(comp_mode || val_type != "actual") {
-        pv_all <- rv$sf$pv[!is.na(rv$sf$pv)]
-        if(length(pv_all) > 0) {
-          s_p <- summary(pv_all)
-          stats_total_p <- data.frame(Metric = names(s_p), Value = as.character(round(as.numeric(s_p), 3)))
-          register_export_item("table_stats_pre_total", paste(meta$label, "- Total Descriptive Statistics (Predicted)"), "table", stats_total_p, meta$category)
-        }
-      }
-      
-      # error-only handler: a blanket condition= also intercepts messages
-      # raised inside the reactive, aborting its evaluation mid-flight and
-      # poisoning the cached value for every later consumer (the Jenks bug)
-      params_k <- tryCatch(agro_params(), error = function(e) NULL)
-      if(!is.null(params_k) && (comp_mode || val_type != "actual")) {
-        # Same binning and arithmetic as the on-screen Agreement table
-        # (compute_agreement_metrics, spatial_metrics.R) so the export and the
-        # Scientific Analysis tab can never report different agreement figures.
-        ag_k <- compute_agreement_metrics(df_perf$v, df_perf$pv, method = "agro", params = params_k)
-        if(is.null(ag_k$status)) {
-          kappa_total <- data.frame(
-            Metric = c("Accuracy", "Kappa (Unweighted)", "Weighted Kappa (Linear)", "MCC"),
-            Value = round(c(ag_k$accuracy, ag_k$kappa, ag_k$kappa_linear, ag_k$mcc), 4)
-          )
-          register_export_item("table_kappa_total", paste(meta$label, "- Total Classification Performance - Map in Agro or Binned styling to see the stats"), "table", kappa_total, meta$category)
-        }
+    }
+    if(!is.null(rv$cv_repeats_act$total)) {
+      register_export_item("table_cv_repeats_total", paste(meta$label, "- Total Fold-Realization Stability (Actual)"), "table", cv_repeats_export_df(rv$cv_repeats_act$total, "Actual Model"), meta$category)
+    }
+    if((comp_mode || val_type != "actual") && !is.null(rv$cv_repeats_pre$total)) {
+      register_export_item("table_cv_repeats_pre_total", paste(meta$label, "- Total Fold-Realization Stability (Predicted)"), "table", cv_repeats_export_df(rv$cv_repeats_pre$total, "Predicted Model"), meta$category)
+    }
+
+    # Every fitted variogram of the run in one sheet, one row per
+    # locality/target - the combined view of the Variogram Parameters card.
+    vgm_par_total <- vgm_params_export_df(rv$v_fit_list)
+    if(!is.null(vgm_par_total)) {
+      register_export_item("table_vgm_params_total", paste(meta$label, "- Variogram Parameters (all localities)"), "table", vgm_par_total, meta$category)
+    }
+
+    # Regional IDW power / TPS lambda for every locality of the run: the
+    # per-locality sheets below carry one row each, this is the whole set.
+    if(current_method %in% c("IDW", "TPS")) {
+      params_total <- build_regional_params_df(current_method, "Total (Combined)",
+                                               rv$disp$regional_params,
+                                               has_pre = comp_mode || val_type != "actual")
+      if(!is.null(params_total)) {
+        register_export_item("table_params_total", paste(meta$label, "- Model Parameters (all localities)"), "table", params_total, meta$category)
       }
     }
 
-    if(isTruthy(input$color_style %in% c("agro", "bin")) && !is.null(rv$rast)) {
-       area_total <- area_df_total_act()
-       if(is.data.frame(area_total)) register_export_item("table_area_total", paste(meta$label, "- Total Area Coverage"), "table", area_total, meta$category)
+    if(!is.null(rv$sf)) {
+      df_perf <- rv$sf %>% st_drop_geometry() %>% filter(!is.na(v), !is.na(pv))
+      # Same builder as the on-screen Prediction Performance card
+      # (server_sci_analysis.R): perform_cv() owns every definition, so an
+      # export cannot report a different CCC or an Inf RPD than the screen.
+      perf_total <- pred_perf_df(df_perf$v, df_perf$pv)
+      if(!is.null(perf_total)) {
+        register_export_item("table_perf_uploaded_total", paste(meta$label, "- Total Prediction Performance"), "table", perf_total, meta$category)
+      }
     }
+
+    # The on-screen Descriptive Statistics card's own frame and builder: the
+    # uploaded rows of the run's localities, not rv$sf (which is
+    # coordinate-deduplicated and would summarise a different sample).
+    sv_total <- stats_table_vectors(rv$user_data, rv$disp, rv$mapping$loc, rv$disp$localities)
+    if(!is.null(sv_total)) {
+      stats_total <- summary_stats_df(sv_total$act, sv_total$pre,
+                                      labels = c("Total_Actual", "Total_Predicted"))
+      if(!is.null(stats_total)) {
+        register_export_item("table_stats_total", paste(meta$label, "- Total Descriptive Statistics"), "table", stats_total, meta$category)
+      }
+    }
+
+    # Class-area and class-agreement tables are NOT registered here. They exist
+    # only once the surface is classified, and the classification is normally
+    # applied after a run, so registering them at run completion caught only
+    # the case where the styling happened to be set beforehand. One observer in
+    # server_sci_analysis.R now registers both families whenever the committed
+    # classification changes, which covers this run too (rv$results_rev, bumped
+    # above, is one of its triggers).
 
     for(l in locs) {
        register_locality_assets(l, meta, comp_mode, val_type, current_method)

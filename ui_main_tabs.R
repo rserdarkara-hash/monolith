@@ -254,31 +254,29 @@ ui_main_tabs <- mainPanel(width = 9,
                             sci_card("Spatial Interpolation Statistics",
                               "Model-specific diagnostics and performance metrics (RMSE, R²).",
                               conditionalPanel(condition = "output.disp_method == 'OK'",
-                                h5("Variogram Parameters (per locality)"), div(class="table-container", DT::dataTableOutput("vgm_params_table")),
+                                sci_table("vgm_params_table", "Variogram Parameters (per locality)"),
                                 hr()
                               ),
                               conditionalPanel(condition = "['IDW', 'TPS'].includes(output.disp_method)",
-                                h5("Regional Parameters (per locality)"), div(class="table-container", DT::dataTableOutput("regional_params_table")),
+                                sci_table("regional_params_table", "Regional Parameters (per locality)"),
                                 hr()
                               ),
-                              h5("Model Performance"), uiOutput("cv_strategy_badge"), div(class="table-container", DT::dataTableOutput("metrics_table")),
+                              sci_table("metrics_table", "Model Performance", uiOutput("cv_strategy_badge")),
                               # Only present when the run was launched with
                               # repeated CV switched on (Spatial Engine panel).
                               conditionalPanel(condition = "output.has_cv_repeats === true",
                                 hr(),
-                                h5(HTML(paste0("Fold-Realization Stability", info_tooltip("cv_repeats_info", "Repeated cross-validation: the same model re-scored under alternative fold assignments (the partition is the only thing that changes). Cells are mean ± SD across realizations. Treat the SD as the resolution of the comparison: two methods whose metrics differ by less than this are separated by fold luck, not skill. Leave-one-out folds are deterministic and never repeat. Moran's I is reported for realization 1 only, in the table above.")))),
-                                div(class="table-container", DT::dataTableOutput("cv_repeats_table"))
+                                sci_table("cv_repeats_table", label = "Fold-Realization Stability",
+                                  title = HTML(paste0("Fold-Realization Stability", info_tooltip("cv_repeats_info", "Repeated cross-validation: the same model re-scored under alternative fold assignments (the partition is the only thing that changes). Cells are mean ± SD across realizations. Treat the SD as the resolution of the comparison: two methods whose metrics differ by less than this are separated by fold luck, not skill. Leave-one-out folds are deterministic and never repeat. Moran's I is reported for realization 1 only, in the table above."))))
                               )
                             ),
                             div(id = "prediction_performance_ui",
                               sci_card("Variable Prediction Statistics",
                                 "Prediction accuracy and classification agreement metrics for uploaded data.",
-                                h5("Prediction Performance (Uploaded Data)"),
-                                div(class="table-container", DT::dataTableOutput("uploaded_metrics_table")),
+                                sci_table("uploaded_metrics_table", "Prediction Performance (Uploaded Data)"),
                                 hr(),
-                                h5("Classification Performance (Uploaded Predictions)"),
-                                selectInput("kappa_bin_method", "Binning Method:", choices = c("Agronomical Classes" = "agro", "Quartiles" = "quartile")),
-                                div(class="table-container", DT::dataTableOutput("kappa_table"))
+                                sci_table("kappa_table", "Classification Performance (Uploaded Predictions)",
+                                  selectInput("kappa_bin_method", "Binning Method:", choices = c("Agronomical Classes" = "agro", "Quartiles" = "quartile")))
                               )
                             ),
                             sci_card("Data Summary Statistics",
@@ -294,21 +292,20 @@ ui_main_tabs <- mainPanel(width = 9,
                               conditionalPanel(condition = "['agro', 'bin'].includes(input.color_style) && output.disp_method && output.disp_method != ''",
                                 h5("Area Coverage"),
                                 fluidRow(
-                                  column(6, h6("Total - Actual"), div(class="table-container", DT::dataTableOutput("area_table_total_act"))),
-                                  column(6, div(id = "area_total_pred_col", h6("Total - Predicted"), div(class="table-container", DT::dataTableOutput("area_table_total_pre"))))
+                                  column(6, sci_table("area_table_total_act", "Total - Actual", title_tag = h6)),
+                                  column(6, div(id = "area_total_pred_col", sci_table("area_table_total_pre", "Total - Predicted", title_tag = h6)))
                                 ),
                                 conditionalPanel(condition = "input.sel_loc_stats && input.sel_loc_stats != 'Total (Combined)'",
                                   fluidRow(
-                                    column(6, h6("Locality - Actual"), div(class="table-container", DT::dataTableOutput("area_table_loc_act"))),
-                                    column(6, div(id = "loc_pred_col", h6("Locality - Predicted"), div(class="table-container", DT::dataTableOutput("area_table_loc_pre"))))
+                                    column(6, sci_table("area_table_loc_act", "Locality - Actual", title_tag = h6)),
+                                    column(6, div(id = "loc_pred_col", sci_table("area_table_loc_pre", "Locality - Predicted", title_tag = h6)))
                                   )
                                 ),
                                 hr()
                               ),
                               conditionalPanel(condition = "output.disp_method && output.disp_method != ''",
-                                h5("Descriptive Statistics"),
-                                div(class="table-container", DT::dataTableOutput("stats_table_total")),
-                                div(class="table-container", DT::dataTableOutput("stats_table_loc"))
+                                sci_table("stats_table_total", "Descriptive Statistics"),
+                                sci_table("stats_table_loc", label = "Selected locality descriptive statistics")
                               )
                             ),
                             conditionalPanel(condition = "output.sci_diag_method == 'OK' || output.sci_vgm_tuning == 'yes'",

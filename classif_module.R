@@ -339,18 +339,15 @@ classif_ui <- function(id) {
             shiny::uiOutput(ns("table_select_ui")),
             shiny::conditionalPanel(
               condition = sprintf("input['%s'] == 'metrics'", ns("table_selection")),
-              shiny::h4("Model Performance"),
-              DT::dataTableOutput(ns("metrics_table"))
+              sci_table(ns("metrics_table"), "Model Performance", title_tag = shiny::h4)
             ),
             shiny::conditionalPanel(
               condition = sprintf("input['%s'] == 'confmat'", ns("table_selection")),
-              shiny::h4("Confusion Matrix"),
-              DT::dataTableOutput(ns("confmat_table"))
+              sci_table(ns("confmat_table"), "Confusion Matrix", title_tag = shiny::h4)
             ),
             shiny::conditionalPanel(
               condition = sprintf("input['%s'] == 'perclass'", ns("table_selection")),
-              shiny::h4("Per-class Accuracy"),
-              DT::dataTableOutput(ns("perclass_table"))
+              sci_table(ns("perclass_table"), "Per-class Accuracy", title_tag = shiny::h4)
             ),
             shiny::conditionalPanel(
               condition = sprintf("input['%s'] == 'lift'", ns("table_selection")),
@@ -358,7 +355,8 @@ classif_ui <- function(id) {
                 shiny::tags$i(class = "fa fa-info-circle",
                   title = "Benchmarks the covariate model against two no-covariate baselines on the SAME cross-validation folds: always predicting the most common class (no-information rate), and a spatial-only nearest-neighbour classifier. The McNemar test checks whether the paired accuracy improvement over the spatial baseline is statistically significant.",
                   style = "color: var(--mn-text-3); cursor: help; margin-left: 5px;"))),
-              shiny::uiOutput(ns("lift_ui"))
+              sci_table(ns("lift_ui"), label = "covariate lift",
+                        content = shiny::uiOutput(ns("lift_ui")))
             ),
             shiny::conditionalPanel(
               condition = sprintf("input['%s'] == 'groups'", ns("table_selection")),
@@ -366,7 +364,7 @@ classif_ui <- function(id) {
                 shiny::tags$i(class = "fa fa-info-circle",
                   title = "Pooled out-of-fold predictions split by locality (or by polygon in polygons-only scope). NA appears where a metric is undefined for that area, e.g. a class that never occurs there. Small areas carry wide uncertainty.",
                   style = "color: var(--mn-text-3); cursor: help; margin-left: 5px;"))),
-              DT::dataTableOutput(ns("group_metrics_table"))
+              sci_table(ns("group_metrics_table"), label = "performance by area")
             ),
             shiny::conditionalPanel(
               condition = sprintf("input['%s'] == 'area'", ns("table_selection")),
@@ -374,7 +372,7 @@ classif_ui <- function(id) {
                 shiny::tags$i(class = "fa fa-info-circle",
                   title = "Exact cell counts x cell area per predicted class, in hectares. Honours the live confidence threshold (abstained cells appear as 'Unclassified').",
                   style = "color: var(--mn-text-3); cursor: help; margin-left: 5px;"))),
-              DT::dataTableOutput(ns("area_table"))
+              sci_table(ns("area_table"), label = "class area coverage")
             ),
             shiny::hr(),
             shiny::h4("Export"),
@@ -1185,7 +1183,10 @@ classif_server <- function(id, data_reactive, vars_metadata_reactive, spatial_re
       for (cn in c("accuracy", "kap", "bal_accuracy", "f_meas")) gm[[cn]] <- round(gm[[cn]], 3)
       colnames(gm) <- c("Area", "n", "Overall accuracy", "Cohen's kappa",
                         "Balanced accuracy", "F1 score (macro)")
-      DT::datatable(gm, options = list(dom = 't', pageLength = 15, scrollX = TRUE),
+      # paging = FALSE on every table here: dom = 't' shows no paging
+      # controls, so rows past the first page were unreachable on screen and
+      # missing from a copy.
+      DT::datatable(gm, options = list(dom = 't', paging = FALSE, scrollX = TRUE),
                     rownames = FALSE)
     })
 
@@ -1196,13 +1197,13 @@ classif_server <- function(id, data_reactive, vars_metadata_reactive, spatial_re
                         Estimator = m$.estimator_label,
                         Value = round(m$.estimate, 4),
                         check.names = FALSE)
-      DT::datatable(out, options = list(dom = 't', pageLength = 12, scrollX = TRUE), rownames = FALSE)
+      DT::datatable(out, options = list(dom = 't', paging = FALSE, scrollX = TRUE), rownames = FALSE)
     })
 
     output$confmat_table <- DT::renderDataTable({
       res <- cl_rv$res; shiny::req(res)
       cm <- as.data.frame.matrix(res$conf_mat)
-      DT::datatable(cm, options = list(dom = 't', scrollX = TRUE),
+      DT::datatable(cm, options = list(dom = 't', paging = FALSE, scrollX = TRUE),
                     caption = "Rows = predicted, columns = actual")
     })
 
@@ -1212,7 +1213,7 @@ classif_server <- function(id, data_reactive, vars_metadata_reactive, spatial_re
       pc$producer_accuracy <- round(pc$producer_accuracy, 3)
       pc$user_accuracy <- round(pc$user_accuracy, 3)
       colnames(pc) <- c("Class", "n", "Producer acc. (recall)", "User acc. (precision)")
-      DT::datatable(pc, options = list(dom = 't', scrollX = TRUE), rownames = FALSE)
+      DT::datatable(pc, options = list(dom = 't', paging = FALSE, scrollX = TRUE), rownames = FALSE)
     })
 
     # Area accounting follows the rasteriser (not the worker's res$area) so the
@@ -1221,7 +1222,7 @@ classif_server <- function(id, data_reactive, vars_metadata_reactive, spatial_re
       rl <- get_rasters()
       a <- rl$area; a$area_ha <- round(a$area_ha, 2)
       colnames(a) <- c("Class", "Cells", "Area (ha)")
-      DT::datatable(a, options = list(dom = 't', scrollX = TRUE), rownames = FALSE)
+      DT::datatable(a, options = list(dom = 't', paging = FALSE, scrollX = TRUE), rownames = FALSE)
     })
 
     output$run_summary <- shiny::renderUI({

@@ -1,12 +1,20 @@
 # server_export.R (sourced with local = TRUE inside server) - export registry,
 # run-config/run-history panels, WYSIWYG styler and export download handlers.
-  register_export_item <- function(id, label, type, obj, category = "General", kind = "value") {
+  register_export_item <- function(id, label, type, obj, category = "General", kind = "value",
+                                   var_label = NULL) {
     req(obj)
     clean_id <- gsub("[^a-zA-Z0-9_]", "_", id)
+    # The variable label every registry label opens with ("<label> - ..."),
+    # kept so a batch workbook can drop exactly that prefix from sheet names
+    # (export_sheet_name). Defaults to the displayed run's variable.
+    if (is.null(var_label)) {
+      var_label <- tryCatch(isolate(get_display_meta()$label), error = function(e) NULL)
+    }
 
     new_item <- list(
       id = clean_id,
       label = label,
+      var_label = var_label,
       type = type, # "plot", "table", "map"
       obj = obj,
       category = category,
@@ -615,6 +623,22 @@
     })
   })
   
+  # One writer for every table sheet, single-item download and batch workbook
+  # alike. openxlsx's bare writeData() lays the frame down unstyled at the
+  # default 8.43-character column width, so metric labels and the Source
+  # strings arrived in Excel truncated and with no header to freeze against.
+  # The fill is a literal because it is a worksheet colour, not app chrome:
+  # Excel has no access to the interface tokens.
+  .export_header_style <- createStyle(textDecoration = "bold", fgFill = "#EFEFEF",
+                                      border = "bottom", halign = "left",
+                                      valign = "center")
+  write_table_sheet <- function(wb, sheet, df) {
+    addWorksheet(wb, sheet)
+    writeData(wb, sheet, df, headerStyle = .export_header_style)
+    freezePane(wb, sheet, firstRow = TRUE)
+    setColWidths(wb, sheet, cols = seq_len(max(1L, ncol(df))), widths = "auto")
+  }
+
   # One place decides what a registry item is written as. "gtiff" only survives
   # for items that actually hold a raster; anything else silently written as a
   # GeoTIFF would be a corrupt file, so it falls back to PNG (and the batch
@@ -650,14 +674,10 @@
 
             export_plot_to_file(p_obj, file, ext, input)
           } else if (item$type == "table") {
-            if (ext == "xlsx") {
-              wb <- createWorkbook()
-              addWorksheet(wb, "Data")
-              writeData(wb, "Data", item$obj)
-              saveWorkbook(wb, file, overwrite = TRUE)
-            } else {
-              write.csv(item$obj, file, row.names = FALSE)
-            }
+            # export_ext_for() writes every table as .xlsx.
+            wb <- createWorkbook()
+            write_table_sheet(wb, "Data", item$obj)
+            saveWorkbook(wb, file, overwrite = TRUE)
           } else {
             stop(sprintf("No writer for export type '%s'.", item$type))
           }
@@ -705,31 +725,16 @@
           used_sheet_names <- c()
           n_sheets <- 0L
           for(item in table_items) {
-            # openxlsx rejects an empty or whitespace-only sheet name; fall back to
-            # the registry id (then to a positional name) so a label-less item cannot
-            # take the whole batch down with it.
-            clean_label <- trimws(gsub("[^a-zA-Z0-9 ]", "_", item$label %||% ""))
-            if (!nzchar(clean_label)) clean_label <- trimws(gsub("[^a-zA-Z0-9 ]", "_", item$id %||% ""))
-            if (!nzchar(clean_label)) clean_label <- paste0("Table_", n_sheets + 1L)
-            sheet_name <- substr(clean_label, 1, 31)
-            
-            if(sheet_name %in% used_sheet_names) {
-              suffix <- if(grepl("_pre_|_pre$", item$id)) "_Pre" else "_2"
-              counter <- 2
-              candidate <- paste0(substr(sheet_name, 1, 31 - nchar(suffix)), suffix)
-              while(candidate %in% used_sheet_names) {
-                counter <- counter + 1
-                suffix <- paste0("_", counter)
-                candidate <- paste0(substr(sheet_name, 1, 31 - nchar(suffix)), suffix)
-              }
-              sheet_name <- candidate
-            }
+            # 31 characters, the variable-label prefix every label in a run
+            # shares dropped, unique ignoring case: export_sheet_name()
+            # (global_utils.R).
+            sheet_name <- export_sheet_name(item$label, item$id, used_sheet_names,
+                                            item$var_label)
             used_sheet_names <- c(used_sheet_names, sheet_name)
             # Per item, like the plot loop below: one unwritable table costs one
             # table, not the whole zip (every selected figure included).
             ok <- tryCatch({
-              addWorksheet(wb, sheet_name)
-              writeData(wb, sheet_name, item$obj)
+              write_table_sheet(wb, sheet_name, item$obj)
               TRUE
             }, error = function(e) {
               rv$log <- paste0(rv$log, "\n[Batch] Failed to add table sheet '",

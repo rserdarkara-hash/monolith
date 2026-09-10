@@ -850,6 +850,26 @@ input[type='checkbox'], input[type='radio'] { accent-color: var(--mn-accent); }
 }
 
 /* ==== tables ============================================================ */
+/* A result table carries the same title-and-tools strip as a figure card: the
+   copy-to-clipboard button is the table's counterpart to a figure's PNG. */
+.sci-table-block { margin-bottom: 10px; }
+.sci-table-head {
+  display: flex; justify-content: space-between; align-items: center; gap: 8px;
+  margin: 0 0 6px 0;
+}
+.sci-table-head > h4, .sci-table-head > h5, .sci-table-head > h6 { margin: 0; }
+.mn-copy-btn {
+  border: 1px solid transparent; background: transparent; color: var(--mn-text-2);
+  padding: 2px 8px; line-height: 1.5; flex: 0 0 auto;
+}
+.mn-copy-btn:hover, .mn-copy-btn:focus { background: var(--mn-surface-3); color: var(--mn-text); }
+.mn-copy-btn.mn-copied { color: var(--mn-ok); }
+.mn-copy-btn.mn-copy-failed { color: var(--mn-danger); }
+/* Screen-reader announcement for a copy: the icon flip is the sighted cue. */
+.mn-copy-live {
+  position: absolute; width: 1px; height: 1px; margin: -1px; padding: 0;
+  overflow: hidden; clip: rect(0 0 0 0); white-space: nowrap; border: 0;
+}
 .table-container { width: 100%; overflow-x: auto; font-size: 12.5px; margin-bottom: 10px; }
 .table-container table,
 .table-container .dataTables_wrapper {

@@ -810,3 +810,152 @@ test_that("spatial block folds are spatially compact and random folds are not", 
   expect_lt(ratio(block), 0.4)
   expect_equal(ratio(rand), 1, tolerance = 0.05)
 })
+
+# ── export builders: the screen's table and the exported sheet ─────────────
+# These exist because each export site used to re-derive its own subset of the
+# metrics under its own labels. The assertion is parity with perform_cv (the
+# metric authority) and with the column set the card renders — never a
+# hardcoded number.
+
+test_that("cv_metrics_export_df reports every perform_cv metric, numerically", {
+  set.seed(11)
+  cv <- data.frame(var1.observed = rnorm(60, 10, 2))
+  cv$var1.pred <- cv$var1.observed + rnorm(60, 0, 0.4)
+  res <- perform_cv(cv, moran = FALSE)
+
+  out <- cv_metrics_export_df(res, "Actual Model", "Standard LOOCV")
+
+  expect_equal(nrow(out), 1)
+  expect_equal(names(out), c("Source", "CV Design", "n", unname(CV_METRIC_LABELS)))
+  expect_equal(out$Source, "Actual Model")
+  expect_equal(out$`CV Design`, "Standard LOOCV")
+  expect_equal(out$n, res$n)
+  # every value comes straight off perform_cv, and stays a number
+  for (k in names(CV_METRIC_LABELS)) {
+    col <- out[[unname(CV_METRIC_LABELS[[k]])]]
+    expect_true(is.numeric(col), info = k)
+    expect_equal(col, as.numeric(res[[k]] %||% NA_real_), info = k)
+  }
+  expect_null(cv_metrics_export_df(NULL, "x"))
+})
+
+test_that("the Model Performance column set and its export share one dictionary", {
+  # The card drops Moran's expectation (it renders as a tooltip); nothing else
+  # may differ, in membership or in order.
+  screen <- unname(CV_METRIC_LABELS[setdiff(names(CV_METRIC_LABELS), "moran_e")])
+  exported <- unname(CV_METRIC_LABELS)
+
+  expect_equal(setdiff(exported, screen), "Moran E[I]")
+  expect_equal(screen, exported[exported != "Moran E[I]"])
+  # and the labels are the ones perform_cv can actually fill
+  expect_true(all(names(CV_METRIC_LABELS) %in% names(perform_cv(NULL))))
+})
+
+test_that("cv_repeats_export_df splits mean and SD into numeric columns", {
+  set.seed(12)
+  reps <- lapply(1:4, function(i) {
+    d <- data.frame(var1.observed = rnorm(40, 5, 1))
+    d$var1.pred <- d$var1.observed + rnorm(40, 0, 0.3)
+    d
+  })
+  summ <- summarise_cv_repeats(reps)
+  skip_if(is.null(summ), "repeat summary unavailable")
+
+  out <- cv_repeats_export_df(summ, "Actual Model")
+
+  expect_equal(nrow(out), length(CV_REPEAT_METRICS))
+  expect_equal(names(out), c("Source", "Fold realizations", "n", "Metric", "Mean", "SD"))
+  expect_equal(out$Metric, unname(CV_REPEAT_METRICS))
+  expect_true(is.numeric(out$Mean) && is.numeric(out$SD))
+  expect_equal(out$Mean, unname(vapply(names(CV_REPEAT_METRICS),
+                                       function(k) as.numeric(summ$mean[[k]]), numeric(1))))
+  expect_equal(out$`Fold realizations`, rep(4L, nrow(out)))
+  expect_null(cv_repeats_export_df(NULL, "x"))
+})
+
+test_that("pred_perf_df reports the uploaded-prediction dictionary off perform_cv", {
+  set.seed(13)
+  obs <- rnorm(50, 20, 3)
+  pre <- obs + rnorm(50, 0.5, 1)
+  cv_df <- data.frame(var1.observed = obs, var1.pred = pre)
+  m <- perform_cv(cv_df, moran = FALSE, round_values = FALSE)
+
+  # the card: perform_cv's own display rounding
+  shown <- pred_perf_df(obs, pre, round_values = TRUE)
+  m_shown <- perform_cv(cv_df, moran = FALSE)
+  expect_equal(shown$Value[shown$Metric == "RMSE"], m_shown$rmse)
+  expect_equal(shown$Value[shown$Metric == "NMAE (%)"],
+               round(mean(abs(obs - pre)) / abs(mean(obs)) * 100, 2))
+
+  # the export: full precision
+  out <- pred_perf_df(obs, pre)
+
+  expect_equal(nrow(out), 12)
+  expect_true(is.numeric(out$Value))
+  val <- function(nm) out$Value[out$Metric == nm]
+  expect_equal(val("RMSE"), m$rmse)
+  expect_equal(val("R² (NSE/Traditional)"), m$nse)
+  expect_equal(val("SMAPE (%)"), m$smape)
+  expect_equal(val("n"), as.numeric(m$n))
+  # MBE is predicted-minus-observed, the documented sign flip against Bias (ME)
+  expect_equal(val("MBE (ML pred - observed)"), -m$me)
+  # NMAE off the raw residuals, not the display-rounded MAE
+  expect_equal(val("NMAE (%)"), mean(abs(obs - pre)) / abs(mean(obs)) * 100)
+  expect_null(pred_perf_df(obs[1:2], pre[1:2]))
+})
+
+test_that("pred_perf_df drops incomplete pairs before scoring", {
+  obs <- c(1, 2, 3, 4, NA, 6)
+  pre <- c(1.1, 2.2, NA, 4.1, 5, 5.8)
+  keep <- !is.na(obs) & !is.na(pre)
+  out <- pred_perf_df(obs, pre)
+  expect_equal(out$Value[out$Metric == "n"], sum(keep))
+  expect_equal(out$Value[out$Metric == "RMSE"],
+               sqrt(mean((obs[keep] - pre[keep])^2)))
+})
+
+test_that("a strongly autocorrelated residual field exports a Moran p that is small, not zero", {
+  # A 10 x 10 grid whose residual is a smooth east-west gradient. At 4 dp the
+  # two-sided p (far below 5e-5 here) was rounded to exactly 0, an impossible
+  # value, and landed in an exported numeric column.
+  g <- expand.grid(x = seq(0, 900, by = 100), y = seq(0, 900, by = 100))
+  g$var1.observed <- 10 + g$x / 100
+  g$var1.pred <- 10 + 0.5 * g$x / 100
+  res <- perform_cv(g)
+  expect_gt(res$moran_i, 0.5)
+
+  p <- cv_metrics_export_df(res, "Actual Model")[["Moran p"]]
+  expect_true(is.numeric(p))
+  expect_gt(p, 0)
+  expect_lt(p, 1e-4)
+})
+
+test_that("the Model Performance labels extend the fold-realization labels", {
+  # one dictionary: relabelling a metric in CV_REPEAT_METRICS relabels it in
+  # Model Performance and both exports at once
+  k <- names(CV_REPEAT_METRICS)
+  expect_identical(names(CV_METRIC_LABELS)[seq_along(k)], k)
+  expect_identical(CV_METRIC_LABELS[k], CV_REPEAT_METRICS)
+  expect_equal(setdiff(names(CV_METRIC_LABELS), k), c("moran_i", "moran_e", "moran_p"))
+})
+
+test_that("rf_importance_df writes every importance measure the forest recorded", {
+  set.seed(5)
+  d <- data.frame(a = runif(80), b = runif(80), c = runif(80))
+  d$y <- 3 * d$a + d$b + rnorm(80, 0, 0.1)
+
+  # randomForest's own seq(along =) partial-match warning, not ours
+  grow <- function(...) suppressWarnings(randomForest::randomForest(y ~ ., data = d, ntree = 60, ...))
+  with_imp <- grow(importance = TRUE)
+  out <- rf_importance_df(with_imp)
+  expect_equal(names(out), c("Variable", "%IncMSE", "IncNodePurity"))
+  expect_equal(out$Variable[1], "a")
+  imp <- randomForest::importance(with_imp)
+  expect_equal(out$IncNodePurity, unname(imp[out$Variable, "IncNodePurity"]))
+  expect_false(is.unsorted(rev(out[["%IncMSE"]])))   # ordered by the first measure
+
+  without <- grow()
+  out2 <- rf_importance_df(without)
+  expect_equal(names(out2), c("Variable", "IncNodePurity"))
+  expect_equal(out2$Variable[1], "a")
+})

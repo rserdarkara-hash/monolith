@@ -189,10 +189,278 @@ build_regional_params_df <- function(type, loc, regional_params, has_pre) {
   out
 }
 
+# ── Shared result-table builders ─────────────────────────────────────────────
+# One definition per result table, consumed by BOTH the on-screen card and the
+# export registry. Before these existed each export re-derived its own subset
+# of the metrics under its own labels, so an exported workbook reported fewer
+# statistics than the screen it was taken from. Values stay NUMERIC: a metric
+# written to a worksheet as text cannot be sorted, charted or recomputed.
+
+# Column order and labels of the Model Performance table: CV_METRIC_LABELS,
+# defined in spatial_metrics.R beside CV_REPEAT_METRICS, which it extends.
+
+# One wide row of cross-validation metrics from a perform_cv() result.
+# `cv_design` is the fold plan the row was scored under (cv_type_label()); it
+# is a column of its own here because the on-screen Source string that carries
+# it is not machine-readable.
+cv_metrics_export_df <- function(res, source_label, cv_design = NA_character_) {
+  if (is.null(res)) return(NULL)
+  out <- data.frame(Source = source_label,
+                    `CV Design` = cv_design,
+                    n = as.integer(res$n %||% NA),
+                    check.names = FALSE, stringsAsFactors = FALSE)
+  for (k in names(CV_METRIC_LABELS)) {
+    v <- res[[k]]
+    out[[unname(CV_METRIC_LABELS[[k]])]] <-
+      if (is.null(v) || length(v) != 1) NA_real_ else as.numeric(v)
+  }
+  out
+}
+
+# Mean and SD across fold realizations (repeated CV) as an exportable frame:
+# one row per metric, with the mean and the SD in columns of their own rather
+# than fused into the "m ± s" string the screen shows.
+cv_repeats_export_df <- function(summ, source_label) {
+  if (is.null(summ)) return(NULL)
+  keys <- names(CV_REPEAT_METRICS)
+  data.frame(
+    Source = source_label,
+    `Fold realizations` = as.integer(summ$n_repeats),
+    n = as.integer(summ$n),
+    Metric = unname(CV_REPEAT_METRICS[keys]),
+    Mean = vapply(keys, function(k) as.numeric(summ$mean[[k]] %||% NA_real_), numeric(1)),
+    SD = vapply(keys, function(k) as.numeric(summ$sd[[k]] %||% NA_real_), numeric(1)),
+    check.names = FALSE, stringsAsFactors = FALSE, row.names = NULL
+  )
+}
+
+# Metric dictionary for an externally supplied prediction column (uploaded ML
+# predictions). perform_cv() owns every definition, so this table and Model
+# Performance cannot drift apart. Two documented departures from Model
+# Performance (Scientific Guide 5): MBE is reported predicted-minus-observed,
+# and NMAE has no CV counterpart - it comes off the raw residuals so a
+# small-mean variable does not carry display rounding into a percentage.
+# moran = FALSE: an uploaded prediction column carries no CV residual field.
+# round_values = TRUE is the card's display rounding (perform_cv's own
+# dictionary: 4 dp, 2 dp for the percentage and ratio metrics).
+pred_perf_df <- function(obs, pre, round_values = FALSE) {
+  ok <- !is.na(obs) & !is.na(pre)
+  obs <- obs[ok]; pre <- pre[ok]
+  if (length(obs) < 3) return(NULL)
+  m <- perform_cv(data.frame(var1.observed = obs, var1.pred = pre), moran = FALSE,
+                  round_values = round_values)
+  mean_v <- mean(obs)
+  mae_raw <- mean(abs(obs - pre))
+  nmae <- if (is.finite(mae_raw) && abs(mean_v) > 0) (mae_raw / abs(mean_v)) * 100 else NA_real_
+  if (isTRUE(round_values)) nmae <- round(nmae, 2)
+  data.frame(
+    Metric = c("R² (NSE/Traditional)", "R² (Correlation)", "RMSE", "NRMSE (%)",
+               "MAE", "NMAE (%)", "MBE (ML pred - observed)", "Lin's CCC (Agree)",
+               "RPD (Precision)", "RPIQ", "SMAPE (%)", "n"),
+    Value = as.numeric(c(m$nse, m$r2, m$rmse, m$nrmse_mean, m$mae, nmae, -m$me,
+                         m$ccc, m$rpd, m$rpiq, m$smape, m$n)),
+    stringsAsFactors = FALSE
+  )
+}
+
+# Class-agreement table from a compute_agreement_metrics() result.
+agreement_metrics_df <- function(ag, round_values = FALSE) {
+  if (is.null(ag) || !is.null(ag$status)) return(NULL)
+  v <- as.numeric(c(ag$accuracy, ag$bal_accuracy, ag$off_by_one,
+                    ag$mcc, ag$kappa, ag$kappa_linear))
+  data.frame(
+    Metric = c("Overall Accuracy", "Balanced Accuracy", "Off-by-one Accuracy",
+               "Matthews Corr. Coef. (MCC)", "Kappa (Unweighted)",
+               "Weighted Kappa (Linear)"),
+    Value = if (isTRUE(round_values)) round(v, 4) else v,
+    stringsAsFactors = FALSE
+  )
+}
+
+# Screen rounding for a statistic in the variable's own units: three decimals,
+# or four significant digits below 1. A fixed number of decimals collapses a
+# small-unit variable (total N spans 0.0175-0.214 %; a fitted nugget of
+# 2.151e-4) to one significant digit or to zero.
+display_num <- function(x) {
+  x <- as.numeric(x)
+  ifelse(is.finite(x) & abs(x) < 1, signif(x, 4), round(x, 3))
+}
+
+# summary() of one or two numeric vectors as a tidy frame, values left numeric.
+# A FIXED row set keeps the two columns in step: summary() appends an "NA's"
+# element only for a vector that actually has missing values, so building the
+# second column by assignment failed outright ("replacement has 6 rows, data
+# has 7") whenever exactly one of the two sides carried them. The
+# missing-value row is shown only when there is something to report. A second
+# vector with no observed value keeps its column (statistics NA, the NA's row
+# counting it), so an empty predicted side reads as empty rather than absent.
+summary_stats_df <- function(a, b = NULL, labels = c("Value", "Predicted"),
+                             round_values = FALSE) {
+  rows <- c("Min.", "1st Qu.", "Median", "Mean", "3rd Qu.", "Max.", "NA's")
+  stat_rows <- rows[rows != "NA's"]
+  col <- function(x) {
+    if (is.null(x) || length(x) == 0) return(NULL)
+    x <- as.numeric(x)
+    v <- stats::setNames(rep(NA_real_, length(rows)), rows)
+    if (any(!is.na(x))) {
+      s <- summary(x)
+      keep <- intersect(names(s), stat_rows)
+      v[keep] <- as.numeric(s[keep])
+    }
+    v[["NA's"]] <- sum(is.na(x))
+    if (isTRUE(round_values)) v[] <- display_num(v)
+    v
+  }
+  ca <- col(a)
+  if (is.null(ca) || all(is.na(ca[stat_rows]))) return(NULL)
+  cb <- col(b)
+  no_na <- function(v) is.null(v) || v[["NA's"]] == 0
+  keep <- if (no_na(ca) && no_na(cb)) stat_rows else rows
+  out <- data.frame(Metric = keep, V = unname(ca[keep]), stringsAsFactors = FALSE)
+  names(out)[2] <- labels[1]
+  if (!is.null(cb)) out[[labels[2]]] <- unname(cb[keep])
+  out
+}
+
+# The two vectors a Descriptive Statistics table summarises, shared by the card
+# and its export so both describe ONE sample: the uploaded rows of `localities`
+# (every row when NULL). Not the run's point set, which is coordinate-
+# deduplicated and gives a different n, mean and quartiles wherever co-located
+# samples exist. The predicted side is the column the displayed run mapped
+# (_ss for a Single-Split run, never a fallback to the other), and only when
+# that run mapped predictions. NULL when the displayed variable is not in `df`.
+stats_table_vectors <- function(df, meta, loc_col, localities = NULL) {
+  if (is.null(df) || is.null(meta)) return(NULL)
+  if (!is.null(localities) && !is.null(loc_col) && loc_col %in% names(df)) {
+    df <- df[df[[loc_col]] %in% localities, , drop = FALSE]
+  }
+  if (!is_valid_col_ref(meta$actual) || !meta$actual %in% names(df)) return(NULL)
+  has_pred <- isTRUE(meta$comp_mode) ||
+    (!is.null(meta$value_type) && !identical(meta$value_type, "actual"))
+  pv_col <- if (identical(meta$value_type, "pred_ss")) meta$pred_ss else meta$pred
+  list(act = df[[meta$actual]],
+       pre = if (has_pred && is_valid_col_ref(pv_col) && pv_col %in% names(df)) df[[pv_col]] else NULL)
+}
+
+# ── Fitted variogram parameters ──────────────────────────────────────────────
+# The reported parameters of one fitted gstat variogramModel. Sill is the TOTAL
+# sill (nugget + partial sills) and Structural Dependency is the partial-sill
+# share of it in percent, so 100% is a pure spatial structure and 0% a pure
+# nugget (NA when the sill is zero).
+#
+# Range (a) is gstat's range PARAMETER, which is not comparable across model
+# families: the distance at which the model reaches 95% of its sill is a for
+# Sph, 3a for Exp, sqrt(3)a for Gau and about 4.75a for Mat nu = 1.5
+# (.vgm_practical_range_factor, spatial_vgm.R). Practical Range is that
+# distance, so rows fitted with different families compare on it. Kappa is
+# reported for a Matern structure only (it is inert for the others). A nested
+# model names every structure, and its ranges are those of the structure that
+# reaches its sill last. A pure-nugget model reports nugget and sill with no
+# range. Unrounded unless round_values = TRUE (the card's display rounding).
+vgm_params_row <- function(f, round_values = FALSE) {
+  out <- list(model = NA_character_, kappa = NA_real_, nugget = NA_real_,
+              sill = NA_real_, range = NA_real_, practical_range = NA_real_,
+              sdep = NA_real_)
+  if (is.null(f) || NROW(f) == 0) return(out)
+  mdl <- as.character(f$model)
+  is_nug <- mdl == "Nug"
+  st <- which(!is_nug)
+  out$nugget <- sum(f$psill[is_nug])
+  out$sill <- sum(f$psill)
+  out$model <- if (length(st)) paste(mdl[st], collapse = " + ") else "Nug"
+  if (length(st)) {
+    prac <- vapply(st, function(i) {
+      f$range[i] * .vgm_practical_range_factor(mdl[i], f$kappa[i])
+    }, numeric(1))
+    lead <- st[which.max(prac)]
+    out$range <- f$range[lead]
+    out$practical_range <- f$range[lead] * .vgm_practical_range_factor(mdl[lead], f$kappa[lead])
+    if (identical(mdl[lead], "Mat")) out$kappa <- f$kappa[lead]
+  }
+  if (isTRUE(out$sill > 0)) out$sdep <- ((out$sill - out$nugget) / out$sill) * 100
+  if (isTRUE(round_values)) {
+    out$nugget <- display_num(out$nugget)
+    out$sill <- display_num(out$sill)
+    out$range <- round(out$range, 1)
+    out$practical_range <- round(out$practical_range, 1)
+    out$sdep <- round(out$sdep, 1)
+  }
+  out
+}
+
+# Screen flavour: "NA" for an absent value, the smoothness beside a Matern
+# model name and the percent sign on Structural Dependency, all character so
+# one column can mix the model name with numbers.
+.vgm_params_chr <- function(f) {
+  p <- vgm_params_row(f, round_values = TRUE)
+  if (is.na(p$model)) return(rep("NA", 6))
+  chr <- function(x) if (is.na(x)) "NA" else as.character(x)
+  c(if (is.na(p$kappa)) p$model else paste0(p$model, " (kappa = ", p$kappa, ")"),
+    chr(p$nugget), chr(p$sill), chr(p$range), chr(p$practical_range),
+    if (is.na(p$sdep)) "NA" else paste0(p$sdep, "%"))
+}
+
+# The Variogram Parameters card. "Total (Combined)" lists every fitted
+# locality/target (variograms are fitted per locality); a named locality is
+# transposed so Actual and Predicted sit side by side. NULL when nothing in the
+# store was fitted, which sci_dt() renders as the empty state.
+vgm_params_table_df <- function(v_fit_list, loc) {
+  if (identical(loc, "Total (Combined)")) {
+    return(vgm_params_export_df(v_fit_list, round_values = TRUE))
+  }
+  f_a <- v_fit_list[[paste0(loc, "_act")]]
+  f_p <- v_fit_list[[paste0(loc, "_pre")]]
+  if (is.null(f_a) && is.null(f_p)) return(NULL)
+  res <- data.frame(Param = c("Model", "Nugget", "Sill", "Range (a)",
+                              "Practical Range", "Structural Dep."),
+                    Actual = .vgm_params_chr(f_a), stringsAsFactors = FALSE)
+  # Predicted column only when a predicted-surface fit exists: an all-"NA"
+  # column for a run that never mapped predictions is just noise.
+  if (!is.null(f_p)) res$Predicted <- .vgm_params_chr(f_p)
+  res
+}
+
+# Export flavour: tidy, one row per fitted locality/target, numeric columns.
+vgm_params_export_df <- function(v_fit_list, locs = NULL, round_values = FALSE) {
+  if (is.null(v_fit_list) || length(v_fit_list) == 0) return(NULL)
+  if (is.null(locs)) locs <- unique(sub("_(act|pre)$", "", names(v_fit_list)))
+  rows <- list()
+  for (l in locs) {
+    for (tgt in c("act", "pre")) {
+      f <- v_fit_list[[paste0(l, "_", tgt)]]
+      if (is.null(f)) next
+      p <- vgm_params_row(f, round_values = round_values)
+      rows[[length(rows) + 1]] <- data.frame(
+        Locality = l,
+        Target = if (tgt == "act") "Actual" else "Predicted",
+        Model = p$model, Kappa = p$kappa, Nugget = p$nugget, Sill = p$sill,
+        `Range (a)` = p$range, `Practical Range` = p$practical_range,
+        `Structural Dep. (%)` = p$sdep,
+        check.names = FALSE, stringsAsFactors = FALSE)
+    }
+  }
+  if (length(rows) == 0) return(NULL)
+  do.call(rbind, rows)
+}
+
+# Every importance measure a randomForest recorded, one row per covariate,
+# ordered by the first. A regression forest grown with importance = TRUE stores
+# %IncMSE and IncNodePurity; without it, only IncNodePurity. Raw column names:
+# this is the numeric record behind the labelled importance plot.
+rf_importance_df <- function(rf_mod) {
+  imp_mat <- randomForest::importance(rf_mod)
+  out <- data.frame(Variable = rownames(imp_mat), stringsAsFactors = FALSE)
+  for (cn in colnames(imp_mat)) out[[cn]] <- unname(imp_mat[, cn])
+  out <- out[order(out[[2]], decreasing = TRUE), , drop = FALSE]
+  rownames(out) <- NULL
+  out
+}
+
 # --- RK linear-trend presentation --------------------------------------------
 # Structured replacement for the raw print(summary.lm) dump on the Scientific
 # Analysis tab: compact fit-statistic chips + a publication-style coefficient
-# table. Display-only: exports keep the raw numeric coefficient table.
+# table. rk_coef_table() is the panel's text flavour; the export registers the
+# numeric flavours rk_coef_export_df() and rk_fit_stats_df().
 
 # --- Ruler readouts -----------------------------------------------------------
 # Length and area formatting for the Map Viewer ruler. Metres and hectares are
@@ -258,33 +526,77 @@ rk_fit_stats <- function(lm_sum) {
   )
 }
 
-# Coefficient table (estimate, SE, 95% CI, t, p, significance) from a
-# summary.lm object. Term names map to display labels when variable metadata
-# is supplied; the CI uses the t quantile on the residual df.
-rk_coef_table <- function(lm_sum, vars_metadata = NULL, conf_level = 0.95) {
+# Coefficients of a summary.lm object with their t-based confidence bounds (the
+# t quantile on the residual df; NA without one). NULL when the object does not
+# carry the four summary.lm coefficient columns.
+.rk_coef_core <- function(lm_sum, conf_level) {
   if (is.null(lm_sum) || is.null(lm_sum$coefficients)) return(NULL)
   cf <- as.data.frame(lm_sum$coefficients)
   need <- c("Estimate", "Std. Error", "t value", "Pr(>|t|)")
   if (!all(need %in% colnames(cf))) return(NULL)
   df_res <- lm_sum$df[2]
-  est <- cf[["Estimate"]]; se <- cf[["Std. Error"]]; p <- cf[["Pr(>|t|)"]]
-  ci <- if (is.finite(df_res) && df_res >= 1) {
-    tq <- stats::qt(1 - (1 - conf_level) / 2, df_res)
-    sprintf("[%.4g, %.4g]", est - tq * se, est + tq * se)
-  } else rep("NA", length(est))
-  terms <- rownames(cf)
-  labels <- vapply(terms, function(tm) {
+  tq <- if (is.finite(df_res) && df_res >= 1) stats::qt(1 - (1 - conf_level) / 2, df_res) else NA_real_
+  est <- cf[["Estimate"]]; se <- cf[["Std. Error"]]
+  list(terms = rownames(cf), est = est, se = se, tq = tq,
+       lo = est - tq * se, hi = est + tq * se,
+       t = cf[["t value"]], p = cf[["Pr(>|t|)"]])
+}
+
+.rk_term_labels <- function(terms, vars_metadata) {
+  unname(vapply(terms, function(tm) {
     if (tm == "(Intercept)") "(Intercept)" else get_var_label(tm, vars_metadata)
-  }, character(1))
+  }, character(1)))
+}
+
+# Coefficient table (estimate, SE, 95% CI, t, p, significance) as the RK trend
+# panel shows it: display text, p-values as "< 0.001" and the CI as one string.
+# Term names map to display labels when variable metadata is supplied.
+rk_coef_table <- function(lm_sum, vars_metadata = NULL, conf_level = 0.95) {
+  k <- .rk_coef_core(lm_sum, conf_level)
+  if (is.null(k)) return(NULL)
+  ci <- if (is.finite(k$tq)) sprintf("[%.4g, %.4g]", k$lo, k$hi) else rep("NA", length(k$est))
   data.frame(
-    Term = unname(labels),
-    Estimate = signif(est, 4),
-    `Std. Error` = signif(se, 4),
+    Term = .rk_term_labels(k$terms, vars_metadata),
+    Estimate = signif(k$est, 4),
+    `Std. Error` = signif(k$se, 4),
     `95% CI` = ci,
-    `t value` = round(cf[["t value"]], 2),
-    `p value` = vapply(p, format_p_value, character(1)),
-    `Sig.` = vapply(p, signif_stars, character(1)),
+    `t value` = round(k$t, 2),
+    `p value` = vapply(k$p, format_p_value, character(1)),
+    `Sig.` = vapply(k$p, signif_stars, character(1)),
     check.names = FALSE
+  )
+}
+
+# Export flavour of the same table: every statistic a full-precision number,
+# the CI as two columns, so the sheet can be recomputed on.
+rk_coef_export_df <- function(lm_sum, vars_metadata = NULL, conf_level = 0.95) {
+  k <- .rk_coef_core(lm_sum, conf_level)
+  if (is.null(k)) return(NULL)
+  pct <- paste0(format(100 * conf_level), "%")
+  out <- data.frame(Term = .rk_term_labels(k$terms, vars_metadata),
+                    Estimate = k$est, `Std. Error` = k$se,
+                    check.names = FALSE, stringsAsFactors = FALSE)
+  out[[paste0("CI Lower (", pct, ")")]] <- k$lo
+  out[[paste0("CI Upper (", pct, ")")]] <- k$hi
+  out[["t value"]] <- k$t
+  out[["p value"]] <- k$p
+  out[["Sig."]] <- vapply(k$p, signif_stars, character(1))
+  out
+}
+
+# The fit-statistic chips above the coefficient table, as an exportable frame:
+# the chips are the only place R², the residual SE, the F test and n are
+# reported, so an export of the coefficients alone loses the model's fit.
+# Full precision: the chips format for the screen, the sheet keeps the numbers.
+rk_fit_stats_df <- function(lm_sum) {
+  s <- rk_fit_stats(lm_sum)
+  if (is.null(s)) return(NULL)
+  data.frame(
+    Statistic = c("R²", "Adj. R²", "Residual SE", "Residual df", "F statistic",
+                  "F df1", "F df2", "Model p", "n"),
+    Value = unname(c(s$r2, s$adj_r2, s$sigma, s$df_res,
+                     s$f_value, s$f_df1, s$f_df2, s$f_p, s$n)),
+    stringsAsFactors = FALSE
   )
 }
 

@@ -338,6 +338,36 @@ test_that("export_raster_payload rejects the two non-raster map payloads", {
   expect_null(export_raster_payload(NULL))
 })
 
+test_that("export_sheet_name drops exactly the variable-label prefix", {
+  # a label that itself contains " - ": splitting at the first " - " kept the
+  # rest of the variable label and cut the locality and table name instead
+  lab <- "Na - exchangeable (mg/kg)"
+  full <- paste(lab, "- Kale - Model CV Metrics (Actual)")
+  nm <- export_sheet_name(full, "table_cv_loc_Kale", character(0), lab)
+  expect_equal(nm, "Kale _ Model CV Metrics _Actual")
+  expect_lte(nchar(nm), 31)
+  # without the variable label nothing is guessed away
+  expect_match(export_sheet_name(full, "table_cv_loc_Kale"), "^Na _ exchangeable")
+})
+
+test_that("export_sheet_name keeps names unique, ignoring case as Excel does", {
+  lab <- "pH"
+  a <- export_sheet_name("pH - Kale - Model CV Metrics (Actual)", "table_cv_loc_Kale",
+                         character(0), lab)
+  b <- export_sheet_name("pH - Kale - Model CV Metrics (Actual)", "table_cv_pre_loc_Kale",
+                         a, lab)
+  expect_true(endsWith(b, "_Pre"))
+  expect_lte(nchar(b), 31)
+  c3 <- export_sheet_name("pH - Kale - Model CV Metrics (Actual)", "x", c(a, b), lab)
+  expect_false(tolower(c3) %in% tolower(c(a, b)))
+
+  # "Kale" and "KALE" are the same sheet name to Excel
+  expect_equal(export_sheet_name("t - Kale", "x", "KALE", "t"), "Kale_2")
+  # an empty label falls back to the id, then to a positional name
+  expect_equal(export_sheet_name("", "table_x", character(0)), "table_x")
+  expect_equal(export_sheet_name("", "", c("a", "b")), "Table_3")
+})
+
 test_that("styler_format_ext maps the GeoTIFF token to .tif", {
   expect_equal(styler_format_ext("gtiff"), "tif")
   expect_equal(styler_format_ext("tiff"), "tiff")

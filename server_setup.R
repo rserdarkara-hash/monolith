@@ -124,63 +124,67 @@
   # input$method here would mis-register diagnostics if the user changed the
   # sidebar while the run was still executing.
   register_locality_assets <- function(l, meta, comp_mode, val_type, method) {
-     if(!is.null(rv$sf)) {
-       df_l_act <- rv$sf %>% st_drop_geometry() %>% filter(loc == !!l, !is.na(v))
-       if(nrow(df_l_act) > 0) {
-         s_l <- summary(df_l_act$v)
-         stats_l <- data.frame(Metric = names(s_l), Value = as.character(round(as.numeric(s_l), 3)))
-         register_export_item(paste0("table_stats_loc_", l), paste(meta$label, "-", l, "- Descriptive Statistics (Actual)"), "table", stats_l, meta$category)
-       }
-       
-       if(comp_mode || val_type != "actual") {
-         df_l_pre <- rv$sf %>% st_drop_geometry() %>% filter(loc == !!l, !is.na(pv))
-         if(nrow(df_l_pre) > 0) {
-           s_l_pre <- summary(df_l_pre$pv)
-           stats_l_pre <- data.frame(Metric = names(s_l_pre), Value = as.character(round(as.numeric(s_l_pre), 3)))
-           register_export_item(paste0("table_stats_pre_loc_", l), paste(meta$label, "-", l, "- Descriptive Statistics (Predicted)"), "table", stats_l_pre, meta$category)
-         }
-       }
+     # The per-locality Descriptive Statistics card's own frame and builder
+     # (uploaded rows of this locality, not the deduplicated rv$sf).
+     sv_l <- stats_table_vectors(rv$user_data, rv$disp, rv$mapping$loc, l)
+     stats_l <- if(!is.null(sv_l)) summary_stats_df(sv_l$act, sv_l$pre, labels = c("Selected_Actual", "Selected_Predicted"))
+     if(!is.null(stats_l)) {
+       register_export_item(paste0("table_stats_loc_", l), paste(meta$label, "-", l, "- Descriptive Statistics"), "table", stats_l, meta$category)
+     }
 
+     if(!is.null(rv$sf)) {
        if(comp_mode || val_type != "actual") {
          df_l_perf <- rv$sf %>% st_drop_geometry() %>% filter(loc == !!l, !is.na(v), !is.na(pv))
-         if(nrow(df_l_perf) >= 3) {
-           # Same metric dictionary as the on-screen card and the Total export;
-           # per-locality n is small (8-30), which is exactly where the two CCC
-           # estimators diverge most. moran = FALSE: no CV residual field here.
-           perf_m_l <- perform_cv(data.frame(var1.observed = df_l_perf$v, var1.pred = df_l_perf$pv),
-                                  moran = FALSE)
-           perf_l <- data.frame(
-             Metric = c("R² (Trad)", "R² (Corr)", "RMSE", "MBE (ML pred - observed)", "CCC", "RPD"),
-             Value = c(perf_m_l$nse, perf_m_l$r2, perf_m_l$rmse, -perf_m_l$me, perf_m_l$ccc, perf_m_l$rpd)
-           )
+         # Same builder as the on-screen Prediction Performance card, so the
+         # export carries all eleven statistics rather than a six-metric
+         # subset under its own labels. Per-locality n is small (8-30), which
+         # is exactly where the two CCC estimators diverge most.
+         perf_l <- pred_perf_df(df_l_perf$v, df_l_perf$pv)
+         if(!is.null(perf_l)) {
            register_export_item(paste0("table_perf_loc_", l), paste(meta$label, "-", l, "- Prediction Performance"), "table", perf_l, meta$category)
          }
+
        }
      }
-     
+
+     # Model CV metrics export: the same wide row the Model Performance card
+     # shows, with the fold plan and Moran's null expectation as columns of
+     # their own. It used to be a two-column dump of perform_cv()'s internal
+     # field names, with every value coerced to text.
      if(!is.null(rv$cv_metrics_act[[l]])) {
-       cv_l <- rv$cv_metrics_act[[l]]
        n_obs_l <- if(!is.null(rv$cv_data_act[[l]])) nrow(rv$cv_data_act[[l]]) else NA
-       cv_table <- data.frame(Metric = names(cv_l), Value = as.character(round(as.numeric(cv_l), 4)))
-       cv_table <- rbind(data.frame(Metric = "CV Type", Value = cv_type_label(n_obs_l, rv$cv_strategy_sel)), cv_table)
+       cv_table <- cv_metrics_export_df(rv$cv_metrics_act[[l]], "Actual Model",
+                                        cv_type_label(n_obs_l, rv$cv_strategy_sel))
        register_export_item(paste0("table_cv_loc_", l), paste(meta$label, "-", l, "- Model CV Metrics (Actual)"), "table", cv_table, meta$category)
      }
 
      if((comp_mode || val_type != "actual") && !is.null(rv$cv_metrics_pre[[l]])) {
-       cv_l_p <- rv$cv_metrics_pre[[l]]
        n_obs_l_p <- if(!is.null(rv$cv_data_pre[[l]])) nrow(rv$cv_data_pre[[l]]) else NA
-       cv_table_p <- data.frame(Metric = names(cv_l_p), Value = as.character(round(as.numeric(cv_l_p), 4)))
-       cv_table_p <- rbind(data.frame(Metric = "CV Type", Value = cv_type_label(n_obs_l_p, rv$cv_strategy_sel)), cv_table_p)
+       cv_table_p <- cv_metrics_export_df(rv$cv_metrics_pre[[l]], "Predicted Model",
+                                          cv_type_label(n_obs_l_p, rv$cv_strategy_sel))
        register_export_item(paste0("table_cv_pre_loc_", l), paste(meta$label, "-", l, "- Model CV Metrics (Predicted)"), "table", cv_table_p, meta$category)
      }
-     
-     if(isTruthy(input$color_style %in% c("agro", "bin")) && !is.null(rv$rast_list_act[[l]])) {
-       # same cache id as the Scientific Analysis per-locality table and as the
-       # total that sums it: one expanse() pass per locality per run, not three
-       area_l <- calc_area_df(rv$rast_list_act[[l]], paste0("loc_act_", l))
-       if(is.data.frame(area_l)) register_export_item(paste0("table_area_loc_", l), paste(meta$label, "-", l, "- Area Coverage"), "table", area_l, meta$category)
+
+     # Fold-realization stability (opt-in repeated CV): reported on screen,
+     # never exportable before.
+     rep_l_a <- rv$cv_repeats_act$per_loc[[l]]
+     if(!is.null(rep_l_a)) {
+       register_export_item(paste0("table_cv_repeats_loc_", l), paste(meta$label, "-", l, "- Fold-Realization Stability (Actual)"), "table", cv_repeats_export_df(rep_l_a, "Actual Model"), meta$category)
      }
-     
+     if(comp_mode || val_type != "actual") {
+       rep_l_p <- rv$cv_repeats_pre$per_loc[[l]]
+       if(!is.null(rep_l_p)) {
+         register_export_item(paste0("table_cv_repeats_pre_loc_", l), paste(meta$label, "-", l, "- Fold-Realization Stability (Predicted)"), "table", cv_repeats_export_df(rep_l_p, "Predicted Model"), meta$category)
+       }
+     }
+
+     # Per-locality class-area coverage is registered by the classification
+     # observer in server_sci_analysis.R, not here: the classification is
+     # usually applied after the run, and a table registered at run completion
+     # would miss it. That observer covers both surfaces and re-registers on
+     # every re-classification.
+
+
      # Variogram exports register the same ggplot builders the Scientific
      # Analysis tab renders (former lattice look retired; numbers unchanged).
      if(!is.null(rv$v_emp_list[[paste0(l, "_act")]])) {
@@ -199,7 +203,15 @@
        df_vgm_p <- as.data.frame(v_emp_p) %>% select(np, dist, gamma, dir.hor, dir.ver)
        register_export_item(paste0("table_vgm_pre_", l), paste(meta$label, "-", l, "- Variogram Data (Predicted)"), "table", df_vgm_p, meta$category)
      }
-     
+
+     # The FITTED model (model family, nugget, sill, range, structural
+     # dependency). Only the empirical points were exportable before, so the
+     # parameters the kriging system actually solved with left no record.
+     vgm_par_l <- vgm_params_export_df(rv$v_fit_list, locs = l)
+     if(!is.null(vgm_par_l)) {
+       register_export_item(paste0("table_vgm_params_", l), paste(meta$label, "-", l, "- Variogram Parameters"), "table", vgm_par_l, meta$category)
+     }
+
      if(!is.null(rv$cv_data_act[[l]])) {
        df_cv <- as.data.frame(rv$cv_data_act[[l]])
        p_op <- tryCatch({
@@ -225,58 +237,61 @@
        }
      }
      
+     # Like the variogram above, the GCV curve exports as BOTH the figure and
+     # the lambda/GCV grid it was drawn from - the numeric record of how the
+     # smoothing parameter was chosen.
      if(method == "TPS" && !is.null(rv$tps_gcv_data[[paste0(l, "_act")]])) {
        df_gcv <- rv$tps_gcv_data[[paste0(l, "_act")]]
-       p_gcv <- ggplot(df_gcv, aes(x = lambda, y = gcv)) + 
+       p_gcv <- ggplot(df_gcv, aes(x = lambda, y = gcv)) +
          geom_line(color = "steelblue") + geom_point() + scale_x_log10() +
          labs(title = paste("TPS GCV Diagnostics (Actual):", l)) + theme_minimal()
        register_export_item(paste0("plot_tps_gcv_", l), paste(meta$label, "-", l, "- TPS GCV Curve (Actual)"), "plot", p_gcv, meta$category)
+       register_export_item(paste0("table_tps_gcv_", l), paste(meta$label, "-", l, "- TPS GCV Data (Actual)"), "table", as.data.frame(df_gcv), meta$category)
      }
      if(method == "TPS" && (comp_mode || val_type != "actual") && !is.null(rv$tps_gcv_data[[paste0(l, "_pre")]])) {
        df_gcv_p <- rv$tps_gcv_data[[paste0(l, "_pre")]]
-       p_gcv_p <- ggplot(df_gcv_p, aes(x = lambda, y = gcv)) + 
+       p_gcv_p <- ggplot(df_gcv_p, aes(x = lambda, y = gcv)) +
          geom_line(color = "firebrick") + geom_point() + scale_x_log10() +
          labs(title = paste("TPS GCV Diagnostics (Predicted):", l)) + theme_minimal()
        register_export_item(paste0("plot_tps_gcv_pre_", l), paste(meta$label, "-", l, "- TPS GCV Curve (Predicted)"), "plot", p_gcv_p, meta$category)
+       register_export_item(paste0("table_tps_gcv_pre_", l), paste(meta$label, "-", l, "- TPS GCV Data (Predicted)"), "table", as.data.frame(df_gcv_p), meta$category)
      }
      
      # RF importance exports reuse the labeled SA-tab builder (metadata labels
      # instead of raw column names; every importance measure gets a panel).
-     # The data-table export keeps raw column names: it is the numeric record.
+     # The data-table export (rf_importance_df, ui_formatting.R) keeps raw
+     # column names and carries EVERY importance measure the forest recorded.
      if(method == "RFK" && !is.null(rv$rf_models[[paste0(l, "_act")]])) {
        rf_mod <- rv$rf_models[[paste0(l, "_act")]]
-       imp_mat <- randomForest::importance(rf_mod)
-       imp_col <- colnames(imp_mat)[1]
-       df_imp <- data.frame(Variable = rownames(imp_mat), Importance = imp_mat[, imp_col])
-       df_imp <- df_imp[order(df_imp$Importance, decreasing = TRUE), ]
        p_imp <- build_rf_importance_plot(rf_mod, paste("Variable Importance (Actual):", l), rv$mapping$vars)
        register_export_item(paste0("plot_rf_imp_act_", l), paste(meta$label, "-", l, "- RF Variable Importance (Actual)"), "plot", p_imp, meta$category)
-       register_export_item(paste0("table_rf_imp_act_", l), paste(meta$label, "-", l, "- RF Variable Importance Data (Actual)"), "table", df_imp, meta$category)
+       register_export_item(paste0("table_rf_imp_act_", l), paste(meta$label, "-", l, "- RF Variable Importance Data (Actual)"), "table", rf_importance_df(rf_mod), meta$category)
      }
      if(method == "RFK" && (comp_mode || val_type != "actual") && !is.null(rv$rf_models[[paste0(l, "_pre")]])) {
        rf_mod_p <- rv$rf_models[[paste0(l, "_pre")]]
-       imp_mat_p <- randomForest::importance(rf_mod_p)
-       imp_col_p <- colnames(imp_mat_p)[1]
-       df_imp_p <- data.frame(Variable = rownames(imp_mat_p), Importance = imp_mat_p[, imp_col_p])
-       df_imp_p <- df_imp_p[order(df_imp_p$Importance, decreasing = TRUE), ]
        p_imp_p <- build_rf_importance_plot(rf_mod_p, paste("Variable Importance (Predicted):", l), rv$mapping$vars)
        register_export_item(paste0("plot_rf_imp_pre_", l), paste(meta$label, "-", l, "- RF Variable Importance (Predicted)"), "plot", p_imp_p, meta$category)
-       register_export_item(paste0("table_rf_imp_pre_", l), paste(meta$label, "-", l, "- RF Variable Importance Data (Predicted)"), "table", df_imp_p, meta$category)
+       register_export_item(paste0("table_rf_imp_pre_", l), paste(meta$label, "-", l, "- RF Variable Importance Data (Predicted)"), "table", rf_importance_df(rf_mod_p), meta$category)
      }
 
+     # The coefficient table the RK trend panel shows (labelled terms, CI,
+     # significance codes), in its numeric export flavour, plus the fit
+     # statistics that panel puts in chips.
+     register_rk_trend <- function(lm_sum, tgt, tgt_label) {
+       coef_df <- rk_coef_export_df(lm_sum, rv$mapping$vars)
+       if(!is.null(coef_df)) {
+         register_export_item(paste0("table_rk_coef_", tgt, "_", l), paste(meta$label, "-", l, paste0("- RK Regression Coefficients (", tgt_label, ")")), "table", coef_df, meta$category)
+       }
+       fit_df <- rk_fit_stats_df(lm_sum)
+       if(!is.null(fit_df)) {
+         register_export_item(paste0("table_rk_fit_", tgt, "_", l), paste(meta$label, "-", l, paste0("- RK Trend Fit Statistics (", tgt_label, ")")), "table", fit_df, meta$category)
+       }
+     }
      if(method == "RK" && !is.null(rv$model_summaries[[paste0(l, "_act")]])) {
-       lm_sum <- rv$model_summaries[[paste0(l, "_act")]]
-       coef_df <- as.data.frame(lm_sum$coefficients)
-       coef_df$Variable <- rownames(coef_df)
-       coef_df <- coef_df[, c("Variable", "Estimate", "Std. Error", "t value", "Pr(>|t|)" )]
-       register_export_item(paste0("table_rk_coef_act_", l), paste(meta$label, "-", l, "- RK Regression Coefficients (Actual)"), "table", coef_df, meta$category)
+       register_rk_trend(rv$model_summaries[[paste0(l, "_act")]], "act", "Actual")
      }
      if(method == "RK" && (comp_mode || val_type != "actual") && !is.null(rv$model_summaries[[paste0(l, "_pre")]])) {
-       lm_sum_p <- rv$model_summaries[[paste0(l, "_pre")]]
-       coef_df_p <- as.data.frame(lm_sum_p$coefficients)
-       coef_df_p$Variable <- rownames(coef_df_p)
-       coef_df_p <- coef_df_p[, c("Variable", "Estimate", "Std. Error", "t value", "Pr(>|t|)" )]
-       register_export_item(paste0("table_rk_coef_pre_", l), paste(meta$label, "-", l, "- RK Regression Coefficients (Predicted)"), "table", coef_df_p, meta$category)
+       register_rk_trend(rv$model_summaries[[paste0(l, "_pre")]], "pre", "Predicted")
      }
 
      # CK exports use the same faceted ggplot + metadata labels as the SA tab.

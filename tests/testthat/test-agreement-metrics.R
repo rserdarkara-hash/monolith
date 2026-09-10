@@ -218,3 +218,41 @@ test_that("agreement metrics refuse too few points and a variance-free target", 
   expect_null(ok$status)
   expect_equal(ok$n, 20)
 })
+
+
+# ── agreement_metrics_df ──────────────────────────────────────────────────
+# The Classification Performance card and its export read one builder, so the
+# exported sheet cannot list fewer statistics than the screen it came from.
+
+test_that("agreement_metrics_df reports all six statistics, numerically", {
+  set.seed(21)
+  obs <- runif(60, 0, 10)
+  pre <- obs + rnorm(60, 0, 1)
+  ag <- compute_agreement_metrics(obs, pre, method = "quartile")
+
+  out <- agreement_metrics_df(ag)
+
+  expect_equal(out$Metric, c("Overall Accuracy", "Balanced Accuracy",
+                             "Off-by-one Accuracy", "Matthews Corr. Coef. (MCC)",
+                             "Kappa (Unweighted)", "Weighted Kappa (Linear)"))
+  expect_true(is.numeric(out$Value))
+  val <- function(nm) out$Value[out$Metric == nm]
+  # the export flavour is full precision
+  expect_equal(val("Overall Accuracy"), ag$accuracy)
+  expect_equal(val("Balanced Accuracy"), ag$bal_accuracy)
+  expect_equal(val("Off-by-one Accuracy"), ag$off_by_one)
+  expect_equal(val("Matthews Corr. Coef. (MCC)"), ag$mcc)
+  expect_equal(val("Kappa (Unweighted)"), ag$kappa)
+  expect_equal(val("Weighted Kappa (Linear)"), ag$kappa_linear)
+
+  # the card rounds to 4 dp
+  shown <- agreement_metrics_df(ag, round_values = TRUE)
+  expect_equal(shown$Value, round(out$Value, 4))
+})
+
+test_that("agreement_metrics_df returns NULL for a refused comparison", {
+  ag <- compute_agreement_metrics(c(1, 2), c(1, 2), method = "quartile")
+  expect_false(is.null(ag$status))
+  expect_null(agreement_metrics_df(ag))
+  expect_null(agreement_metrics_df(NULL))
+})
