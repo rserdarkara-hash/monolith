@@ -180,8 +180,21 @@ make_golden <- function(src_data = "sample_data/samp_data_1.xlsx",
       "| tiny =", paste(names(scopes$tiny), unlist(scopes$tiny), sep = "/", collapse = ", "), "\n")
   cat("source md5:", meta$source$md5_data, "/", meta$source$md5_meta, "\n")
   cat("localities:\n"); print(table(gs$locality))
-  cat("\nNEXT: regenerate this fixture's baselines with\n",
-      "  Rscript tests/testthat/fixtures/make_baselines.R\n", sep = "")
+  # A custom out_dir needs MONOLITH_GOLDEN_DIR named here: the recorder resolves
+  # golden_dir() in its OWN process, so a bare Rscript would silently record
+  # against the shipped fixture instead of the one just written.
+  cat("\nNEXT: regenerate this fixture's baselines with\n")
+  if (identical(normalizePath(out_dir, winslash = "/", mustWork = FALSE),
+                normalizePath(file.path("tests", "testthat", "fixtures"),
+                              winslash = "/", mustWork = FALSE))) {
+    cat("  Rscript tests/testthat/fixtures/make_baselines.R\n")
+  } else {
+    cat("  Sys.setenv(MONOLITH_GOLDEN_DIR = \"", out_dir, "\")\n",
+        "  source(\"tests/testthat/fixtures/make_baselines.R\")\n",
+        "(both from the project root; the variable must reach the recorder's own\n",
+        "process, so a bare Rscript call would record against the shipped fixture)\n",
+        sep = "")
+  }
   invisible(meta)
 }
 

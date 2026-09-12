@@ -202,35 +202,65 @@ test_that("this session's packages are the versions renv.lock pins", {
   expect_equal(drift, character(0))
 })
 
-test_that("a missing package stops rather than installing the latest CRAN version", {
+test_that("a missing package never installs without an explicit yes", {
   # The guard that protects the recorded baselines: install.packages() fetches
   # whatever CRAN publishes today, which is the one action that can move a
-  # recorded value with nothing in the repository having changed. Asserted by
-  # EVALUATING global.R's own block against a package that cannot exist, with
-  # install.packages() stubbed to fail loudly - a source-text match would pass
-  # just as happily on a branch that can never be reached.
+  # recorded value with nothing in the repository having changed. What the block
+  # owes is NOT a refusal to install - most locked versions are no longer
+  # current, and sending every user through a source build of 76 compiled
+  # packages would be the wrong trade - but three properties:
+  #   (a) it never installs without an explicit yes,
+  #   (b) it never prompts non-interactively (helper.R sources this file, and a
+  #       prompt there would hang the suite),
+  #   (c) it names both routes, so the choice is informed.
+  # Asserted by EVALUATING global.R's own block against a package that cannot
+  # exist - a source-text match would pass just as happily on a branch that can
+  # never be reached.
   root <- normalizePath(file.path(testthat::test_path(), "..", ".."), mustWork = TRUE)
   src <- readLines(file.path(root, "global.R"), warn = FALSE)
   i <- grep("if (length(missing_packages) > 0) {", src, fixed = TRUE)
   expect_length(i, 1)
   j <- i + which(src[(i + 1):length(src)] == "}")[1]
-
   blk <- parse(text = paste(src[i:j], collapse = "\n"))
-  env <- new.env(parent = globalenv())
-  env$missing_packages <- "definitely.not.a.real.package"
-  env$install.packages <- function(...) stop("install.packages must not be reached")
+
+  # `interactive()` and `utils::menu()` are stubbed through the evaluation
+  # environment. menu() is reached as `utils::menu`, so the `::` operator itself
+  # is the binding to intercept; everything else it is asked for is forwarded.
+  mk_env <- function(interactive_val, menu_answer = 1L) {
+    e <- new.env(parent = globalenv())
+    e$missing_packages <- "definitely.not.a.real.package"
+    e$install.packages <- function(...) stop("<<installed>>", call. = FALSE)
+    e$interactive <- function() interactive_val
+    e$`::` <- function(pkg, name) {
+      p <- as.character(substitute(pkg)); n <- as.character(substitute(name))
+      if (p == "utils" && n == "menu") return(function(...) menu_answer)
+      get(n, envir = asNamespace(p))
+    }
+    e
+  }
 
   old <- setwd(root)
   on.exit(setwd(old), add = TRUE)
-  # renv.lock is present at the root, so the refusal names renv::restore(). The
-  # variable is forced off here because the upstream-drift job sets it globally.
+  # MONOLITH_ALLOW_LATEST is forced off here because the upstream-drift job sets
+  # it globally.
   withr::with_envvar(c(MONOLITH_ALLOW_LATEST = "false"), {
-    expect_error(eval(blk, env), "renv::restore", fixed = TRUE)
+    # (b) non-interactive: stops, never prompts, never installs.
+    msg <- tryCatch(eval(blk, mk_env(FALSE)), error = conditionMessage)
+    expect_false(grepl("<<installed>>", msg, fixed = TRUE))
+    # (c) renv.lock is present at the root, so both routes are named.
+    expect_match(msg, "install.packages(c(", fixed = TRUE)
+    expect_match(msg, "renv::restore()", fixed = TRUE)
+
+    # (a) interactive and declined: still nothing installed.
+    expect_error(eval(blk, mk_env(TRUE, menu_answer = 2L)), "Cancelled", fixed = TRUE)
+    # interactive and accepted: the install proceeds.
+    expect_error(eval(blk, mk_env(TRUE, menu_answer = 1L)), "<<installed>>", fixed = TRUE)
   })
 
-  # MONOLITH_ALLOW_LATEST is the upstream-drift CI job's declared opt-in, and it
-  # must reach install.packages() - that job exists to run on newer versions.
+  # MONOLITH_ALLOW_LATEST is the upstream-drift CI job's declared opt-in: it
+  # installs with no question asked, because that job exists to run on newer
+  # versions on a machine no one is sitting at.
   withr::with_envvar(c(MONOLITH_ALLOW_LATEST = "true"), {
-    expect_error(eval(blk, env), "install.packages must not be reached", fixed = TRUE)
+    expect_error(eval(blk, mk_env(FALSE)), "<<installed>>", fixed = TRUE)
   })
 })

@@ -27,52 +27,64 @@ required_packages <- c(
 
 missing_packages <- required_packages[!(required_packages %in% installed.packages()[, "Package"])]
 if (length(missing_packages) > 0) {
-  # WHY THIS STOPS INSTEAD OF INSTALLING. install.packages() fetches whatever
-  # CRAN publishes today, and this app's numeric test layer pins recorded values
-  # (tests/testthat/fixtures/) that only hold for the versions in renv.lock: a
-  # change in gstat's variogram fit or fields' GCV moves them. Installing latest
-  # is therefore the one action that can silently invalidate the baselines, and
-  # it costs the user no less than restoring the validated set - the download is
-  # the same size either way. So while a lockfile is present, the app names what
-  # is missing and points at the one command that installs the right versions.
+  # WHY THIS DOES NOT SIMPLY INSTALL. install.packages() fetches whatever CRAN
+  # publishes today, and the numeric test layer (tests/testthat/fixtures/) pins
+  # values measured under the versions in renv.lock: a change in gstat's
+  # variogram fit or fields' GCV moves them. Installing without asking is
+  # therefore the one action that can invalidate a recorded baseline with
+  # nothing in the repository having changed.
   #
-  # MONOLITH_ALLOW_LATEST=true opts back into installing latest. It exists for
-  # the upstream-drift CI job (.github/workflows/upstream.yaml), whose whole
-  # purpose is to run against newer packages on purpose; it is not a convenience
-  # switch for ordinary use.
+  # It does NOT follow that everyone should be sent through renv::restore().
+  # Most locked versions are no longer current, so restoring builds them from
+  # source and needs a C/C++/Fortran toolchain (Rtools on Windows). Those pins
+  # matter for reproducing the recorded test values, not for analysing your own
+  # data. So both routes are named with their real cost, and nothing installs
+  # without an explicit yes.
+  #
+  # MONOLITH_ALLOW_LATEST=true skips the question. It exists for the
+  # upstream-drift CI job (.github/workflows/upstream.yaml), which runs against
+  # newer packages on purpose; it is not a convenience switch.
   allow_latest <- isTRUE(as.logical(Sys.getenv("MONOLITH_ALLOW_LATEST", "false")))
-  missing_txt <- paste(missing_packages, collapse = ", ")
 
-  if (!allow_latest && file.exists("renv.lock")) {
-    stop("Missing packages: ", missing_txt,
-         "\n\nInstall the validated versions (renv.lock) with:",
-         "\n    install.packages(\"renv\")   # once",
-         "\n    renv::restore()",
-         "\n\nThese are the versions the app's recorded test baselines were taken",
-         " under. See README, section 3.", call. = FALSE)
-  }
-
-  # No lockfile (a stripped copy of the repository): offer the install, since
-  # there is no validated set to point at. Never prompt when non-interactive -
-  # the test harness sources this file, and a prompt there would hang the suite.
-  if (!allow_latest && !interactive()) {
-    stop("Missing packages: ", missing_txt,
-         "\n\nInstall them with:",
-         "\n    install.packages(c(\"", paste(missing_packages, collapse = "\", \""), "\"))",
-         call. = FALSE)
-  }
   if (!allow_latest) {
-    ans <- utils::menu(c("Yes", "No"),
-                       title = paste0(length(missing_packages),
-                                      " package(s) are missing: ", missing_txt,
-                                      "\nInstall them from CRAN now (latest versions)?"))
+    # The A/B lettering earns its place only when there is a B: a stripped copy
+    # of the repository carries no lockfile, and there is then one route.
+    has_lock <- file.exists("renv.lock")
+    routes <- paste0(
+      length(missing_packages), " package(s) are missing: ",
+      paste(missing_packages, collapse = ", "),
+      if (has_lock) "\n\nA. Current CRAN releases." else "\n\nCurrent CRAN releases.",
+      " Pre-built binaries, a few minutes, no compiler:",
+      "\n     install.packages(c(\"", paste(missing_packages, collapse = "\", \""), "\"))",
+      if (has_lock) "\n   This is the route for using the app." else "")
+    if (has_lock) {
+      routes <- paste0(routes,
+        "\n\nB. The versions renv.lock pins, which the recorded test baselines were",
+        "\n   measured under:",
+        "\n     install.packages(\"renv\")   # once",
+        "\n     renv::restore()",
+        "\n   Most of them are no longer current, so they build from source: a long",
+        "\n   install and a C/C++/Fortran toolchain (Rtools on Windows). Needed only",
+        "\n   to reproduce the recorded test values, not to analyse your own data.")
+    }
+
+    # Never prompt when non-interactive: the test harness sources this file, and
+    # a prompt there would hang the suite.
+    if (!interactive()) {
+      stop(routes, "\n\nSee README, section 3.", call. = FALSE)
+    }
+
+    message(routes, "\n")
+    ans <- utils::menu(c("Install the current CRAN releases now", "Cancel"),
+                       title = "Install the missing packages now?")
     if (!identical(ans, 1L)) {
       stop("Cancelled: ", length(missing_packages), " package(s) still missing.",
            call. = FALSE)
     }
   }
 
-  message("Installing missing packages from CRAN (latest versions): ", missing_txt)
+  message("Installing from CRAN (current releases): ",
+          paste(missing_packages, collapse = ", "))
   install.packages(missing_packages, repos = "https://cloud.r-project.org")
 }
 

@@ -1,8 +1,8 @@
 ![Monolith: Spatial Analysis Dashboard](assets/banner.png)
 
-# Monolith Spatial Analysis Dashboard (v1.1.0)
+# Monolith Spatial Analysis Dashboard (v1.1.1)
 
-[![Version](https://img.shields.io/badge/version-1.1.0-6f42c1)](#)
+[![Version](https://img.shields.io/badge/version-1.1.1-6f42c1)](#)
 [![R](https://img.shields.io/badge/R-%E2%89%A5%204.5.0-276DC3?logo=r&logoColor=white)](https://cran.r-project.org/)
 [![Shiny](https://img.shields.io/badge/built%20with-Shiny-1f77b4)](https://shiny.posit.co/)
 [![Tests](https://github.com/rserdarkara-hash/monolith/actions/workflows/tests.yaml/badge.svg)](https://github.com/rserdarkara-hash/monolith/actions/workflows/tests.yaml)
@@ -229,7 +229,7 @@ Before installing the application, ensure you have the following software instal
 *   **R:** Version **4.5.0 or higher** is required and is checked at startup; Monolith is developed and tested on **R 4.5.2**. You can download it from [CRAN](https://cran.r-project.org/).
 *   **RStudio (Optional but recommended):** The easiest way to run and interact with Shiny applications. Download from [Posit](https://posit.co/download/rstudio-desktop/).
 *   **System Dependencies for Spatial Packages:** The spatial stack (`sf`, `terra`) links against GDAL, GEOS and PROJ. Monolith is tested against **GDAL 3.11.4, GEOS 3.13.1 and PROJ 9.7.0**; any reasonably recent releases of these libraries will work.
-    *   **Windows:** Nothing to do; CRAN ships the spatial packages as self-contained binaries. Installing [RTools](https://cran.r-project.org/bin/windows/Rtools/) (matching your R version) is only needed if a package must be compiled from source.
+    *   **Windows:** Nothing to do for the normal install; CRAN ships the spatial packages as self-contained binaries. [RTools](https://cran.r-project.org/bin/windows/Rtools/) (matching your R version) is needed only if you install through `renv::restore()`, which builds most of the pinned versions from source (see [Package Dependencies](#3-package-dependencies)).
     *   **macOS:** You may need to install `gdal` and `proj` via Homebrew (`brew install gdal proj`).
     *   **Linux (Ubuntu/Debian):** Install spatial libraries using your package manager:
         ```bash
@@ -252,7 +252,7 @@ Two equally valid ways to obtain Monolith:
 Monolith depends on **59 CRAN packages** for its spatial engine, statistical analytics, and user interface, all pinned in `renv.lock` (see [Reproducible installation](#reproducible-installation-with-renv-optional)).
 
 > [!IMPORTANT]
-> **Installing the dependencies.** `global.R` checks the suite at startup and names anything missing. While `renv.lock` is present it stops there and points at `renv::restore()` instead of installing on its own: `install.packages()` fetches whatever CRAN published today, and the numeric test layer (Section 9) records values that hold for the pinned versions. The download is the same size either way, so restoring costs nothing extra and gives you the versions the app was validated against.
+> **Installing the dependencies.** `global.R` checks the suite at startup, names anything missing, and offers two routes rather than installing on its own. **To use the app, take the first:** `install.packages()` with the current CRAN releases, which arrive as pre-built binaries in a few minutes and need no compiler. **To reproduce the recorded test values of Section 9, take the second:** `renv::restore()`, which installs the exact versions in `renv.lock`. Most of those are no longer current, so they build from source, which takes far longer and needs a C/C++/Fortran toolchain (RTools on Windows). The pinned versions matter for reproducing the test baselines, not for analysing your own data. Nothing is installed without your explicit confirmation, because an unasked install of the current releases is the one action that can move a recorded baseline with nothing in the repository having changed.
 
 The full dependency suite, grouped by function:
 
@@ -268,7 +268,7 @@ The full dependency suite, grouped by function:
 | **CRS catalogue** | `DBI`, `RSQLite` |
 
 <details>
-<summary><strong>Tested version matrix</strong>: the exact package versions Monolith 1.1.0 is developed and validated against (click to expand)</summary>
+<summary><strong>Tested version matrix</strong>: the exact package versions Monolith 1.1.1 is developed and validated against (click to expand)</summary>
 
 <br>
 
@@ -310,7 +310,7 @@ install.packages("renv")   # once
 renv::restore()             # reads renv.lock; confirm the prompt to activate the project
 ```
 
-This installs the pinned versions into a project-local library without touching your global R library, and is the route `global.R` points at when a package is missing. Installing the suite yourself with `install.packages()` works too - you then get current CRAN releases rather than the validated ones, which is fine for ordinary use and is the one thing that can move the recorded test values.
+This installs the pinned versions into a project-local library without touching your global R library. Budget time for it: most of the locked versions have been superseded on CRAN, so they are built from source and a toolchain is required (RTools on Windows, Xcode command line tools on macOS, the `-dev` headers listed in Section 1 on Linux). Reach for it when you want to reproduce the recorded test values; for ordinary analysis the current CRAN releases are the faster and equally valid choice.
 
 ### 4. Input Data Requirements
 
@@ -321,7 +321,7 @@ Monolith reads a single flat table of point observations, one row per sample:
 *   **Variables:** at least one numeric column to interpolate. Any further numeric columns are available as covariates for RK, RFK, and CK, and as inputs to the correlation, PCA, governing-factors, and classification modules. Covariates must be co-sampled, that is, measured at the same points as the target.
 *   **Localities (optional):** a text column grouping samples into fields, sites, or farms. Each locality is modelled separately. Without one, the dataset is treated as a single region; groups can also be drawn on the map afterwards.
 *   **Categorical columns (optional):** text or factor columns are the targets available to the Classification Suite and the grouping factors used by the descriptive suite.
-*   **Variable list (optional):** a second file (`.xlsx`, `.xls`, `.csv`, JSON, or TXT) mapping column names to display labels, units, and categories, which is what drives the readable axis titles and the variable folders in the sidebar. See `sample_data/samp_var_list.xlsx`.
+*   **Variable list (optional):** a second file (`.xlsx`, `.xls`, `.csv`) mapping column names to display labels, units, and categories, which is what drives the readable axis titles and the variable folders in the sidebar. See `sample_data/samp_var_list.xlsx`.
 *   **Boundary shapefile (optional):** upload `.shp` together with `.shx`, `.dbf`, and `.prj` to clip surfaces to a known field boundary.
 
 The Data Setup tab validates the mapping before anything is modelled: a mini-map colours the points by locality so a swapped X/Y pair or a wrong CRS is visible immediately. See the [User Guide](docs/user_guide.md) for the full ingestion walkthrough.
@@ -403,7 +403,7 @@ monolith/
    shiny::runApp("monolith.R", launch.browser = TRUE)
    ```
 
-If a package is missing, startup stops and names it; run `renv::restore()` (see [Package Dependencies](#3-package-dependencies)) and launch again. With the library complete, startup takes seconds.
+If a package is missing, startup names it and asks before installing anything; take the current CRAN releases unless you specifically need the pinned ones (see [Package Dependencies](#3-package-dependencies)). With the library complete, startup takes seconds.
 
 ## Documentation
 
@@ -419,13 +419,35 @@ Sample datasets in [sample_data/](sample_data/) let you exercise every module wi
 
 ## Testing and Reproducibility
 
-Monolith ships with a `testthat` suite of 3,068 assertions across 35 test files, covering the interpolation pipeline, cross-validation metrics, variogram fitting, the classification engine, the descriptive/correlation/PCA plot builders, metadata matching and the Governing Factors module. Where a quantity has an external or closed-form reference, the tests assert against that rather than against the app's own output: IDW against the hand-written Shepard sum, Ordinary Kriging against its exactness and pure-nugget closed forms, RK and RFK against the trend-plus-kriged-residual decomposition, VIF against `1/(1 - R²)` from an actual regression, Moran's I against a hand-built weight matrix, the classification and agreement metrics against a hand-built confusion matrix, the agronomical class bins against `terra::classify`'s own output, the PCA spectrum against the eigenvalues of the correlation and covariance matrices, Lin's CCC against a value computed independently with `DescTools`, and the plotted variogram curves against `gstat::variogramLine`. Those tests run on a frozen extract of the sample survey (`tests/testthat/fixtures/`), so their inputs never move and a changed number means the code changed; that directory's `GOLDEN_MANIFEST.md` states what a green suite does and does not establish, and how to substitute your own golden dataset without editing a single test. A separate file boots the assembled application in a headless browser through `shinytest2` and checks the shell (server initialisation, input identifiers, tab wiring, documentation drawer); it skips itself when `shinytest2` or a Chromium-based browser is unavailable. The suite runs on every push through GitHub Actions against the pinned `renv.lock` environment, on Linux and on Windows - the platform is not incidental, since one recorded value was once resolved differently by the two platforms' floating-point paths. A second, weekly workflow (`upstream.yaml`) runs the same suite against the current CRAN releases instead of the pinned ones, so a change in an upstream package that moves one of the recorded values is reported as upstream news rather than discovered months later; it never gates a pull request. To run everything from the project root:
+Monolith ships with a `testthat` suite of 3,072 assertions across 35 test files, covering the interpolation pipeline, cross-validation metrics, variogram fitting, the classification engine, the descriptive/correlation/PCA plot builders, metadata matching and the Governing Factors module. Where a quantity has an external or closed-form reference, the tests assert against that rather than against the app's own output: IDW against the hand-written Shepard sum, Ordinary Kriging against its exactness and pure-nugget closed forms, RK and RFK against the trend-plus-kriged-residual decomposition, VIF against `1/(1 - R²)` from an actual regression, Moran's I against a hand-built weight matrix, the classification and agreement metrics against a hand-built confusion matrix, the agronomical class bins against `terra::classify`'s own output, the PCA spectrum against the eigenvalues of the correlation and covariance matrices, Lin's CCC against a value computed independently with `DescTools`, and the plotted variogram curves against `gstat::variogramLine`. Those tests run on a frozen extract of the sample survey (`tests/testthat/fixtures/`), so their inputs never move and a changed number means the code changed; that directory's `GOLDEN_MANIFEST.md` states what a green suite does and does not establish, and how to substitute your own golden dataset without editing a single test. A separate file boots the assembled application in a headless browser through `shinytest2` and checks the shell (server initialisation, input identifiers, tab wiring, documentation drawer); it skips itself when `shinytest2` or a Chromium-based browser is unavailable. The suite runs on every push through GitHub Actions against the pinned `renv.lock` environment, on Linux and on Windows - the platform is not incidental, since one recorded value was once resolved differently by the two platforms' floating-point paths. A second, weekly workflow (`upstream.yaml`) runs the same suite against the current CRAN releases instead of the pinned ones, so a change in an upstream package that moves one of the recorded values is reported as upstream news rather than discovered months later; it never gates a pull request. To run everything from the project root:
 
 ```bash
 Rscript tests/testthat.R
 ```
 
 The first run is slow because the harness sources the full application (all 59 packages); this is expected. Scientific accuracy is treated as the project's primary invariant; changes that alter numeric results are gated on these tests.
+
+### Freezing your own dataset as the reference
+
+The numeric layer is not tied to the shipped sample data. For a thesis, a submission or a regional survey you can freeze your own survey as the golden set, so the suite proves that your published numbers and surfaces do not drift as the code or the packages move underneath them.
+
+```r
+source("tests/testthat/fixtures/make_golden.R")
+make_golden(src_data = "my_survey.xlsx",
+            out_dir  = "tests/testthat/fixtures_mine",
+            roles    = list(locality = "site", x = "easting", y = "northing",
+                            crs = 25832, target = "pH_lab", ...))
+
+# Point the suite at your fixture, then record its baselines. Do both from the
+# project root, and set the variable rather than the option if you prefer to run
+# the recorder as a separate `Rscript` process, which would not inherit it.
+Sys.setenv(MONOLITH_GOLDEN_DIR = "tests/testthat/fixtures_mine")
+source("tests/testthat/fixtures/make_baselines.R")
+```
+
+The recorder runs the whole suite first and refuses to record anything from a failing tree. It records the few quantities that have no closed form (Jenks breaks, the iterative VIF drop order, the end-to-end surface digest) together with the R and package versions they were measured under. Commit `tests/testthat/fixtures_mine/` with your analysis and archive the repository; a reader can re-run the suite and get the same values.
+
+Not one test is edited: the rest recompute their reference from whatever data they are handed. `roles` must name every column the fixture expects, 17 soil properties, 6 prediction columns and 10 covariates, and [GOLDEN_MANIFEST.md](tests/testthat/fixtures/GOLDEN_MANIFEST.md) carries the full role table.
 
 ## Scope and Limitations
 
@@ -457,7 +479,7 @@ Human oversight remained central throughout: all methodological choices, model f
   title     = {Monolith: A Spatial Analysis Dashboard for Geostatistical Modeling and Mapping},
   author    = {Kara, R. Serdar},
   year      = {2026},
-  version   = {1.1.0},
+  version   = {1.1.1},
   doi       = {10.5281/zenodo.21130951},
   publisher = {Zenodo},
   url       = {https://github.com/rserdarkara-hash/monolith},

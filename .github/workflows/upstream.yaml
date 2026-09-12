@@ -59,6 +59,17 @@ jobs:
           r-version: "4.5.2"
           use-public-rspm: true
 
+      - name: Install the test toolchain
+        # tests/testthat.R opens with library(testthat), which runs BEFORE
+        # global.R can install anything - so the suite cannot bootstrap itself
+        # here. testthat is a TEST dependency: renv.lock carries it, but
+        # global.R's required_packages declares what the APP needs, not what
+        # runs the suite. The pinned job gets it from setup-renv; this job has
+        # no setup-renv by design, so it installs it directly. The app's own 59
+        # still come from global.R at current versions, which is the point of
+        # this job. Repos is the P3M binary endpoint setup-r configured above.
+        run: Rscript -e 'install.packages(c("testthat", "withr"))'
+
       - name: Run the suite against the latest CRAN
         # Deliberately NO setup-renv step. The test harness sources global.R,
         # whose install branch - unlocked by MONOLITH_ALLOW_LATEST above - pulls
