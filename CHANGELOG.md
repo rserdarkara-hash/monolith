@@ -2,7 +2,7 @@
 
 All notable changes to Monolith are documented in this file.
 
-## [1.1.1 - Unreleased] - Updated renv.lock / CRS recognition optimization / Directional variogram on both surfaces / Baseline provenance / User's own reproducibility conditions
+## [1.1.1] - 2026-09-13 - Updated renv.lock / CRS recognition optimization / Directional variogram on both surfaces / Baseline provenance / User's own reproducibility conditions
 
 ### Changed
 - **The Directional Variogram panel reads the uploaded prediction column too.** A *Data* switch above the card selects the measured values or, for a run that mapped an uploaded ML prediction column, those predictions; the existing *Computed on* switch then selects the values themselves or the cross-validation residuals of that surface, so all four combinations are available instead of the measured side only. The second choice appears only for a run that has a prediction side, by the same rule that gates the Validation Diagnostics (Predicted) block. An ML model's output is usually smoother than the measurements it approximates and carries its own directional structure, so the two sides read against each other say whether the model preserved the anisotropy of the field it was trained on. Still strictly diagnostic: every engine remains omnidirectional and no map or metric changes. Scientific Guide 5.1.

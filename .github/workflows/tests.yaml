@@ -40,6 +40,12 @@ jobs:
       # it is reported rather than blocking.
       RENV_CONFIG_REPOS_OVERRIDE: https://packagemanager.posit.co/cran/latest
       DOWNLOAD_STATIC_LIBV8: 1
+      # renv 1.2.4 orders installs only among packages it has to install, so a
+      # package linked from a partially stale cache (gtable) does not hold back
+      # its dependent (gridExtra) until its own dependency (rlang) is in. The
+      # Linux-only post-install load test then fails on the missing rlang.
+      # Windows never runs that test. The suite loads every package anyway.
+      RENV_INSTALL_TEST_LOAD: false
     steps:
       - uses: actions/checkout@v5
 
