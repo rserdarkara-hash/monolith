@@ -28,7 +28,7 @@ Whether the target is soil physicochemistry, a topographic interaction, or a man
    more slowly. Either launch from the R GUI or a terminal, which opens your
    system browser by default, or in RStudio set the **Run App** dropdown to
    *Run External*.
-4. On the **1. Data Setup** tab, upload `sample_data/samp_data_1.xlsx` and, as the variable list, `samp_var_list.xlsx` (optional for your own data; required for proper investigation of the sample data). Confirm the X/Y mapping and CRS, then move to the Spatial Engine in the sidebar and run an interpolation. The sample file arrives ready to run: **Locality** preset to Kale and Yorga, the two the accompanying manuscript examines in detail, and both CRS selectors preset to `EPSG:32635` (UTM 35N), the zone those localities are on. Clear the Locality box to map all seven. These presets are keyed on the sample file's own name and never apply to a dataset of your own.
+4. On the **1. Data Setup** tab, upload `sample_data/samp_data_1.xlsx` and, as the variable list, `samp_var_list.xlsx` (optional but recommended for your own data; required for proper investigation of the sample data). Confirm the X/Y mapping and CRS, then move to the Spatial Engine in the sidebar and run an interpolation. The sample file arrives ready to run: **Locality** preset to Kale and Yorga, the two the accompanying manuscript examines in detail, and both CRS selectors preset to `EPSG:32635` (UTM 35N), the zone those localities are on. Clear the Locality box to map all seven. These presets are keyed on the sample file's own name and never apply to a dataset of your own.
 
 The sample data carries usage restrictions until its associated manuscript is published; see [License](#license).
 
