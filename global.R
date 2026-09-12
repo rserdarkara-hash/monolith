@@ -27,13 +27,52 @@ required_packages <- c(
 
 missing_packages <- required_packages[!(required_packages %in% installed.packages()[, "Package"])]
 if (length(missing_packages) > 0) {
-  # Convenience fallback only: this pulls the LATEST CRAN versions, which can
-  # drift from the pinned versions in renv.lock. For reproducible results
-  # (matching the versions the app was validated against), restore the
-  # environment with renv::restore() instead — see README.
-  message("Installing missing packages from CRAN (latest versions): ",
-          paste(missing_packages, collapse = ", "),
-          "\nNote: for the reproducible, validated environment use renv::restore() (renv.lock).")
+  # WHY THIS STOPS INSTEAD OF INSTALLING. install.packages() fetches whatever
+  # CRAN publishes today, and this app's numeric test layer pins recorded values
+  # (tests/testthat/fixtures/) that only hold for the versions in renv.lock: a
+  # change in gstat's variogram fit or fields' GCV moves them. Installing latest
+  # is therefore the one action that can silently invalidate the baselines, and
+  # it costs the user no less than restoring the validated set - the download is
+  # the same size either way. So while a lockfile is present, the app names what
+  # is missing and points at the one command that installs the right versions.
+  #
+  # MONOLITH_ALLOW_LATEST=true opts back into installing latest. It exists for
+  # the upstream-drift CI job (.github/workflows/upstream.yaml), whose whole
+  # purpose is to run against newer packages on purpose; it is not a convenience
+  # switch for ordinary use.
+  allow_latest <- isTRUE(as.logical(Sys.getenv("MONOLITH_ALLOW_LATEST", "false")))
+  missing_txt <- paste(missing_packages, collapse = ", ")
+
+  if (!allow_latest && file.exists("renv.lock")) {
+    stop("Missing packages: ", missing_txt,
+         "\n\nInstall the validated versions (renv.lock) with:",
+         "\n    install.packages(\"renv\")   # once",
+         "\n    renv::restore()",
+         "\n\nThese are the versions the app's recorded test baselines were taken",
+         " under. See README, section 3.", call. = FALSE)
+  }
+
+  # No lockfile (a stripped copy of the repository): offer the install, since
+  # there is no validated set to point at. Never prompt when non-interactive -
+  # the test harness sources this file, and a prompt there would hang the suite.
+  if (!allow_latest && !interactive()) {
+    stop("Missing packages: ", missing_txt,
+         "\n\nInstall them with:",
+         "\n    install.packages(c(\"", paste(missing_packages, collapse = "\", \""), "\"))",
+         call. = FALSE)
+  }
+  if (!allow_latest) {
+    ans <- utils::menu(c("Yes", "No"),
+                       title = paste0(length(missing_packages),
+                                      " package(s) are missing: ", missing_txt,
+                                      "\nInstall them from CRAN now (latest versions)?"))
+    if (!identical(ans, 1L)) {
+      stop("Cancelled: ", length(missing_packages), " package(s) still missing.",
+           call. = FALSE)
+    }
+  }
+
+  message("Installing missing packages from CRAN (latest versions): ", missing_txt)
   install.packages(missing_packages, repos = "https://cloud.r-project.org")
 }
 

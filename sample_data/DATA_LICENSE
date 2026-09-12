@@ -1,14 +1,103 @@
 # DATA LICENSE & RESTRICTIONS
 
-Copyright (c) 2026 Recep Serdar Kara, on behalf of the data rights holders. All rights reserved.
+Copyright (c) 2026 Ali Rıza Ongun, Cansu Almaz, Gizem Çiçek, R. Serdar Kara, and
+Mahmut Tepecik (jointly, the "Rights Holders"). All rights reserved, including
+any applicable database rights.
 
-The files and datasets within this sample_data/ directory are provided strictly for demonstration, evaluation, and testing of the Monolith application, until the associated manuscript (currently under peer review) is formally published. Upon publication, these datasets will be released under the Creative Commons Attribution 4.0 International (CC BY 4.0) license (https://creativecommons.org/licenses/by/4.0/). Until then, all rights are reserved and the terms below apply to all third parties.
+The files and datasets within this `sample_data/` directory are provided strictly
+for demonstration, evaluation, and testing of the Monolith application
+(https://github.com/rserdarkara-hash/monolith).
 
-By using, cloning, or downloading this repository, you agree to the following terms regarding the sample datasets:
+## Version and supersession
 
-1. **Restricted Use**: The sample data is provided solely to demonstrate the functionality and interface of the Monolith application. Any other use, including but not limited to spatial analyses for external projects, commercial use, or academic/scientific research and publication, is strictly prohibited.
-2. **No Publication**: You may not publish, reprint, upload, or present any research, maps, figures, reports, or analytical results generated using this sample data in any journal article, conference proceeding, website, thesis, presentation, or other public or private forum.
-3. **No Redistribution**: You may not copy, share, redistribute, sublicense, or sell the sample datasets, either in their original form or in any modified or derived format, without the prior written consent of the copyright owner, Recep Serdar Kara.
-4. **No Ownership Transfer**: No ownership rights, intellectual property rights, or research exploitation rights to this data are transferred to any user of this repository.
+**Version 2 — effective 12 September 2026, distributed with Monolith 1.1.1 and later.**
 
-For inquiries regarding the authorized use, licensing, or collaborations involving these datasets, please contact the author: Recep Serdar Kara.
+This file replaces all earlier versions of the DATA_LICENSE, including those
+distributed with Monolith releases up to and including 1.1.0 and those contained
+in archived release records. Where an earlier version of this file remains
+present in a historical Git tag, a release archive, or any third-party copy, the
+terms set out here are the operative terms for the datasets.
+
+Holders of copies obtained under an earlier version of this file may rely on
+these terms in place of the earlier ones. In particular, the software
+verification exception in section 2(b) and the automatic CC BY 4.0 release
+described below apply to every copy of the datasets however and whenever
+obtained, including copies obtained under an earlier version of this file.
+
+## Automatic release under CC BY 4.0
+
+Upon formal publication of the associated manuscript, **or on 31 December 2027,
+whichever occurs first**, these datasets are automatically released under the
+Creative Commons Attribution 4.0 International (CC BY 4.0) license
+(https://creativecommons.org/licenses/by/4.0/). This transition requires no
+further action, announcement, or consent by any Rights Holder. All Rights
+Holders have agreed in writing to both the interim terms below and this
+automatic release.
+
+Until that date, all rights are reserved and the terms below apply to all third
+parties.
+
+## Interim terms
+
+By using, cloning, or downloading this repository, you agree to the following
+terms regarding the sample datasets:
+
+1. **Restricted Use.** The sample data is provided solely to demonstrate the
+   functionality and interface of the Monolith application. Any other use,
+   including but not limited to spatial analyses for external projects,
+   commercial use, or academic or scientific research and publication, is
+   prohibited except as permitted under sections 2(a) and 2(b).
+
+2. **No Publication.** You may not publish, reprint, upload, or present any
+   research, maps, figures, reports, or analytical results generated using this
+   sample data in any journal article, conference proceeding, website, thesis,
+   presentation, or other public or private forum. Two exceptions apply:
+
+   (a) **Teaching.** Non-commercial classroom instruction demonstrating the
+   methods implemented in Monolith is permitted, provided that no outputs
+   derived from the data are published, archived, or otherwise made publicly
+   available beyond the instructional setting.
+
+   (b) **Software verification.** Reporting of results obtained from this data
+   solely for the purpose of verifying the correctness, accuracy, or numerical
+   reproducibility of the Monolith software is permitted, provided that the
+   source is cited and the underlying data is not redistributed. This exception
+   does not extend to reporting substantive findings about the study area or
+   the environmental phenomena the data describes.
+
+3. **No Redistribution.** You may not copy, share, redistribute, sublicense, or
+   sell the sample datasets, either in their original form or in any modified or
+   derived format, without the prior written consent of the Rights Holders.
+
+   Forks created through GitHub's built-in fork mechanism are permitted,
+   provided that the fork retains this DATA_LICENSE file unmodified and that all
+   users of the fork remain bound by these terms. Redistribution outside GitHub's
+   fork mechanism — including mirrors, data repositories, institutional archives,
+   package distributions, or journal supplementary materials — requires prior
+   written consent.
+
+4. **No Ownership Transfer.** No ownership rights, intellectual property rights,
+   or research exploitation rights to this data are transferred to any user of
+   this repository.
+
+## Scope and exemptions
+
+These terms bind third parties only. They do not restrict the Rights Holders
+themselves, nor any party acting with their written consent.
+
+These terms do not apply to derived test fixtures and baseline outputs
+distributed within this repository (including, without limitation, the contents
+of `tests/testthat/fixtures/`). Those artifacts are distributed under the
+repository's primary license and may be used, copied, and redistributed
+accordingly.
+
+This DATA_LICENSE governs only the contents of the `sample_data/` directory. The
+Monolith source code is licensed separately under GPL-3.0. The datasets in this
+directory are not a derivative work of that source code, and the terms of the
+GPL-3.0 do not extend to them.
+
+## Contact
+
+For inquiries regarding authorized use, licensing, or collaborations involving
+these datasets, please contact R. Serdar Kara (r.serdarkara@gmail.com), who acts
+as the designated point of contact for all Rights Holders.

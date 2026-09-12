@@ -321,10 +321,30 @@
   # variogram re-projects to a metric CRS itself — rv$sf carries the user's
   # chosen DISPLAY crs, which may well be geographic, and a bearing in degrees
   # of longitude is not a bearing on the ground.
+  # The two switches over the card pick one of four columns of rv$sf: the DATA
+  # (measured values `v`, or the uploaded ML prediction column `pv`) times the
+  # SOURCE (those values, or that surface's CV residuals). An uploaded
+  # prediction column is a field in its own right — a model's output carries its
+  # own spatial structure, usually smoother than the measurements it
+  # approximates — so its anisotropy is read directly rather than inferred from
+  # the measured side.
+  dir_vgm_value_col <- function(tgt, src) {
+    if (identical(src, "resid")) {
+      if (identical(tgt, "pre")) "model_resid_pre" else "model_resid_act"
+    } else {
+      if (identical(tgt, "pre")) "pv" else "v"
+    }
+  }
+
   build_directional_vgm_diag <- function() {
     loc <- input$sel_loc_stats; req(loc)
     req(rv$sf)
-    src <- input$dir_vgm_source %||% "v"
+    # Guarded rather than trusted: the switch loses its second choice when a run
+    # without a prediction side is displayed, and the stale input value can
+    # still reach a download handler before that update lands.
+    tgt <- if (identical(input$dir_vgm_target, "pre") && isTRUE(disp_has_pred())) "pre" else "act"
+    src <- if (identical(input$dir_vgm_source, "resid")) "resid" else "v"
+    surf <- if (identical(tgt, "pre")) "uploaded-prediction" else "measured-value"
 
     pts <- rv$sf
     if (loc != "Total (Combined)" && "loc" %in% colnames(pts)) {
@@ -332,30 +352,34 @@
     }
     if (nrow(pts) == 0) return(sci_placeholder("No points available for this locality."))
 
-    if (identical(src, "resid")) {
-      # Prefer the displayed surface's CV residual column; both are written by
-      # the run, and only one exists for an actual-only run.
-      col <- if ("model_resid_act" %in% colnames(pts) &&
-                 any(!is.na(pts$model_resid_act))) {
-        "model_resid_act"
-      } else if ("model_resid_pre" %in% colnames(pts) &&
-                 any(!is.na(pts$model_resid_pre))) {
-        "model_resid_pre"
-      } else {
-        NULL
-      }
-      if (is.null(col)) {
-        return(sci_placeholder(paste0("No cross-validation residuals are stored for this run.\n",
-                                      "Switch to \"Measured values\", or re-run with a method that reports CV.")))
-      }
-      value_col <- col
-      what <- "CV residuals"
+    value_col <- dir_vgm_value_col(tgt, src)
+    if (!value_col %in% colnames(pts) || !any(!is.na(pts[[value_col]]))) {
+      return(sci_placeholder(
+        if (identical(src, "resid")) {
+          # The two sources do not have the same precondition, and a reader who
+          # has just seen the values plot plausibly reads an empty residual
+          # panel as a fault: values are the uploaded column itself, residuals
+          # exist only where this run's interpolation AND its cross-validation
+          # completed for that surface. State that, not just the absence.
+          paste0("No cross-validation residuals are stored for the ", surf, " surface of this run.\n",
+                 "Values are read from the uploaded table, so they plot whenever that column is\n",
+                 "filled; residuals exist only where this run's interpolation and its\n",
+                 "cross-validation both completed for this surface. The Run Log on this tab\n",
+                 "reports the cause.")
+        } else if (identical(tgt, "pre")) {
+          paste0("This run carries no uploaded prediction values.\n",
+                 "The prediction column of the mapped variable is empty for these points.")
+        } else {
+          "No measured values are available for this run."
+        }))
+    }
+
+    what <- if (identical(src, "resid")) {
+      paste0("CV residuals, ", surf, " surface")
+    } else if (identical(tgt, "pre")) {
+      "uploaded prediction values"
     } else {
-      if (!"v" %in% colnames(pts) || !any(!is.na(pts$v))) {
-        return(sci_placeholder("No measured values are available for this run."))
-      }
-      value_col <- "v"
-      what <- "measured values"
+      "measured values"
     }
 
     vd <- calc_directional_variogram(pts, value_col)
@@ -374,9 +398,35 @@
   output$directional_vgm_plot <- renderCachedPlot({
     p <- build_directional_vgm_diag(); req(p); p
   }, cacheKeyExpr = {
-    list("dir_vgm", input$sel_loc_stats, input$dir_vgm_source, rv$results_rev,
-         is.null(rv$sf), if (is.null(rv$sf)) 0L else nrow(rv$sf))
+    list("dir_vgm", input$sel_loc_stats, input$dir_vgm_target, input$dir_vgm_source,
+         rv$results_rev, is.null(rv$sf), if (is.null(rv$sf)) 0L else nrow(rv$sf))
   }, cache = "session")
+
+  # "Uploaded predictions" is offered by the same rule that gates the Validation
+  # Diagnostics (Predicted) block, so the two cannot disagree about whether the
+  # displayed run has a prediction side.
+  observeEvent(list(rv$disp, rv$has_predictions), {
+    choices <- c("Actual data" = "act")
+    if (isTRUE(disp_has_pred())) choices <- c(choices, "Uploaded predictions" = "pre")
+    sel <- if (isTruthy(input$dir_vgm_target) && input$dir_vgm_target %in% choices) {
+      input$dir_vgm_target
+    } else {
+      "act"
+    }
+    shinyWidgets::updateRadioGroupButtons(session, "dir_vgm_target", choices = choices,
+                                          selected = sel, size = "sm")
+  }, ignoreNULL = FALSE)
+
+  # The values choice names the column it reads, and that column differs by
+  # target; only the label moves, so the selection carries over unchanged.
+  observeEvent(input$dir_vgm_target, {
+    lbl <- if (identical(input$dir_vgm_target, "pre")) "Uploaded prediction values" else "Measured values"
+    shinyWidgets::updateRadioGroupButtons(
+      session, "dir_vgm_source",
+      choices = stats::setNames(c("v", "resid"), c(lbl, "Model residuals (CV)")),
+      selected = if (identical(input$dir_vgm_source, "resid")) "resid" else "v",
+      size = "sm")
+  })
 
   # ── expand modal + PNG download wiring for every SA plot card ────────────
   register_sci_plot("directional_vgm_plot", "Directional Variogram (Anisotropy Check)", build_directional_vgm_diag)

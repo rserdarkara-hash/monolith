@@ -361,6 +361,138 @@ golden_baseline <- function(key) {
   b[[key]]
 }
 
+# ── The environment a baseline was recorded in ───────────────────────────────
+#
+# A recorded baseline means "same code + same data + same packages -> same
+# numbers". The data is frozen in this fixture and the code is in git; the
+# package versions were the one leg nothing recorded, which made a moved value
+# indistinguishable from an upstream change and left the reader bisecting.
+#
+# These are the packages that can actually move one of the four recorded values:
+# gstat (the empirical variogram and the kriging solve), sf and terra
+# (projection, grid construction, rasterisation, the ellipsoidal areas),
+# classInt (the Jenks breaks) and spdep (Moran's I inside perform_cv). Extend the
+# list only when a NEW baseline brings a new package in - an entry that cannot
+# move a value would report drift that means nothing.
+GOLDEN_BASELINE_PKGS <- c("gstat", "sf", "terra", "classInt", "spdep")
+
+#' TRUE when this session is deliberately running on unpinned package versions.
+#'
+#' Set by the upstream-drift CI job (.github/workflows/upstream.yaml), which runs
+#' the suite against the latest CRAN on purpose. The two environment assertions
+#' below skip there: a version difference is that job's PREMISE, so asserting
+#' against it would make the job permanently red and useless as an alarm. What it
+#' still asserts is the thing it exists for - whether a recorded VALUE moved.
+monolith_unpinned_run <- function() {
+  isTRUE(as.logical(Sys.getenv("MONOLITH_ALLOW_LATEST", "false")))
+}
+
+#' This session's environment, in the shape make_baselines.R records.
+golden_env_snapshot <- function(pkgs = GOLDEN_BASELINE_PKGS) {
+  vs <- vapply(pkgs, function(p) {
+    tryCatch(as.character(utils::packageVersion(p)),
+             error = function(e) NA_character_)
+  }, character(1))
+  list(r_version = as.character(getRversion()),
+       platform = R.version$platform,
+       recorded_at = format(Sys.Date(), "%Y-%m-%d"),
+       packages = vs)
+}
+
+#' The environment `golden_baselines.rds` was recorded in, or NULL when the
+#' fixture ships no baselines (or carries none recorded before this was added).
+golden_provenance <- function() {
+  if (isTRUE(getOption("monolith_golden_baselines_bypass", FALSE))) return(NULL)
+  b <- .golden_read("golden_baselines.rds", required = FALSE)
+  if (is.null(b)) return(NULL)
+  attr(b, "provenance", exact = TRUE)
+}
+
+#' Every difference between the recording environment and this one, as
+#' "pkg: recorded X, here Y" lines; `character(0)` when they agree, NULL when
+#' nothing was recorded.
+#'
+#' PLATFORM IS DELIBERATELY NOT COMPARED. Baselines are recorded on Windows and
+#' CI runs Linux, so comparing it would be permanently red there; it is carried
+#' for the message only - and the platform difference is real enough to matter
+#' (it moved `ok_surface_digest` once), which is exactly why the reader needs to
+#' see it rather than have the suite shout about it on every run.
+#'
+#' Versions are compared as `package_version()`, never as strings: gstat reports
+#' "2.1-5" where `packageVersion()` normalises it to 2.1.5, and a string test
+#' would call every dashed version a drift.
+golden_provenance_drift <- function(prov = golden_provenance()) {
+  if (is.null(prov)) return(NULL)
+  here <- golden_env_snapshot(names(prov$packages))
+  out <- character(0)
+  if (!identical(prov$r_version, here$r_version)) {
+    out <- c(out, sprintf("R: recorded %s, here %s", prov$r_version, here$r_version))
+  }
+  for (p in names(prov$packages)) {
+    a <- prov$packages[[p]]
+    b <- here$packages[[p]]
+    same <- !is.na(a) && !is.na(b) && isTRUE(package_version(a) == package_version(b))
+    if (!same) out <- c(out, sprintf("%s: recorded %s, here %s", p, a, b))
+  }
+  out
+}
+
+#' The provenance note a baseline assertion passes as `info =`, so a moved value
+#' arrives with the versions it was recorded under instead of sending the reader
+#' to bisect. NULL when nothing was recorded, in which case the expectation
+#' simply carries no note.
+golden_baseline_info <- function() {
+  prov <- golden_provenance()
+  if (is.null(prov)) return(NULL)
+  base <- sprintf("baseline recorded %s on %s under R %s (%s)",
+                  prov$recorded_at %||% "?", prov$platform %||% "?", prov$r_version,
+                  paste(names(prov$packages), prov$packages, collapse = ", "))
+  drift <- golden_provenance_drift(prov)
+  if (length(drift)) {
+    paste0(base, "; THIS SESSION DIFFERS - ", paste(drift, collapse = "; "))
+  } else {
+    paste0(base, "; this session matches it")
+  }
+}
+
+#' Every declared package whose installed version differs from `renv.lock`, as
+#' "pkg: lock X, session Y" lines; `character(0)` when they agree, NULL when the
+#' lockfile cannot be read.
+#'
+#' Read-only: nothing is installed, activated or written. The lockfile stays the
+#' authority and this only reports when the session has stopped matching it,
+#' which is the cheap half of what an activated renv would guarantee. Its caller
+#' reports a difference as a SKIP, not a failure - a deliberate local upgrade is
+#' not a defect, and `golden_provenance_drift()` is what speaks up when a
+#' version actually moves a recorded number.
+renv_lock_drift <- function(pkgs = NULL) {
+  root <- normalizePath(file.path(testthat::test_path(), "..", ".."), mustWork = FALSE)
+  lf <- file.path(root, "renv.lock")
+  if (!file.exists(lf)) return(NULL)
+  lock <- tryCatch(jsonlite::fromJSON(lf, simplifyVector = FALSE)$Packages,
+                   error = function(e) NULL)
+  if (is.null(lock)) return(NULL)
+  if (is.null(pkgs)) {
+    pkgs <- if (exists("required_packages", inherits = TRUE)) required_packages else names(lock)
+  }
+  out <- character(0)
+  # A declared package the lockfile has never heard of is the same class of
+  # problem as a version difference, and the one the intersect() below would
+  # otherwise hide: renv.lock has not been regenerated since it was added, so
+  # `global.R` and the lockfile no longer describe the same dependency set.
+  absent <- setdiff(pkgs, names(lock))
+  if (length(absent)) {
+    out <- c(out, sprintf("%s: declared in global.R, absent from renv.lock", absent))
+  }
+  for (p in intersect(pkgs, names(lock))) {
+    lv <- lock[[p]]$Version
+    iv <- tryCatch(as.character(utils::packageVersion(p)), error = function(e) NA_character_)
+    ok <- !is.null(lv) && !is.na(iv) && isTRUE(package_version(lv) == package_version(iv))
+    if (!ok) out <- c(out, sprintf("%s: lock %s, session %s", p, lv %||% "?", iv))
+  }
+  out
+}
+
 #' The variogram the surface digest is pinned to.
 #'
 #' The digest exists to lock the DRIVER - grid construction, the kriging solve,

@@ -1,0 +1,68 @@
+name: upstream
+
+# The drift canary. It runs the same numeric suite as tests.yaml, but against
+# TODAY'S CRAN instead of the versions renv.lock pins.
+#
+# WHY IT IS A SEPARATE WORKFLOW. tests.yaml answers "does this commit still
+# reproduce the validated numbers?" and must block a pull request. This one
+# answers "does the outside world still agree with them?" - a question about
+# upstream, not about the commit - so it must never block anything, must not add
+# minutes to a pull request, and needs its own badge and its own failure mail.
+# Those are three properties a second matrix leg cannot have, which is why this
+# is a file and not a leg.
+#
+# A failure here is news, not a regression: it says a package moved a number the
+# fixture records. The baselines carry the versions they were recorded under
+# (tests/testthat/fixtures/, the `provenance` attribute), so the failure message
+# names what changed. The response is to reproduce it locally, decide whether the
+# new behaviour is more correct, and only then re-record.
+on:
+  schedule:
+    # Mondays, 04:17 UTC. Off-hour on purpose: a scheduled job that collides
+    # with the top of the hour waits in GitHub's queue.
+    - cron: "17 4 * * 1"
+  workflow_dispatch:
+
+jobs:
+  latest:
+    runs-on: ubuntu-latest
+    env:
+      # The declared opt-in global.R requires before it will install anything.
+      # With renv.lock present it otherwise refuses and points at
+      # renv::restore(), which is precisely what this job must NOT do. The same
+      # flag makes the suite's two environment assertions skip: a version
+      # difference is this job's premise, so asserting against it would leave the
+      # canary permanently red and useless as an alarm. What it still asserts is
+      # the only thing that matters here - whether a recorded VALUE moved.
+      MONOLITH_ALLOW_LATEST: "true"
+      DOWNLOAD_STATIC_LIBV8: 1
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Install system libraries for the spatial stack
+        # Same list and the same third-party-repo workaround as tests.yaml; see
+        # the comments there for why the sources are matched on content.
+        run: |
+          sudo find /etc/apt/sources.list.d -maxdepth 1 -type f \
+            \( -name '*.list' -o -name '*.sources' \) \
+            -exec grep -lE 'dl\.google\.com|packages\.microsoft\.com' {} + \
+            | sudo xargs -r rm -f
+          sudo apt-get update -o Acquire::Retries=3 || true
+          sudo apt-get install -y --no-install-recommends \
+            libgdal-dev libgeos-dev libproj-dev libudunits2-dev \
+            libcurl4-openssl-dev libssl-dev libxml2-dev \
+            libfontconfig1-dev libfreetype6-dev libharfbuzz-dev libfribidi-dev \
+            libpng-dev libtiff5-dev libjpeg-dev
+
+      - uses: r-lib/actions/setup-r@v2
+        with:
+          r-version: "4.5.2"
+          use-public-rspm: true
+
+      - name: Run the suite against the latest CRAN
+        # Deliberately NO setup-renv step. The test harness sources global.R,
+        # whose install branch - unlocked by MONOLITH_ALLOW_LATEST above - pulls
+        # today's versions of all 59 declared packages. That the app can still
+        # be assembled from a clean machine on current CRAN is itself part of
+        # what this job checks.
+        run: Rscript tests/testthat.R

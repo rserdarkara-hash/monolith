@@ -7,16 +7,46 @@ on:
 
 jobs:
   test:
-    runs-on: ubuntu-latest
+    # TWO OPERATING SYSTEMS, NOT TWO R VERSIONS. An R matrix would buy nothing
+    # here: renv.lock pins R 4.5.2 and global.R refuses to start below 4.5.0, so
+    # an oldrel leg fails by design, and an R-devel leg needs an UNPINNED library
+    # - which is a different question, asked by upstream.yaml.
+    #
+    # The platform, by contrast, has already moved a recorded number. The
+    # ok_surface_digest baseline passed on Windows and failed on Linux because
+    # robust_vgm_fit()'s candidate search landed on a near-tie that a different
+    # BLAS/libm resolves the other way; the fix was to pin the variogram and the
+    # boundary, and the way to notice the next one before a release is to run
+    # both platforms. Development happens on Windows, so Linux is the leg that
+    # was never exercised locally - and vice versa.
+    runs-on: ${{ matrix.os }}
+    strategy:
+      # One platform failing must not cancel the other: when a number is
+      # platform-dependent, the interesting output is BOTH legs' results.
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+    # The Windows leg is reported but not yet blocking. Its risk is a toolchain
+    # one, not a scientific one: P3M serves binaries for CURRENT versions, so a
+    # pinned version that CRAN has since superseded falls back to a source build,
+    # and on Windows a source build of sf/terra is slow and fragile. A red badge
+    # from that would destroy the signal this job exists to give. Promote it by
+    # deleting this line once a few runs have restored cleanly.
+    continue-on-error: ${{ matrix.os == 'windows-latest' }}
     env:
-      # Serve pre-built Linux binaries where available; renv falls back to
-      # source builds (CRAN archive) for pinned versions no longer current.
+      # Serves pre-built binaries to both runners where available; renv falls
+      # back to source builds (CRAN archive) for pinned versions no longer
+      # current. That fallback is the Windows leg's slow path, and the reason
+      # it is reported rather than blocking.
       RENV_CONFIG_REPOS_OVERRIDE: https://packagemanager.posit.co/cran/latest
       DOWNLOAD_STATIC_LIBV8: 1
     steps:
       - uses: actions/checkout@v5
 
       - name: Install system libraries for the spatial stack
+        # Linux only: the Windows runner gets GDAL/PROJ/GEOS inside the sf and
+        # terra binaries themselves, and has no apt.
+        if: runner.os == 'Linux'
         run: |
           # Every library below comes from Ubuntu's own archives. The runner
           # image also configures third-party repos (Google Chrome, Microsoft)

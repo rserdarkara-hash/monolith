@@ -231,7 +231,9 @@ test_that("the VIF gate drops exactly what an lm-based VIF says it should", {
   # someone weakens the reference above. On the shipped survey the two
   # temperature variables and one of the slope/ruggedness pair go.
   recorded <- golden_baseline("vif_drop_order")
-  if (!is.null(recorded)) expect_equal(ref_dropped, recorded)
+  if (!is.null(recorded)) {
+    expect_equal(ref_dropped, recorded, info = golden_baseline_info())
+  }
 })
 
 test_that("an orthogonal design has VIF exactly 1 and survives the gate", {

@@ -158,3 +158,79 @@ test_that("the fixture matches its recorded identity", {
   expect_equal(golden_meta()$scopes, id$scopes)
   if (!is.null(id$varlist_dim)) expect_equal(dim(golden_varlist()), id$varlist_dim)
 })
+
+# ── The environment the baselines were recorded in ──────────────────────────
+
+test_that("the baselines record the environment they were taken in", {
+  prov <- golden_provenance()
+  skip_if(is.null(prov), "no baseline provenance recorded for this golden set")
+  skip_if(monolith_unpinned_run(), "deliberately unpinned run (upstream drift job)")
+
+  expect_true(all(c("r_version", "platform", "packages") %in% names(prov)))
+  # Every package that can move one of the four recorded values must be named,
+  # or the record is incomplete in exactly the way that sends a reader bisecting.
+  expect_true(all(GOLDEN_BASELINE_PKGS %in% names(prov$packages)))
+  expect_false(any(is.na(prov$packages)))
+
+  # THIS is the assertion with teeth, and it is a failure rather than a note on
+  # purpose: a session whose gstat/sf/terra/classInt/spdep differs from the one
+  # the baselines were taken in cannot say whether a moved value is a code
+  # change or an upstream one. Two legitimate answers - restore the recorded
+  # versions, or re-record after confirming for yourself that the values did not
+  # move. It cannot deadlock make_baselines.R: that script sets the bypass while
+  # it runs the gate, so golden_provenance() is NULL and this test skips there.
+  expect_equal(golden_provenance_drift(prov), character(0),
+               info = golden_baseline_info())
+})
+
+test_that("this session's packages are the versions renv.lock pins", {
+  drift <- renv_lock_drift()
+  skip_if(is.null(drift), "renv.lock is not readable from here")
+  skip_if(monolith_unpinned_run(), "deliberately unpinned run (upstream drift job)")
+
+  # Reported as a SKIP, not a failure. renv is not activated in this project by
+  # design, so the lockfile is an authority the session is not forced to obey; a
+  # deliberate local upgrade is a choice, not a defect. What it buys is that
+  # "FAIL 0 | SKIP 0" now also means "this environment is the one renv.lock
+  # describes", which is the half of an activated renv that costs nothing. The
+  # test above is the one that refuses when a version difference reaches a
+  # recorded number.
+  if (length(drift)) {
+    skip(paste0("session differs from renv.lock (renv::restore() realigns it): ",
+                paste(drift, collapse = "; ")))
+  }
+  expect_equal(drift, character(0))
+})
+
+test_that("a missing package stops rather than installing the latest CRAN version", {
+  # The guard that protects the recorded baselines: install.packages() fetches
+  # whatever CRAN publishes today, which is the one action that can move a
+  # recorded value with nothing in the repository having changed. Asserted by
+  # EVALUATING global.R's own block against a package that cannot exist, with
+  # install.packages() stubbed to fail loudly - a source-text match would pass
+  # just as happily on a branch that can never be reached.
+  root <- normalizePath(file.path(testthat::test_path(), "..", ".."), mustWork = TRUE)
+  src <- readLines(file.path(root, "global.R"), warn = FALSE)
+  i <- grep("if (length(missing_packages) > 0) {", src, fixed = TRUE)
+  expect_length(i, 1)
+  j <- i + which(src[(i + 1):length(src)] == "}")[1]
+
+  blk <- parse(text = paste(src[i:j], collapse = "\n"))
+  env <- new.env(parent = globalenv())
+  env$missing_packages <- "definitely.not.a.real.package"
+  env$install.packages <- function(...) stop("install.packages must not be reached")
+
+  old <- setwd(root)
+  on.exit(setwd(old), add = TRUE)
+  # renv.lock is present at the root, so the refusal names renv::restore(). The
+  # variable is forced off here because the upstream-drift job sets it globally.
+  withr::with_envvar(c(MONOLITH_ALLOW_LATEST = "false"), {
+    expect_error(eval(blk, env), "renv::restore", fixed = TRUE)
+  })
+
+  # MONOLITH_ALLOW_LATEST is the upstream-drift CI job's declared opt-in, and it
+  # must reach install.packages() - that job exists to run on newer versions.
+  withr::with_envvar(c(MONOLITH_ALLOW_LATEST = "true"), {
+    expect_error(eval(blk, env), "install.packages must not be reached", fixed = TRUE)
+  })
+})

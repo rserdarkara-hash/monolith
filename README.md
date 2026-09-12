@@ -6,6 +6,7 @@
 [![R](https://img.shields.io/badge/R-%E2%89%A5%204.5.0-276DC3?logo=r&logoColor=white)](https://cran.r-project.org/)
 [![Shiny](https://img.shields.io/badge/built%20with-Shiny-1f77b4)](https://shiny.posit.co/)
 [![Tests](https://github.com/rserdarkara-hash/monolith/actions/workflows/tests.yaml/badge.svg)](https://github.com/rserdarkara-hash/monolith/actions/workflows/tests.yaml)
+[![Upstream](https://github.com/rserdarkara-hash/monolith/actions/workflows/upstream.yaml/badge.svg)](https://github.com/rserdarkara-hash/monolith/actions/workflows/upstream.yaml)
 [![License: GPL v3](https://img.shields.io/badge/license-GPL--3.0-blue)](LICENSE)
 [![Platform](https://img.shields.io/badge/platform-Windows%20%7C%20macOS%20%7C%20Linux-lightgrey)](#1-system-prerequisites)
 [![DOI](https://zenodo.org/badge/DOI/10.5281/zenodo.21130951.svg)](https://doi.org/10.5281/zenodo.21130951)
@@ -19,7 +20,14 @@ Whether the target is soil physicochemistry, a topographic interaction, or a man
 
 1. Install **R 4.5.0 or higher** (see [System Prerequisites](#1-system-prerequisites)).
 2. Download or clone this repository.
-3. Open `monolith.R` in RStudio and click **Run App**, or run `shiny::runApp("monolith.R")` from the project root. Missing packages install automatically on first launch, so expect a wait.
+3. Open `monolith.R` in RStudio and click **Run App**, or run
+   `shiny::runApp("monolith.R", launch.browser = TRUE)` from the project root.
+
+   **Run it in a real browser, not the RStudio viewer pane.** The embedded
+   viewer renders Leaflet maps, large tables, and raster overlays noticeably
+   more slowly. Either launch from the R GUI or a terminal, which opens your
+   system browser by default, or in RStudio set the **Run App** dropdown to
+   *Run External*.
 4. On the **1. Data Setup** tab, upload `sample_data/samp_data_1.xlsx` and, as the optional variable list, `samp_var_list.xlsx`. Confirm the X/Y mapping and CRS, then move to the Spatial Engine in the sidebar and run an interpolation. The sample file arrives ready to run: **Locality** preset to Kale and Yorga, the two the accompanying manuscript examines in detail, and both CRS selectors preset to `EPSG:32635` (UTM 35N), the zone those localities are on. Clear the Locality box to map all seven. These presets are keyed on the sample file's own name and never apply to a dataset of your own.
 
 The sample data carries usage restrictions until its associated manuscript is published; see [License](#license).
@@ -135,7 +143,7 @@ Automated least-squares fitting for variograms for four different models, Genera
 
 Evaluate models with a selectable cross-validation strategy: Auto (LOOCV for n ≤ 50, seeded random 10-fold above), full Leave-One-Out, or Spatial Block CV (k-means folds, recommended under spatial autocorrelation). Every run reports the same twelve-column panel, so two methods are always compared on identical quantities: RMSE, NRMSE (%), MAE, R² in both its correlation and its Nash-Sutcliffe (traditional) form, Bias (ME), Lin's CCC, RPD, RPIQ, SMAPE (%), and Moran's I of the cross-validation residuals with its two-sided p-value, the statistic carrying its null expectation E[I] = −1/(n − 1) on hover. The applied strategy is stated above the table, and the pooled Total (Combined) row carries a note that its R² and NSE are measured against the pooled mean. An optional repeated cross-validation re-runs the folds under 3, 5 or 10 alternative assignments and reports each metric as mean ± SD, so the spread contributed by the fold split can be read alongside the difference between two methods.
 
-A **directional variogram** panel recomputes semivariance within four angular cones (0°/45°/90°/135° from north) on either the measured values or the run's cross-validation residuals, so directional structure can be checked instead of assumed. It is diagnostic only: every engine in the app is omnidirectional, and nothing on the map changes because of what the panel shows.
+A **directional variogram** panel recomputes semivariance within four angular cones (0°/45°/90°/135° from north) on the measured values, on an uploaded ML prediction column, or on the cross-validation residuals of either surface, so directional structure can be checked instead of assumed. It is diagnostic only: every engine in the app is omnidirectional, and nothing on the map changes because of what the panel shows.
 
 ![Model performance table, observed-versus-predicted scatter, variance surface and directional variogram](assets/4.png)
 
@@ -244,9 +252,7 @@ Two equally valid ways to obtain Monolith:
 Monolith depends on **59 CRAN packages** for its spatial engine, statistical analytics, and user interface, all pinned in `renv.lock` (see [Reproducible installation](#reproducible-installation-with-renv-optional)).
 
 > [!IMPORTANT]
-> **Automated Package Setup:**
-> You **do not need** to execute any manual `install.packages(...)` console commands.
-> Sourcing the dashboard or launching `monolith.R` automatically triggers a smart **Auto-Installation Hook** inside `global.R`. This hook scans your environment, identifies any missing packages from the required suite, and downloads them non-interactively from the cloud CRAN repository.
+> **Installing the dependencies.** `global.R` checks the suite at startup and names anything missing. While `renv.lock` is present it stops there and points at `renv::restore()` instead of installing on its own: `install.packages()` fetches whatever CRAN published today, and the numeric test layer (Section 9) records values that hold for the pinned versions. The download is the same size either way, so restoring costs nothing extra and gives you the versions the app was validated against.
 
 The full dependency suite, grouped by function:
 
@@ -304,7 +310,7 @@ install.packages("renv")   # once
 renv::restore()             # reads renv.lock; confirm the prompt to activate the project
 ```
 
-This installs the pinned versions into a project-local library without touching your global R library. It is entirely optional; the Auto-Installation Hook described above remains the default path and installs current CRAN releases instead.
+This installs the pinned versions into a project-local library without touching your global R library, and is the route `global.R` points at when a package is missing. Installing the suite yourself with `install.packages()` works too - you then get current CRAN releases rather than the validated ones, which is fine for ordinary use and is the one thing that can move the recorded test values.
 
 ### 4. Input Data Requirements
 
@@ -368,7 +374,7 @@ monolith/
 ├── sample_data/                      # Demo datasets (restricted license)
 ├── tests/                            # testthat unit & regression test suite
 │   └── testthat/fixtures/            # Frozen golden dataset, baselines & generators
-├── .github/workflows/                # Continuous integration (runs the test suite)
+├── .github/workflows/                # CI: tests.yaml (pinned, Linux + Windows), upstream.yaml (weekly, latest CRAN)
 │
 ├── DESCRIPTION                       # Package metadata; the version the app reads at startup
 ├── renv.lock                         # Pinned dependency tree for renv::restore()
@@ -394,10 +400,10 @@ monolith/
    ```
 3. Launch the Shiny app:
    ```R
-   shiny::runApp("monolith.R")
+   shiny::runApp("monolith.R", launch.browser = TRUE)
    ```
 
-On first launch, expect a delay while the Auto-Installation Hook downloads any missing packages; subsequent launches are fast.
+If a package is missing, startup stops and names it; run `renv::restore()` (see [Package Dependencies](#3-package-dependencies)) and launch again. With the library complete, startup takes seconds.
 
 ## Documentation
 
@@ -413,7 +419,7 @@ Sample datasets in [sample_data/](sample_data/) let you exercise every module wi
 
 ## Testing and Reproducibility
 
-Monolith ships with a `testthat` suite of 3,060 assertions across 35 test files, covering the interpolation pipeline, cross-validation metrics, variogram fitting, the classification engine, the descriptive/correlation/PCA plot builders, metadata matching and the Governing Factors module. Where a quantity has an external or closed-form reference, the tests assert against that rather than against the app's own output: IDW against the hand-written Shepard sum, Ordinary Kriging against its exactness and pure-nugget closed forms, RK and RFK against the trend-plus-kriged-residual decomposition, VIF against `1/(1 - R²)` from an actual regression, Moran's I against a hand-built weight matrix, the classification and agreement metrics against a hand-built confusion matrix, the agronomical class bins against `terra::classify`'s own output, the PCA spectrum against the eigenvalues of the correlation and covariance matrices, Lin's CCC against a value computed independently with `DescTools`, and the plotted variogram curves against `gstat::variogramLine`. Those tests run on a frozen extract of the sample survey (`tests/testthat/fixtures/`), so their inputs never move and a changed number means the code changed; that directory's `GOLDEN_MANIFEST.md` states what a green suite does and does not establish, and how to substitute your own golden dataset without editing a single test. A separate file boots the assembled application in a headless browser through `shinytest2` and checks the shell (server initialisation, input identifiers, tab wiring, documentation drawer); it skips itself when `shinytest2` or a Chromium-based browser is unavailable. The suite runs on every push through GitHub Actions against the pinned `renv.lock` environment. To run everything from the project root:
+Monolith ships with a `testthat` suite of 3,068 assertions across 35 test files, covering the interpolation pipeline, cross-validation metrics, variogram fitting, the classification engine, the descriptive/correlation/PCA plot builders, metadata matching and the Governing Factors module. Where a quantity has an external or closed-form reference, the tests assert against that rather than against the app's own output: IDW against the hand-written Shepard sum, Ordinary Kriging against its exactness and pure-nugget closed forms, RK and RFK against the trend-plus-kriged-residual decomposition, VIF against `1/(1 - R²)` from an actual regression, Moran's I against a hand-built weight matrix, the classification and agreement metrics against a hand-built confusion matrix, the agronomical class bins against `terra::classify`'s own output, the PCA spectrum against the eigenvalues of the correlation and covariance matrices, Lin's CCC against a value computed independently with `DescTools`, and the plotted variogram curves against `gstat::variogramLine`. Those tests run on a frozen extract of the sample survey (`tests/testthat/fixtures/`), so their inputs never move and a changed number means the code changed; that directory's `GOLDEN_MANIFEST.md` states what a green suite does and does not establish, and how to substitute your own golden dataset without editing a single test. A separate file boots the assembled application in a headless browser through `shinytest2` and checks the shell (server initialisation, input identifiers, tab wiring, documentation drawer); it skips itself when `shinytest2` or a Chromium-based browser is unavailable. The suite runs on every push through GitHub Actions against the pinned `renv.lock` environment, on Linux and on Windows - the platform is not incidental, since one recorded value was once resolved differently by the two platforms' floating-point paths. A second, weekly workflow (`upstream.yaml`) runs the same suite against the current CRAN releases instead of the pinned ones, so a change in an upstream package that moves one of the recorded values is reported as upstream news rather than discovered months later; it never gates a pull request. To run everything from the project root:
 
 ```bash
 Rscript tests/testthat.R

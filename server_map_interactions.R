@@ -423,10 +423,17 @@
     shinyjs::toggleClass("sci_stack", "vgm-first", condition = isTRUE(sci_vgm_tuning()))
     shinyjs::toggleClass("sci_stack", "vgm-only", condition = isTRUE(sci_stale_run()))
   })
-  output$disp_has_pred <- reactive({
+  # Whether the displayed run has a prediction side at all: either it was
+  # configured for one, or it produced one. Kept as a reactive because the
+  # Scientific Analysis tab's directional-variogram switch (chunk I) needs the
+  # same answer in R, and two copies of this rule would drift.
+  disp_has_pred <- reactive({
     d <- rv$disp
     active <- !is.null(d) && (isTRUE(d$comp_mode) || !identical(d$value_type, "actual"))
-    if (active || isTRUE(rv$has_predictions)) "yes" else "no"
+    active || isTRUE(rv$has_predictions)
+  })
+  output$disp_has_pred <- reactive({
+    if (isTRUE(disp_has_pred())) "yes" else "no"
   })
   outputOptions(output, "disp_has_pred", suspendWhenHidden = FALSE)
   

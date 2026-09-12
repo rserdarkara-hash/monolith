@@ -90,9 +90,21 @@ baselines$jenks_target_5 <- calc_class_breaks(gs[[target]], 5, "jenks")
 # End-to-end: does the whole regional driver still assemble the same surface?
 baselines$ok_surface_digest <- run_surface_digest(golden_sf("tiny"))
 
+# ── The environment these values came out of ────────────────────────────────
+# Carried as an attribute, so `names(baselines)` still lists only the baselines
+# themselves. Without it a moved value is ambiguous three ways - the code
+# changed, the fixture changed, or gstat/classInt changed underneath both - and
+# the reader has no way to tell which without bisecting. golden_baseline_info()
+# puts these versions into the failure message of every baseline assertion, and
+# test-golden-fixture.R fails when the session no longer matches them.
+prov <- golden_env_snapshot()
+attr(baselines, "provenance") <- prov
+
 saveRDS(baselines, target_file, version = 3)
 
 cat("\nWritten:", target_file, "\n\n")
+cat("recorded in     :  R", prov$r_version, "on", prov$platform, "\n")
+cat("                  ", paste(names(prov$packages), prov$packages, collapse = ", "), "\n")
 cat("identity        : ", baselines$identity$n_rows, "x",
     baselines$identity$n_cols, "rows/cols, core",
     baselines$identity$n_core, ", tiny", baselines$identity$n_tiny, "\n")

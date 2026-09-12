@@ -348,13 +348,23 @@ ui_main_tabs <- mainPanel(width = 9,
                             # of their own).
                             div(id = "directional_vgm_ui", class = "sci-keep",
                                hr(),
-                               radioButtons("dir_vgm_source", "Directional variogram computed on:",
-                                            choices = c("Measured values" = "v",
-                                                        "Model residuals (CV)" = "resid"),
-                                            selected = "v", inline = TRUE),
+                               fluidRow(
+                                 # "Uploaded predictions" is added to the first
+                                 # switch by server_sci_analysis.R only for a run
+                                 # that has a prediction side, and the second
+                                 # switch's first label follows it, so the pair
+                                 # can never offer a column this run has not got.
+                                 column(6, shinyWidgets::radioGroupButtons("dir_vgm_target", "Data:",
+                                                        choices = c("Actual data" = "act"),
+                                                        selected = "act", size = "sm")),
+                                 column(6, shinyWidgets::radioGroupButtons("dir_vgm_source", "Computed on:",
+                                                        choices = c("Measured values" = "v",
+                                                                    "Model residuals (CV)" = "resid"),
+                                                        selected = "v", size = "sm"))
+                               ),
                                sci_plot_card("directional_vgm_plot",
                                  tags$span("Directional Variogram (Anisotropy Check)",
-                                   info_tooltip("dir_vgm", "Semivariance computed separately within four angular cones (bearings measured clockwise from north). If the four curves reach their sill at clearly different distances, the spatial structure is directional (anisotropic) and a single omnidirectional range under-describes it. Diagnostic only: every interpolation engine in this app is omnidirectional, so nothing on the map changes because of what you read here.")),
+                                   info_tooltip("dir_vgm", "Semivariance computed separately within four angular cones (bearings measured clockwise from north). If the four curves reach their sill at clearly different distances, the spatial structure is directional (anisotropic) and a single omnidirectional range under-describes it. The switches above choose the point set: the measured values or an uploaded ML prediction column, and for either one the values themselves or that surface's cross-validation residuals. Diagnostic only: every interpolation engine in this app is omnidirectional, so nothing on the map changes because of what you read here.")),
                                  height = "330px")
                             ),
                             div(id = "validation_diagnostics_act_ui",

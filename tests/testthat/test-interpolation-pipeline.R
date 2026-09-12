@@ -1860,7 +1860,8 @@ test_that("the Jenks break path is pinned", {
   recorded <- golden_baseline("jenks_target_5")
   skip_if(is.null(recorded), "no baselines recorded for this golden set")
 
-  expect_equal(calc_class_breaks(x, 5, "jenks"), recorded, tolerance = 1e-9)
+  expect_equal(calc_class_breaks(x, 5, "jenks"), recorded, tolerance = 1e-9,
+               info = golden_baseline_info())
   # Seed-sandboxed: repeated calls agree and the caller's stream is untouched.
   set.seed(99); before <- .Random.seed
   expect_equal(calc_class_breaks(x, 5, "jenks"), recorded, tolerance = 1e-9)
@@ -1897,14 +1898,16 @@ test_that("the whole regional driver still produces the surface it produced befo
   # cells, so every candidate centre sits exactly 150 m from an edge and the
   # mask survives +/- 20 m of vertex noise unchanged. It still clips - 294
   # candidate cells, 127 kept - so the mask remains under test.
-  # If this fails where nothing in the repository changed, compare package
-  # versions before suspecting the code.
+  # If this fails where nothing in the repository changed, read the `info` line
+  # on the failure: it carries the R and package versions the baseline was
+  # recorded under and names any that differ here.
   recorded <- golden_baseline("ok_surface_digest")
   skip_if(is.null(recorded), "no baselines recorded for this golden set")
 
   digest <- run_surface_digest(golden_sf("tiny"))
   expect_named(digest, names(recorded))
-  expect_equal(digest, recorded, tolerance = 1e-6)
+  expect_equal(digest, recorded, tolerance = 1e-6,
+               info = golden_baseline_info())
 })
 
 test_that("calc_metric_spacing is the mean nearest-neighbour distance in metres", {
