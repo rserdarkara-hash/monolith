@@ -35,8 +35,9 @@ if (length(missing_packages) > 0) {
   # nothing in the repository having changed.
   #
   # It does NOT follow that everyone should be sent through renv::restore().
-  # Most locked versions are no longer current, so restoring builds them from
-  # source and needs a C/C++/Fortran toolchain (Rtools on Windows). Those pins
+  # Every locked version CRAN has since superseded is restored from source, which
+  # needs a C/C++/Fortran toolchain (Rtools on Windows), and that share grows
+  # with the lockfile's age. Those pins
   # matter for reproducing the recorded test values, not for analysing your own
   # data. So both routes are named with their real cost, and nothing installs
   # without an explicit yes.
@@ -63,9 +64,9 @@ if (length(missing_packages) > 0) {
         "\n   measured under:",
         "\n     install.packages(\"renv\")   # once",
         "\n     renv::restore()",
-        "\n   Most of them are no longer current, so they build from source: a long",
-        "\n   install and a C/C++/Fortran toolchain (Rtools on Windows). Needed only",
-        "\n   to reproduce the recorded test values, not to analyse your own data.")
+        "\n   Any that CRAN has since superseded build from source, which takes longer",
+        "\n   and needs a C/C++/Fortran toolchain (Rtools on Windows). Needed only to",
+        "\n   reproduce the recorded test values, not to analyse your own data.")
     }
 
     # Never prompt when non-interactive: the test harness sources this file, and

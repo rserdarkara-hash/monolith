@@ -390,7 +390,8 @@
     # completes. Localities, boundary, buffer, and grid resolution are
     # module-local controls: the interpolation sidebar is hidden on the
     # Classification Suite tab and never affects classification runs.
-    polygons_reactive = reactive(list(drawn = get_drawn_sf(), shp = rv$shp_bound))
+    polygons_reactive = reactive(list(drawn = get_drawn_sf(),
+                                      shp = shp_assume_crs(rv$shp_bound, rv$mapping$crs)))
   )
 
   # No theme wiring here any more. There is one theme; its light and dark
@@ -422,6 +423,10 @@
   # An upload resets both selectors and then reads them back in the same flush,
   # where input$<id> still reports the old file's CRS (crs_effective).
   session_state$crs_stale <- list()
+  # The value each selector last held as far as the server knows (written by
+  # the app or reported by the browser); used to re-send the selection when
+  # the zone ordering rebuilds the dropdowns.
+  session_state$crs_last <- list()
 
   # Bumped by every map renderLeaflet. Overlay observers depend on it so
   # proxy-managed layers (points, borders, controls) are re-applied after each

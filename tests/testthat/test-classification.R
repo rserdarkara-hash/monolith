@@ -392,8 +392,15 @@ test_that("run_classification_pipeline returns only serialisable pieces and hono
     df, target = "soil", predictors = c("elev", "slope"),
     x_col = "lon", y_col = "lat", src_crs = 4326, proj_crs = "EPSG:32636",
     method = "rf", strategy = "spatial", depth = "none",
-    v = 5, grid_res = 250, boundary = "concave", make_surface = TRUE
+    v = 5, grid_res = 250, boundary = "concave", make_surface = TRUE,
+    nn_surface = TRUE
   )
+  # The 1-NN surface covers exactly the model surface's cells, on its levels.
+  expect_equal(nrow(res$surface_nn), nrow(res$surface_df))
+  expect_equal(res$surface_nn$x, res$surface_df$x)
+  expect_equal(res$surface_nn$y, res$surface_df$y)
+  expect_identical(levels(res$surface_nn$.pred_class), res$levels)
+  expect_false(anyNA(res$surface_nn$.pred_class))
 
   expect_false(is.null(res$surface_df))
   expect_true(is.data.frame(res$surface_df))
@@ -413,6 +420,26 @@ test_that("run_classification_pipeline returns only serialisable pieces and hono
     method = "rf", strategy = "standard", depth = "none", v = 5, make_surface = FALSE
   )
   expect_null(res_eval$surface_df)
+  expect_null(res_eval$surface_nn)
+
+  # Covariate-free run: no model is fitted, nothing covariate-dependent is
+  # returned, and the map is the 1-NN surface on the same grid.
+  res_nn <- run_classification_pipeline(
+    df, target = "soil", predictors = character(0),
+    x_col = "lon", y_col = "lat", src_crs = 4326, proj_crs = "EPSG:32636",
+    method = "rf", strategy = "spatial", depth = "none",
+    v = 5, grid_res = 250, boundary = "concave", make_surface = TRUE
+  )
+  expect_true(res_nn$nn_only)
+  expect_null(res_nn$importance); expect_null(res_nn$model_path); expect_null(res_nn$lift)
+  expect_equal(nrow(res_nn$surface_df), nrow(res$surface_nn))
+  expect_identical(as.character(res_nn$surface_df$.pred_class),
+                   as.character(res$surface_nn$.pred_class))
+  expect_false(any(grepl("^\\.pred_[A-C]$|^\\.entropy$", names(res_nn$surface_df))))
+  rl <- classif_surface_to_rasters(res_nn$surface_df, res = res_nn$res,
+                                   crs_wkt = res_nn$crs_wkt, levels_order = res_nn$levels)
+  expect_null(rl$prob); expect_null(rl$entropy)
+  expect_equal(sum(rl$area$n_cells), nrow(res_nn$surface_df))
 })
 
 test_that("numeric covariates are never auto-classified as categorical", {
@@ -842,6 +869,48 @@ test_that("covariate lift switches from exact binomial to chi-square at 25 disco
     stats::mcnemar.test(matrix(c(0, 10, 14, 0), nrow = 2))$p.value)))
 })
 
+test_that("the spatial 1-NN surface gives each cell its nearest sample's class", {
+  train_xy <- cbind(c(0, 10, 0), c(0, 0, 10))
+  train_y <- factor(c("A", "B", "C"), levels = c("A", "B", "C", "D"))
+  grid_xy <- cbind(c(1, 9, 1, 6), c(1, 1, 9, 4))
+  # Hand-computed nearest samples: (1,1)->(0,0) A; (9,1)->(10,0) B;
+  # (1,9)->(0,10) C; (6,4): d^2 to A 52, to B 32, to C 72 -> B.
+  s <- classif_nn_surface(train_xy, train_y, grid_xy, levels(train_y))
+  expect_equal(as.character(s$.pred_class), c("A", "B", "C", "B"))
+  expect_identical(levels(s$.pred_class), c("A", "B", "C", "D"))
+  expect_equal(s$x, grid_xy[, 1]); expect_equal(s$y, grid_xy[, 2])
+
+  # A hard-class surface rasterises with a class layer and area table, and no
+  # fabricated probability or entropy layer.
+  g <- expand.grid(x = seq(50, 950, 100), y = seq(50, 950, 100))
+  surf <- classif_nn_surface(cbind(c(100, 900), c(500, 500)), c("A", "B"),
+                             as.matrix(g), c("A", "B"))
+  rl <- classif_surface_to_rasters(surf, res = 100, crs_wkt = sf::st_crs(32633)$wkt,
+                                   levels_order = c("A", "B"))
+  expect_null(rl$prob); expect_null(rl$entropy)
+  expect_equal(rl$area$n_cells, c(50L, 50L))
+})
+
+test_that("the lift interpretation reads direction from lift_abs and significance from p", {
+  mk <- function(p, d) data.frame(mcnemar_p = p, lift_abs = d)
+  expect_match(classif_lift_interpretation(mk(NA, 0)), "not defined")
+  expect_match(classif_lift_interpretation(mk(0.2, -0.05)), "no significant difference")
+  up <- classif_lift_interpretation(mk(0.01, 0.08))
+  expect_match(up, "significantly MORE accurate")
+  # The previous wording called a significant NEGATIVE lift an "improvement".
+  down_cat <- classif_lift_interpretation(mk(0.01, -0.08), "cat")
+  expect_match(down_cat, "significantly LESS accurate")
+  expect_match(down_cat, "Spatial 1-NN map")
+  down_bin <- classif_lift_interpretation(mk(0.0004, -0.08), "bin")
+  expect_match(down_bin, "p < 0.001")
+  expect_match(down_bin, "interpolating the continuous variable")
+  expect_false(grepl("1-NN map", down_bin))
+  # Random folds carry the leakage caveat; spatial folds do not.
+  expect_match(classif_lift_interpretation(mk(0.2, 0.01), strategy = "standard"),
+               "Spatial blocked CV")
+  expect_false(grepl("blocked CV", classif_lift_interpretation(mk(0.2, 0.01), strategy = "spatial")))
+})
+
 test_that("run_classification_cv threads the baseline through .row alignment", {
   pts <- make_classif_points(n = 60)
   cv <- run_classification_cv(pts, "soil", c("elev", "slope"),
@@ -849,6 +918,24 @@ test_that("run_classification_cv threads the baseline through .row alignment", {
   expect_true(all(c(".row", ".pred_base") %in% names(cv$predictions)))
   expect_setequal(cv$predictions$.row, seq_len(nrow(pts)))
   expect_false(anyNA(cv$predictions$.pred_base))
+
+  # The covariate-free run is the same classifier on the same folds: with no
+  # missing covariates its predictions are exactly the covariate run's
+  # .pred_base, and its accuracy is the lift table's baseline accuracy.
+  nn <- run_classification_nn_cv(pts, "soil", strategy = "spatial", v = 5)
+  expect_identical(nn$fold_id, cv$fold_id)
+  base_by_row <- as.character(cv$predictions$.pred_base[order(cv$predictions$.row)])
+  expect_identical(as.character(nn$predictions$.pred_class), base_by_row)
+  lf <- classif_covariate_lift(cv$predictions, "soil")
+  expect_equal(nn$metrics$.estimate[nn$metrics$.metric == "accuracy"], lf$baseline_acc)
+  expect_equal(nn$majority_acc, lf$majority_acc)
+  # Hard classes only: no probability metric is reported.
+  expect_false(any(c("roc_auc", "mn_log_loss", "brier_class") %in% nn$metrics$.metric))
+
+  # The 1-NN map is drawn from the point set the baseline was scored on.
+  expect_equal(nrow(cv$base_xy), nrow(pts))
+  expect_equal(unname(cv$base_xy), unname(sf::st_coordinates(pts)[, 1:2]))
+  expect_equal(as.character(cv$base_y), as.character(pts$soil))
 })
 
 # ── Permutation feature importance ───────────────────────────────────────────

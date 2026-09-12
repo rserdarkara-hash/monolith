@@ -154,15 +154,15 @@
   )
   
   output$render_user_guide <- renderUI({
-    withMathJax(HTML(commonmark::markdown_html(paste(readLines("docs/user_guide.md", warn = FALSE), collapse = "\n"))))
+    withMathJax(HTML(commonmark::markdown_html(paste(readLines("docs/user_guide.md", warn = FALSE), collapse = "\n"), extensions = "table")))
   })
   
   output$render_desc_exploratory_guide <- renderUI({
-    withMathJax(HTML(commonmark::markdown_html(paste(readLines("docs/desc_exploratory_guide.md", warn = FALSE), collapse = "\n"))))
+    withMathJax(HTML(commonmark::markdown_html(paste(readLines("docs/desc_exploratory_guide.md", warn = FALSE), collapse = "\n"), extensions = "table")))
   })
   
   output$render_scientific_guide <- renderUI({
-    withMathJax(HTML(commonmark::markdown_html(paste(readLines("docs/scientific_guide.md", warn = FALSE), collapse = "\n"))))
+    withMathJax(HTML(commonmark::markdown_html(paste(readLines("docs/scientific_guide.md", warn = FALSE), collapse = "\n"), extensions = "table")))
   })
   
   # Unwrapped display-layer values of the merged run rasters, cached per run.

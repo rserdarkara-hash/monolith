@@ -180,7 +180,7 @@ validate_crs <- function(crs_selection, error_prefix = "Invalid CRS provided", d
     if (isTRUE(require_metric)) {
       f <- crs_metre_factor(c_obj)
       if (!is.na(f) && abs(f - 1) > 1e-9) {
-        stop(sprintf("axis unit is '%s', not metres. Resolution, buffer distance, variogram ranges and on-map measurements are all expressed in metres, so this CRS would report every distance %.4gx its true size. Choose a metric projected CRS for the area (e.g. its UTM zone).",
+        stop(sprintf("axis unit is '%s', not metres. Exported rasters, the resolution suggestion and on-map measurements are stated in metres, so this CRS would report every distance %.4gx its true size. Choose a metric projected CRS for the area (e.g. its UTM zone).",
                      as.character(c_obj$units), 1 / f))
       }
     }
@@ -1021,7 +1021,7 @@ crs_target_suitability <- function(crs, lon, lat, warn_dev = 0.001, block_dev = 
 #' ask when the advisory fires: no, this is not why the points are in the wrong
 #' place.
 crs_measure_detail <- paste(
-  "Grid resolution, buffer radius, variogram ranges, exported cell size and the Map Viewer's projected ruler are all stated in metres and read straight from the Target Mapping CRS, so its scale error at your data is carried by every one of them, with no error raised anywhere.",
+  "The finished surface is resampled into the Target Mapping CRS, so exported rasters and their cell size, the resolution suggestion and the Map Viewer's projected ruler are all stated in its metres and carry its scale error at your data, with no error raised anywhere. The models are fitted in the Input Data CRS (or, for geographic input, its UTM zone); for projected data choose the same UTM zone for both.",
   "The Target Mapping CRS never moves your points on the map (that is the Input Data CRS); it decides what a metre means.")
 
 #' The Target Mapping CRS this data should be measured in.
@@ -1078,16 +1078,89 @@ crs_recommend_target <- function(lon, lat) {
 # really does arrive in it - but never an analysis one: at 52 deg N it inflates
 # every distance by 64%, so it is not offered as a Target, and the suitability
 # gate refuses it if it is typed in anyway.
+#' How an uploaded boundary relates to the samples: how many fall inside the
+#' polygons the pipeline will use (a point/line layer's convex hull, via
+#' shp_boundary_polygons()) and, when none do, how far the boundary is from
+#' them.
+#' @return list(n, inside, dist_km, hull, usable) or NULL when it cannot be
+#'   answered (no CRS on either side, no usable coordinates).
+shp_boundary_overlap <- function(shp, x, y, crs) {
+  shp <- shp_assume_crs(shp, crs)
+  if (is.null(shp) || is.na(sf::st_crs(shp))) return(NULL)
+  src <- suppressWarnings(tryCatch(sf::st_crs(crs), error = function(e) NULL))
+  if (is.null(src) || is.na(src)) return(NULL)
+  x <- suppressWarnings(as.numeric(as.character(x)))
+  y <- suppressWarnings(as.numeric(as.character(y)))
+  ok <- is.finite(x) & is.finite(y)
+  if (!any(ok)) return(NULL)
+  tryCatch({
+    hull <- !all(as.character(sf::st_geometry_type(shp)) %in% c("POLYGON", "MULTIPOLYGON"))
+    poly <- shp_boundary_polygons(shp)
+    if (is.null(poly)) return(list(n = sum(ok), inside = 0L, dist_km = NA_real_, hull = hull, usable = FALSE))
+    # Tested in the data's own CRS when it is projected, as the pipeline's clip
+    # is: in EPSG:4326 sf draws polygon edges as geodesics, so a sample lying
+    # on a straight projected edge can read as outside. Geographic data is
+    # tested in 4326, where the distance comes back in metres too.
+    frame <- if (isTRUE(sf::st_is_longlat(src))) sf::st_crs(4326) else src
+    poly <- sf::st_union(sf::st_transform(sf::st_make_valid(poly), frame))
+    pts <- sf::st_transform(sf::st_as_sf(data.frame(.x = x[ok], .y = y[ok]),
+                                         coords = c(".x", ".y"), crs = src), frame)
+    inside <- sum(lengths(sf::st_intersects(pts, poly)) > 0)
+    dist_km <- if (inside == 0)
+      as.numeric(units::set_units(sf::st_distance(sf::st_union(pts), poly), "km")) else 0
+    list(n = sum(ok), inside = inside, dist_km = dist_km, hull = hull, usable = TRUE)
+  }, error = function(e) NULL)
+}
+
+# Every WGS 84 / UTM zone in both hemispheres is listed, so the dropdown covers
+# any study area; crs_choice_groups() lifts the zones around the data to the top.
+utm_crs_choices <- local({
+  z <- 1:60
+  n <- setNames(paste0("EPSG:", 32600 + z), sprintf("UTM %dN (EPSG:%d)", z, 32600 + z))
+  s <- setNames(paste0("EPSG:", 32700 + z), sprintf("UTM %dS (EPSG:%d)", z, 32700 + z))
+  c(n, s)
+})
+
 common_crs_input <- c(
   "WGS 84 (EPSG:4326)" = "EPSG:4326",
-  "UTM 35N (EPSG:32635)" = "EPSG:32635",
-  "UTM 33N (EPSG:32633)" = "EPSG:32633",
-  "UTM 34N (EPSG:32634)" = "EPSG:32634",
   "S-JTSK / Krovak East North (EPSG:5514)" = "EPSG:5514",
-  "Pseudo-Mercator (EPSG:3857)" = "EPSG:3857"
+  "Pseudo-Mercator (EPSG:3857)" = "EPSG:3857",
+  utm_crs_choices
 )
 
 common_crs_target <- common_crs_input[common_crs_input != "EPSG:3857"]
+
+#' The WGS 84 / UTM zone of a position and its two neighbours, same hemisphere,
+#' as EPSG codes with the position's own zone first. Neighbours are included
+#' because a study area near a zone edge is often mapped in the adjacent zone.
+crs_near_zone_codes <- function(lon, lat) {
+  lon <- suppressWarnings(as.numeric(lon)); lat <- suppressWarnings(as.numeric(lat))
+  if (length(lon) != 1 || length(lat) != 1 || !is.finite(lon) || !is.finite(lat)) return(integer(0))
+  zone <- min(max(floor((lon + 180) / 6) + 1, 1), 60)
+  zones <- ((c(zone, zone - 1, zone + 1) - 1) %% 60) + 1
+  as.integer((if (lat < 0) 32700 else 32600) + zones)
+}
+
+#' Grouped selectize choices for a CRS selector: the zones near the data first
+#' (when known), then the non-UTM entries, then the remaining UTM zones by
+#' hemisphere, then any value outside `base` (a typed or restored CRS), which
+#' selectize refuses unless it is one of the options. Each group is a list so
+#' Shiny renders a one-item group as a group rather than a bare option.
+crs_choice_groups <- function(base, near = integer(0), extra = NULL) {
+  near_v <- intersect(paste0("EPSG:", near), base)
+  rest <- base[!(base %in% near_v)]
+  north <- rest[rest %in% utm_crs_choices & grepl("^EPSG:326", rest)]
+  south <- rest[rest %in% utm_crs_choices & grepl("^EPSG:327", rest)]
+  extra <- extra[nzchar(extra %||% "") & !(extra %in% base)]
+  groups <- list(
+    "Near your data" = base[match(near_v, base)],
+    "Common" = rest[!(rest %in% utm_crs_choices)],
+    "WGS 84 / UTM north" = north,
+    "WGS 84 / UTM south" = south,
+    "Entered" = setNames(extra, extra)
+  )
+  lapply(groups[lengths(groups) > 0], as.list)
+}
 
 dashboard_palettes <- c("viridis", "Greens", "Blues", "Oranges", "YlOrRd", "RdYlBu", "BrBG", "YlOrBr", "Greys", "Spectral")
 

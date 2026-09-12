@@ -347,6 +347,33 @@ dedup_valid_points <- function(pts_sf, target) {
   dplyr::mutate(pts_sf, x = cc[, 1], y = cc[, 2])
 }
 
+#' An uploaded boundary as polygons. Polygon layers pass through unchanged;
+#' point or line layers become the convex hull of all their features (one row),
+#' the same treatment classif_scope_polygons() gives them. NULL when the hull
+#' does not enclose an area (fewer than 3 non-collinear vertices). Without this,
+#' a point layer reached the grid clip as a MULTIPOINT boundary of zero area and
+#' the locality failed.
+#' A boundary uploaded without a .prj carries no CRS; it is taken to be in the
+#' Input Data CRS (the CRS of the sample coordinates), which is what the upload
+#' notice promises. One rule for the pipeline, the Data Setup note and the
+#' Classification Suite's polygon scope. A layer that has a CRS, or an
+#' unparseable `crs`, is returned unchanged.
+shp_assume_crs <- function(shp, crs) {
+  if (is.null(shp) || !is.na(sf::st_crs(shp))) return(shp)
+  co <- suppressWarnings(tryCatch(sf::st_crs(crs), error = function(e) NULL))
+  if (is.null(co) || is.na(co)) return(shp)
+  sf::st_set_crs(shp, co)
+}
+
+shp_boundary_polygons <- function(shp) {
+  is_poly <- function(g) all(as.character(sf::st_geometry_type(g)) %in% c("POLYGON", "MULTIPOLYGON"))
+  if (is.null(shp) || length(sf::st_geometry(shp)) == 0) return(NULL)
+  if (is_poly(shp)) return(shp)
+  hull <- sf::st_convex_hull(sf::st_union(sf::st_geometry(shp)))
+  if (!is_poly(hull)) return(NULL)
+  sf::st_sf(geometry = hull)
+}
+
 run_regional_interpolation <- function(item, current_method, current_crs, aux_vars, shp_bound, b_type, buff_mode, b_dist, res_mode, grid_res, crs_sel, comp_mode, val_type, progress_dir_val = tempdir(), session_id_val = "default", cancel_file_val = NULL, vif_threshold = 10) {
   options(monolith_progress_dir = progress_dir_val)
   options(monolith_session_id = session_id_val)
@@ -429,9 +456,12 @@ run_regional_interpolation <- function(item, current_method, current_crs, aux_va
     
     local_shp <- NULL
     if (!is.null(shp_bound)) {
+      shp_bound <- shp_assume_crs(shp_bound, current_crs)
       match_col <- NULL
-      for(col_name in colnames(shp_bound)) {
-        if (any(as.character(shp_bound[[col_name]]) == l)) {
+      for(col_name in setdiff(colnames(shp_bound), attr(shp_bound, "sf_column"))) {
+        # na.rm: an attribute column that is entirely NA made any() return NA
+        # and the if() abort the locality.
+        if (any(as.character(shp_bound[[col_name]]) == l, na.rm = TRUE)) {
           match_col <- col_name
           break
         }
@@ -439,10 +469,23 @@ run_regional_interpolation <- function(item, current_method, current_crs, aux_va
       
       if (!is.null(match_col)) {
         local_shp <- shp_bound %>% dplyr::filter(!!sym(match_col) == l)
-        local_shp <- sf::st_transform(local_shp, sf::st_crs(pts)) %>% sf::st_union()
+        local_shp <- shp_boundary_polygons(sf::st_transform(local_shp, sf::st_crs(pts)))
+        if (is.null(local_shp)) {
+          write_warning_file(l, "act", "Uploaded shapefile features for this locality do not enclose an area (fewer than 3 non-collinear points); using point-derived boundary.")
+        } else {
+          local_shp <- sf::st_union(local_shp)
+          # A name match is not a location match: a feature labelled with this
+          # locality that encloses none of its samples would move the grid
+          # away from the data, so it is refused like an unnamed one.
+          if (!any(sf::st_intersects(local_shp, sf::st_union(pts), sparse = FALSE))) {
+            local_shp <- NULL
+            write_warning_file(l, "act", "Uploaded shapefile feature named for this locality does not overlap its samples; using point-derived boundary.")
+          }
+        }
       } else {
         local_shp <- tryCatch({
-          shp_trans <- tryCatch(sf::st_transform(shp_bound, sf::st_crs(pts)), error = function(e) NULL)
+          shp_trans <- tryCatch(shp_boundary_polygons(sf::st_transform(shp_bound, sf::st_crs(pts))),
+                                error = function(e) NULL)
           if (!is.null(shp_trans)) {
             intersects <- sf::st_intersects(shp_trans, sf::st_union(pts), sparse = FALSE)
             if (any(intersects)) {

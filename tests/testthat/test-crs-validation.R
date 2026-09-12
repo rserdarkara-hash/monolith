@@ -670,9 +670,9 @@ test_that("neither CRS selector carries a default zone", {
   # The root cause of the incident: a hardcoded zone silently georeferenced
   # every user's data into the Turkey/Ukraine/Belarus longitude band.
   expect_false(grepl('selected = "EPSG:', tabs, fixed = TRUE))
-  expect_match(tabs, 'selectizeInput("map_crs", "Input Data CRS", choices = common_crs_input, selected = ""',
+  expect_match(tabs, 'selectizeInput("map_crs", "Input Data CRS", choices = crs_choice_groups(common_crs_input), selected = ""',
                fixed = TRUE)
-  expect_match(tabs, 'selectizeInput("crs_selection", "Target Mapping CRS", choices = common_crs_target, selected = ""',
+  expect_match(tabs, 'selectizeInput("crs_selection", "Target Mapping CRS", choices = crs_choice_groups(common_crs_target), selected = ""',
                fixed = TRUE)
   expect_match(tabs, 'uiOutput("crs_landing_note")', fixed = TRUE)
   # rv$mapping$crs must start unset too, or the default returns by the back door
@@ -1272,8 +1272,11 @@ test_that("Web Mercator is offered as an input CRS and never as a target", {
   ds <- paste(readLines(file.path(root, "server_data_setup.R"), warn = FALSE), collapse = "\n")
   # A CRS outside the list still travels with its own choice entry, so an
   # uploaded config or a restored run made under any CRS keeps loading.
-  expect_match(ds, "ch <- if (value %in% base) base else c(base, setNames(value, value))",
+  expect_match(ds, "ch <- crs_choice_groups(base, isolate(crs_near()), extra = value)",
                fixed = TRUE)
+  ch <- crs_choice_groups(common_crs_target, extra = "EPSG:25833")
+  expect_equal(unlist(ch[["Entered"]], use.names = FALSE), "EPSG:25833")
+  expect_null(crs_choice_groups(common_crs_target, extra = "EPSG:32633")[["Entered"]])
   expect_match(ds, 'set_crs_choice("map_crs", value, "Select the CRS your coordinates were recorded in", common_crs_input',
                fixed = TRUE)
   expect_match(ds, 'set_crs_choice("crs_selection", value, "Select the CRS for output maps and exports", common_crs_target',
@@ -1284,6 +1287,33 @@ test_that("Web Mercator is offered as an input CRS and never as a target", {
   # it on the next upload or boundary shapefile.
   expect_match(ds, "set_input_crs(norm, record = FALSE)", fixed = TRUE)
   expect_match(ds, "set_target_crs(norm, record = FALSE)", fixed = TRUE)
+})
+
+test_that("the CRS selectors list every UTM zone and put the data's zones first", {
+  # 120 zones, each exactly once, in both lists.
+  expect_equal(sum(common_crs_input %in% paste0("EPSG:", c(32601:32660, 32701:32760))), 120)
+  expect_false(anyDuplicated(common_crs_input) > 0)
+  expect_true(all(utm_crs_choices %in% common_crs_target))
+
+  # Zone arithmetic: Potsdam (13.06 E) is 33N; the neighbours follow, and the
+  # wrap at the antimeridian keeps 1 and 60 adjacent.
+  expect_equal(crs_near_zone_codes(13.06, 52.4), c(32633L, 32632L, 32634L))
+  expect_equal(crs_near_zone_codes(-70.6, -33.4), c(32719L, 32718L, 32720L))
+  expect_equal(crs_near_zone_codes(-179.5, 10), c(32601L, 32660L, 32602L))
+  expect_length(crs_near_zone_codes(NA, 10), 0)
+
+  g <- crs_choice_groups(common_crs_target, crs_near_zone_codes(13.06, 52.4))
+  expect_equal(names(g)[1], "Near your data")
+  expect_equal(unlist(g[[1]], use.names = FALSE), c("EPSG:32633", "EPSG:32632", "EPSG:32634"))
+  # Every option appears once across the groups, labels intact.
+  flat <- unlist(g, use.names = FALSE)
+  expect_setequal(flat, unname(common_crs_target))
+  expect_false(anyDuplicated(flat) > 0)
+  expect_true("UTM 33N (EPSG:32633)" %in% names(g[[1]]))
+  # No position: no near group, and one-item groups stay groups (lists).
+  g0 <- crs_choice_groups(common_crs_target)
+  expect_false("Near your data" %in% names(g0))
+  expect_true(all(vapply(g0, is.list, logical(1))))
 })
 
 test_that("the suitability gate is advisory at selection time and enforced at run time", {

@@ -151,14 +151,11 @@
       return()
     }
     rv$shp_bound <- s
-    
-    geom_types <- unique(sf::st_geometry_type(s))
-    if (!any(geom_types %in% c("POLYGON", "MULTIPOLYGON"))) {
-      showNotification("Uploaded shapefile contains point/line geometry. Monolith will automatically generate boundary polygons (convex hulls) around these points/lines for interpolation.", type = "warning", duration = 12)
-    } else {
+    # Point/line layers are described by output$shp_boundary_note (convex hull).
+    if (all(as.character(sf::st_geometry_type(s)) %in% c("POLYGON", "MULTIPOLYGON"))) {
       showNotification("Custom shapefile loaded successfully!", type = "message")
     }
-    
+
     crs_obj <- sf::st_crs(s)
     crs_val <- NULL
     if (!is.null(crs_obj$epsg) && !is.na(crs_obj$epsg)) {
@@ -169,11 +166,56 @@
       crs_val <- crs_obj$wkt
     }
     if(!is.null(crs_val)) {
-      set_target_crs(crs_val)
+      # A boundary's .prj says how that file was saved, not which grid suits the
+      # analysis: the pipeline reprojects the boundary to the data's CRS. It
+      # fills an empty Target Mapping CRS and never replaces one already set.
+      if (!crs_has_value("crs_selection")) {
+        set_target_crs(crs_val)
+      } else {
+        cur <- crs_effective("crs_selection")
+        same <- isTRUE(tryCatch(sf::st_crs(cur) == crs_obj, error = function(e) FALSE))
+        if (!same && nzchar(cur)) {
+          shp_lab <- if (!is.null(crs_obj$epsg) && !is.na(crs_obj$epsg)) paste0("EPSG:", crs_obj$epsg) else (crs_obj$Name %||% "its own CRS")
+          showNotification(sprintf("The boundary is stored in %s. It is reprojected to your data's CRS at run time; the Target Mapping CRS stays %s.",
+                                   shp_lab, cur),
+                           type = "message", duration = 12)
+        }
+      }
     } else {
-      showNotification("The uploaded shapefile carries no CRS definition (.prj missing?). Its coordinates will be assumed to match the analysis CRS - if the boundary lands in the wrong place, re-export the shapefile with a .prj file.",
+      showNotification("The uploaded shapefile carries no CRS definition (.prj missing?). Its coordinates are assumed to be in the Input Data CRS, the system your sample coordinates are recorded in. If the note under the upload reports no samples inside it, re-export the shapefile with its .prj file.",
                        type = "warning", duration = 15)
     }
+  })
+
+  # Persistent readout under the boundary upload: whether the samples fall
+  # inside it. Re-evaluated when either side changes, so the order of the two
+  # uploads does not matter. A boundary that encloses no sample is not applied
+  # at run time (each locality falls back to its point-derived boundary), and
+  # saying so only then, in the run log, came too late.
+  output$shp_boundary_note <- renderUI({
+    s <- rv$shp_bound
+    req(s)
+    note <- function(tone, txt) div(class = paste0("alert alert-", tone),
+                                    style = "margin: 8px 0 0 0; padding: 6px 10px;", txt)
+    hull_txt <- "The layer holds points or lines, so its convex hull is used as the boundary."
+    has_map <- !is.null(rv$user_data) && isTruthy(input$map_x) && isTruthy(input$map_y) &&
+      isTruthy(input$map_crs) && all(c(input$map_x, input$map_y) %in% colnames(rv$user_data))
+    ov <- if (has_map) shp_boundary_overlap(s, rv$user_data[[input$map_x]],
+                                             rv$user_data[[input$map_y]], input$map_crs)
+    if (is.null(ov)) {
+      hull <- !all(as.character(sf::st_geometry_type(s)) %in% c("POLYGON", "MULTIPOLYGON"))
+      return(if (hull) note("info", hull_txt))
+    }
+    if (!ov$usable)
+      return(note("warning", "The layer's features do not enclose an area (fewer than 3 non-collinear points), so it cannot serve as a boundary; the sidebar's boundary type is used instead."))
+    if (ov$inside == 0)
+      return(note("warning", sprintf("None of your %d samples fall inside this boundary (it lies %s km from them), so it will not be applied: each locality uses the boundary type set in the sidebar.%s",
+                                     ov$n, format(round(ov$dist_km, 1), big.mark = ","),
+                                     if (ov$hull) paste0(" ", hull_txt) else "")))
+    if (ov$inside < ov$n)
+      return(note("info", sprintf("%d of your %d samples fall inside this boundary. A locality with no sample inside it uses the boundary type set in the sidebar.%s",
+                                  ov$inside, ov$n, if (ov$hull) paste0(" ", hull_txt) else "")))
+    if (ov$hull) note("info", hull_txt)
   })
 
   # selectize refuses a value that is not one of its options, so any CRS the
@@ -185,14 +227,19 @@
   # choice: promoting a typed `32633` to `EPSG:32633` is the USER's CRS in a
   # parseable spelling, and recording it would let the identification observer
   # overwrite it on the next upload.
+  # The EPSG codes of the UTM zones around the data, which crs_choice_groups()
+  # lists first. A reactiveVal, so the selectors are rebuilt only when the
+  # zones actually change, not on every input the position depends on.
+  crs_near <- reactiveVal(integer(0))
   set_crs_choice <- function(id, value, placeholder, base, record = TRUE) {
-    ch <- if (value %in% base) base else c(base, setNames(value, value))
+    ch <- crs_choice_groups(base, isolate(crs_near()), extra = value)
     if (isTRUE(record)) {
       session_state$crs_auto[[id]] <- unique(c(session_state$crs_auto[[id]], value))
     }
     # A real write supersedes any pending clear: whatever the browser is still
     # showing, this is the value the selector now holds.
     session_state$crs_stale[[id]] <- NULL
+    session_state$crs_last[[id]] <- value
     updateSelectizeInput(session, id, choices = ch, selected = value,
                          options = list(create = TRUE, placeholder = placeholder))
   }
@@ -237,7 +284,8 @@
     session_state$crs_auto[[id]] <- character(0)
     cur <- as.character(isolate(input[[id]]) %||% "")
     session_state$crs_stale[[id]] <- if (nzchar(cur)) cur else NULL
-    updateSelectizeInput(session, id, choices = base, selected = "",
+    session_state$crs_last[[id]] <- ""
+    updateSelectizeInput(session, id, choices = crs_choice_groups(base, isolate(crs_near())), selected = "",
                          options = list(create = TRUE, placeholder = placeholder))
   }
   clear_input_crs  <- function() clear_crs_choice("map_crs", "Select the CRS your coordinates were recorded in", common_crs_input)
@@ -252,17 +300,51 @@
   # selection, so the marker has done its job and must not go on masking the
   # user's own choice of the CRS the previous dataset happened to use.
   observeEvent(input$map_crs, {
+    session_state$crs_last$map_crs <- input$map_crs
     req(input$map_crs)
     session_state$crs_stale$map_crs <- NULL
     norm <- normalize_crs_input(input$map_crs)
     if (!identical(norm, input$map_crs)) set_input_crs(norm, record = FALSE)
-  })
+  }, priority = 10)
   observeEvent(input$crs_selection, {
+    session_state$crs_last$crs_selection <- input$crs_selection
     req(input$crs_selection)
     session_state$crs_stale$crs_selection <- NULL
     norm <- normalize_crs_input(input$crs_selection)
     if (!identical(norm, input$crs_selection)) set_target_crs(norm, record = FALSE)
+  }, priority = 10)
+
+  # Where the data is, for ordering the two selectors: the Tier-3 click while
+  # the file carries no evidence of its grid, otherwise the data's centroid
+  # read through the Input Data CRS (the same position the advisory uses).
+  observe({
+    pos <- if (isTRUE(crs_pick$no_evidence) && !is.null(crs_pick$click)) {
+      crs_pick$click
+    } else if (!is.null(rv$user_data) && isTruthy(input$map_crs) &&
+               isTruthy(input$map_x) && isTruthy(input$map_y)) {
+      p <- crs_sample_positions(rv$user_data, input$map_x, input$map_y, input$map_crs)
+      if (!is.null(p)) list(lon = p$lon[1], lat = p$lat[1])
+    }
+    crs_near(if (is.null(pos)) integer(0) else crs_near_zone_codes(pos$lon, pos$lat))
   })
+  # Rebuild both selectors when the zones change. The selection is re-sent
+  # from crs_last (the value last written by the app or reported by the
+  # browser), not from input$: a value the app set in this flush has not
+  # round-tripped yet, and re-sending the browser's old reading would undo it.
+  # The two input observers above run at priority 10 so a user's own change
+  # is in crs_last before a rebuild it triggers (a new Input Data CRS moves
+  # the position, hence the zones) re-sends the selection.
+  observeEvent(crs_near(), {
+    near <- crs_near()
+    rebuild <- function(id, placeholder, base) {
+      cur <- session_state$crs_last[[id]] %||% ""
+      updateSelectizeInput(session, id, choices = crs_choice_groups(base, near, extra = cur),
+                           selected = cur,
+                           options = list(create = TRUE, placeholder = placeholder))
+    }
+    rebuild("map_crs", "Select the CRS your coordinates were recorded in", common_crs_input)
+    rebuild("crs_selection", "Select the CRS for output maps and exports", common_crs_target)
+  }, ignoreInit = TRUE)
 
   # Input-CRS identification. Degrees are self-evident; projected coordinates
   # are identified ONLY from evidence carried by the upload (a companion
@@ -307,13 +389,17 @@
     # sibling of the identified code (EPSG:25833 where the scoring reports
     # EPSG:32633) is a defensible choice, and it used to be silently undone.
     if (crs_user_chose("map_crs")) return()
-    set_input_crs(ident$crs)
+    # A boundary upload re-runs this observer; when it confirms the CRS already
+    # in place there is nothing new to announce.
+    unchanged <- identical(crs_effective("map_crs"), ident$crs)
+    if (!unchanged) set_input_crs(ident$crs)
     # Never overwrite a Target Mapping CRS the user (or an uploaded .prj)
     # already chose; only fill it when it is still unset.
     if (!crs_has_value("crs_selection")) {
       set_target_crs(ident$crs)
     }
-    showNotification(ident$message, type = "message", duration = 15, id = "crs_ident")
+    if (!unchanged)
+      showNotification(ident$message, type = "message", duration = 15, id = "crs_ident")
   })
 
   # ── Tier 3: locate the study area, then confirm a place ───────────────────
@@ -687,7 +773,7 @@
     if (!isTruthy(sel)) {
       return(crs_target_note_box(
         "info", "Target Mapping CRS not set.",
-        "It is the CRS every exported raster and shapefile is written in, and the one every distance the app reports is measured in.",
+        "It is the CRS the finished surface is resampled into and every exported raster and shapefile is written in. For projected data, choose the same UTM zone as the Input Data CRS.",
         rec = offer(), why = crs_measure_detail))
     }
 
@@ -721,8 +807,10 @@
       return(crs_target_note_box(
         "info",
         sprintf("'%s' is geographic: maps and exports come out in longitude/latitude degrees.", sel),
-        sprintf("Measurement is unaffected. The pipeline projects to %s, which it derives from your data, and every distance is computed there.",
-                if (!is.null(rec)) sprintf("%s (%s)", rec$crs, rec$label) else "the UTM zone of your data")))
+        if (isTRUE(tryCatch(sf::st_is_longlat(sf::st_crs(input$map_crs)), error = function(e) FALSE)))
+          "The models are unaffected: the pipeline projects your geographic input to the UTM zone of each locality and computes every distance there."
+        else
+          sprintf("The models are fitted in your Input Data CRS (%s); only the finished surface is resampled into degrees.", input$map_crs)))
     }
 
     suit <- crs_target_suitability(sel, pos$lon, pos$lat)

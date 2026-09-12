@@ -771,6 +771,10 @@ run_classification_cv <- function(pts_sf, target, predictors,
   preds$.pred_base <- base_cls[preds$.row]
 
   list(
+    # The point set the baseline was scored on, so a 1-NN map drawn from it is
+    # the surface that baseline accuracy describes.
+    base_xy = unname(sf::st_coordinates(keep_sf)[, 1:2, drop = FALSE]),
+    base_y = train_df[[target]],
     method = method,
     strategy = strategy,
     fold_id = fold_id,
@@ -817,6 +821,105 @@ classif_spatial_baseline <- function(coords, y, fold_id) {
     out[te_idx] <- as.character(y[tr_idx][nn])
   }
   factor(out, levels = levels(y))
+}
+
+#' The spatial 1-NN baseline as a MAP: every grid cell takes the class of its
+#' nearest sample (Euclidean, projected coords) - the categorical analogue of
+#' Thiessen polygons. Built from the same complete-case point set the CV
+#' baseline scores, so the reported baseline accuracy describes this surface.
+#' Hard classes only: 1-NN has no class probabilities, so no entropy either.
+classif_nn_surface <- function(train_xy, train_y, grid_xy, levels = NULL) {
+  train_xy <- as.matrix(train_xy)
+  grid_xy <- as.matrix(grid_xy)
+  y <- as.character(train_y)
+  lev <- if (is.null(levels)) sort(unique(y)) else levels
+  nn <- FNN::get.knnx(train_xy, grid_xy, k = 1)$nn.index[, 1]
+  data.frame(x = grid_xy[, 1], y = grid_xy[, 2],
+             .pred_class = factor(y[nn], levels = lev))
+}
+
+#' Covariate-free cross-validation: the spatial 1-NN classifier IS the model.
+#' Uses the same fold construction as run_classification_cv (same seed, same
+#' strategy, points with a target value), so on a dataset without missing
+#' covariates its folds and out-of-fold predictions equal the `.pred_base`
+#' column of a covariate run. No probabilities exist, so only the class
+#' metrics are computed. `.pred_base` mirrors `.pred_class` so every consumer
+#' of the pooled predictions keeps working.
+run_classification_nn_cv <- function(pts_sf, target, strategy = c("spatial", "standard"),
+                                     v = 10L, seed = 12345L, group = NULL) {
+  strategy <- match.arg(strategy)
+  if (!is.null(group) && length(group) != nrow(pts_sf)) {
+    stop("`group` must have one entry per row of `pts_sf`.")
+  }
+  full_df <- as.data.frame(sf::st_drop_geometry(pts_sf))
+  cc <- !is.na(full_df[[target]])
+  keep_sf <- pts_sf[cc, ]
+  y <- droplevels(as.factor(full_df[[target]][cc]))
+  if (nlevels(y) < 2) {
+    stop("Classification target must have at least two classes after removing missing rows.")
+  }
+  lvl <- levels(y)
+  grp <- if (is.null(group)) NULL else as.character(group)[cc]
+
+  fold_id <- classif_make_fold_id(keep_sf, strategy, target = target, v = v, seed = seed)
+  xy <- unname(sf::st_coordinates(keep_sf)[, 1:2, drop = FALSE])
+  base <- classif_spatial_baseline(xy, y, fold_id)
+
+  # A fold whose training rows hold no sample of a class cannot assign it:
+  # the same CV-design caveat the covariate path reports.
+  gaps <- lapply(sort(unique(fold_id)), function(i) {
+    miss <- setdiff(lvl, as.character(unique(y[fold_id != i])))
+    if (length(miss)) data.frame(fold = i, class = miss, stringsAsFactors = FALSE)
+  })
+  gaps <- Filter(Negate(is.null), gaps)
+
+  preds <- data.frame(.fold = fold_id, .row = seq_along(y))
+  preds[[target]] <- y
+  preds$.pred_class <- base
+  preds$.pred_base <- base
+  if (!is.null(grp)) preds$.scope_group <- grp
+
+  list(
+    base_xy = xy, base_y = y,
+    method = "nn", strategy = strategy,
+    fold_id = fold_id, n_folds = length(unique(fold_id)),
+    levels = lvl,
+    class_gaps = if (length(gaps)) do.call(rbind, gaps) else NULL,
+    predictions = preds,
+    metrics = classif_compute_metrics(preds, target),
+    per_class = classif_per_class_accuracy(preds, target),
+    conf_mat = yardstick::conf_mat(preds, truth = !!rlang::sym(target),
+                                   estimate = !!rlang::sym(".pred_class")),
+    majority_acc = max(table(y)) / length(y),
+    best_params = NULL, nested = FALSE, importance = NULL, weights_applied = FALSE
+  )
+}
+
+#' Plain-language reading of the covariate-lift result. McNemar's test is
+#' two-sided, so the direction comes from lift_abs and significance from p.
+#' `target_mode` ("cat" / "bin") decides where a significantly negative lift
+#' points the user; `strategy` adds the random-fold caveat.
+classif_lift_interpretation <- function(lift, target_mode = "cat", strategy = "spatial") {
+  p <- lift$mcnemar_p
+  d <- lift$lift_abs
+  msg <- if (is.na(p)) {
+    "McNemar test: not defined - the covariate model and the spatial baseline are right and wrong on exactly the same points."
+  } else {
+    p_txt <- if (p < 0.001) "p < 0.001" else sprintf("p = %.3f", p)
+    if (p >= 0.05) {
+      sprintf("McNemar %s: no significant difference from the spatial baseline - the covariates add no demonstrable information beyond spatial position.", p_txt)
+    } else if (d > 0) {
+      sprintf("McNemar %s: the covariate model is significantly MORE accurate than the spatial baseline.", p_txt)
+    } else if (identical(target_mode, "bin")) {
+      sprintf("McNemar %s: the covariate model is significantly LESS accurate than the spatial baseline. Consider interpolating the continuous variable in the Spatial Engine and classifying that surface instead.", p_txt)
+    } else {
+      sprintf("McNemar %s: the covariate model is significantly LESS accurate than the spatial baseline. Consider the Spatial 1-NN map (map selector above).", p_txt)
+    }
+  }
+  if (identical(strategy, "standard")) {
+    msg <- paste(msg, "Random folds favour the 1-NN baseline, because each held-out point keeps its near neighbours in the training set; re-check under Spatial blocked CV.")
+  }
+  msg
 }
 
 #' Covariate lift: how much the covariate model improves on two no-covariate
@@ -1297,13 +1400,21 @@ classif_surface_to_rasters <- function(grid_sf, res, crs_wkt, levels_order = NUL
   terra::coltab(class_r) <- data.frame(value = seq_along(levs_map), col = pal)
   names(class_r) <- "class"
 
-  prob_r <- terra::rast(lapply(prob_cols, function(cc) {
-    terra::rasterize(xy, templ, values = df[[cc]])
-  }))
-  names(prob_r) <- sub("^\\.pred_", "P_", prob_cols)
+  # A hard-class surface (the spatial 1-NN map) carries no probabilities and no
+  # entropy: those layers are NULL rather than fabricated.
+  prob_r <- NULL
+  if (length(prob_cols)) {
+    prob_r <- terra::rast(lapply(prob_cols, function(cc) {
+      terra::rasterize(xy, templ, values = df[[cc]])
+    }))
+    names(prob_r) <- sub("^\\.pred_", "P_", prob_cols)
+  }
 
-  ent_r <- terra::rasterize(xy, templ, values = df$.entropy)
-  names(ent_r) <- "entropy"
+  ent_r <- NULL
+  if (!is.null(df$.entropy)) {
+    ent_r <- terra::rasterize(xy, templ, values = df$.entropy)
+    names(ent_r) <- "entropy"
+  }
 
   counts <- table(factor(cls_chr, levels = levs_map))
   # Ellipsoidal area, from the SAME terra::expanse call the interpolation Area
@@ -1819,7 +1930,8 @@ run_classification_pipeline <- function(df, target, predictors,
                                         grid_res = NULL, boundary = "concave",
                                         buffer_mode = "fixed", buffer_dist = 250,
                                         strict_scope = NULL,
-                                        make_surface = TRUE, seed = 12345L,
+                                        make_surface = TRUE, nn_surface = FALSE,
+                                        seed = 12345L,
                                         group_col = NULL, boundary_wkt = NULL,
                                         class_weights = FALSE,
                                         model_rds_path = NULL,
@@ -1857,6 +1969,53 @@ run_classification_pipeline <- function(df, target, predictors,
   pts <- classif_project_metric(pts)
   work_crs <- sf::st_crs(pts)
   co <- sf::st_coordinates(pts); pts$x <- co[, 1]; pts$y <- co[, 2]
+
+  # Covariate-free run: the spatial 1-NN classifier is the model. No fitting,
+  # tuning, importance, covariate kriging or model bundle - only its
+  # out-of-fold metrics and, on request, its map on the usual grid.
+  if (length(predictors) == 0) {
+    .classif_check_cancel(cancel_file)
+    report("cv", 0, "Cross-validating the spatial 1-NN classifier...")
+    cv <- run_classification_nn_cv(pts, target, strategy = strategy, v = v,
+                                   seed = seed, group = grp)
+    report("cv", 1)
+    out <- list(
+      nn_only = TRUE,
+      cv_metrics = as.data.frame(cv$metrics),
+      per_class = cv$per_class,
+      conf_mat = cv$conf_mat$table,
+      best_params = NULL, nested = FALSE, nested_params = NULL,
+      fold_id = cv$fold_id, n_folds = cv$n_folds,
+      class_gaps = cv$class_gaps,
+      method = "nn", strategy = strategy, depth = "none",
+      n = nrow(pts), levels = cv$levels, predictors = character(0),
+      target_col = target,
+      cv_predictions = cv$predictions,
+      majority_acc = cv$majority_acc,
+      weights_requested = FALSE, weights_applied = FALSE,
+      group_metrics = if (is.null(grp)) NULL else classif_group_metrics(cv$predictions, target)
+    )
+    if (make_surface) {
+      .classif_check_cancel(cancel_file)
+      report("grid", 0, "Building the prediction grid...")
+      bnd_sf <- if (is.null(boundary_wkt)) NULL else {
+        sf::st_transform(sf::st_as_sfc(boundary_wkt, crs = proj_crs), work_crs)
+      }
+      gr <- classif_build_grid(pts, res = grid_res, boundary = boundary, boundary_sf = bnd_sf,
+                               buffer_mode = buffer_mode, buffer_dist = buffer_dist,
+                               strict_scope = strict_scope)
+      report("surface", 0, sprintf("Assigning nearest-sample classes to %s grid cells...",
+                                   format(nrow(gr$grid_p), big.mark = ",")))
+      out$surface_df <- classif_nn_surface(cv$base_xy, cv$base_y,
+                                           cbind(gr$grid_p$x, gr$grid_p$y), cv$levels)
+      out$res <- gr$res
+      out$crs_wkt <- gr$crs_wkt
+      out$grid_warning <- gr$strict_warning
+    }
+    report("surface", 1, "Finishing...")
+    .classif_check_cancel(cancel_file)
+    return(out)
+  }
 
   cv <- run_classification_cv(pts, target, predictors, method = method,
                               strategy = strategy, v = v, depth = depth, seed = seed,
@@ -1992,6 +2151,10 @@ run_classification_pipeline <- function(df, target, predictors,
       progress = function(f) report("surface", f))
 
     out$surface_df <- surf
+    if (isTRUE(nn_surface)) {
+      out$surface_nn <- classif_nn_surface(cv$base_xy, cv$base_y,
+                                           cbind(gr$grid_p$x, gr$grid_p$y), levs)
+    }
     out$res <- gr$res
     out$crs_wkt <- gr$crs_wkt
     # Advisory carried back to the main session (the module raises it as a

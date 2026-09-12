@@ -159,10 +159,10 @@
       local({
         rec <- crs_recommend_target(pos$lon, pos$lat)
         if (is.null(rec)) {
-          tags$p("Choose the UTM zone or national grid the study area belongs to, or continue and accept that every distance this run reports carries that error.")
+          tags$p("Choose the UTM zone or national grid the study area belongs to, or continue and accept that the exported surface and the ruler's projected measurements carry that error.")
         } else {
           tags$p("Set the Target Mapping CRS to ", tags$b(sprintf("%s (%s)", rec$crs, rec$label)),
-                 " on the Data Setup tab, or continue and accept that every distance this run reports carries that error.")
+                 " on the Data Setup tab, or continue and accept that the exported surface and the ruler's projected measurements carry that error.")
         }
       }),
       footer = tagList(

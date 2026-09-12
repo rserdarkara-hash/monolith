@@ -1062,6 +1062,89 @@ test_that("interp_run_item forwards a run_params list into a full regional run",
   expect_false(is.null(res$r_a))
 })
 
+test_that("an uploaded boundary works as points, without a .prj, and is refused when it misses the data", {
+  pts <- make_test_points(30)
+  coords <- sf::st_coordinates(pts)
+  pts_data <- data.frame(x = coords[, 1], y = coords[, 2],
+                         v = pts$v, pv = NA, Locality = "LocA")
+  item <- list(l = "LocA", pts_data = pts_data,
+               m_params = list(idw_p_act = 2, idw_p_pre = 2, idw_nmax = 12,
+                               tps_lambda_act = -1, tps_lambda_pre = -1,
+                               pre_fit_act = NULL, pre_fit_pre = NULL,
+                               cv_strategy = "auto", rfk_uncertainty = "jackknife"))
+  proj_root <- normalizePath(file.path(testthat::test_path(), "..", ".."), winslash = "/")
+  run_with <- function(shp) {
+    rp <- list(main_wd = proj_root, current_method = "IDW", current_crs = 32633,
+               aux_vars = character(0), shp_bound = shp, b_type = "wrapped",
+               buff_mode = "dynamic", b_dist = 250, res_mode = "fixed", grid_res = 50,
+               crs_sel = "EPSG:32633", comp_mode = FALSE, val_type = "actual",
+               progress_dir_val = tempdir(), session_id_val = "shp_test",
+               cancel_file_val = NULL, vif_threshold = 10)
+    interp_run_item(item, rp)
+  }
+  # A point layer (the samples themselves, in another UTM zone, with an
+  # all-NA attribute column): its convex hull is the boundary, so the grid is
+  # the hull's area and the run completes. Both the name-matched path
+  # (Locality column) and the overlap path (no name column) must work.
+  shp_pts <- sf::st_transform(sf::st_as_sf(pts_data, coords = c("x", "y"), crs = 32633), 32635)
+  for (shp in list(shp_pts, shp_pts[, "v"])) {
+    res <- run_with(shp)
+    expect_false(grepl("Error", res$log_msg))
+    expect_false(is.null(res$r_a))
+  }
+  hull_ha <- as.numeric(sf::st_area(sf::st_convex_hull(sf::st_union(pts)))) / 1e4
+  r <- terra::unwrap(run_with(shp_pts)$r_a)
+  expect_equal(sum(!is.na(terra::values(r[["var1.pred"]]))) * 50^2 / 1e4, hull_ha,
+               tolerance = 0.15)
+
+  # No .prj: the layer is taken to be in the Input Data CRS.
+  no_prj <- sf::st_set_crs(sf::st_as_sf(pts_data, coords = c("x", "y"), crs = 32633), NA)
+  res <- run_with(no_prj)
+  expect_false(grepl("Error", res$log_msg))
+  expect_false(is.null(res$r_a))
+
+  # A feature NAMED for the locality that encloses none of its samples is
+  # refused: the run falls back to the point-derived boundary instead of
+  # gridding 50 km away.
+  far <- pts_data; far$x <- far$x + 50000
+  res <- run_with(sf::st_as_sf(far, coords = c("x", "y"), crs = 32633))
+  expect_false(is.null(res$r_a))
+  ext <- terra::ext(terra::unwrap(res$r_a))
+  expect_true(ext$xmin < max(coords[, 1]) && ext$xmax > min(coords[, 1]))
+})
+
+test_that("boundary helpers: hull, assumed CRS and overlap", {
+  pts <- make_test_points(30)
+  cc <- sf::st_coordinates(pts)
+  # Polygons pass through; points become one hull row; degenerate input is NULL.
+  # 1 m wider than the samples' bbox: extreme samples would otherwise sit
+  # exactly on an edge, where a transform's rounding decides the side.
+  poly <- sf::st_sf(geometry = sf::st_as_sfc(sf::st_bbox(sf::st_buffer(pts, 1))))
+  expect_identical(shp_boundary_polygons(poly), poly)
+  h <- shp_boundary_polygons(pts)
+  expect_equal(nrow(h), 1L)
+  expect_true(all(as.character(sf::st_geometry_type(h)) == "POLYGON"))
+  expect_null(shp_boundary_polygons(pts[1:2, ]))
+
+  no_crs <- sf::st_set_crs(pts, NA)
+  expect_true(sf::st_crs(shp_assume_crs(no_crs, "EPSG:32633")) == sf::st_crs(32633))
+  expect_true(is.na(sf::st_crs(shp_assume_crs(no_crs, "not a crs"))))
+  expect_identical(shp_assume_crs(pts, "EPSG:4326"), pts)
+
+  ov <- shp_boundary_overlap(poly, cc[, 1], cc[, 2], "EPSG:32633")
+  expect_equal(c(ov$n, ov$inside), c(30L, 30L))
+  expect_false(ov$hull)
+  # 50 km east: nothing inside, and the gap is reported in km.
+  far <- sf::st_set_geometry(poly, sf::st_geometry(poly) + c(50000, 0))
+  far <- sf::st_set_crs(far, 32633)
+  ov <- shp_boundary_overlap(far, cc[, 1], cc[, 2], "EPSG:32633")
+  expect_equal(ov$inside, 0L)
+  gap_km <- (50000 - diff(range(cc[, 1])) - 2) / 1000
+  expect_equal(ov$dist_km, gap_km, tolerance = 0.01)
+  # The same boundary without a .prj is read in the Input Data CRS.
+  expect_equal(shp_boundary_overlap(sf::st_set_crs(poly, NA), cc[, 1], cc[, 2], "EPSG:32633")$inside, 30L)
+})
+
 test_that("CK applies the multicollinearity gate to its co-kriging system", {
   # apply_CK had NO gate: the Auto-Drop / Keep All threshold was threaded to
   # RK/RFK only, so collinear covariates still reached fit.lmc() -- which is

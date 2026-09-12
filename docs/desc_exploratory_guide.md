@@ -12,8 +12,8 @@ A **Variable naming** radio at the top of the Analytics Engine switches every dr
 
 A master control panel at the top of the Analytics Engine dictates the data subset fed into every analysis tab (Descriptive, Correlation, PCA, Governing Factors). Filters and groupings persist across the session, and results update immediately when a grouping changes.
 
-*   **Grouping variables (max 5):** select up to five categorical or numerical variables as grouping factors.
-*   **Auto-discretization:** a continuous variable selected as a grouping factor (elevation, pH) is binned automatically into ordered categories (Low, Medium, High) so it can drive boxplot groups or correlation-network nodes.
+*   **Grouping variables (labelled Max 5):** select categorical or numerical variables as grouping factors. Several variables combine into one group per observed combination of their levels.
+*   **Discretization:** each numeric grouping variable gets a *Type/Binning* selector: Categorical, Median or Mean (two classes, at or below and above), Tertiles (Low, Medium, High) or Quintiles (Q1 to Q5). A numeric variable with more than 10 distinct values starts on Median; any other variable starts on Categorical.
 *   **Active group filter:** once groups are defined, the filter dropdown isolates specific sub-populations.
 
 ---
@@ -33,7 +33,7 @@ A dropdown switches between thirteen visualization modes:
 *   On the categorical-variance plots (Boxplot, Violin, Sina), the test control is a single-select radio group: **None** (the default), ANOVA, Duncan's multiple range test (Duncan 1955), Tukey's HSD (Tukey 1949), and Kruskal-Wallis (Kruskal & Wallis 1952). Only one test is ever applied.
 *   **Kruskal-Wallis** is the non-parametric route for data violating the normality assumptions, flagged by the normality indicator beside the control. Its pairwise post-hoc comparisons behind the significance letters are Benjamini-Hochberg adjusted (Benjamini & Hochberg 1995), consistent with the FDR policy used in the correlation table.
 *   **Duncan's is labelled *(liberal)* for a reason.** It controls only the comparison-wise error rate, so with *k* groups its effective family-wise error rate grows toward 1 and it separates more means than Tukey's HSD on identical data. It is provided for reproducing older agronomy literature that reports it; **Tukey's HSD is the conservative default** for new work. See Scientific Guide Section 8.6.
-*   Significance letters ('a', 'b', 'ab') are rendered directly on the plot geometries, so differences between groups can be read straight off the figure.
+*   Significance letters ('a', 'b', 'ab') are rendered directly on the plot geometries, so differences between groups can be read straight off the figure. ANOVA, and Tukey or Duncan with only two groups, print the *F* statistic, degrees of freedom and *p* instead of letters.
 
 **2.3 Ghosting overlay**
 *   A toggle that overlays the currently filtered sub-population on a faded "ghosted" background representing the entire dataset.
@@ -71,11 +71,11 @@ Linear and monotonic relationships between the numeric variables in the dataset.
 ## 4. Tab 3: Principal Component Analysis (PCA)
 
 **4.1 Automated collinearity filter**
-*   Before PCA executes, the selected variables are scanned. Near-perfect collinearity ($r > 0.95$) raises a warning panel that intercepts the process, lists the exact conflicting pairs, and prevents execution. An "Ignore Warning & Force PCA" button is available for advanced users. The guard exists because collinear inputs distort the loading vectors severely.
+*   Before PCA executes, the selected variables are scanned. Near-perfect pairwise collinearity ($|r| > 0.95$), or a variable the iterative VIF screen removes at VIF > 10, raises a warning panel that intercepts the process, lists the conflicting pairs and variables, and prevents execution. An "Ignore Warning & Force PCA" button is available for advanced users. The guard exists because collinear inputs distort the loading vectors severely.
 *   The same scan flags variables that are **constant** over the current selection (zero variance). These are listed as *Constant (no variance)* rather than *High VIF*, because a constant is not a collinearity problem: it carries no information at all and would make the correlation matrix singular on its own.
 
 **4.2 Plot settings**
-*   **Types:** Scree Plot, Biplot (2D), Biplot (3D), Loadings, Contribution, Cumulative Variance, and Mahalanobis Distance.
+*   **Types:** Scree Plot, Biplot (2D), Biplot (3D), Loadings, Contribution, Quality of Representation (cos2), Cumulative Variance, and Mahalanobis Distance.
 *   **Controls:** numeric inputs appear according to the plot type, to select specific principal components (X-axis PC 1, Y-axis PC 2) or assess specific loading contributions.
 *   **Scaling caveat (Contribution):** contribution is the share of a *component* attributable to a variable, so it is scale-sensitive by definition. With "Scale & Center Data" unchecked, the values are dominated by the high-variance variables and are not comparable across variables measured on different scales; the module shows an inline note under the plot controls in that case.
 *   **cos2 (quality of representation):** the share of a *variable's own* variance captured by the selected PCs, normalised by that variable's total variance across all components, so it always reads 0 to 1 whether or not the PCA was scaled (Abdi & Williams 2010; Lê et al. 2008; Scientific Guide Section 8.5). For an unscaled run the inline note points out what does still depend on scaling: the components themselves are driven by the high-variance variables.

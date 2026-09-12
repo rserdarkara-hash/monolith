@@ -260,11 +260,32 @@ classif_ui <- function(id) {
               )
             ),
             
+            # Map source: the covariate model, or (categorical targets) the
+            # no-covariate spatial 1-NN surface the lift table scores.
+            shiny::conditionalPanel(
+              condition = sprintf("output['%s'] == 'yes'", ns("has_nn")),
+              shiny::radioButtons(ns("map_source"),
+                shiny::tags$span("Maps show",
+                  shiny::tags$i(class = "fa fa-info-circle",
+                    title = "Spatial 1-NN assigns every cell the class of its nearest sample, using no covariates (a Thiessen mosaic). It is the surface whose accuracy the 'Spatial baseline (1-NN)' row of the covariate-lift table reports, built from the same points. It has no class probabilities, so the entropy map, the probability map and the confidence threshold do not apply to it.",
+                    style = "color: var(--mn-text-3); cursor: help; margin-left: 5px;")),
+                choices = c("Covariate model" = "model", "Spatial 1-NN (no covariates)" = "nn"),
+                selected = "model", inline = TRUE)
+            ),
+            shiny::conditionalPanel(
+              condition = sprintf("output['%s'] == 'yes' && output['%s'] == 'yes'",
+                                  ns("maps_nn"), ns("has_surface")),
+              shiny::tags$small(style = "color: var(--mn-text-3); display:block; margin: -6px 0 8px 0;",
+                "Spatial 1-NN (each cell takes its nearest sample's class, no covariates) produces hard classes only: no entropy or probability map, and no confidence threshold.")
+            ),
+
             # Second Row: Confidence threshold and Prob class dropdown
             shiny::conditionalPanel(
               condition = sprintf("output['%s'] == 'yes'", ns("has_surface")),
               shiny::fluidRow(
                 shiny::column(6,
+                  shiny::conditionalPanel(
+                  condition = sprintf("output['%s'] != 'yes'", ns("maps_nn")),
                   shiny::sliderInput(ns("conf_thresh"),
                     shiny::tags$span("Confidence threshold (abstain below)",
                       shiny::tags$i(class = "fa fa-info-circle",
@@ -272,6 +293,7 @@ classif_ui <- function(id) {
                         style = "color: var(--mn-text-3); cursor: help; margin-left: 5px;")),
                     min = 0, max = 0.95, value = 0, step = 0.05, ticks = FALSE),
                   shiny::uiOutput(ns("abstain_note"))
+                  )
                 ),
                 shiny::column(6,
                   shiny::uiOutput(ns("prob_class_ui"))
@@ -324,12 +346,16 @@ classif_ui <- function(id) {
                 )
               ),
               shiny::column(6,
+                # A covariate-free run has no covariates to rank.
+                shiny::conditionalPanel(
+                  condition = sprintf("output['%s'] != 'yes'", ns("nn_only")),
                 sci_plot_card(ns("importance_plot"), "Feature Importance",
                               expand_id = ns("importance_expand_btn"), download = FALSE,
                               info = shiny::tags$i(class = "fa fa-info-circle",
                                 title = "Permutation importance: how much the multiclass log-loss worsens when one covariate is randomly shuffled (mean of 5 shuffles). Scored either out-of-fold or on the final model's training rows, following the 'Feature importance scored on' setting - the axis label states which. Shares renormalise the positive importances to 100%. Correlated covariates split their importance between them, so read this alongside the collinearity note.",
                                 style = "color: var(--mn-text-3); cursor: help; margin-left: 5px;"),
                               head_min_height = CLASSIF_CARD_HEAD_H)
+                )
               )
             ),
             shiny::hr(),
@@ -381,8 +407,13 @@ classif_ui <- function(id) {
                 condition = sprintf("output['%s'] == 'yes'", ns("has_surface")),
                 style = "display: inline;",
                 shiny::downloadButton(ns("dl_class"), "Class GeoTIFF", class = "btn-sm"),
-                shiny::downloadButton(ns("dl_prob"), "Probabilities GeoTIFF", class = "btn-sm"),
-                shiny::downloadButton(ns("dl_entropy"), "Entropy GeoTIFF", class = "btn-sm"),
+                # 1-NN has no probabilities, so these two layers do not exist there.
+                shiny::conditionalPanel(
+                  condition = sprintf("output['%s'] != 'yes'", ns("maps_nn")),
+                  style = "display: inline;",
+                  shiny::downloadButton(ns("dl_prob"), "Probabilities GeoTIFF", class = "btn-sm"),
+                  shiny::downloadButton(ns("dl_entropy"), "Entropy GeoTIFF", class = "btn-sm")
+                ),
                 shiny::downloadButton(ns("dl_png"), "Styled Maps (PNG)", class = "btn-sm")
               ),
               shiny::downloadButton(ns("dl_report"), "Metrics CSV", class = "btn-sm"),
@@ -737,9 +768,15 @@ classif_server <- function(id, data_reactive, vars_metadata_reactive, spatial_re
       # text/factor (dummy-encoded categoricals).
       elig <- cols[vapply(cols, function(c) is.numeric(df[[c]]) || .classif_is_categorical(df[[c]]), logical(1))]
       labs <- vapply(elig, function(v) get_var_label(v, vars_metadata_reactive()), character(1))
-      shinyWidgets::pickerInput(ns("predictors"), "Covariates",
-        choices = stats::setNames(elig, labs), multiple = TRUE,
-        options = list(`actions-box` = TRUE, `live-search` = TRUE))
+      shiny::tagList(
+        shinyWidgets::pickerInput(ns("predictors"), "Covariates",
+          choices = stats::setNames(elig, labs), multiple = TRUE,
+          options = list(`actions-box` = TRUE, `live-search` = TRUE)),
+        if (!identical(input$target_mode, "bin")) {
+          shiny::tags$small(style = "color: var(--mn-text-3); display:block; margin: -8px 0 8px 0;",
+            "Leave empty to classify from spatial position alone (nearest-sample, 1-NN); the method, tuning, class-weight and importance settings then do not apply.")
+        }
+      )
     })
 
     # ── Run ──────────────────────────────────────────────────────────────────
@@ -749,12 +786,19 @@ classif_server <- function(id, data_reactive, vars_metadata_reactive, spatial_re
     try_run <- function() {
       if (identical(cl_rv$ready, "running")) return(NULL)
       df <- data_reactive(); sp <- spatial_reactive()
-      shiny::req(df, sp$x, sp$y, sp$src_crs, sp$proj_crs, input$predictors)
+      shiny::req(df, sp$x, sp$y, sp$src_crs, sp$proj_crs)
 
       target_src <- if (identical(input$target_mode, "bin")) input$target_num else input$target_cat
       preds <- setdiff(input$predictors, c(target_src, sp$x, sp$y))
       if (length(preds) < 1) {
-        shiny::showNotification("Select at least one covariate.", type = "error"); return()
+        # A categorical target may run covariate-free (spatial 1-NN). A binned
+        # continuous target may not: its no-covariate route is interpolating
+        # the continuous variable and classifying that surface.
+        if (identical(input$target_mode, "bin")) {
+          shiny::showNotification("Select at least one covariate. Without covariates, interpolate the continuous variable in the Spatial Engine and classify that surface instead.", type = "error", duration = 10)
+          return()
+        }
+        return(launch_run(character(0)))
       }
 
       chk <- scoped_collinearity()
@@ -807,7 +851,7 @@ classif_server <- function(id, data_reactive, vars_metadata_reactive, spatial_re
 
     launch_run <- function(preds, dropped = character(0)) {
       df <- data_reactive(); sp <- spatial_reactive()
-      if (length(preds) < 1) {
+      if (length(preds) < 1 && length(dropped) > 0) {
         shiny::showNotification("No covariates left after the collinearity drop.", type = "error"); return()
       }
 
@@ -880,6 +924,7 @@ classif_server <- function(id, data_reactive, vars_metadata_reactive, spatial_re
       # at depth "none", so also guard against a stale value.
       nested_v <- isTRUE(input$nested_cv) && !identical(depth_v, "none")
       make_surf <- isTRUE(input$make_surface)
+      target_mode_v <- input$target_mode
       # CRS the run is computed in. classif_resolve_scope falls back to the
       # data's UTM zone when the Target Mapping CRS is geographic (degrees
       # would collapse the metre-based prediction grid to a single cell), and
@@ -929,6 +974,7 @@ classif_server <- function(id, data_reactive, vars_metadata_reactive, spatial_re
           buffer_mode = bs_v$buff_mode, buffer_dist = bs_v$buff_dist,
           strict_scope = strict_scope_v,
           make_surface = make_surf,
+          nn_surface = identical(target_mode_v, "cat"),
           group_col = ".scope_group", boundary_wkt = boundary_wkt_v,
           class_weights = weights_v, model_rds_path = model_path_ship,
           nested = nested_v, importance_mode = imp_mode_v,
@@ -965,6 +1011,8 @@ classif_server <- function(id, data_reactive, vars_metadata_reactive, spatial_re
         res$scope_label <- scope_label_v
         res$dropped_covariates <- dropped
         res$train_xy <- train_xy_v
+        res$target_mode <- target_mode_v
+        shiny::updateRadioButtons(session, "map_source", selected = "model")
         cl_rv$res <- res
         cl_rv$ready <- "yes"
         if (length(dropped) > 0) {
@@ -1016,6 +1064,23 @@ classif_server <- function(id, data_reactive, vars_metadata_reactive, spatial_re
       if (!is.null(cl_rv$res) && !is.null(cl_rv$res$surface_df)) "yes" else "no"
     })
     shiny::outputOptions(output, "has_surface", suspendWhenHidden = FALSE)
+    output$has_nn <- shiny::reactive({
+      if (!is.null(cl_rv$res) && !is.null(cl_rv$res$surface_nn)) "yes" else "no"
+    })
+    shiny::outputOptions(output, "has_nn", suspendWhenHidden = FALSE)
+    # TRUE when the maps should show the spatial 1-NN surface. Falls back to the
+    # model whenever this run carries no 1-NN surface (binned target, or a
+    # stale selection from a previous categorical run).
+    # A covariate-free run (nn_only) has no model surface at all: its
+    # surface_df IS the 1-NN surface.
+    show_nn <- shiny::reactive({
+      isTRUE(cl_rv$res$nn_only) ||
+        (identical(input$map_source, "nn") && !is.null(cl_rv$res$surface_nn))
+    })
+    output$maps_nn <- shiny::reactive({ if (show_nn()) "yes" else "no" })
+    shiny::outputOptions(output, "maps_nn", suspendWhenHidden = FALSE)
+    output$nn_only <- shiny::reactive({ if (isTRUE(cl_rv$res$nn_only)) "yes" else "no" })
+    shiny::outputOptions(output, "nn_only", suspendWhenHidden = FALSE)
     output$has_model <- shiny::reactive({
       p <- cl_rv$res$model_path
       if (!is.null(p) && file.exists(p)) "yes" else "no"
@@ -1030,8 +1095,9 @@ classif_server <- function(id, data_reactive, vars_metadata_reactive, spatial_re
       res <- cl_rv$res; shiny::req(res)
       ch <- c("Model performance metrics" = "metrics",
               "Confusion matrix" = "confmat",
-              "Per-class accuracy" = "perclass",
-              "Covariate lift vs baselines" = "lift")
+              "Per-class accuracy" = "perclass")
+      ch <- if (isTRUE(res$nn_only)) c(ch, "Majority-class baseline" = "lift") else
+        c(ch, "Covariate lift vs baselines" = "lift")
       gm <- res$group_metrics
       if (!is.null(gm) && any(!gm$scope %in% c("Total", "All data"))) {
         ch <- c(ch, "Performance by area" = "groups")
@@ -1059,6 +1125,13 @@ classif_server <- function(id, data_reactive, vars_metadata_reactive, spatial_re
     get_rasters <- shiny::reactive({
       res <- cl_rv$res
       shiny::req(res, res$surface_df)
+      if (show_nn()) {
+        rl <- classif_surface_to_rasters(
+          if (isTRUE(res$nn_only)) res$surface_df else res$surface_nn, res = res$res, crs_wkt = res$crs_wkt, levels_order = res$levels,
+          conf_threshold = 0)
+        rl$source <- "nn"
+        return(rl)
+      }
       classif_surface_to_rasters(
         res$surface_df, res = res$res, crs_wkt = res$crs_wkt, levels_order = res$levels,
         conf_threshold = conf_thresh_d())
@@ -1071,6 +1144,7 @@ classif_server <- function(id, data_reactive, vars_metadata_reactive, spatial_re
     # or above the overall one).
     output$abstain_note <- shiny::renderUI({
       res <- cl_rv$res; shiny::req(res, res$cv_predictions)
+      if (show_nn()) return(NULL)
       tau <- conf_thresh_d()
       if (is.null(tau) || tau <= 0) return(NULL)
       pr <- res$cv_predictions
@@ -1102,26 +1176,46 @@ classif_server <- function(id, data_reactive, vars_metadata_reactive, spatial_re
         " | weights unsupported (unweighted)"
       } else ""
       depth_part <- if (isTRUE(res$nested)) paste0(res$depth, " (nested CV)") else res$depth
+      model_part <- if (isTRUE(res$nn_only)) "model: spatial 1-NN, no covariates" else
+        paste("tuning:", depth_part)
       shiny::tags$span(class = "badge",
         style = "background: var(--mn-accent-weak); color: var(--mn-accent); padding: 4px 8px; border-radius: 4px; font-weight: 500;",
-        sprintf("%s | %d folds | n = %d | tuning: %s%s%s",
-                lbl, res$n_folds, res$n, depth_part, scope_part, wt_part))
+        sprintf("%s | %d folds | n = %d | %s%s%s",
+                lbl, res$n_folds, res$n, model_part, scope_part, wt_part))
     })
+
+    # Covariate-free run: the 1-NN model against the no-information rate.
+    nn_only_baseline_ui <- function(res) {
+      m <- res$cv_metrics
+      acc <- m$.estimate[m$.metric == "accuracy"][1]
+      kap <- m$.estimate[m$.metric == "kap"][1]
+      fmt <- function(x) ifelse(is.na(x), "-", sprintf("%.3f", x))
+      shiny::tagList(
+        shiny::tags$table(class = "table table-condensed", style = "margin-bottom: 6px;",
+          shiny::tags$thead(shiny::tags$tr(
+            shiny::tags$th("Model"), shiny::tags$th("Accuracy"), shiny::tags$th("Kappa"))),
+          shiny::tags$tbody(
+            shiny::tags$tr(shiny::tags$td("Spatial 1-NN (no covariates)"),
+                           shiny::tags$td(fmt(acc)), shiny::tags$td(fmt(kap))),
+            shiny::tags$tr(shiny::tags$td("Majority class (no information)"),
+                           shiny::tags$td(fmt(res$majority_acc)), shiny::tags$td("0.000")))),
+        shiny::tags$p(style = "font-size: 0.88em;",
+          sprintf("Spatial position alone is %s the no-information rate by %.1f accuracy points on these folds. Kappa corrects for chance agreement, so read it before the accuracy when classes are imbalanced. No covariate lift is computed: this run has no covariates.",
+                  if (acc >= res$majority_acc) "above" else "BELOW",
+                  100 * abs(acc - res$majority_acc)),
+          if (identical(res$strategy, "standard"))
+            " Random folds favour nearest-neighbour assignment, because each held-out point keeps its near neighbours in the training set; re-check under Spatial blocked CV.")
+      )
+    }
 
     # ── Covariate lift vs no-covariate baselines ─────────────────────────────
     output$lift_ui <- shiny::renderUI({
-      res <- cl_rv$res; shiny::req(res, res$lift)
+      res <- cl_rv$res; shiny::req(res)
+      if (isTRUE(res$nn_only)) return(nn_only_baseline_ui(res))
+      shiny::req(res$lift)
       lf <- res$lift
       fmt <- function(x) ifelse(is.na(x), "-", sprintf("%.3f", x))
-      p_lbl <- if (is.na(lf$mcnemar_p)) {
-        "McNemar test: not defined (no discordant pairs)."
-      } else if (lf$mcnemar_p < 0.001) {
-        "McNemar p < 0.001: the paired improvement over the spatial baseline is statistically significant."
-      } else {
-        sprintf("McNemar p = %.3f%s", lf$mcnemar_p,
-                if (lf$mcnemar_p < 0.05) ": the paired improvement over the spatial baseline is statistically significant."
-                else ": the improvement over the spatial baseline is NOT statistically significant - the covariates may add little beyond spatial position.")
-      }
+      p_lbl <- classif_lift_interpretation(lf, res$target_mode %||% "cat", res$strategy)
       dir_word <- if (lf$lift_abs >= 0) "improved" else "REDUCED"
       shiny::tagList(
         shiny::tags$table(class = "table table-condensed", style = "margin-bottom: 6px;",
@@ -1222,7 +1316,8 @@ classif_server <- function(id, data_reactive, vars_metadata_reactive, spatial_re
       rl <- get_rasters()
       a <- rl$area; a$area_ha <- round(a$area_ha, 2)
       colnames(a) <- c("Class", "Cells", "Area (ha)")
-      DT::datatable(a, options = list(dom = 't', paging = FALSE, scrollX = TRUE), rownames = FALSE)
+      DT::datatable(a, options = list(dom = 't', paging = FALSE, scrollX = TRUE), rownames = FALSE,
+                    caption = if (identical(rl$source, "nn")) "Surface: Spatial 1-NN (no covariates)" else "Surface: covariate model")
     })
 
     output$run_summary <- shiny::renderUI({
@@ -1236,7 +1331,8 @@ classif_server <- function(id, data_reactive, vars_metadata_reactive, spatial_re
       shiny::tagList(
         shiny::tags$small(style = "color: var(--mn-text-3);",
           sprintf("Last run: %s, %d classes, scope: %s. Accuracy %.3f, kappa %.3f.%s",
-                  classif_methods()[[res$method]], length(res$levels),
+                  if (isTRUE(res$nn_only)) "Spatial 1-NN (no covariates)" else classif_methods()[[res$method]],
+                  length(res$levels),
                   if (is.null(res$scope_label)) "all data" else res$scope_label,
                   ifelse(length(acc), acc, NA), ifelse(length(kap), kap, NA), drop_part))
       )
@@ -1355,14 +1451,24 @@ classif_server <- function(id, data_reactive, vars_metadata_reactive, spatial_re
     # maxcell caps geom_spatraster's display resampling: 5e4 for the small
     # in-grid panels, 4e5 for the expanded modal view (higher resolution).
     plot_class_map <- function(rl, export = FALSE, maxcell = 5e4) {
+      ttl <- if (identical(rl$source, "nn")) "Spatial 1-NN Class (no covariates)" else "Predicted Class"
       ggplot2::ggplot() +
         tidyterra::geom_spatraster(data = rl$class, maxcell = maxcell) +
         class_fill_scale(rl) +
         map_overlays(export) +
-        ggplot2::labs(title = "Predicted Class", subtitle = class_map_subtitle(rl)) +
+        ggplot2::labs(title = ttl, subtitle = class_map_subtitle(rl)) +
         export_axes(export) + map_theme(export)
     }
+    # Stand-in for the entropy / probability panels while the 1-NN surface is
+    # shown: that surface has no probabilities to draw.
+    nn_na_plot <- function() {
+      ggplot2::ggplot() +
+        ggplot2::annotate("text", x = 0, y = 0, size = 4.5,
+                          label = "Not available for Spatial 1-NN:\nit assigns hard classes, with no probabilities.") +
+        ggplot2::theme_void()
+    }
     plot_entropy_map <- function(rl, export = FALSE, maxcell = 5e4) {
+      if (is.null(rl$entropy)) return(nn_na_plot())
       sc <- value_scale(rl$entropy)
       ggplot2::ggplot() +
         tidyterra::geom_spatraster(data = rl$entropy, maxcell = maxcell) +
@@ -1373,6 +1479,7 @@ classif_server <- function(id, data_reactive, vars_metadata_reactive, spatial_re
         export_axes(export) + map_theme(export)
     }
     plot_prob_map <- function(rl, lyr, class_label, export = FALSE, maxcell = 5e4) {
+      if (is.null(rl$prob)) return(nn_na_plot())
       sc <- value_scale(rl$prob[[lyr]])
       ggplot2::ggplot() +
         tidyterra::geom_spatraster(data = rl$prob[[lyr]], maxcell = maxcell) +
@@ -1423,7 +1530,7 @@ classif_server <- function(id, data_reactive, vars_metadata_reactive, spatial_re
         prob    = {
           shiny::req(input$prob_class)
           lyr <- paste0("P_", input$prob_class)
-          shiny::req(lyr %in% names(rl$prob))
+          shiny::req(is.null(rl$prob) || lyr %in% names(rl$prob))
           plot_prob_map(rl, lyr, input$prob_class, maxcell = 4e5)
         })
     }, res = 96)
@@ -1435,7 +1542,8 @@ classif_server <- function(id, data_reactive, vars_metadata_reactive, spatial_re
       plot_class_map(get_rasters())
     }, cacheKeyExpr = {
       res <- cl_rv$res; shiny::req(res, res$surface_df)
-      list(res$run_id, conf_thresh_d(), isTRUE(input$map_adorn), isTRUE(input$map_points))
+      list(res$run_id, conf_thresh_d(), isTRUE(input$map_adorn), isTRUE(input$map_points),
+           show_nn())
     })
 
     output$entropy_map <- shiny::renderCachedPlot({
@@ -1443,7 +1551,7 @@ classif_server <- function(id, data_reactive, vars_metadata_reactive, spatial_re
     }, cacheKeyExpr = {
       res <- cl_rv$res; shiny::req(res, res$surface_df)
       list(res$run_id, isTRUE(input$map_adorn), isTRUE(input$map_points),
-           isTRUE(input$map_stretch))
+           isTRUE(input$map_stretch), show_nn())
     })
 
     output$prob_class_ui <- shiny::renderUI({
@@ -1455,12 +1563,12 @@ classif_server <- function(id, data_reactive, vars_metadata_reactive, spatial_re
       rl <- get_rasters()
       shiny::req(input$prob_class)
       lyr <- paste0("P_", input$prob_class)
-      shiny::req(lyr %in% names(rl$prob))
+      shiny::req(is.null(rl$prob) || lyr %in% names(rl$prob))
       plot_prob_map(rl, lyr, input$prob_class)
     }, cacheKeyExpr = {
       res <- cl_rv$res; shiny::req(res, res$surface_df, input$prob_class)
       list(res$run_id, input$prob_class, isTRUE(input$map_adorn), isTRUE(input$map_points),
-           isTRUE(input$map_stretch))
+           isTRUE(input$map_stretch), show_nn())
     })
 
     # ── Downloads ────────────────────────────────────────────────────────────
@@ -1470,9 +1578,10 @@ classif_server <- function(id, data_reactive, vars_metadata_reactive, spatial_re
     # GIS software styles those on load.
     dl_raster <- function(which_r, fname, datatype = NULL) {
       shiny::downloadHandler(
-        filename = function() fname,
+        filename = function() if (show_nn()) sub("\\.tif$", "_nn.tif", fname) else fname,
         content = function(file) {
           rl <- get_rasters()
+          shiny::req(rl[[which_r]])
           if (is.null(datatype)) {
             terra::writeRaster(rl[[which_r]], file, overwrite = TRUE)
           } else {
@@ -1497,12 +1606,17 @@ classif_server <- function(id, data_reactive, vars_metadata_reactive, spatial_re
         tmp <- file.path(tempdir(), paste0("classif_png_", format(Sys.time(), "%H%M%OS3")))
         dir.create(tmp, showWarnings = FALSE, recursive = TRUE)
         on.exit(unlink(tmp, recursive = TRUE), add = TRUE)
-        paths <- file.path(tmp, c("predicted_class.png", "prediction_entropy.png",
-                                  sprintf("probability_%s.png", gsub("[^A-Za-z0-9._-]+", "_", cls))))
+        # The 1-NN surface has only a class layer, so its bundle holds one map.
+        nn <- identical(rl$source, "nn")
+        paths <- if (nn) file.path(tmp, "predicted_class_nn.png") else
+          file.path(tmp, c("predicted_class.png", "prediction_entropy.png",
+                           sprintf("probability_%s.png", gsub("[^A-Za-z0-9._-]+", "_", cls))))
         with_showtext_dpi(300, {
           ggplot2::ggsave(paths[1], plot_class_map(rl, export = TRUE), width = 9, height = 7, dpi = 300)
-          ggplot2::ggsave(paths[2], plot_entropy_map(rl, export = TRUE), width = 9, height = 7, dpi = 300)
-          ggplot2::ggsave(paths[3], plot_prob_map(rl, lyr, cls, export = TRUE), width = 9, height = 7, dpi = 300)
+          if (!nn) {
+            ggplot2::ggsave(paths[2], plot_entropy_map(rl, export = TRUE), width = 9, height = 7, dpi = 300)
+            ggplot2::ggsave(paths[3], plot_prob_map(rl, lyr, cls, export = TRUE), width = 9, height = 7, dpi = 300)
+          }
         })
         zip::zip(zipfile = file, files = basename(paths), root = tmp, mode = "cherry-pick")
       }
@@ -1548,6 +1662,15 @@ classif_server <- function(id, data_reactive, vars_metadata_reactive, spatial_re
             }))
             out <- rbind(out, per_area)
           }
+        }
+        # Covariate-free run: the rows above ARE the spatial 1-NN model's.
+        if (isTRUE(res$nn_only)) {
+          out$scope[out$scope == "Total"] <- "Total (spatial 1-NN, no covariates)"
+          out <- rbind(out, data.frame(
+            scope = "Baseline comparison",
+            metric = "Majority-class accuracy (no-information rate)",
+            yardstick_id = "majority_acc", estimator = "Pooled out-of-fold",
+            value = res$majority_acc))
         }
         # Baseline comparison rows (same CV folds as the model metrics above).
         if (!is.null(res$lift)) {

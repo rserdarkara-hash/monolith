@@ -425,7 +425,7 @@
                               condition = "input.styler_format == 'gtiff'",
                               tags$p(style = "font-size: 0.8em; color: var(--mn-text-2); background: var(--mn-surface-2); border: 1px solid var(--mn-line); border-left: 2px solid var(--mn-accent); padding: 8px; border-radius: 3px;",
                                      icon("info-circle"),
-                                     " GeoTIFF writes the raster values, coordinate reference system and extent as computed, for use in QGIS or ArcGIS. Typography, palette, DPI and layout settings do not apply to it. Kriging surfaces are written as multi-band files (prediction, then variance).")
+                                     " GeoTIFF writes the raster values, coordinate reference system and extent of the displayed surface, in the run's Target Mapping CRS, for use in QGIS or ArcGIS. Typography, palette, DPI and layout settings do not apply to it. Kriging surfaces are written as multi-band files (prediction, then variance).")
                             ),
                             if (image_only_map) {
                               tags$p(style = "font-size: 0.8em; color: var(--mn-text-2); background: var(--mn-surface-2); border: 1px solid var(--mn-line); border-left: 2px solid var(--mn-warn); padding: 8px; border-radius: 3px;",
@@ -539,7 +539,7 @@
                  div(style = "background-color: var(--mn-surface-2); border: 1px solid var(--mn-line); height: 600px; display: flex; flex-direction: column; justify-content: center; align-items: center; text-align: center; padding: 40px; color: var(--mn-text-2);",
                      icon("layer-group", class = "fa-3x", style = "margin-bottom: 20px; color: var(--mn-text-3);"),
                      tags$h4("GeoTIFF export", style = "margin-top: 0;"),
-                     tags$p("There is nothing to preview: the file carries the raster values themselves, georeferenced in the run's analysis CRS, not a rendering of them."),
+                     tags$p("There is nothing to preview: the file carries the raster values themselves, georeferenced in the run's Target Mapping CRS, not a rendering of them."),
                      tags$p(style = "font-size: 0.9em;", "Open it in a GIS to symbolise it there.")
                  )
                )

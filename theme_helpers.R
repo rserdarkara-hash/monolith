@@ -980,6 +980,16 @@ table.dataTable tbody tr.odd { background-color: var(--mn-surface-2) !important;
 .docs-drawer-body::-webkit-scrollbar-thumb {
   background: var(--mn-line-2); border-radius: 4px;
 }
+/* Guide tables (commonmark table extension). display: block lets a wide
+   table scroll inside the 600 px drawer instead of widening it. */
+.docs-drawer-body table {
+  display: block; overflow-x: auto; border-collapse: collapse;
+  margin: 8px 0 14px; font-size: 0.9em;
+}
+.docs-drawer-body th, .docs-drawer-body td {
+  border: 1px solid var(--mn-line); padding: 4px 8px; vertical-align: top;
+}
+.docs-drawer-body th { background-color: var(--mn-surface-2); }
 .docs-drawer.open { right: 0; }
 .docs-drawer .nav-tabs > li.active > a { background-color: transparent !important; }
 .docs-nav-fab { display: none; }

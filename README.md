@@ -228,8 +228,8 @@ Before installing the application, ensure you have the following software instal
 
 *   **R:** Version **4.5.0 or higher** is required and is checked at startup; Monolith is developed and tested on **R 4.5.2**. You can download it from [CRAN](https://cran.r-project.org/).
 *   **RStudio (Optional but recommended):** The easiest way to run and interact with Shiny applications. Download from [Posit](https://posit.co/download/rstudio-desktop/).
-*   **System Dependencies for Spatial Packages:** The spatial stack (`sf`, `terra`) links against GDAL, GEOS and PROJ. Monolith is tested against **GDAL 3.11.4, GEOS 3.13.1 and PROJ 9.7.0**; any reasonably recent releases of these libraries will work.
-    *   **Windows:** Nothing to do for the normal install; CRAN ships the spatial packages as self-contained binaries. [RTools](https://cran.r-project.org/bin/windows/Rtools/) (matching your R version) is needed only if you install through `renv::restore()`, which builds most of the pinned versions from source (see [Package Dependencies](#3-package-dependencies)).
+*   **System Dependencies for Spatial Packages:** The spatial stack (`sf`, `terra`) links against GDAL, GEOS and PROJ. Monolith is tested against **GDAL 3.12.1, GEOS 3.14.1 and PROJ 9.7.1**; any reasonably recent releases of these libraries will work.
+    *   **Windows:** Nothing to do for the normal install; CRAN ships the spatial packages as self-contained binaries. [RTools](https://cran.r-project.org/bin/windows/Rtools/) (matching your R version) is needed only if you install through `renv::restore()`, which builds any pinned version CRAN has since superseded from source (see [Package Dependencies](#3-package-dependencies)).
     *   **macOS:** You may need to install `gdal` and `proj` via Homebrew (`brew install gdal proj`).
     *   **Linux (Ubuntu/Debian):** Install spatial libraries using your package manager:
         ```bash
@@ -252,7 +252,7 @@ Two equally valid ways to obtain Monolith:
 Monolith depends on **59 CRAN packages** for its spatial engine, statistical analytics, and user interface, all pinned in `renv.lock` (see [Reproducible installation](#reproducible-installation-with-renv-optional)).
 
 > [!IMPORTANT]
-> **Installing the dependencies.** `global.R` checks the suite at startup, names anything missing, and offers two routes rather than installing on its own. **To use the app, take the first:** `install.packages()` with the current CRAN releases, which arrive as pre-built binaries in a few minutes and need no compiler. **To reproduce the recorded test values of Section 9, take the second:** `renv::restore()`, which installs the exact versions in `renv.lock`. Most of those are no longer current, so they build from source, which takes far longer and needs a C/C++/Fortran toolchain (RTools on Windows). The pinned versions matter for reproducing the test baselines, not for analysing your own data. Nothing is installed without your explicit confirmation, because an unasked install of the current releases is the one action that can move a recorded baseline with nothing in the repository having changed.
+> **Installing the dependencies.** `global.R` checks the suite at startup, names anything missing, and offers two routes rather than installing on its own. **To use the app, take the first:** `install.packages()` with the current CRAN releases, which arrive as pre-built binaries in a few minutes and need no compiler. **To reproduce the recorded test values of Section 9, take the second:** `renv::restore()`, which installs the exact versions in `renv.lock`. Any of those that CRAN has since superseded build from source, which takes longer and needs a C/C++/Fortran toolchain (RTools on Windows). The pinned versions matter for reproducing the test baselines, not for analysing your own data. Nothing is installed without your explicit confirmation, because an unasked install of the current releases is the one action that can move a recorded baseline with nothing in the repository having changed.
 
 The full dependency suite, grouped by function:
 
@@ -276,28 +276,28 @@ Newer CRAN releases are expected to work; if you encounter an inconsistency, mat
 
 | Package | Version | Package | Version | Package | Version |
 |---|---|---|---|---|---|
-| `shiny` | 1.13.0 | `dplyr` | 1.2.0 | `randomForest` | 4.7-1.2 |
-| `shinyjs` | 2.1.1 | `tidyr` | 1.3.1 | `DALEX` | 2.5.3 |
-| `shinyWidgets` | 0.9.0 | `data.table` | 1.18.2 | `yardstick` | 1.3.2 |
+| `shiny` | 1.14.0 | `dplyr` | 1.2.1 | `randomForest` | 4.7-1.2 |
+| `shinyjs` | 2.1.1 | `tidyr` | 1.3.2 | `DALEX` | 2.5.4 |
+| `shinyWidgets` | 0.9.1 | `data.table` | 1.18.6.1 | `yardstick` | 1.4.0 |
 | `shinyFiles` | 0.9.3 | `jsonlite` | 2.0.0 | `agricolae` | 1.3-7 |
-| `shinycssloaders` | 1.1.0 | `readxl` | 1.4.5 | `mgcv` | 1.9-4 |
-| `DT` | 0.34.0 | `openxlsx` | 4.2.8 | `nortest` | 1.0-4 |
-| `sf` | 1.1-0 | `officer` | 0.7.3 | `future` | 1.69.0 |
-| `terra` | 1.8-93 | `zip` | 2.3.3 | `furrr` | 0.3.1 |
-| `tidyterra` | 1.0.0 | `fs` | 2.1.0 | `promises` | 1.5.0 |
-| `leaflet` | 2.2.3 | `ggplot2` | 4.0.2 | `patchwork` | 1.3.2 |
-| `leaflet.extras` | 2.0.1 | `ggpubr` | 0.6.3 | `showtext` | 0.9-7 |
-| `ggspatial` | 1.1.10 | `plotly` | 4.12.0 | `scales` | 1.4.0 |
-| `fields` | 17.1 | `RColorBrewer` | 1.1-3 | `commonmark` | 2.0.0 |
-| `classInt` | 0.4-11 | `viridis` | 0.6.5 | `glue` | 1.8.0 |
-| `gstat` | 2.1-5 | `concaveman` | 1.2.0 | `spdep` | 1.4-2 |
-| `FNN` | 1.1.4 | `parsnip` | 1.4.1 | `recipes` | 1.3.1 |
-| `workflows` | 1.3.0 | `tune` | 2.0.1 | `rsample` | 1.3.2 |
-| `dials` | 1.4.2 | `spatialsample` | 0.6.1 | `hardhat` | 1.4.2 |
-| `ranger` | 0.18.0 | `xgboost` | 3.2.0.1 | `nnet` | 7.3.20 |
-| `DBI` | 1.3.0 | `RSQLite` | 2.4.1 |  |  |
+| `shinycssloaders` | 1.1.0 | `readxl` | 1.5.0 | `mgcv` | 1.9-4 |
+| `DT` | 0.34.0 | `openxlsx` | 4.2.9 | `nortest` | 1.0-4 |
+| `sf` | 1.1-3 | `officer` | 0.7.6 | `future` | 1.75.0 |
+| `terra` | 1.9-50 | `zip` | 3.0.2 | `furrr` | 0.4.0 |
+| `tidyterra` | 1.3.0 | `fs` | 2.1.0 | `promises` | 1.5.0 |
+| `leaflet` | 2.2.3 | `ggplot2` | 4.0.3 | `patchwork` | 1.3.2 |
+| `leaflet.extras` | 2.0.1.9000 | `ggpubr` | 1.0.0 | `showtext` | 0.9-8 |
+| `ggspatial` | 1.1.10 | `plotly` | 4.12.1 | `scales` | 1.4.0 |
+| `fields` | 17.3 | `RColorBrewer` | 1.1-3 | `commonmark` | 2.0.0 |
+| `classInt` | 0.4-11 | `viridis` | 0.6.5 | `glue` | 1.8.1 |
+| `gstat` | 2.1-6 | `concaveman` | 1.2.0 | `spdep` | 1.4-2 |
+| `FNN` | 1.1.4.1 | `parsnip` | 1.6.0 | `recipes` | 1.4.0 |
+| `workflows` | 1.3.0 | `tune` | 2.1.0 | `rsample` | 1.3.2 |
+| `dials` | 1.4.4 | `spatialsample` | 0.6.1 | `hardhat` | 1.4.3 |
+| `ranger` | 0.18.0 | `xgboost` | 3.2.1.1 | `nnet` | 7.3-21 |
+| `DBI` | 1.3.0 | `RSQLite` | 3.53.3 |  |  |
 
-**Runtime environment:** R 4.5.2 (ucrt) · GDAL 3.11.4 · GEOS 3.13.1 · PROJ 9.7.0 · Windows 11 (also runs on macOS and Linux).
+**Runtime environment:** R 4.5.2 (ucrt) · GDAL 3.12.1 · GEOS 3.14.1 · PROJ 9.7.1 · Windows 11 (also runs on macOS and Linux).
 
 </details>
 
@@ -310,7 +310,7 @@ install.packages("renv")   # once
 renv::restore()             # reads renv.lock; confirm the prompt to activate the project
 ```
 
-This installs the pinned versions into a project-local library without touching your global R library. Budget time for it: most of the locked versions have been superseded on CRAN, so they are built from source and a toolchain is required (RTools on Windows, Xcode command line tools on macOS, the `-dev` headers listed in Section 1 on Linux). Reach for it when you want to reproduce the recorded test values; for ordinary analysis the current CRAN releases are the faster and equally valid choice.
+This installs the pinned versions into a project-local library without touching your global R library. Any locked version that CRAN has since superseded is built from source, which needs a toolchain (RTools on Windows, Xcode command line tools on macOS, the `-dev` headers listed in Section 1 on Linux). Reach for it when you want to reproduce the recorded test values; for ordinary analysis the current CRAN releases are the faster and equally valid choice.
 
 ### 4. Input Data Requirements
 
@@ -419,7 +419,7 @@ Sample datasets in [sample_data/](sample_data/) let you exercise every module wi
 
 ## Testing and Reproducibility
 
-Monolith ships with a `testthat` suite of 3,072 assertions across 35 test files, covering the interpolation pipeline, cross-validation metrics, variogram fitting, the classification engine, the descriptive/correlation/PCA plot builders, metadata matching and the Governing Factors module. Where a quantity has an external or closed-form reference, the tests assert against that rather than against the app's own output: IDW against the hand-written Shepard sum, Ordinary Kriging against its exactness and pure-nugget closed forms, RK and RFK against the trend-plus-kriged-residual decomposition, VIF against `1/(1 - R²)` from an actual regression, Moran's I against a hand-built weight matrix, the classification and agreement metrics against a hand-built confusion matrix, the agronomical class bins against `terra::classify`'s own output, the PCA spectrum against the eigenvalues of the correlation and covariance matrices, Lin's CCC against a value computed independently with `DescTools`, and the plotted variogram curves against `gstat::variogramLine`. Those tests run on a frozen extract of the sample survey (`tests/testthat/fixtures/`), so their inputs never move and a changed number means the code changed; that directory's `GOLDEN_MANIFEST.md` states what a green suite does and does not establish, and how to substitute your own golden dataset without editing a single test. A separate file boots the assembled application in a headless browser through `shinytest2` and checks the shell (server initialisation, input identifiers, tab wiring, documentation drawer); it skips itself when `shinytest2` or a Chromium-based browser is unavailable. The suite runs on every push through GitHub Actions against the pinned `renv.lock` environment, on Linux and on Windows - the platform is not incidental, since one recorded value was once resolved differently by the two platforms' floating-point paths. A second, weekly workflow (`upstream.yaml`) runs the same suite against the current CRAN releases instead of the pinned ones, so a change in an upstream package that moves one of the recorded values is reported as upstream news rather than discovered months later; it never gates a pull request. To run everything from the project root:
+Monolith ships with a `testthat` suite of 3,109 assertions across 35 test files, covering the interpolation pipeline, cross-validation metrics, variogram fitting, the classification engine, the descriptive/correlation/PCA plot builders, metadata matching and the Governing Factors module. Where a quantity has an external or closed-form reference, the tests assert against that rather than against the app's own output: IDW against the hand-written Shepard sum, Ordinary Kriging against its exactness and pure-nugget closed forms, RK and RFK against the trend-plus-kriged-residual decomposition, VIF against `1/(1 - R²)` from an actual regression, Moran's I against a hand-built weight matrix, the classification and agreement metrics against a hand-built confusion matrix, the agronomical class bins against `terra::classify`'s own output, the PCA spectrum against the eigenvalues of the correlation and covariance matrices, Lin's CCC against a value computed independently with `DescTools`, and the plotted variogram curves against `gstat::variogramLine`. Those tests run on a frozen extract of the sample survey (`tests/testthat/fixtures/`), so their inputs never move and a changed number means the code changed; that directory's `GOLDEN_MANIFEST.md` states what a green suite does and does not establish, and how to substitute your own golden dataset without editing a single test. A separate file boots the assembled application in a headless browser through `shinytest2` and checks the shell (server initialisation, input identifiers, tab wiring, documentation drawer); it skips itself when `shinytest2` or a Chromium-based browser is unavailable. The suite runs on every push through GitHub Actions against the pinned `renv.lock` environment, on Linux and on Windows - the platform is not incidental, since one recorded value was once resolved differently by the two platforms' floating-point paths. A second, weekly workflow (`upstream.yaml`) runs the same suite against the current CRAN releases instead of the pinned ones, so a change in an upstream package that moves one of the recorded values is reported as upstream news rather than discovered months later; it never gates a pull request. To run everything from the project root:
 
 ```bash
 Rscript tests/testthat.R
