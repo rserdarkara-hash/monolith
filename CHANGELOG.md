@@ -35,7 +35,7 @@ All notable changes to Monolith are documented in this file.
 - The Input CRS identification notice no longer repeats when a boundary upload confirms the CRS already selected.
 
 ### Testing
-- Full suite: 3,132 passing, 0 failing, 0 skipped, across 35 test files (up from 3060 at 1.1.0).
+- Full suite: 3,132 passing, 0 failing, 0 skipped, across 35 test files (up from 3060 at 1.1.0);  Linux CI (ubuntu-24.04): 3,111 passing, 0 failing, 1 skipped (the shinytest2 smoke file is skipped on CI).
 
 ## [1.1.0] - 2026-09-10 - Golden fixture testing of arithmetics / Updated reference list / In-place stylized export of data
 
