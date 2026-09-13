@@ -43,6 +43,8 @@ with_seed <- function(seed, expr) {
 }
 
 
+#' Model family for the co-kriging LMC: the first non-nugget structure of the
+#' primary variable's fitted variogram, or "Sph" when there is none.
 suggest_lmc_model <- function(primary_vgm) {
   if (is.null(primary_vgm)) return("Sph")
   m_type <- as.character(primary_vgm$model[primary_vgm$model != "Nug"])
@@ -75,6 +77,8 @@ suggest_lmc_model <- function(primary_vgm) {
   switch(m, "Sph" = 1, "Exp" = 3, "Gau" = sqrt(3), 1)
 }
 
+#' Default empirical-variogram lags: cutoff = half the bounding-box diagonal of
+#' the points, split into 15 bins. Returns `list(width, cutoff)` in CRS units.
 calc_scientific_lags <- function(sf_pts) {
   bbox <- sf::st_bbox(sf_pts)
   max_dist <- as.numeric(sqrt((bbox$xmax - bbox$xmin)^2 + (bbox$ymax - bbox$ymin)^2))
@@ -139,6 +143,14 @@ clean_gstat_env <- function(vgm_obj) {
   return(vgm_obj)
 }
 
+#' Automated variogram fit. Screens 4 families (Sph, Exp, Gau, Mat with
+#' nu = 1.5) x 4 starting ranges with gstat::fit.variogram. A candidate is
+#' eligible when its practical range lies between max lag / 100 and 2 x max
+#' lag, its partial sill is positive and its nugget non-negative; the lowest
+#' SSErr wins, converged candidates before flawed ones. Returns a vgm carrying
+#' attr "vgm_diagnostics", plus "flawed_winner", or "is_fallback" for the
+#' heuristic Spherical model used when nothing is eligible or the empirical
+#' variogram has fewer than 5 bins.
 robust_vgm_fit <- function(v_emp, v_data) {
   initial_sill <- var(v_data, na.rm=TRUE)
   if (is.na(initial_sill) || initial_sill == 0) initial_sill <- 1

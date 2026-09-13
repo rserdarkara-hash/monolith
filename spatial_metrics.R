@@ -4,6 +4,9 @@
 # see the worker contract note there before moving anything.
 
 
+#' Prediction and observation column names in a CV object (gstat's `var1.*`
+#' names first, then any `*.pred` / `*.observed`). Returns `list(pred,
+#' observed)`, NA where a column is absent.
 detect_cv_columns <- function(cnames) {
   pre_col <- grep("^var1\\.pred$|^target\\.pred$|^pred$", cnames, value = TRUE)[1]
   if (is.na(pre_col)) pre_col <- grep("\\.pred$", cnames, value = TRUE)[1]
@@ -14,6 +17,9 @@ detect_cv_columns <- function(cnames) {
   list(pred = pre_col, observed = obs_col)
 }
 
+#' Lin's concordance correlation coefficient on jointly complete pairs, using
+#' population moments (Lin 1989). NA below 2 pairs or when either vector is
+#' constant.
 calc_ccc <- function(observed, predicted) {
   # Filter to jointly complete pairs up front so means, variances and the
   # covariance all come from the SAME subset (mixing per-vector na.rm with
@@ -205,6 +211,8 @@ calc_moran <- function(residuals, coords) {
   })
 }
 
+#' A CV object (sf or Spatial) as a plain data.frame; sf input gains `x`/`y`
+#' coordinate columns.
 .cv_to_df <- function(cv_obj) {
   if (is.null(cv_obj)) return(NULL)
   if (inherits(cv_obj, "Spatial")) {
@@ -580,6 +588,11 @@ build_cv_repeat_summary <- function(reps_by_loc) {
   list(n_repeats = n_rep, per_loc = per_loc, total = total)
 }
 
+#' Cross-validation for RK (`model_type = "lm"`) and RFK (`"rf"`). Every fold
+#' refits the trend and the residual variogram on its training rows and
+#' predicts the held-out rows as trend + kriged residual; folds come from
+#' make_cv_folds(). Returns an sf with `observed`, `var1.pred` and `residual`,
+#' ordered like the complete-case input rows, or NULL below 3 such rows.
 perform_kriging_loocv <- function(pts, target_var, aux_vars, lags_func, vgm_fit_func, model_type = c("lm", "rf"), l = "region", prefix = "act", rf_ntree = 200, cv_strategy = "auto", fold_seed = CV_FOLD_SEED) {
   model_type <- match.arg(model_type)
   pts <- pts[complete.cases(sf::st_drop_geometry(pts)[, c(target_var, aux_vars), drop=FALSE]), ]
@@ -665,6 +678,8 @@ perform_kriging_loocv <- function(pts, target_var, aux_vars, lags_func, vgm_fit_
   })
 }
 
+#' Observed minus predicted from a CV object, or its `residual` column when the
+#' pair is not found; an all-NA vector of length `n_rows` when neither exists.
 get_cv_residuals <- function(cv_obj, n_rows) {
   if (is.null(cv_obj)) return(rep(NA_real_, n_rows))
   df <- .cv_to_df(cv_obj)

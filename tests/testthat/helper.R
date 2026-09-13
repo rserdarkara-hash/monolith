@@ -388,15 +388,27 @@ monolith_unpinned_run <- function() {
 }
 
 #' This session's environment, in the shape make_baselines.R records.
+#'
+#' `sys_libs` is the GDAL/GEOS/PROJ that sf and terra are linked against. Like
+#' `platform` it is carried for the message only, never compared: Windows
+#' binaries bundle their own libraries while Linux links Ubuntu's, so the two
+#' legs differ by construction.
 golden_env_snapshot <- function(pkgs = GOLDEN_BASELINE_PKGS) {
   vs <- vapply(pkgs, function(p) {
     tryCatch(as.character(utils::packageVersion(p)),
              error = function(e) NA_character_)
   }, character(1))
+  libs <- tryCatch({
+    s <- sf::sf_extSoftVersion()
+    t <- unlist(terra::gdal(lib = "all"))
+    c(sf = sprintf("GDAL %s, GEOS %s, PROJ %s", s[["GDAL"]], s[["GEOS"]], s[["PROJ"]]),
+      terra = sprintf("GDAL %s, GEOS %s, PROJ %s", t[["gdal"]], t[["geos"]], t[["proj"]]))
+  }, error = function(e) NULL)
   list(r_version = as.character(getRversion()),
        platform = R.version$platform,
        recorded_at = format(Sys.Date(), "%Y-%m-%d"),
-       packages = vs)
+       packages = vs,
+       sys_libs = libs)
 }
 
 #' The environment `golden_baselines.rds` was recorded in, or NULL when the
@@ -447,6 +459,12 @@ golden_baseline_info <- function() {
   base <- sprintf("baseline recorded %s on %s under R %s (%s)",
                   prov$recorded_at %||% "?", prov$platform %||% "?", prov$r_version,
                   paste(names(prov$packages), prov$packages, collapse = ", "))
+  if (length(prov$sys_libs)) {
+    here_libs <- golden_env_snapshot(character(0))$sys_libs
+    base <- paste0(base, sprintf("; libraries recorded [%s], here [%s]",
+                                 paste(names(prov$sys_libs), prov$sys_libs, collapse = "; "),
+                                 paste(names(here_libs), here_libs, collapse = "; ")))
+  }
   drift <- golden_provenance_drift(prov)
   if (length(drift)) {
     paste0(base, "; THIS SESSION DIFFERS - ", paste(drift, collapse = "; "))

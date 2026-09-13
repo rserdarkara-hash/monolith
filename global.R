@@ -164,6 +164,12 @@ showtext_auto()
 
 addResourcePath("assets", file.path(getwd(), "assets"))
 
+# Shiny rejects any upload above its request cap (5 MB by default) before a
+# handler runs, which made the 30 MB checks on the data and metadata tables in
+# server_data_setup.R unreachable and refused ordinary boundary shapefile sets.
+# The cap covers a whole .shp set in one request; tables keep their 30 MB limit.
+options(shiny.maxRequestSize = 200 * 1024^2)
+
 if (!inherits(future::plan(), "multisession")) {
   future::plan(future::multisession)
 }

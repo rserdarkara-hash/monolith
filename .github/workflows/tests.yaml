@@ -19,13 +19,18 @@ jobs:
     # boundary, and the way to notice the next one before a release is to run
     # both platforms. Development happens on Windows, so Linux is the leg that
     # was never exercised locally - and vice versa.
+    #
+    # The Linux runner is pinned to a release rather than ubuntu-latest: GDAL,
+    # GEOS and PROJ come from Ubuntu's apt there, not from the lockfile, so a
+    # moving image would change them silently. Move it deliberately, and check
+    # the recorded provenance (tests/testthat/fixtures) when you do.
     runs-on: ${{ matrix.os }}
     strategy:
       # One platform failing must not cancel the other: when a number is
       # platform-dependent, the interesting output is BOTH legs' results.
       fail-fast: false
       matrix:
-        os: [ubuntu-latest, windows-latest]
+        os: [ubuntu-24.04, windows-latest]
     # The Windows leg is reported but not yet blocking. Its risk is a toolchain
     # one, not a scientific one: P3M serves binaries for CURRENT versions, so a
     # pinned version that CRAN has since superseded falls back to a source build,

@@ -161,7 +161,8 @@ Karacasu 220 / Altinova 355, extents from 0.9 x 3.0 km to 22.9 x 32.1 km,
 `v83`~`v86` r = 0.998, VIF up to 766.
 
 **Recording provenance** — also in `golden_baselines.rds`, as an attribute:
-the R version, the platform, the date, and the versions of the five packages
+the R version, the platform, the date, the GDAL/GEOS/PROJ that `sf` and `terra`
+are linked against, and the versions of the five packages
 that can move one of the recorded values (`gstat`, `sf`, `terra`, `classInt`,
 `spdep`). A recorded value means *same code + same data + same packages -> same
 numbers*; the fixture freezes the data and git holds the code, so without this
@@ -169,10 +170,12 @@ the package leg was unrecorded and a moved value could not be told apart from
 an upstream change. Every baseline assertion now carries it in its failure
 message, and `test-golden-fixture.R` fails outright when the session's versions
 differ from the recorded ones — either restore them, or re-record after
-confirming for yourself that the values did not move. The platform is recorded
-but deliberately *not* compared: baselines are recorded on Windows and CI runs
-Linux, and comparing it would make CI permanently red over a difference that is
-real (it moved `ok_surface_digest` once) but not a defect.
+confirming for yourself that the values did not move. The platform and the
+system libraries are recorded but deliberately *not* compared: baselines are
+recorded on Windows, whose binaries bundle their own GDAL/GEOS/PROJ, while CI
+also runs Linux against Ubuntu's, and comparing them would make CI permanently
+red over a difference that is real (the platform moved `ok_surface_digest`
+once) but not a defect.
 
 ---
 

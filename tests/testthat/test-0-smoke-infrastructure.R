@@ -39,3 +39,14 @@ test_that("DESCRIPTION file exists and is parseable", {
   desc <- read.dcf(desc_path)
   expect_true("monolith" %in% desc[, "Package"])
 })
+
+test_that("Shiny's upload cap admits every per-file limit the handlers enforce", {
+  # Shiny refuses an upload above shiny.maxRequestSize before any handler runs,
+  # so a handler limit above the cap is dead code and its message never shows.
+  src <- readLines(file.path(testthat::test_path(), "..", "..", "server_data_setup.R"),
+                   warn = FALSE)
+  mb <- as.numeric(regmatches(src, regexpr("(?<=fsize > )[0-9]+(?= \\* 1024 \\* 1024)",
+                                           src, perl = TRUE)))
+  expect_gt(length(mb), 0)
+  expect_gte(getOption("shiny.maxRequestSize"), max(mb) * 1024^2)
+})

@@ -37,6 +37,7 @@ update_progress_file <- function(l, prefix, step, total) {
   .write_status_file(l, prefix, "progress", round((step / total) * 100))
 }
 
+#' Latest run warning for a locality/surface, read by the main-session poller.
 write_warning_file <- function(l, prefix, message) {
   .write_status_file(l, prefix, "warn", message)
 }
@@ -125,6 +126,8 @@ strict_buffer_message <- function(buffer, res, label = NULL) {
     res_arm)
 }
 
+#' Pooled display-layer values of two rasters, so a comparison view can share
+#' one colour scale. NULL when scales are not matched or for uncertainty maps.
 get_joint_scale_values <- function(r1_packed, r2_packed, match_scales, is_uncertainty) {
   if(match_scales && !is_uncertainty) {
     res <- c(raster_value_layer(r1_packed), raster_value_layer(r2_packed))
@@ -155,6 +158,12 @@ gov_shap_item <- function(i, explainer, newdata, cancel_path = NULL) {
   sp
 }
 
+#' Governing-factors analysis: a random forest of the target on the predictors
+#' (complete rows only), DALEX permutation importance, ALE and PDP profiles of
+#' the most important predictor, and its SHAP contributions on a sample of up to
+#' `shap_sample_size` rows. Seeded (12345). Returns `list(model, explainer,
+#' importance, top_var, ale, pdp, shap, n_used, n_total)`, or NULL below 10
+#' complete rows.
 compute_governing_factors <- function(df, target_col, predictors, n_permutations = 10, rf_ntree = 100, shap_sample_size = 100, cores_hint = NULL, cancel_file = NULL) {
   req_cols <- c(target_col, predictors)
   df_clean <- df[, req_cols, drop = FALSE]
@@ -294,6 +303,8 @@ compute_governing_factors <- function(df, target_col, predictors, n_permutations
   })
 }
 
+#' Merge per-locality rasters (live or Packed) into one SpatRaster; NULL when
+#' the list holds none.
 merge_wrapped_rasters <- function(raster_list) {
   if (is.null(raster_list) || length(raster_list) == 0) return(NULL)
   valid_list <- Filter(Negate(is.null), raster_list)
@@ -311,6 +322,9 @@ merge_wrapped_rasters <- function(raster_list) {
   merged
 }
 
+#' Points ready for distance-based work: a geographic CRS is projected to the
+#' WGS 84 UTM zone of the points' mean position (southern variant below the
+#' equator); a projected CRS is returned unchanged. NULL for empty input.
 validate_and_project_sf <- function(pts_sf) {
   if (is.null(pts_sf) || nrow(pts_sf) == 0) return(NULL)
   
@@ -347,12 +361,6 @@ dedup_valid_points <- function(pts_sf, target) {
   dplyr::mutate(pts_sf, x = cc[, 1], y = cc[, 2])
 }
 
-#' An uploaded boundary as polygons. Polygon layers pass through unchanged;
-#' point or line layers become the convex hull of all their features (one row),
-#' the same treatment classif_scope_polygons() gives them. NULL when the hull
-#' does not enclose an area (fewer than 3 non-collinear vertices). Without this,
-#' a point layer reached the grid clip as a MULTIPOINT boundary of zero area and
-#' the locality failed.
 #' A boundary uploaded without a .prj carries no CRS; it is taken to be in the
 #' Input Data CRS (the CRS of the sample coordinates), which is what the upload
 #' notice promises. One rule for the pipeline, the Data Setup note and the
@@ -365,6 +373,12 @@ shp_assume_crs <- function(shp, crs) {
   sf::st_set_crs(shp, co)
 }
 
+#' An uploaded boundary as polygons. Polygon layers pass through unchanged;
+#' point or line layers become the convex hull of all their features (one row),
+#' the same treatment classif_scope_polygons() gives them. NULL when the hull
+#' does not enclose an area (fewer than 3 non-collinear vertices). Without this,
+#' a point layer reached the grid clip as a MULTIPOINT boundary of zero area and
+#' the locality failed.
 shp_boundary_polygons <- function(shp) {
   is_poly <- function(g) all(as.character(sf::st_geometry_type(g)) %in% c("POLYGON", "MULTIPOLYGON"))
   if (is.null(shp) || length(sf::st_geometry(shp)) == 0) return(NULL)
@@ -374,6 +388,13 @@ shp_boundary_polygons <- function(shp) {
   sf::st_sf(geometry = hull)
 }
 
+#' One locality's whole run: clean, project and deduplicate the points, build
+#' the boundary and the prediction grid, screen and krige covariates, run the
+#' selected engine on the actual (and, in comparison mode, the predicted)
+#' surface and rasterize the results. Runs inside a PSOCK worker. Returns a list
+#' of Packed rasters, CV objects and metrics, fitted models, boundary and points
+#' in `crs_sel`, and `log_msg`. Errors are reported in `log_msg`; only a
+#' cancellation raises.
 run_regional_interpolation <- function(item, current_method, current_crs, aux_vars, shp_bound, b_type, buff_mode, b_dist, res_mode, grid_res, crs_sel, comp_mode, val_type, progress_dir_val = tempdir(), session_id_val = "default", cancel_file_val = NULL, vif_threshold = 10) {
   options(monolith_progress_dir = progress_dir_val)
   options(monolith_session_id = session_id_val)
@@ -971,6 +992,9 @@ buffer_multipliers <- c(
   "RFK" = 3.0
 )
 
+#' Method factor for the dynamic wrapped buffer: buffer = factor x the local
+#' resolution (half the mean nearest-neighbour distance, or the fixed grid
+#' resolution), clamped to 5-2000 m. 2.0 for an unknown method.
 get_buffer_multiplier <- function(method) {
   if (is.null(method) || length(method) == 0 || is.na(method) || method == "") return(2.0)
   if (method %in% names(buffer_multipliers)) {

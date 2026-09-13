@@ -76,6 +76,11 @@ optimize_idw_p <- function(pts, target_var, nmax = 12, cv_strategy = "auto") {
   !is.finite(s) || s <= 1e-8 * scale_ref
 }
 
+#' Covariate screen for RK/RFK/CK and the classification suite. Reports pairs
+#' with |r| > `pairwise_threshold`, drops degenerate (constant) covariates, then
+#' drops the highest-VIF covariate one at a time while any VIF exceeds
+#' `vif_threshold` (`Inf` = keep all). Returns `list(has_collinearity, pairs,
+#' kept, dropped, dropped_constant, dropped_vif)`.
 detect_multicollinearity_engine <- function(df, vars = NULL, vif_threshold = 10, pairwise_threshold = 0.95) {
   # sf's geometry column is sticky under `[ , ]`, so an sf input would carry an
   # sfc into the degenerate scan (is.finite() on an sfc errors) and, if it ever
@@ -224,6 +229,8 @@ detect_multicollinearity_engine <- function(df, vars = NULL, vif_threshold = 10,
   ))
 }
 
+#' detect_multicollinearity_engine() over every numeric column of `df`,
+#' returning only the kept/dropped sets.
 check_vif <- function(df, threshold = 10) {
   res <- detect_multicollinearity_engine(df, vif_threshold = threshold)
   return(list(kept = res$kept, dropped = res$dropped,
@@ -306,6 +313,7 @@ krige_covariates <- function(data, grid_p, aux_vars, lags, method_params, on_var
 }
 
 
+#' The empty result list every engine fills and returns.
 init_interpolation_res <- function() {
   # cv_obj_reps stays NULL unless the user asked for repeated CV: it holds one
   # trimmed CV frame per fold realization (see add_cv_repeats).
@@ -314,6 +322,9 @@ init_interpolation_res <- function() {
        cv_obj_reps = NULL, residuals = NULL)
 }
 
+#' Evaluate one CV expression into `res`: the CV object, its perform_cv()
+#' metrics and its residuals. A failure is written to the run log and leaves
+#' all three empty instead of stopping the engine.
 safe_run_cv <- function(res, expr, label, n_data) {
   cv_obj <- tryCatch({
     expr
@@ -483,6 +494,11 @@ rf_infinitesimal_jackknife_var <- function(pred_individual, inbag, chunk = 2000L
   run_cv_with_repeats(res, cv_okfb, method_params, nrow(data), cv_label, l, prefix)
 }
 
+#' Shared engine for OK, RK and RFK. OK kriges the target directly; RK (lm) and
+#' RFK (randomForest) fit a trend on the screened covariates and krige its
+#' residuals, adding the trend variance to the kriging variance. A failed RK/RFK
+#' falls back to OK with a named warning. Returns the init_interpolation_res()
+#' list with grid predictions in `res_sf` (`var1.pred`, `var1.var`).
 apply_kriging_pipeline <- function(engine = c("OK", "RK", "RFK"), data, target_var, grid_p, lags, method_params, aux_vars = NULL, l = "region", prefix = "act", vif_threshold = 10) {
   engine <- match.arg(engine)
   res <- init_interpolation_res()
@@ -687,14 +703,17 @@ apply_kriging_pipeline <- function(engine = c("OK", "RK", "RFK"), data, target_v
   return(res)
 }
 
+#' Ordinary Kriging; see apply_kriging_pipeline().
 apply_OK <- function(data, target_var, grid_p, lags, method_params, l = "region", prefix = "act") {
   apply_kriging_pipeline("OK", data, target_var, grid_p, lags, method_params, NULL, l, prefix)
 }
 
+#' Regression Kriging (linear trend + kriged residuals); see apply_kriging_pipeline().
 apply_RK <- function(data, target_var, grid_p, lags, method_params, aux_vars, l = "region", prefix = "act", vif_threshold = 10) {
   apply_kriging_pipeline("RK", data, target_var, grid_p, lags, method_params, aux_vars, l, prefix, vif_threshold)
 }
 
+#' Random Forest Kriging (forest trend + kriged residuals); see apply_kriging_pipeline().
 apply_RFK <- function(data, target_var, grid_p, lags, method_params, aux_vars, l = "region", prefix = "act", vif_threshold = 10) {
   apply_kriging_pipeline("RFK", data, target_var, grid_p, lags, method_params, aux_vars, l, prefix, vif_threshold)
 }
@@ -914,6 +933,9 @@ apply_CK <- function(data, target_var, grid_p, lags, method_params, aux_vars, l 
   return(res)
 }
 
+#' Inverse distance weighting with power `idw_p` (default 2) over the `idw_nmax`
+#' nearest samples (default 12). Deterministic: `res_sf` carries no usable
+#' variance.
 apply_IDW <- function(data, target_var, grid_p, method_params, l = "region", prefix = "act") {
   res <- init_interpolation_res()
   
@@ -939,6 +961,10 @@ apply_IDW <- function(data, target_var, grid_p, method_params, l = "region", pre
   return(res)
 }
 
+#' Thin plate spline (fields::Tps) on coordinates scaled to the unit box.
+#' `tps_lambda` NULL/NA/negative selects the smoothing by GCV, 0 interpolates
+#' exactly, a positive value fixes it; CV folds refit under the same rule. Any
+#' failure falls back to apply_IDW() with a named warning.
 apply_TPS <- function(data, target_var, grid_p, method_params, l = "region", prefix = "act") {
   res <- init_interpolation_res()
   
@@ -1028,6 +1054,9 @@ apply_TPS <- function(data, target_var, grid_p, method_params, l = "region", pre
   return(res)
 }
 
+#' Dispatch to the engine named by `method` (OK, RK, RFK, CK, IDW, TPS). An
+#' engine error comes back as a result list with NULL `res_sf` and the message
+#' in `log_msg`, never as a condition.
 apply_interpolation <- function(data, target_var, method, grid_p, aux_vars, lags, method_params, l, prefix, vif_threshold = 10) {
   res <- tryCatch({
     if(method == "OK") {

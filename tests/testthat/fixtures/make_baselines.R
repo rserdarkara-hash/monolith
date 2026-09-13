@@ -105,6 +105,7 @@ saveRDS(baselines, target_file, version = 3)
 cat("\nWritten:", target_file, "\n\n")
 cat("recorded in     :  R", prov$r_version, "on", prov$platform, "\n")
 cat("                  ", paste(names(prov$packages), prov$packages, collapse = ", "), "\n")
+cat("                  ", paste(names(prov$sys_libs), prov$sys_libs, collapse = "; "), "\n")
 cat("identity        : ", baselines$identity$n_rows, "x",
     baselines$identity$n_cols, "rows/cols, core",
     baselines$identity$n_core, ", tiny", baselines$identity$n_tiny, "\n")
