@@ -25,7 +25,7 @@ Whether the target is soil physicochemistry, a topographic interaction, or a man
 
    **Run it in a real browser, not the RStudio viewer pane.** The embedded
    viewer renders Leaflet maps, large tables, and raster overlays noticeably
-   more slowly. Either launch from the R GUI or a terminal, which opens your
+   more slowly. Either launch from an R console or a terminal, which opens your
    system browser by default, or in RStudio set the **Run App** dropdown to
    *Run External*.
 4. On the **1. Data Setup** tab, upload `sample_data/samp_data_1.xlsx` and, as the variable list, `samp_var_list.xlsx` (optional but recommended for your own data; required for proper investigation of the sample data). Confirm the X/Y mapping and CRS, then move to the Spatial Engine in the sidebar and run an interpolation. The sample file arrives ready to run: **Locality** preset to Kale and Yorga, the two the accompanying manuscript examines in detail, and both CRS selectors preset to `EPSG:32635` (UTM 35N), the zone those localities are on. Clear the Locality box to map all seven. These presets are keyed on the sample file's own name and never apply to a dataset of your own.
@@ -227,7 +227,7 @@ To understand the spatial structure of model errors, Monolith provides two diagn
 Before installing the application, ensure you have the following software installed:
 
 *   **R:** Version **4.5.0 or higher** is required and is checked at startup; Monolith is developed and tested on **R 4.5.2**. You can download it from [CRAN](https://cran.r-project.org/).
-*   **RStudio (Optional but recommended):** The easiest way to run and interact with Shiny applications. Download from [Posit](https://posit.co/download/rstudio-desktop/).
+*   **RStudio (Optional, use your default browser with R for the best performance):** The easiest way to run and interact with Shiny applications. Download from [Posit](https://posit.co/download/rstudio-desktop/).
 *   **System Dependencies for Spatial Packages:** The spatial stack (`sf`, `terra`) links against GDAL, GEOS and PROJ. Monolith is tested against **GDAL 3.12.1, GEOS 3.14.1 and PROJ 9.7.1**; any reasonably recent releases of these libraries will work.
     *   **Windows:** Nothing to do for the normal install; CRAN ships the spatial packages as self-contained binaries. [RTools](https://cran.r-project.org/bin/windows/Rtools/) (matching your R version) is needed only if you install through `renv::restore()`, which builds any pinned version CRAN has since superseded from source (see [Package Dependencies](#3-package-dependencies)).
     *   **macOS:** You may need to install `gdal` and `proj` via Homebrew (`brew install gdal proj`).

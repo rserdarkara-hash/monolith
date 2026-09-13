@@ -371,7 +371,7 @@ The suite is self-contained: while this tab is active the interpolation sidebar 
 
 ## References
 
-The works behind the methods named in this guide. The Scientific Guide's Section 11 carries the complete list, including the estimators and conventions this guide only refers to in passing.
+The works behind the methods named in this guide. The Scientific Guide's Section 11 carries the complete list, including the estimators and conventions this guide only refers to in passing; please, run your own, secondary verification on the references before using them.
 
 Breiman, L. (2001). Random forests. *Machine Learning*, 45(1), 5-32. https://doi.org/10.1023/A:1010933404324
 

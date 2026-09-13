@@ -2,7 +2,7 @@
 
 The **Descriptive and Exploratory Suite** provides statistical and visual tools for investigating your data, either before interpolation or after generating parameter predictions.
 
-> *Scope of this document: the statistical methods in this suite (normality tests, group-comparison tests, correlation and partial correlation, PCA, random-forest explainability) are established published methods and are not original contributions of this software or its author. This guide describes how they are implemented here; the mathematics and the choices behind them are in the Scientific Guide. Works cited below are listed in the References section at the end of this document.*
+> *Scope of this document: the statistical methods in this suite (normality tests, group-comparison tests, correlation and partial correlation, PCA, random-forest explainability) are established published methods and are not original contributions of this software or its author. This guide describes how they are implemented here; the mathematics and the choices behind them are in the Scientific Guide. Works cited below are listed in the References section at the end of this document; please, run your own, secondary verification on the references before using them.*
 
 ## 0. Variable Naming
 
