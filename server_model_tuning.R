@@ -51,8 +51,22 @@
     if (length(jobs) == 0) return(invisible(NULL))
 
     main_wd <- getwd()
-    cores_hint <- tryCatch(as.integer(future::availableCores()), error = function(e) 1L)
-    nested_workers <- if (length(jobs) > 1L) max(1L, min(cores_hint - 1L, length(jobs))) else 1L
+    cores_hint <- tryCatch(
+  as.integer(future::availableCores()),
+  error = function(e) 1L
+)
+
+# TPS is memory-heavy. Keep it asynchronous, but do not create
+# another PSOCK layer inside the promise worker.
+if (identical(worker_name, "tps_gcv_item")) {
+  nested_workers <- 1L
+} else {
+  nested_workers <- if (length(jobs) > 1L) {
+    max(1L, min(cores_hint - 1L, length(jobs)))
+  } else {
+    1L
+  }
+}
 
     rv$opt_running <- TRUE
     shinyjs::disable(btn_id)

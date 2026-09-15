@@ -31,7 +31,7 @@ gov_factors_ui <- function(id) {
               shiny::icon("circle-notch", class = "fa-spin fa-4x", style = "color: var(--mn-text-3); margin-bottom: 20px;"),
               shiny::h3("Executing Machine Learning Analytics...", style = "color: var(--mn-text); font-weight: 600; margin-bottom: 10px;"),
               shiny::p("Fitting high-dimensional Random Forest models and extracting explanatory SHAP, PDP, and ALE profiles in the background.", style = "color: var(--mn-text-2); font-size: 1.1em;"),
-              shiny::p("The dashboard remains fully responsive. You can view other tabs or start other operations.", style = "color: var(--mn-text-3); font-style: italic; font-size: 0.9em; margin-top: 15px;"),
+              shiny::p("The dashboard becomes responsive once the module starts (up to a minute or two); recommended use is one large fitting per session (memory optimisation is in progress for the module).", style = "color: var(--mn-text-3); font-style: italic; font-size: 0.9em; margin-top: 15px;"),
               shiny::actionButton(ns("gov_cancel_btn"), "Cancel Run",
                                   icon = shiny::icon("stop"),
                                   class = "btn-danger btn-sm",
