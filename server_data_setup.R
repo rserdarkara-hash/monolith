@@ -669,6 +669,16 @@
     # four inputs. A toast saying the same thing only queues alongside
     # crs_ident.
     removeNotification("crs_guard")
+    removeNotification("input_crs_distortion")
+    pos <- crs_sample_positions(rv$user_data, input$map_x, input$map_y, input$map_crs)
+    if (!is_longlat && !is.null(pos)) {
+      k <- crs_scale_factor(input$map_crs, pos$lon, pos$lat)
+      if (!is.null(k) && isTRUE(k$dev > 0.01)) {
+        showNotification(sprintf(
+          "Input Data CRS has distance distortion up to %.2f%% here. Metre-based projected input is used for interpolation as supplied. Reproject the data to its local UTM zone before upload to reduce distortion; changing the CRS label alone does not reproject coordinates.",
+          100 * k$dev), type = "warning", duration = 20, id = "input_crs_distortion")
+      }
+    }
   })
 
   # Standing readout under the mini-map, so the landing position is visible

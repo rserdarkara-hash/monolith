@@ -315,7 +315,7 @@
      
      if(method %in% c("IDW", "TPS")) {
        param_df <- build_regional_params_df(method, l, rv$disp$regional_params,
-                                            has_pre = comp_mode || val_type != "actual")
+                                            has_pre = comp_mode || val_type != "actual", export = TRUE)
        if(!is.null(param_df)) {
          register_export_item(paste0("table_params_loc_", l), paste(meta$label, "-", l, "- Model Parameters"), "table", param_df, meta$category)
        }
@@ -448,7 +448,8 @@
       x = NULL, y = NULL, loc = NULL, crs = NULL,
       vars = list() # List of actual/pred pairs
     ),
-    rast = NULL, rast_pred = NULL, rast_res = NULL, rast_point_res = NULL, sf = NULL, bound = NULL, 
+    rast = NULL, rast_pred = NULL, rast_res = NULL, rast_point_res = NULL, sf = NULL, bound = NULL,
+    bound_overlap_m2 = c(act = 0, pre = 0),
     v_fit_list = list(), v_emp_list = list(), 
     rast_list_act = list(), rast_list_pre = list(), rast_list_res = list(), rast_list_point_res = list(),
     desc_vars_state = list(x = "", y = "", z = "", multi = character(0)),

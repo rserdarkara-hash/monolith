@@ -62,6 +62,25 @@ make_rp <- function() list(
   LocB = list(idw_p_act = 2,   idw_p_pre = 2, tps_lambda_act = 0.01, tps_lambda_pre = 0)
 )
 
+test_that("regional parameter exports keep fitted values numeric", {
+  rp <- make_rp()
+  rp$LocA$tps_lambda_act <- -1
+  rp$LocA$tps_fit_act <- list(lambda = 1.234e-9, eff_df = 5.6)
+  rp$LocA$tps_fit_pre <- list(lambda = 2e-5, eff_df = 8)
+  df <- build_regional_params_df("TPS", "LocA", rp, TRUE, export = TRUE)
+  expect_equal(df$Mode, c("Auto (GCV)", "Auto (GCV)"))
+  expect_equal(df$Surface, c("Actual", "Predicted"))
+  expect_equal(df$Lambda, c(1.234e-9, 2e-5))
+  expect_equal(df[["Effective df"]], c(5.6, 8))
+  shown <- build_regional_params_df("TPS", "LocA", rp, FALSE)
+  expect_match(shown$Actual, "1.23e-09", fixed = TRUE)
+  expect_match(shown$Actual, "5.6", fixed = TRUE)
+  idw <- build_regional_params_df("IDW", "Total (Combined)", rp, FALSE, export = TRUE)
+  expect_type(idw[["Power (p)"]], "double")
+  expect_equal(nrow(idw), 2)
+  expect_equal(format_param_val("TPS", 1e-9), "1e-09")
+})
+
 test_that("committed lambda 0 shows as 0, not Auto (GCV)", {
   df <- build_regional_params_df("TPS", "LocA", make_rp(), has_pre = TRUE)
   expect_equal(df$Actual, "0")

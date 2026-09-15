@@ -129,6 +129,17 @@ test_that("compute_governing_factors does not perturb the caller's RNG (T19)", {
 
 # ── Cooperative cancellation ────────────────────────────────────────────────
 
+test_that("a failed SHAP cluster start restores mc.cores", {
+  withr::local_options(mc.cores = 1L)
+  testthat::with_mocked_bindings({
+    expect_error(compute_governing_factors(make_test_df(60), "a", c("b", "c", "d"),
+      n_permutations = 1, rf_ntree = 10, shap_sample_size = 50, cores_hint = 3),
+      "forced cluster startup failure")
+    expect_identical(getOption("mc.cores"), 1L)
+  }, makeClusterPSOCK = function(...) stop("forced cluster startup failure"),
+  .package = "parallelly")
+})
+
 test_that("compute_governing_factors aborts when the cancel flag is set", {
   df <- make_test_df(60)
   preds <- c("b", "c", "d")

@@ -69,26 +69,25 @@
 
       nested_cl <- NULL
       old_mc_cores <- getOption("mc.cores")
-      if (nested_workers >= 2L && future::nbrOfWorkers() == 1L) {
-        # PSOCK workers report mc.cores = 1; tell parallelly what the main
-        # session allocated to this batch before spawning, or its worker-count
-        # guard misfires.
-        options(mc.cores = nested_workers)
-        nested_cl <- parallelly::makeClusterPSOCK(nested_workers)
-        future::plan(future::cluster, workers = nested_cl)
-      }
-
       tryCatch({
+        if (nested_workers >= 2L && future::nbrOfWorkers() == 1L) {
+          # PSOCK workers report mc.cores = 1; tell parallelly what the main
+          # session allocated to this batch before spawning, or its worker-count
+          # guard misfires.
+          options(mc.cores = nested_workers)
+          nested_cl <- parallelly::makeClusterPSOCK(nested_workers)
+          future::plan(future::cluster, workers = nested_cl)
+        }
         do.call(furrr::future_map, c(
           list(.x = jobs, .f = worker_fn),
           worker_args,
           list(.options = furrr::furrr_options(seed = 12345, packages = packages))
         ))
       }, finally = {
+        options(mc.cores = old_mc_cores)
         if (!is.null(nested_cl)) {
-          future::plan(future::sequential)
-          parallel::stopCluster(nested_cl)
-          options(mc.cores = old_mc_cores)
+          tryCatch(future::plan(future::sequential),
+                   finally = parallel::stopCluster(nested_cl))
         }
       })
     }, seed = 12345)
@@ -365,6 +364,8 @@
       nugget_val <- fit$psill[1]
       psill_val  <- fit$psill[2]
       range_val  <- fit$range[2]
+      mdl <- as.character(fit$model[2])
+      if (mdl %in% c("Sph", "Exp", "Gau", "Mat")) updateSelectInput(session, "k_mod", selected = mdl)
       
       updateSliderInput(session, "m_nugget", value = nugget_val, max = round(max(nugget_val + psill_val, 0.1), 2))
       updateSliderInput(session, "m_psill", value = psill_val, max = round(max((nugget_val + psill_val) * 1.5, 0.1), 2))
@@ -377,7 +378,7 @@
     loc <- input$m_loc
     target <- if(input$comp_mode && !is.null(input$m_target)) input$m_target else "act"
     
-    rv$v_fit_list[[paste0(loc, "_", target)]] <- vgm(psill = input$m_psill, model = input$k_mod, range = input$m_range, nugget = input$m_nugget)
+    rv$v_fit_list[[paste0(loc, "_", target)]] <- manual_vgm(input$m_psill, input$k_mod, input$m_range, input$m_nugget)
     showNotification(paste("Manual model applied to", loc, "(", target, ")"), type = "message")
   })
 
@@ -486,5 +487,4 @@
       }
     )
   })
-
 

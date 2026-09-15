@@ -242,14 +242,17 @@ compute_governing_factors <- function(df, target_col, predictors, n_permutations
     n_shap_workers <- min(max(0L, cores_hint - 1L), 8L)
     if (length(sample_idx) >= 50 && n_shap_workers >= 2L && future::nbrOfWorkers() == 1L) {
       old_mc_cores <- getOption("mc.cores")
+      old_plan <- future::plan()
+      shap_cl <- NULL
+      on.exit({
+        options(mc.cores = old_mc_cores)
+        if (!is.null(shap_cl)) {
+          tryCatch(future::plan(old_plan), finally = parallel::stopCluster(shap_cl))
+        }
+      }, add = TRUE)
       options(mc.cores = n_shap_workers)
       shap_cl <- parallelly::makeClusterPSOCK(n_shap_workers)
-      old_plan <- future::plan(future::cluster, workers = shap_cl)
-      on.exit({
-        future::plan(old_plan)
-        parallel::stopCluster(shap_cl)
-        options(mc.cores = old_mc_cores)
-      }, add = TRUE)
+      future::plan(future::cluster, workers = shap_cl)
     }
     # gov_shap_item is TOP-LEVEL (see its note above): plain-data arguments only,
     # so nothing from this frame is serialized to the SHAP workers. Subsetting
@@ -322,20 +325,28 @@ merge_wrapped_rasters <- function(raster_list) {
   merged
 }
 
-#' Points ready for distance-based work: a geographic CRS is projected to the
-#' WGS 84 UTM zone of the points' mean position (southern variant below the
-#' equator); a projected CRS is returned unchanged. NULL for empty input.
+# Metres per projected axis unit; shared by worker projections and UI gates.
+crs_metre_factor <- function(crs) {
+  co <- tryCatch(sf::st_crs(crs), error = function(e) NULL)
+  if (is.null(co) || is.na(co) || isTRUE(sf::st_is_longlat(co))) return(NA_real_)
+  f <- tryCatch(as.numeric(units::set_units(co$ud_unit, "m")), error = function(e) NA_real_)
+  if (length(f) == 1 && is.finite(f) && f > 0) f else NA_real_
+}
+
+#' Geographic and non-metre projected input use the WGS 84 UTM zone of the
+#' points' mean position. Metre-based projected input is unchanged.
 validate_and_project_sf <- function(pts_sf) {
   if (is.null(pts_sf) || nrow(pts_sf) == 0) return(NULL)
   
-  if (sf::st_is_longlat(pts_sf)) {
+  unit_f <- crs_metre_factor(sf::st_crs(pts_sf))
+  if (sf::st_is_longlat(pts_sf) || (!is.na(unit_f) && abs(unit_f - 1) > 1e-9)) {
     coords_4326 <- sf::st_coordinates(sf::st_transform(pts_sf, 4326))
     lon_c <- mean(coords_4326[, 1], na.rm = TRUE)
     lat_c <- mean(coords_4326[, 2], na.rm = TRUE)
     if (is.na(lon_c) || is.na(lat_c)) {
       stop("Calculated geographic center contains NA.")
     }
-    utm_zone <- floor((lon_c + 180) / 6) + 1
+    utm_zone <- min(60, max(1, floor((lon_c + 180) / 6) + 1))
     utm_crs <- paste0("+proj=utm +zone=", utm_zone, " +datum=WGS84 +units=m +no_defs")
     if (lat_c < 0) utm_crs <- paste0(utm_crs, " +south")
     
@@ -388,6 +399,34 @@ shp_boundary_polygons <- function(shp) {
   sf::st_sf(geometry = hull)
 }
 
+#' Excess coverage from overlapping locality domains, in square metres.
+#' With three identical polygons the excess is twice their area. CRS units
+#' are converted explicitly; final mapping boundaries may be geographic.
+locality_boundary_overlap <- function(bounds) {
+  if (length(bounds) < 2) return(0)
+  if (any(vapply(bounds, is.null, logical(1)))) return(NA_real_)
+  g <- lapply(bounds, function(b) sf::st_union(sf::st_geometry(b)))
+  g <- lapply(g, sf::st_transform, crs = sf::st_crs(g[[1]]))
+  area <- function(x) sum(as.numeric(units::set_units(sf::st_area(x), "m^2")))
+  max(0, sum(vapply(g, area, numeric(1))) - area(sf::st_union(do.call(c, unname(g)))))
+}
+
+#' Uploaded feature indices intersecting samples from multiple run localities.
+#' A point/line layer becomes one hull, matching the worker's unnamed route.
+shared_boundary_features <- function(shp, items, current_crs) {
+  if (is.null(shp) || length(items) < 2) return(integer(0))
+  xy <- do.call(rbind, lapply(items, function(it) data.frame(
+    x = suppressWarnings(as.numeric(as.character(it$pts_data$x))),
+    y = suppressWarnings(as.numeric(as.character(it$pts_data$y))), l = it$l)))
+  xy <- xy[is.finite(xy$x) & is.finite(xy$y), , drop = FALSE]
+  if (!nrow(xy)) return(integer(0))
+  pts <- validate_and_project_sf(sf::st_as_sf(xy, coords = c("x", "y"), crs = current_crs))
+  shp <- shp_boundary_polygons(sf::st_transform(shp_assume_crs(shp, current_crs), sf::st_crs(pts)))
+  if (is.null(shp)) return(integer(0))
+  hit <- sf::st_intersects(shp, pts)
+  which(vapply(hit, function(h) length(unique(pts$l[h])) > 1, logical(1)))
+}
+
 #' One locality's whole run: clean, project and deduplicate the points, build
 #' the boundary and the prediction grid, screen and krige covariates, run the
 #' selected engine on the actual (and, in comparison mode, the predicted)
@@ -395,7 +434,7 @@ shp_boundary_polygons <- function(shp) {
 #' of Packed rasters, CV objects and metrics, fitted models, boundary and points
 #' in `crs_sel`, and `log_msg`. Errors are reported in `log_msg`; only a
 #' cancellation raises.
-run_regional_interpolation <- function(item, current_method, current_crs, aux_vars, shp_bound, b_type, buff_mode, b_dist, res_mode, grid_res, crs_sel, comp_mode, val_type, progress_dir_val = tempdir(), session_id_val = "default", cancel_file_val = NULL, vif_threshold = 10) {
+run_regional_interpolation <- function(item, current_method, current_crs, aux_vars, shp_bound, b_type, buff_mode, b_dist, res_mode, grid_res, crs_sel, comp_mode, val_type, progress_dir_val = tempdir(), session_id_val = "default", cancel_file_val = NULL, vif_threshold = 10, shp_shared = integer(0)) {
   options(monolith_progress_dir = progress_dir_val)
   options(monolith_session_id = session_id_val)
   
@@ -509,8 +548,9 @@ run_regional_interpolation <- function(item, current_method, current_crs, aux_va
                                 error = function(e) NULL)
           if (!is.null(shp_trans)) {
             intersects <- sf::st_intersects(shp_trans, sf::st_union(pts), sparse = FALSE)
-            if (any(intersects)) {
-              shp_trans[which(intersects)[1], ] %>% sf::st_union()
+            eligible <- setdiff(which(intersects), shp_shared)
+            if (length(eligible)) {
+              shp_trans[eligible[1], ] %>% sf::st_union()
             } else {
               NULL
             }
@@ -520,7 +560,11 @@ run_regional_interpolation <- function(item, current_method, current_crs, aux_va
           # The user supplied a boundary shapefile but it cannot be applied to
           # this locality (projection failure or no spatial overlap); say so
           # instead of silently swapping in the point-derived boundary.
-          write_warning_file(l, "act", "Uploaded shapefile boundary could not be applied (projection or overlap issue); using point-derived boundary.")
+          msg <- if (length(shp_shared)) {
+            "Uploaded boundary has features shared by several run localities, and no unshared feature could be applied here; using the selected sidebar boundary. Add an attribute column containing locality names to assign features explicitly."
+          } else "Uploaded shapefile boundary could not be applied (projection or overlap issue); using point-derived boundary."
+          write_warning_file(l, "act", msg)
+          res_out$log_msg <- paste0(res_out$log_msg, "\n", l, ": ", msg)
         }
       }
     }
@@ -775,6 +819,7 @@ run_regional_interpolation <- function(item, current_method, current_crs, aux_va
         res_a_list <- apply_interpolation(pts_a, "v", current_method, grid_p, aux_vars, lags_a, mp_a, l, "act", vif_threshold)
         res_out$v_emp_act <- res_a_list$v_emp; res_out$v_fit_act <- res_a_list$fit; res_out$cv_act <- res_a_list$cv_metrics; res_out$cv_obj_act <- res_a_list$cv_obj
         res_out$cv_reps_act <- res_a_list$cv_obj_reps
+        res_out$tps_fit_act <- res_a_list$tps_fit
         res_out$summ_act <- res_a_list$model_summary; res_out$rf_act <- res_a_list$rf_model; res_out$gstat_act <- res_a_list$gstat_obj
         res_out$log_msg <- paste0(res_out$log_msg, "\n", res_a_list$log_msg)
         if (cov_log_msg != "") res_out$log_msg <- paste0(res_out$log_msg, "\n", cov_log_msg)
@@ -834,6 +879,7 @@ run_regional_interpolation <- function(item, current_method, current_crs, aux_va
             res_p_list <- apply_interpolation(pts_p, "pv", current_method, grid_p, aux_vars, lags_p, mp_p, l, "pre", vif_threshold)
             res_out$v_emp_pre <- res_p_list$v_emp; res_out$v_fit_pre <- res_p_list$fit; res_out$cv_pre <- res_p_list$cv_metrics; res_out$cv_obj_pre <- res_p_list$cv_obj
             res_out$cv_reps_pre <- res_p_list$cv_obj_reps
+            res_out$tps_fit_pre <- res_p_list$tps_fit
             res_out$summ_pre <- res_p_list$model_summary; res_out$rf_pre <- res_p_list$rf_model; res_out$gstat_pre <- res_p_list$gstat_obj
             res_out$log_msg <- paste0(res_out$log_msg, "\n", res_p_list$log_msg)
             
@@ -941,6 +987,11 @@ calc_metric_spacing <- function(pts) {
   if (is.null(pts) || nrow(pts) < 2) return(list(mean_nn = NA_real_, max_dim = NA_real_))
 
   crs_units <- sf::st_crs(pts)$units_gdal
+  unit_f <- crs_metre_factor(sf::st_crs(pts))
+  if (!is.na(unit_f) && abs(unit_f - 1) > 1e-9) {
+    pts <- validate_and_project_sf(pts)
+    crs_units <- sf::st_crs(pts)$units_gdal
+  }
   if (!is.null(crs_units) && !is.na(crs_units) && grepl("degree", crs_units, ignore.case = TRUE)) {
     # Flag the failure where it happens rather than inferring it afterwards from
     # deep object equality: identical(pts_m, pts) tied a numeric scaling decision
@@ -1138,7 +1189,8 @@ interp_run_item <- function(item, run_params) {
     progress_dir_val = run_params$progress_dir_val,
     session_id_val = run_params$session_id_val,
     cancel_file_val = run_params$cancel_file_val,
-    vif_threshold = run_params$vif_threshold
+    vif_threshold = run_params$vif_threshold,
+    shp_shared = run_params$shp_shared %||% integer(0)
   )
 }
 
@@ -1188,7 +1240,7 @@ tps_gcv_item <- function(item, current_crs) {
   # Project before normalizing to the unit box, exactly as apply_TPS does on the
   # run path: on geographic coordinates 1 deg lon != 1 deg lat on the ground, so
   # the point-cloud aspect ratio (and the GCV-optimal lambda) would otherwise
-  # differ from the run that consumes this value. No-op for projected uploads.
+  # differ from the run that consumes this value. No-op for metre-based projections.
   pts_sf <- validate_and_project_sf(
     sf::st_as_sf(item$df, coords = c("x", "y"), crs = current_crs))
   # Dedup co-located points exactly as dedup_valid_points does on the run path
@@ -1208,7 +1260,7 @@ tps_gcv_item <- function(item, current_crs) {
                (raw_coords[, 2] - ym) / max_range)
 
   tryCatch({
-    mod <- fields::Tps(pts, vals)
+    mod <- fields::Tps(pts, vals, scale.type = "unscaled")
     best_lam <- mod$lambda
 
     gcv_res <- data.frame(
@@ -1230,7 +1282,7 @@ idw_opt_item <- function(item, current_crs, idw_nmax_val, cv_strategy = "auto") 
   # Project first so optimize_idw_p's nmax neighbour selection and distance-decay
   # weighting run on the same metric coordinates the run pipeline uses. IDW is
   # scale-invariant, but degree axes are anisotropic (1 deg lon != 1 deg lat), so
-  # a geographic CRS distorts both. No-op for already-projected uploads.
+  # a geographic CRS distorts both. No-op for metre-based projections.
   pts <- validate_and_project_sf(
     sf::st_as_sf(item$df, coords = c("x", "y"), crs = current_crs))
   # Dedup co-located points exactly as dedup_valid_points does on the run path

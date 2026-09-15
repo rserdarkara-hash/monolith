@@ -4,6 +4,18 @@
 # spatial_helpers.R.
 
 
+# Manual and automatic Mat use the same family: Matern nu = 1.5.
+manual_vgm <- function(psill, model, range, nugget) {
+  gstat::vgm(psill = psill, model = model, range = range, nugget = nugget,
+             kappa = if (identical(model, "Mat")) 1.5 else 0.5)
+}
+
+# gstat fit.method = 7: the criterion shown by Auto-Fit.
+vgm_weighted_sse <- function(v_emp, model) {
+  line <- gstat::variogramLine(model, dist_vector = v_emp$dist)
+  sum(v_emp$np / v_emp$dist^2 * (v_emp$gamma - line$gamma)^2)
+}
+
 # ── RNG sandbox ─────────────────────────────────────────────────────────────
 # ONE implementation of the app's seeding convention, shared by every helper
 # that draws random numbers (fold building, kriging LOOCV, the IDW power

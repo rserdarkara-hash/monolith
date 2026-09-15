@@ -371,10 +371,10 @@ golden_baseline <- function(key) {
 # These are the packages that can actually move one of the four recorded values:
 # gstat (the empirical variogram and the kriging solve), sf and terra
 # (projection, grid construction, rasterisation, the ellipsoidal areas),
-# classInt (the Jenks breaks) and spdep (Moran's I inside perform_cv). Extend the
+# classInt (the Jenks breaks). Moran diagnostics are not recorded. Extend the
 # list only when a NEW baseline brings a new package in - an entry that cannot
 # move a value would report drift that means nothing.
-GOLDEN_BASELINE_PKGS <- c("gstat", "sf", "terra", "classInt", "spdep")
+GOLDEN_BASELINE_PKGS <- c("gstat", "sf", "terra", "classInt")
 
 #' TRUE when this session is deliberately running on unpinned package versions.
 #'

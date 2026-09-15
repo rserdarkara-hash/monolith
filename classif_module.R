@@ -17,7 +17,8 @@ classif_build_target <- function(df, mode, cat_col, num_col, n_classes = 4,
                                  style = "quantile") {
   if (identical(mode, "bin")) {
     x <- as.numeric(df[[num_col]])
-    ci <- classInt::classIntervals(x[is.finite(x)], n = n_classes, style = style)
+    ci <- with_seed(12345L, suppressMessages(
+      classInt::classIntervals(x[is.finite(x)], n = n_classes, style = style)))
     brks <- unique(ci$brks)
     if (length(brks) < 3) return(NULL)
     # Distinct breaks can still collide after rounding (tight distributions),
@@ -448,6 +449,22 @@ classif_server <- function(id, data_reactive, vars_metadata_reactive, spatial_re
     cls_session_id <- substr(session$token, 1, 8)
     cls_progress_dir <- file.path(tempdir(), paste0("classif_progress_", cls_session_id))
     cls_cancel_file <- file.path(cls_progress_dir, "classif_cancel.txt")
+    model_paths <- character(0)
+    session_closed <- FALSE
+    run_in_flight <- FALSE
+    cleanup_classif_files <- function() {
+      unlink(model_paths)
+      unlink(cls_progress_dir, recursive = TRUE)
+    }
+    session$onSessionEnded(function() {
+      session_closed <<- TRUE
+      if (run_in_flight) {
+        # Keep the cancellation flag until the worker settles; removing the
+        # directory now would let the worker recreate it and miss cancellation.
+        if (!dir.exists(cls_progress_dir)) dir.create(cls_progress_dir, recursive = TRUE)
+        file.create(cls_cancel_file)
+      } else cleanup_classif_files()
+    })
     cls_progress_file <- file.path(
       cls_progress_dir, paste0("progress_", cls_session_id, "_classification_cls.txt"))
     # Companion file naming the stage the worker is in, so the caption tracks
@@ -787,6 +804,7 @@ classif_server <- function(id, data_reactive, vars_metadata_reactive, spatial_re
       if (identical(cl_rv$ready, "running")) return(NULL)
       df <- data_reactive(); sp <- spatial_reactive()
       shiny::req(df, sp$x, sp$y, sp$src_crs, sp$proj_crs)
+      if (is.null(validate_crs(sp$proj_crs, "Invalid Target Mapping CRS", require_metric = TRUE))) return()
 
       target_src <- if (identical(input$target_mode, "bin")) input$target_num else input$target_cat
       preds <- setdiff(input$predictors, c(target_src, sp$x, sp$y))
@@ -863,6 +881,18 @@ classif_server <- function(id, data_reactive, vars_metadata_reactive, spatial_re
         shiny::showNotification("No data points fall inside the selected spatial scope.", type = "error"); return()
       }
       sdf <- sc$df
+
+      pos <- crs_sample_positions(sdf, sp$x, sp$y, sp$src_crs)
+      if (!is.null(pos)) {
+        suit <- crs_target_suitability(sp$proj_crs, pos$lon, pos$lat)
+        if (identical(suit$level, "block")) {
+          rec <- crs_recommend_target(pos$lon, pos$lat)
+          advice <- if (is.null(rec)) "Choose a suitable metric Target Mapping CRS in Data Setup." else
+            sprintf("Choose %s in Data Setup.", rec$crs)
+          shiny::showNotification(paste(suit$title, suit$msg, advice), type = "error", duration = 20)
+          return()
+        }
+      }
 
       tvec <- tryCatch(
         classif_build_target(sdf, input$target_mode, input$target_cat, input$target_num,
@@ -955,6 +985,7 @@ classif_server <- function(id, data_reactive, vars_metadata_reactive, spatial_re
       # main-session tempfile, keeping the promise payload lean; the Download
       # Model button copies this file.
       model_path_ship <- tempfile(pattern = "classif_model_", fileext = ".rds")
+      model_paths <<- c(model_paths, model_path_ship)
 
       # Lean worker payload: bundle every input into ONE plain-data list built
       # here in the main session, then ship only that. run_classification_pipeline
@@ -983,6 +1014,7 @@ classif_server <- function(id, data_reactive, vars_metadata_reactive, spatial_re
         )
       )
 
+      run_in_flight <<- TRUE
       promises::future_promise({
         setwd(run_args$proj_root)
         suppressPackageStartupMessages({
@@ -1004,6 +1036,14 @@ classif_server <- function(id, data_reactive, vars_metadata_reactive, spatial_re
          # the pipeline runs inside .classif_with_seed()'s two-sided sandbox,
          # which sets its own seed and restores the caller's state.
          seed = TRUE) %...>% (function(res) {
+        run_in_flight <<- FALSE
+        if (session_closed) {
+          cleanup_classif_files()
+          return(NULL)
+        }
+        superseded <- setdiff(model_paths, res$model_path %||% character(0))
+        unlink(superseded)
+        model_paths <<- setdiff(model_paths, superseded)
         reset_run_ui()
         # Unique run token: keys the per-run plot cache (renderCachedPlot).
         res$run_id <- paste0(substr(session$token, 1, 8), "-",
@@ -1047,6 +1087,13 @@ classif_server <- function(id, data_reactive, vars_metadata_reactive, spatial_re
             type = "warning", duration = 15)
         }
       }) %...!% (function(err) {
+        run_in_flight <<- FALSE
+        unlink(model_path_ship)
+        model_paths <<- setdiff(model_paths, model_path_ship)
+        if (session_closed) {
+          cleanup_classif_files()
+          return(NULL)
+        }
         reset_run_ui()
         cl_rv$ready <- "no"
         if (grepl("cancelled by user", conditionMessage(err), fixed = TRUE)) {

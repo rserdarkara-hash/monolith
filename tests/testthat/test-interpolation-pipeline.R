@@ -442,6 +442,63 @@ test_that("repeated CV reaches the kriging engines too", {
 
 # ── apply_TPS exactness ───────────────────────────────────────────────────
 
+test_that("TPS and its optimizer preserve geometry under rotation", {
+  d <- with_seed(11, {
+    x <- runif(80, 0, 4000); y <- runif(80, 0, 1000)
+    data.frame(x = x, y = y, v = sin(x / 700) + cos(y / 300) + rnorm(80, 0, 0.05))
+  })
+  rotated <- d
+  rotated$x <- (d$x - d$y) / sqrt(2)
+  rotated$y <- (d$x + d$y) / sqrt(2)
+  mk <- function(z) sf::st_as_sf(z, coords = c("x", "y"), crs = 32633)
+  fits <- lapply(list(d, rotated), function(z) {
+    p <- mk(z)
+    suppressWarnings(apply_TPS(p, "v", p, list(tps_lambda = -1)))
+  })
+  expect_equal(fits[[1]]$res_sf$var1.pred, fits[[2]]$res_sf$var1.pred, tolerance = 1e-6)
+  for (i in 1:2) {
+    z <- list(d, rotated)[[i]]
+    opt <- suppressWarnings(tps_gcv_item(list(l = "R", df = z), 32633))
+    p <- mk(z)
+    fixed <- suppressWarnings(apply_TPS(p, "v", p, list(tps_lambda = opt$best_lam)))
+    expect_equal(fixed$res_sf$var1.pred, fits[[1]]$res_sf$var1.pred, tolerance = 1e-6)
+    expect_equal(fits[[i]]$tps_fit$lambda, opt$best_lam)
+  }
+})
+
+test_that("TPS reports fitted smoothing and a qualified near-plane warning", {
+  pts <- golden_sf("full", localities = "Tavas")
+  dir <- tempfile("tps_report_"); dir.create(dir)
+  withr::defer(unlink(dir, recursive = TRUE))
+  withr::local_options(monolith_progress_dir = dir, monolith_session_id = "report")
+  res <- suppressWarnings(apply_TPS(pts, "ph", pts, list(tps_lambda = -1), "Tavas"))
+  expect_type(res$tps_fit$lambda, "double")
+  expect_lt(res$tps_fit$eff_df, 3.5)
+  expect_match(res$log_msg, "near-planar")
+  warnings <- list.files(dir, pattern = "^warn_", full.names = TRUE)
+  expect_gt(length(warnings), 0)
+  expect_match(paste(unlist(lapply(warnings, readLines)), collapse = " "), "GCV")
+  fixed <- suppressWarnings(apply_TPS(pts, "ph", pts, list(tps_lambda = 1e8), "Tavas"))
+  expect_match(fixed$log_msg, "Fixed lambda")
+  expect_false(grepl("GCV", fixed$log_msg))
+})
+
+test_that("locality overlap is excess coverage in square metres", {
+  sq <- sf::st_as_sfc(sf::st_bbox(c(xmin = 500000, xmax = 500100,
+                                    ymin = 4500000, ymax = 4500100), crs = sf::st_crs(32633)))
+  far <- sf::st_set_crs(sq + c(1000, 0), 32633)
+  expect_equal(locality_boundary_overlap(list(sq, sq)), 10000)
+  expect_equal(locality_boundary_overlap(list(sq, sq, sq)), 20000)
+  expect_equal(locality_boundary_overlap(list(sq, far)), 0)
+  expect_equal(locality_boundary_overlap(list(sq)), 0)
+  expect_true(is.na(locality_boundary_overlap(list(sq, NULL))))
+  expect_true(is.na(locality_boundary_overlap(list(NULL, NULL))))
+  expect_equal(locality_boundary_overlap(list(sq, sf::st_transform(far, 4326))), 0)
+  feet <- sf::st_transform(sq, 2263)
+  expect_equal(locality_boundary_overlap(list(feet, feet)),
+               as.numeric(units::set_units(sf::st_area(feet), "m^2")))
+})
+
 test_that("apply_TPS with lambda = 0 interpolates data points exactly", {
   pts <- make_test_points(15)
   # fields::Tps warns about its GCV diagnostics grid on small noisy data;
@@ -1111,6 +1168,40 @@ test_that("an uploaded boundary works as points, without a .prj, and is refused 
   expect_false(is.null(res$r_a))
   ext <- terra::ext(terra::unwrap(res$r_a))
   expect_true(ext$xmin < max(coords[, 1]) && ext$xmax > min(coords[, 1]))
+})
+
+test_that("shared unnamed boundaries fall back per locality and explicit names win", {
+  pts <- golden_sf("full", localities = c("Kale", "Yorga"))
+  items <- lapply(split(pts, pts$locality, drop = TRUE), function(p) {
+    xy <- sf::st_coordinates(p)
+    list(l = as.character(p$locality[1]),
+         pts_data = data.frame(x = xy[, 1], y = xy[, 2], v = p$ph, pv = NA_real_),
+         m_params = list(idw_p_act = 2, idw_nmax = 12, cv_strategy = "auto"))
+  })
+  polygon <- sf::st_as_sf(sf::st_buffer(sf::st_convex_hull(sf::st_union(pts)), 500))
+  shared <- shared_boundary_features(polygon, items, sf::st_crs(pts))
+  expect_identical(shared, 1L)
+  expect_identical(shared_boundary_features(pts, items, sf::st_crs(pts)), 1L)
+  expect_length(shared_boundary_features(polygon, items[1], sf::st_crs(pts)), 0)
+  dir <- tempfile("shared_boundary_"); dir.create(dir)
+  withr::defer(unlink(dir, recursive = TRUE))
+  withr::local_options(monolith_progress_dir = dir, monolith_session_id = "shared")
+  run <- function(it, shp, ids) suppressWarnings(run_regional_interpolation(
+    it, "IDW", sf::st_crs(pts), character(0), shp, "convex", "fixed", 250,
+    "fixed", 250, sf::st_crs(pts)$wkt, FALSE, "actual",
+    progress_dir_val = dir, session_id_val = "shared", shp_shared = ids))
+  res <- lapply(items, run, shp = polygon, ids = shared)
+  for (i in seq_along(items)) {
+    ref <- run(items[[i]], NULL, integer(0))
+    expect_false(is.null(res[[i]]$r_a))
+    expect_equal(sf::st_bbox(res[[i]]$bound), sf::st_bbox(ref$bound))
+    expect_match(res[[i]]$log_msg, "shared by several")
+  }
+  expect_equal(locality_boundary_overlap(lapply(res, `[[`, "bound")), 0)
+  polygon$Locality <- items[[1]]$l
+  named <- run(items[[1]], polygon, shared)
+  expect_equal(as.numeric(sf::st_bbox(named$bound)), as.numeric(sf::st_bbox(polygon)))
+  expect_true(sf::st_crs(named$bound) == sf::st_crs(polygon))
 })
 
 test_that("boundary helpers: hull, assumed CRS and overlap", {
@@ -1858,15 +1949,21 @@ test_that("CK is an exact interpolator at the sample locations", {
 
 test_that("TPS roughness decreases monotonically with lambda", {
   pts  <- golden_sf("tiny")
-  grid <- make_test_grid_safe(pts, res = 800)
+  xy <- sf::st_coordinates(pts)
+  xy <- sweep(xy, 2, apply(xy, 2, min)) / max(apply(xy, 2, function(z) diff(range(z))))
+  d <- as.matrix(dist(xy))
+  K <- d^2 * log(d); K[d == 0] <- 0
+  T <- cbind(1, xy)
+  system <- rbind(cbind(K, T), cbind(t(T), matrix(0, 3, 3)))
 
-  # lambda is the weight on the bending-energy penalty, so a larger lambda buys
-  # smoothness at the cost of fidelity. Roughness is measured as the spread of
-  # first differences along the grid's raster order - a crude but monotone proxy
-  # for bending energy, which is all this claim needs.
+  # Independent TPS definition: reconstruct the radial coefficients from the
+  # fitted values with T'c = 0. Bending energy is proportional to c'Kc for
+  # K(r) = r^2 log(r). Raster-order first differences are not this penalty and
+  # have no monotonicity guarantee (they also count linear slope as roughness).
   rough <- vapply(c(1e-6, 1e-4, 1e-2, 1, 1e3), function(lam) {
-    r <- apply_TPS(pts, "ph", grid, list(tps_lambda = lam))
-    sd(diff(r$res_sf$var1.pred))
+    r <- apply_TPS(pts, "ph", pts, list(tps_lambda = lam))
+    coef <- solve(system, c(r$res_sf$var1.pred, 0, 0, 0))[seq_len(nrow(pts))]
+    as.numeric(crossprod(coef, K %*% coef))
   }, numeric(1))
 
   expect_true(all(diff(rough) < 0))

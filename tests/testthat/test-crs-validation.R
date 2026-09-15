@@ -3,6 +3,18 @@
 # not a character string. It uses showNotification on error which requires a
 # running Shiny session.
 
+test_that("non-metre input coordinates and spacing use local UTM metres", {
+  geo <- sf::st_as_sf(data.frame(x = c(-74, -73.99, -73.98), y = c(40.7, 40.71, 40.705)),
+                      coords = c("x", "y"), crs = 4326)
+  feet <- sf::st_transform(geo, 2263)
+  expected <- sf::st_transform(geo, 32618)
+  actual <- validate_and_project_sf(feet)
+  expect_equal(sf::st_crs(actual)$units_gdal, "metre")
+  expect_equal(sf::st_coordinates(actual), sf::st_coordinates(expected), tolerance = 1e-7)
+  expect_identical(validate_and_project_sf(expected), expected)
+  expect_equal(calc_metric_spacing(feet), calc_metric_spacing(expected), tolerance = 1e-7)
+})
+
 test_that("validate_crs accepts EPSG code string and returns crs object", {
   result <- validate_crs("EPSG:4326")
   expect_s3_class(result, "crs")
@@ -87,6 +99,9 @@ test_that("the run gate commits its CRS and demands a metric one", {
   root <- normalizePath(file.path(testthat::test_path(), "..", ".."), mustWork = TRUE)
   exec <- paste(readLines(file.path(root, "server_execution.R"), warn = FALSE), collapse = "\n")
   expect_match(exec, "require_metric = TRUE", fixed = TRUE)
+  cls <- paste(readLines(file.path(root, "classif_module.R"), warn = FALSE), collapse = "\n")
+  expect_match(cls, 'validate_crs(sp$proj_crs, "Invalid Target Mapping CRS", require_metric = TRUE)', fixed = TRUE)
+  expect_match(cls, 'crs_target_suitability(sp$proj_crs, pos$lon, pos$lat)', fixed = TRUE)
   # The displayed run must carry the CRS it was computed in, or the ruler has
   # nothing to name but the live sidebar.
   expect_match(exec, "crs_sel = input$crs_selection", fixed = TRUE)

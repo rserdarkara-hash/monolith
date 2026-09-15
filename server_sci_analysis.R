@@ -536,8 +536,8 @@
   # is ~97% NA. expanse() charges for those cells - measured at 109 s and
   # 1.1 GB of working set on a 13 M-cell merged grid holding 320 k real cells,
   # against 1.4 s per locality - and four of these run in the flush that
-  # applies a classification. The localities a run produces are disjoint (one
-  # boundary per group, cells assigned to one locality), so their areas add.
+  # applies a classification. The total is allowed only after the domain
+  # overlap check below confirms that the locality areas can be added.
   class_area_ha_sum <- function(r_list, id_prefix, params) {
     r_list <- Filter(Negate(is.null), r_list)
     if (length(r_list) == 0) return(NULL)
@@ -574,6 +574,10 @@
 
   area_df_total_act <- reactive({
     req(rv$rast)
+    ov <- (rv$bound_overlap_m2 %||% c(act = 0))[["act"]]
+    if (!is.finite(ov)) return(data.frame(Status = "Locality overlap could not be measured; see the per-locality area tables."))
+    if (ov > 0.5) return(data.frame(Status = sprintf(
+      "Overlapping locality boundaries would count %.3g ha more than once; no combined total is reported. See the per-locality tables.", ov / 1e4)))
     params <- tryCatch(classification_params(), error = function(e) NULL)
     if (is.null(params)) return(area_ha_to_df(NULL, NULL))
     ha <- class_area_ha_sum(rv$rast_list_act, "loc_act", params)
@@ -586,6 +590,10 @@
 
   area_df_total_pre <- reactive({
     req(rv$rast_pred)
+    ov <- (rv$bound_overlap_m2 %||% c(pre = 0))[["pre"]]
+    if (!is.finite(ov)) return(data.frame(Status = "Locality overlap could not be measured; see the per-locality area tables."))
+    if (ov > 0.5) return(data.frame(Status = sprintf(
+      "Overlapping locality boundaries would count %.3g ha more than once; no combined total is reported. See the per-locality tables.", ov / 1e4)))
     params <- tryCatch(classification_params(), error = function(e) NULL)
     if (is.null(params)) return(area_ha_to_df(NULL, NULL))
     ha <- class_area_ha_sum(rv$rast_list_pre, "loc_pre", params)
@@ -633,7 +641,7 @@
     has_pre <- isTRUE(rv$disp$comp_mode) || !identical(rv$disp$value_type, "actual")
 
     reg_if_df <- function(id, label, df) {
-      if (is.data.frame(df) && nrow(df) > 0) {
+      if (is.data.frame(df) && nrow(df) > 0 && !identical(names(df), "Status")) {
         register_export_item(id, paste(meta$label, "-", label), "table", df, meta$category)
       }
     }
@@ -1122,5 +1130,4 @@
       })
     }
   )
-
 

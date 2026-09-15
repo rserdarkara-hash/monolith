@@ -5,6 +5,18 @@
 # NOTE: pinned psill/range values are gstat-version-anchored fit.variogram
 # outputs; after a gstat upgrade a mismatch is a fixture refresh, not a regression.
 
+test_that("manual Matern uses nu 1.5 and the Auto-Fit weighted criterion", {
+  mat <- manual_vgm(1, "Mat", 100, 0)
+  expect_equal(mat$kappa[2], 1.5)
+  expect_equal(gstat::variogramLine(mat, dist_vector = 100)$gamma, 1 - 2 / exp(1))
+  expect_identical(manual_vgm(1, "Exp", 100, 0), gstat::vgm(1, "Exp", 100, 0))
+  pts <- make_test_points(60)
+  lags <- calc_scientific_lags(pts)
+  emp <- gstat::variogram(v ~ 1, pts, width = lags$width, cutoff = lags$cutoff)
+  fit <- suppressWarnings(gstat::fit.variogram(emp, gstat::vgm(1, "Sph", 300, 0.1)))
+  expect_equal(vgm_weighted_sse(emp, fit), attr(fit, "SSErr"), tolerance = 1e-10)
+})
+
 test_that("candidate screening emits no warnings on hostile data", {
   h <- make_hostile_vgm_input(seed = 1) # emits 17 warnings before this change
   expect_no_warning(robust_vgm_fit(h$v_emp, h$v_data))

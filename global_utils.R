@@ -141,26 +141,8 @@ estimate_run_duration <- function(loc_sample_counts, method, comp_mode, cores) {
 }
 
 
-#' Metres per linear axis unit of a PROJECTED CRS.
-#'
-#' Monolith states every length in metres: the resolution slider, the buffer
-#' distance, the nearest-neighbour spacing rule and the ruler's projected column
-#' all label their numbers "m", while the engines operate on the CRS's own axis
-#' units. That identity holds only while the Target Mapping CRS is metric, and
-#' nothing in a CRS string forces it to be - a State Plane zone in US survey
-#' feet would turn a "50 m" grid into 15 m, a "250 m" buffer into 76 m and a
-#' variogram range into a number 3.28x its stated size, all without an error.
-#'
-#' Returns NA when the question does not apply or cannot be answered: a
-#' geographic CRS (no linear axis unit), an unparseable CRS, or a projected CRS
-#' whose unit udunits cannot resolve. Callers treat NA as "do not block", so an
-#' exotic but valid CRS is never refused merely for being unrecognised.
-crs_metre_factor <- function(crs) {
-  co <- tryCatch(sf::st_crs(crs), error = function(e) NULL)
-  if (is.null(co) || is.na(co) || isTRUE(sf::st_is_longlat(co))) return(NA_real_)
-  f <- tryCatch(as.numeric(units::set_units(co$ud_unit, "m")), error = function(e) NA_real_)
-  if (length(f) == 1 && is.finite(f) && f > 0) f else NA_real_
-}
+# crs_metre_factor() lives in spatial_pipeline.R so PSOCK workers and this
+# main-session gate share the unit rule. Unknown units do not block.
 
 #' @param require_metric Enforce the metric-axis rule above. Reserved for the
 #'   Target Mapping CRS: the Input Data CRS may use any unit, because the
@@ -1021,7 +1003,7 @@ crs_target_suitability <- function(crs, lon, lat, warn_dev = 0.001, block_dev = 
 #' ask when the advisory fires: no, this is not why the points are in the wrong
 #' place.
 crs_measure_detail <- paste(
-  "The finished surface is resampled into the Target Mapping CRS, so exported rasters and their cell size, the resolution suggestion and the Map Viewer's projected ruler are all stated in its metres and carry its scale error at your data, with no error raised anywhere. The models are fitted in the Input Data CRS (or, for geographic input, its UTM zone); for projected data choose the same UTM zone for both.",
+  "The finished surface is resampled into the Target Mapping CRS, so exported rasters and their cell size, the resolution suggestion and the Map Viewer's projected ruler are all stated in its metres and carry its scale error at your data, with no error raised anywhere. The models are fitted in the Input Data CRS (or, for geographic or non-metre input, its UTM zone); for projected data choose the same UTM zone for both.",
   "The Target Mapping CRS never moves your points on the map (that is the Input Data CRS); it decides what a metre means.")
 
 #' The Target Mapping CRS this data should be measured in.

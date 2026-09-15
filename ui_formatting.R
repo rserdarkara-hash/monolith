@@ -150,7 +150,7 @@ get_method_label <- function(method) {
 
 format_param_val <- function(type, val) {
   if(type == "TPS" && !is.na(val) && val < 0) return("Auto (GCV)")
-  as.character(round(val, 6))
+  if (type == "TPS") as.character(signif(val, 6)) else as.character(round(val, 6))
 }
 
 # Regional Parameters table for IDW/TPS, built from the run-committed
@@ -161,12 +161,40 @@ format_param_val <- function(type, val) {
 # has_pre = FALSE means the displayed run mapped no prediction surface, so
 # there is no second parameter to report: the column is dropped rather than
 # filled with a column of "N/A", which read as a failed optimization.
-build_regional_params_df <- function(type, loc, regional_params, has_pre) {
+build_regional_params_df <- function(type, loc, regional_params, has_pre, export = FALSE) {
   if (is.null(regional_params) || length(regional_params) == 0) return(NULL)
+  locs <- if (loc == "Total (Combined)") names(regional_params) else intersect(loc, names(regional_params))
+  if (!length(locs)) return(NULL)
+  if (export) {
+    rows <- lapply(locs, function(l) {
+      do.call(rbind, lapply(if (has_pre) c("act", "pre") else "act", function(tgt) {
+        rp <- regional_params[[l]]
+        out <- data.frame(Locality = l, Surface = if (tgt == "act") "Actual" else "Predicted")
+        if (type == "IDW") {
+          out[["Power (p)"]] <- as.numeric(rp[[paste0("idw_p_", tgt)]] %||% NA_real_)
+        } else {
+          val <- rp[[paste0("tps_lambda_", tgt)]] %||% -1
+          fit <- rp[[paste0("tps_fit_", tgt)]]
+          auto <- is.na(val) || val < 0
+          out$Mode <- if (auto) "Auto (GCV)" else "Fixed"
+          out$Lambda <- as.numeric(fit$lambda %||% if (auto) NA_real_ else val)
+          out[["Effective df"]] <- as.numeric(fit$eff_df %||% NA_real_)
+        }
+        out
+      }))
+    })
+    return(do.call(rbind, rows))
+  }
   fmt <- function(l, tgt) {
     key <- paste0(if (type == "IDW") "idw_p_" else "tps_lambda_", tgt)
     val <- regional_params[[l]][[key]]
     if (is.null(val)) return("N/A")
+    fit <- regional_params[[l]][[paste0("tps_fit_", tgt)]]
+    if (type == "TPS" && !is.null(fit)) {
+      if (!is.finite(fit$lambda)) return("TPS fit unavailable")
+      mode <- if (is.na(val) || val < 0) "Auto (GCV): " else "Fixed: "
+      return(sprintf("%s%s (df %s)", mode, signif(fit$lambda, 3), signif(fit$eff_df, 3)))
+    }
     format_param_val(type, val)
   }
   param_lab <- if (type == "IDW") "Power (p)" else "Lambda"

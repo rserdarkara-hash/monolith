@@ -981,12 +981,24 @@ apply_TPS <- function(data, target_var, grid_p, method_params, l = "region", pre
       # is.na() first: `NA < 0` is NA, which errors the `if` and silently sent
       # the whole surface down the IDW fallback. NA is treated as "unset",
       # i.e. the documented Auto (GCV) default, same as NULL / lambda < 0.
-      if (is.null(tps_lam) || is.na(tps_lam) || tps_lam < 0) fields::Tps(x, y) else fields::Tps(x, y, lambda = tps_lam)
+      # Both axes already share one scale. Per-axis scaling would introduce
+      # anisotropy determined by the sample bounding box.
+      if (is.null(tps_lam) || is.na(tps_lam) || tps_lam < 0) {
+        fields::Tps(x, y, scale.type = "unscaled")
+      } else fields::Tps(x, y, lambda = tps_lam, scale.type = "unscaled")
     }
     
     gr_raw <- st_coordinates(grid_p)
     gr_sc <- cbind((gr_raw[,1]-xm)/max_range, (gr_raw[,2]-ym)/max_range)
     mod <- fit_tps(pts_sc, data[[target_var]])
+    res$tps_fit <- list(lambda = as.numeric(mod$lambda), eff_df = as.numeric(mod$eff.df))
+    if (isTRUE(res$tps_fit$eff_df < 3.5)) {
+      mode <- if (is.null(tps_lam) || is.na(tps_lam) || tps_lam < 0) "GCV" else "Fixed lambda"
+      msg <- sprintf("%s produced a near-planar TPS surface (effective df %.2f; a plane has df 3). The map is dominated by a linear trend.",
+                     mode, res$tps_fit$eff_df)
+      write_warning_file(l, prefix, msg)
+      res$log_msg <- paste0(res$log_msg, "\n", msg)
+    }
     p_v <- fields::predict.Krig(mod, gr_sc)
     
     n_pts <- nrow(data)
@@ -1040,6 +1052,7 @@ apply_TPS <- function(data, target_var, grid_p, method_params, l = "region", pre
 
   fb <- attr(res$res_sf, "tps_fallback")
   if (!is.null(fb)) {
+    res$tps_fit <- NULL
     res$cv_obj <- fb$cv_obj
     res$cv_metrics <- fb$cv_metrics
     res$residuals <- fb$residuals

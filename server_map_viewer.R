@@ -980,9 +980,9 @@
        (if (target == "act") is.null(input$m_target) || input$m_target == "act"
         else !is.null(input$m_target) && input$m_target == "pre")
      if (isTRUE(manual_applies)) {
-       manual_model <- vgm(psill = input$m_psill, model = input$k_mod, range = input$m_range, nugget = input$m_nugget)
-       v_line_at_emp <- variogramLine(manual_model, dist_vector = v_emp$dist)
-       sub <- paste("Manual model (red dashed) - SSE:", round(sum((v_emp$gamma - v_line_at_emp$gamma)^2), 4))
+       manual_model <- manual_vgm(input$m_psill, input$k_mod, input$m_range, input$m_nugget)
+       sub <- paste("Manual model (red dashed) - weighted SSE (same criterion as Auto-Fit):",
+                    signif(vgm_weighted_sse(v_emp, manual_model), 4))
      }
      build_variogram_ggplot(v_emp, v_fit,
                             title = paste0("Fitted (", tgt_label, "): ", loc),
@@ -1010,4 +1010,3 @@
           rv$v_emp_list[[paste0(loc, "_pre")]], rv$v_fit_list[[paste0(loc, "_pre")]],
           vgm_manual_overlay_key("pre"))
    }, cache = "session")
-

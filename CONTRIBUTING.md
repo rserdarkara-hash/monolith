@@ -94,7 +94,7 @@ What the suite tells you about your environment:
 - A **skip** from the lockfile comparison means your session no longer matches
   `renv.lock`; it lists the packages.
 - A **failure** in `test-golden-fixture.R` naming package versions means one of
-  `gstat`, `sf`, `terra`, `classInt` or `spdep` differs from the versions the
+  `gstat`, `sf`, `terra` or `classInt` differs from the versions the
   baselines were recorded under. Under Route A this is expected. Setting
   `MONOLITH_ALLOW_LATEST=true` skips those two environment checks while every
   recorded value is still asserted; note that the same variable also lets
@@ -241,8 +241,8 @@ to make a test pass.
 A recorded baseline is `same code + same data + same packages -> same numbers`.
 `golden_baselines.rds` holds four recorded values (`identity`, `vif_drop_order`,
 `jenks_target_5`, `ok_surface_digest`). It also records the environment they were
-taken in: R version, platform, date, the versions of the five packages that can
-move them (`gstat`, `sf`, `terra`, `classInt`, `spdep`), and the GDAL, GEOS and
+taken in: R version, platform, date, the versions of the four packages that can
+move them (`gstat`, `sf`, `terra`, `classInt`), and the GDAL, GEOS and
 PROJ that `sf` and `terra` are linked against. The platform and the libraries are
 recorded but not compared.
 

@@ -28,8 +28,8 @@ jobs:
     runs-on: ubuntu-latest
     env:
       # The declared opt-in global.R requires before it will install anything.
-      # With renv.lock present it otherwise refuses and points at
-      # renv::restore(), which is precisely what this job must NOT do. The same
+      # Startup otherwise stops non-interactively, naming both install routes
+      # (current CRAN or renv::restore()), which is precisely what this job must NOT do. The same
       # flag makes the suite's two environment assertions skip: a version
       # difference is this job's premise, so asserting against it would leave the
       # canary permanently red and useless as an alarm. What it still asserts is

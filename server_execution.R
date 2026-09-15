@@ -459,11 +459,9 @@
     # run-config panel describing a run that never happened. There is no unwind
     # path on purpose: refuse before committing, and nothing needs unwinding.
 
-    # require_metric: every distance this pipeline accepts or reports (grid
-    # resolution, buffer radius, variogram range, the ruler's projected column)
-    # is stated in metres while the engines work on the CRS's own axis units, so
-    # a projected Target Mapping CRS on any other linear unit is refused here
-    # rather than allowed to mean something else throughout the run.
+    # Engines use metre-based Input Data CRS coordinates, or local UTM for
+    # geographic/non-metre input. The Target CRS gate protects the resampled
+    # surface, the resolution suggestion and the projected ruler.
     safe_crs <- validate_crs(input$crs_selection, "CRS Validation Error:", duration = 15,
                              require_metric = TRUE)
     if (is.null(safe_crs)) return()
@@ -705,6 +703,12 @@
       lapply(df_list, function(item) item$m_params[c("idw_p_act", "idw_p_pre", "tps_lambda_act", "tps_lambda_pre")]),
       vapply(df_list, function(item) item$l, character(1))
     )
+    shp_shared <- tryCatch(shared_boundary_features(shp_bound, df_list, current_crs),
+      error = function(e) {
+        showNotification("Uploaded boundary sharing could not be checked; unnamed features will use the selected sidebar boundary.",
+                         type = "warning", duration = 15)
+        seq_len(nrow(shp_bound))
+      })
 
     # Manual variogram fits reach every engine in m_params, but only the OK
     # branch consumes them: RK/RFK refit the RESIDUAL variogram once the trend
@@ -754,7 +758,7 @@
     run_params <- list(
       main_wd = main_wd,
       current_method = current_method, current_crs = current_crs, aux_vars = aux_vars,
-      shp_bound = shp_bound, b_type = b_type, buff_mode = buff_mode, b_dist = b_dist,
+      shp_bound = shp_bound, shp_shared = shp_shared, b_type = b_type, buff_mode = buff_mode, b_dist = b_dist,
       res_mode = res_mode, grid_res = grid_res, crs_sel = crs_sel,
       comp_mode = comp_mode, val_type = val_type,
       progress_dir_val = progress_dir_val, session_id_val = session_id_val,
@@ -783,18 +787,17 @@
 
       nested_cl <- NULL
       old_mc_cores <- getOption("mc.cores")
-      if (nested_workers >= 2L && future::nbrOfWorkers() == 1L) {
-        # PSOCK workers report mc.cores = 1; the main session allocated
-        # nested_workers cores to this batch, so tell parallelly before
-        # spawning or its worker-count guard misfires. Owning the cluster
-        # explicitly (instead of plan(multisession)) guarantees a clean
-        # teardown in the finally block below.
-        options(mc.cores = nested_workers)
-        nested_cl <- parallelly::makeClusterPSOCK(nested_workers)
-        future::plan(future::cluster, workers = nested_cl)
-      }
-
       tryCatch({
+        if (nested_workers >= 2L && future::nbrOfWorkers() == 1L) {
+          # PSOCK workers report mc.cores = 1; the main session allocated
+          # nested_workers cores to this batch, so tell parallelly before
+          # spawning or its worker-count guard misfires. Owning the cluster
+          # explicitly (instead of plan(multisession)) guarantees a clean
+          # teardown in the finally block below.
+          options(mc.cores = nested_workers)
+          nested_cl <- parallelly::makeClusterPSOCK(nested_workers)
+          future::plan(future::cluster, workers = nested_cl)
+        }
         # interp_run_item is TOP-LEVEL (globalenv-enclosed after the source()
         # above), so furrr ships a lean function value instead of a closure
         # over this future's evaluation environment; run parameters travel as
@@ -810,10 +813,10 @@
         # tear the nested cluster down and restore mc.cores so the (reused)
         # promise worker returns to the plain single-threaded state other
         # future_promise tasks expect
+        options(mc.cores = old_mc_cores)
         if (!is.null(nested_cl)) {
-          future::plan(future::sequential)
-          parallel::stopCluster(nested_cl)
-          options(mc.cores = old_mc_cores)
+          tryCatch(future::plan(future::sequential),
+                   finally = parallel::stopCluster(nested_cl))
         }
       })
     }, seed = 12345) %...>% (function(res_all) {
@@ -877,6 +880,12 @@
 
       for(res in res_all) {
           l <- res$l
+          if (current_method == "TPS") {
+            for (tgt in c("act", "pre")) {
+              rv$disp$regional_params[[l]][[paste0("tps_fit_", tgt)]] <-
+                res[[paste0("tps_fit_", tgt)]] %||% list(lambda = NA_real_, eff_df = NA_real_)
+            }
+          }
           if(res$log_msg != "") {
               rv$log <- paste0(rv$log, res$log_msg)
               if(grepl("Error", res$log_msg)) {
@@ -888,7 +897,7 @@
           if(!is.null(res$r_p)) rv$rast_list_pre[[l]] <- res$r_p
           if(!is.null(res$r_res)) rv$rast_list_res[[l]] <- res$r_res
           if(!is.null(res$r_point_err)) rv$rast_list_point_res[[l]] <- res$r_point_err
-          if(!is.null(res$bound)) b_list[[length(b_list)+1]] <- res$bound
+          if(!is.null(res$bound)) b_list[[l]] <- res$bound
           if(!is.null(res$pts)) sf_list[[length(sf_list)+1]] <- res$pts
           
           if(!is.null(res$v_emp_act)) rv$v_emp_list[[paste0(l, "_act")]] <- res$v_emp_act
@@ -1001,6 +1010,9 @@
       rv$sf <- do.call(rbind, sf_list_aligned)
     }
     valid_bounds <- Filter(function(x) !is.null(x) && inherits(x, "sf"), b_list)
+    rv$bound_overlap_m2 <- c(
+      act = tryCatch(locality_boundary_overlap(b_list[names(rv$rast_list_act)]), error = function(e) NA_real_),
+      pre = tryCatch(locality_boundary_overlap(b_list[names(rv$rast_list_pre)]), error = function(e) NA_real_))
     if(length(valid_bounds) > 0) {
       target_crs_b <- sf::st_crs(valid_bounds[[1]])
       b_list_aligned <- lapply(valid_bounds, function(x) {
@@ -1083,7 +1095,7 @@
     if(current_method %in% c("IDW", "TPS")) {
       params_total <- build_regional_params_df(current_method, "Total (Combined)",
                                                rv$disp$regional_params,
-                                               has_pre = comp_mode || val_type != "actual")
+                                               has_pre = comp_mode || val_type != "actual", export = TRUE)
       if(!is.null(params_total)) {
         register_export_item("table_params_total", paste(meta$label, "- Model Parameters (all localities)"), "table", params_total, meta$category)
       }
@@ -1400,4 +1412,3 @@
       )
     ))
   })
-

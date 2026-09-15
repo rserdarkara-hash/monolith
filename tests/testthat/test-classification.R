@@ -1,5 +1,43 @@
 # Tests for the Classification Suite engine (classif_helpers.R).
 
+test_that("classification refuses non-metre targets and removes session files", {
+  shiny::testServer(classif_server, args = list(
+    data_reactive = shiny::reactive(data.frame(x = 1:3, y = 1:3)),
+    vars_metadata_reactive = shiny::reactive(NULL),
+    spatial_reactive = shiny::reactive(list(x = "x", y = "y", src_crs = "EPSG:32633", proj_crs = "EPSG:2263"))
+  ), {
+    env <- environment(try_run)
+    env$launch_run <- function(...) stop("run dispatched")
+    expect_null(try_run())
+    env$spatial_reactive <- function() list(x = "x", y = "y", src_crs = "EPSG:32633", proj_crs = "EPSG:32633")
+    expect_error(try_run(), "run dispatched")
+    path <- tempfile("owned_model_"); writeLines("model", path)
+    foreign <- tempfile("other_session_model_"); writeLines("other", foreign)
+    withr::defer(unlink(c(path, foreign)))
+    env$model_paths <- path
+    dir.create(cls_progress_dir, showWarnings = FALSE)
+    session$close()
+    expect_false(file.exists(path))
+    expect_false(dir.exists(cls_progress_dir))
+    expect_true(file.exists(foreign))
+  })
+})
+
+test_that("closing classification during work retains cancellation until cleanup", {
+  shiny::testServer(classif_server, args = list(
+    data_reactive = shiny::reactive(NULL), vars_metadata_reactive = shiny::reactive(NULL),
+    spatial_reactive = shiny::reactive(NULL)
+  ), {
+    env <- environment(try_run)
+    env$run_in_flight <- TRUE
+    session$close()
+    expect_true(file.exists(cls_cancel_file))
+    expect_true(env$session_closed)
+    cleanup_classif_files()
+    expect_false(dir.exists(cls_progress_dir))
+  })
+})
+
 test_that("method and tuning-depth registries expose the expected ids", {
   expect_setequal(names(classif_methods()), c("multinom", "rf", "xgboost"))
   expect_setequal(names(classif_tuning_depths()), c("none", "light", "full"))
@@ -1100,6 +1138,18 @@ test_that("stricter VIF threshold flags moderate collinearity the default keeps"
   expect_length(loose$dropped, 0)
   expect_gte(length(strict$dropped), 1)
   expect_true(all(strict$dropped %in% c("x1", "x2")))
+})
+
+test_that("sampled Jenks targets are reproducible and preserve the caller RNG", {
+  df <- data.frame(v = seq_len(4000)^1.3)
+  a <- with_seed(1, {
+    before <- .Random.seed
+    out <- suppressWarnings(classif_build_target(df, "bin", NULL, "v", 4, "jenks"))
+    expect_identical(.Random.seed, before)
+    out
+  })
+  b <- with_seed(2, suppressWarnings(classif_build_target(df, "bin", NULL, "v", 4, "jenks")))
+  expect_identical(a, b)
 })
 
 test_that("classif_build_target widens label precision when rounded breaks collide", {
