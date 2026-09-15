@@ -31,18 +31,10 @@ jobs:
       fail-fast: false
       matrix:
         os: [ubuntu-24.04, windows-latest]
-    # The Windows leg is reported but not yet blocking. Its risk is a toolchain
-    # one, not a scientific one: P3M serves binaries for CURRENT versions, so a
-    # pinned version that CRAN has since superseded falls back to a source build,
-    # and on Windows a source build of sf/terra is slow and fragile. A red badge
-    # from that would destroy the signal this job exists to give. Promote it by
-    # deleting this line once a few runs have restored cleanly.
-    continue-on-error: ${{ matrix.os == 'windows-latest' }}
     env:
       # Serves pre-built binaries to both runners where available; renv falls
       # back to source builds (CRAN archive) for pinned versions no longer
-      # current. That fallback is the Windows leg's slow path, and the reason
-      # it is reported rather than blocking.
+      # current. That fallback is the Windows leg's slow path.
       RENV_CONFIG_REPOS_OVERRIDE: https://packagemanager.posit.co/cran/latest
       DOWNLOAD_STATIC_LIBV8: 1
       # renv 1.2.4 orders installs only among packages it has to install, so a

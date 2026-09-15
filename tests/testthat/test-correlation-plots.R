@@ -3,25 +3,72 @@
 # generate_lagged_correlation, and check_collinearity.
 
 test_that("auxiliary ranks use the mapped target and SS partition", {
-  df <- data.frame(loc = rep(c("A", "B"), each = 6),
-                   SubSet = rep(c("Train", "Train", "Train", "Test", "Test", "Test"), 2),
-                   x = 1:12, y = 12:1, actual = 1:12,
-                   custom_cve = c(3, 1, 2, 6, 4, 5, 9, 7, 8, 12, 10, 11),
-                   custom_ss = c(3, 2, 1, 4, 5, 6, 9, 8, 7, 10, 11, 12),
-                   aux = 1:12)
-  mapping <- list(loc = "loc", x = "x", y = "y", vars = list(list(
-    actual = "actual", pred = "custom_cve", pred_ss = "custom_ss")))
-  actual <- rank_auxiliary_correlations(df, mapping, "actual", "actual", "predictions", "A", "Test")
-  cve <- rank_auxiliary_correlations(df, mapping, "actual", "pred", "predictions", "A", "Test")
-  ss <- rank_auxiliary_correlations(df, mapping, "actual", "pred_ss", "predictions", "A", "Train")
-  ss_actual <- rank_auxiliary_correlations(df, mapping, "actual", "pred_ss", "actual", "A", "Train")
+  df <- data.frame(
+    loc = rep(c("A", "B"), each = 6),
+    SubSet = rep(c("Train", "Train", "Train", "Test", "Test", "Test"), 2),
+    x = 1:12,
+    y = 12:1,
+    actual = 1:12,
+    custom_cve = c(3, 1, 2, 6, 4, 5, 9, 7, 8, 12, 10, 11),
+    custom_ss = c(3, 2, 1, 4, 5, 6, 9, 8, 7, 10, 11, 12),
+    aux = 1:12
+  )
+  mapping <- list(
+    loc = "loc",
+    x = "x",
+    y = "y",
+    vars = list(list(
+      actual = "actual",
+      pred = "custom_cve",
+      pred_ss = "custom_ss"
+    ))
+  )
+  actual <- rank_auxiliary_correlations(
+    df,
+    mapping,
+    "actual",
+    "actual",
+    "predictions",
+    "A",
+    "Test"
+  )
+  cve <- rank_auxiliary_correlations(
+    df,
+    mapping,
+    "actual",
+    "pred",
+    "predictions",
+    "A",
+    "Test"
+  )
+  ss <- rank_auxiliary_correlations(
+    df,
+    mapping,
+    "actual",
+    "pred_ss",
+    "predictions",
+    "A",
+    "Train"
+  )
+  ss_actual <- rank_auxiliary_correlations(
+    df,
+    mapping,
+    "actual",
+    "pred_ss",
+    "actual",
+    "A",
+    "Train"
+  )
   aux_corr <- function(res) res$results$Corr[res$results$Variable == "aux"]
   expect_equal(aux_corr(actual), 1)
   expect_identical(actual$target, "actual")
   expect_identical(cve$target, "custom_cve")
   expect_equal(cve$n, 6L) # CVE ignores the hidden SS subset control.
   expect_equal(aux_corr(cve), 23 / 35) # Centred product sum 11.5 / square sum 17.5.
-  expect_equal(cve$results$Pval[cve$results$Variable == "aux"], 2 * pt(-abs((23 / 35) * sqrt(4 / (1 - (23 / 35)^2))), 4))
+  expect_equal(
+    cve$results$Pval[cve$results$Variable == "aux"],
+    2 * pt(-abs((23 / 35) * sqrt(4 / (1 - (23 / 35)^2))), 4)
+  )
   expect_identical(ss$target, "custom_ss")
   expect_equal(ss$n, 3L)
   expect_equal(aux_corr(ss), -1)
@@ -29,14 +76,31 @@ test_that("auxiliary ranks use the mapped target and SS partition", {
   expect_identical(ss_actual$subset, "Train")
   expect_setequal(cve$results$Variable, c("custom_ss", "aux"))
   expect_setequal(actual$results$Variable, c("custom_cve", "custom_ss", "aux"))
-  expect_equal(rank_auxiliary_correlations(df, mapping, "actual", "pred_ss", "predictions", "ALL")$n, 12L)
+  expect_equal(
+    rank_auxiliary_correlations(
+      df,
+      mapping,
+      "actual",
+      "pred_ss",
+      "predictions",
+      "ALL"
+    )$n,
+    12L
+  )
   mapping$vars[[1]]$pred_ss <- NA_character_
-  expect_error(rank_auxiliary_correlations(df, mapping, "actual", "pred_ss"), "prediction column")
+  expect_error(
+    rank_auxiliary_correlations(df, mapping, "actual", "pred_ss"),
+    "prediction column"
+  )
 })
 
 test_that("auxiliary ranks count finite pairs and explain unrankable candidates", {
-  df <- data.frame(actual = c(1:5, NA, Inf), good = c(1, 3, 2, 4, NA, 6, 7),
-                   constant = 1, sparse = c(1, 2, rep(NA, 5)))
+  df <- data.frame(
+    actual = c(1:5, NA, Inf),
+    good = c(1, 3, 2, 4, NA, 6, 7),
+    constant = 1,
+    sparse = c(1, 2, rep(NA, 5))
+  )
   mapping <- list(vars = list(list(actual = "actual")))
   res <- rank_auxiliary_correlations(df, mapping, "actual")
   expect_identical(res$results$Variable, "good")
@@ -55,21 +119,45 @@ test_that("golden auxiliary ranks agree with centred Pearson and Student t defin
   ss <- sub("_cve$", "_ss", cve)
   loc <- unique(df$locality)[1]
   partition <- unique(df$subset)[1]
-  mapping <- list(loc = "locality", x = "x", y = "y", vars = list(list(
-    actual = target, pred = cve, pred_ss = ss)))
+  mapping <- list(
+    loc = "locality",
+    x = "x",
+    y = "y",
+    vars = list(list(
+      actual = target,
+      pred = cve,
+      pred_ss = ss
+    ))
+  )
   for (mode in c("actual", "pred", "pred_ss")) {
-    res <- rank_auxiliary_correlations(df, mapping, target, mode, "predictions", loc, partition)
+    res <- rank_auxiliary_correlations(
+      df,
+      mapping,
+      target,
+      mode,
+      "predictions",
+      loc,
+      partition
+    )
     ref <- df[df$locality == loc, , drop = FALSE]
-    if (mode == "pred_ss") ref <- ref[ref$subset == partition, , drop = FALSE]
+    if (mode == "pred_ss") {
+      ref <- ref[ref$subset == partition, , drop = FALSE]
+    }
     response <- switch(mode, actual = target, pred = cve, pred_ss = ss)
-    x <- ref[[response]]; y <- ref[[cols$covariate_main]]
+    x <- ref[[response]]
+    y <- ref[[cols$covariate_main]]
     ok <- is.finite(x) & is.finite(y)
-    x <- x[ok] - mean(x[ok]); y <- y[ok] - mean(y[ok])
+    x <- x[ok] - mean(x[ok])
+    y <- y[ok] - mean(y[ok])
     r <- sum(x * y) / sqrt(sum(x^2) * sum(y^2))
     n <- sum(ok)
     row <- res$results[res$results$Variable == cols$covariate_main, ]
     expect_equal(row$Corr, r, tolerance = 1e-12)
-    expect_equal(row$Pval, 2 * pt(-abs(r * sqrt((n - 2) / (1 - r^2))), n - 2), tolerance = 1e-12)
+    expect_equal(
+      row$Pval,
+      2 * pt(-abs(r * sqrt((n - 2) / (1 - r^2))), n - 2),
+      tolerance = 1e-12
+    )
     expect_equal(row$N, n)
   }
 })
@@ -77,8 +165,11 @@ test_that("golden auxiliary ranks agree with centred Pearson and Student t defin
 # ── melt_cormat ────────────────────────────────────────────────────────────
 
 test_that("melt_cormat produces correct melted format", {
-  mat <- matrix(c(1.0, 0.5, 0.5, 1.0), nrow = 2,
-                dimnames = list(c("A", "B"), c("A", "B")))
+  mat <- matrix(
+    c(1.0, 0.5, 0.5, 1.0),
+    nrow = 2,
+    dimnames = list(c("A", "B"), c("A", "B"))
+  )
   df <- melt_cormat(mat, "Corr")
   expect_s3_class(df, "data.frame")
   expect_equal(nrow(df), 4)
@@ -115,8 +206,14 @@ test_that("a supplied correlation matrix is aligned to the plotted variables", {
   bare <- unname(full)
   expect_identical(align_cormat(bare, vars), bare)
 
-  expect_s3_class(generate_correlation_heatmap(df, vars, cormat = full), "ggplot")
-  expect_s3_class(generate_correlation_network(df, vars, threshold = 0.1, cormat = full), "ggplot")
+  expect_s3_class(
+    generate_correlation_heatmap(df, vars, cormat = full),
+    "ggplot"
+  )
+  expect_s3_class(
+    generate_correlation_network(df, vars, threshold = 0.1, cormat = full),
+    "ggplot"
+  )
 })
 
 test_that("a constant variable is named instead of blanking the panel", {
@@ -131,11 +228,21 @@ test_that("a constant variable is named instead of blanking the panel", {
   # cor() itself warns ("the standard deviation is zero") before returning the
   # NA row; that is stats' business, the point here is what the panel does with it.
   p_heat <- suppressWarnings(generate_correlation_heatmap(df, vars))
-  p_net  <- suppressWarnings(generate_correlation_network(df, vars, threshold = 0.1))
+  p_net <- suppressWarnings(generate_correlation_network(
+    df,
+    vars,
+    threshold = 0.1
+  ))
   expect_s3_class(p_heat, "ggplot")
   expect_s3_class(p_net, "ggplot")
-  expect_match(as.character(p_heat$layers[[1]]$aes_params$label %||% ""), "constant")
-  expect_match(as.character(p_net$layers[[1]]$aes_params$label %||% ""), "constant")
+  expect_match(
+    as.character(p_heat$layers[[1]]$aes_params$label %||% ""),
+    "constant"
+  )
+  expect_match(
+    as.character(p_net$layers[[1]]$aes_params$label %||% ""),
+    "constant"
+  )
 })
 
 # ── generate_correlation_network ───────────────────────────────────────────
@@ -149,7 +256,7 @@ test_that("generate_correlation_network returns ggplot for valid data", {
 test_that("generate_correlation_network respects threshold", {
   df <- make_test_df(20)
   p_high <- generate_correlation_network(df, c("a", "b", "c"), threshold = 0.99)
-  p_low  <- generate_correlation_network(df, c("a", "b", "c"), threshold = 0.0)
+  p_low <- generate_correlation_network(df, c("a", "b", "c"), threshold = 0.0)
   expect_s3_class(p_high, "ggplot")
   expect_s3_class(p_low, "ggplot")
 })
@@ -158,7 +265,11 @@ test_that("generate_correlation_network respects threshold", {
 
 test_that("generate_partial_correlation returns ggplot for valid data", {
   df <- make_test_df(20)
-  p <- generate_partial_correlation(df, c("a", "b", "c"), control_vars = c("d", "e"))
+  p <- generate_partial_correlation(
+    df,
+    c("a", "b", "c"),
+    control_vars = c("d", "e")
+  )
   expect_s3_class(p, "ggplot")
 })
 
@@ -178,7 +289,12 @@ test_that("generate_partial_correlation returns ggplot for single var", {
 
 test_that("pearson partial correlation matches the lm-residual reference", {
   df <- make_test_df(40)
-  pc <- compute_partial_correlation(df, c("a", "b", "c"), c("d", "e"), method = "pearson")
+  pc <- compute_partial_correlation(
+    df,
+    c("a", "b", "c"),
+    c("d", "e"),
+    method = "pearson"
+  )
 
   ref_resid <- sapply(c("a", "b", "c"), function(v) {
     residuals(lm(as.formula(paste(v, "~ d + e")), data = df))
@@ -195,14 +311,24 @@ test_that("spearman partial correlation residualizes RANKS (ppcor convention)", 
   # ppcor::pcor(method = "spearman") inverts the Spearman matrix, which is the
   # Pearson matrix of the ranks — algebraically the same as residualizing ranks.
   ranked <- as.data.frame(lapply(df[, c("a", "b", "d")], rank))
-  ref <- sapply(c("a", "b"), function(v) residuals(lm(as.formula(paste(v, "~ d")), data = ranked)))
-  expect_equal(unname(pc$cormat[1, 2]), unname(cor(ref)[1, 2]), tolerance = 1e-10)
+  ref <- sapply(c("a", "b"), function(v) {
+    residuals(lm(as.formula(paste(v, "~ d")), data = ranked))
+  })
+  expect_equal(
+    unname(pc$cormat[1, 2]),
+    unname(cor(ref)[1, 2]),
+    tolerance = 1e-10
+  )
 
   # ...and it is NOT the old behaviour (spearman correlation of raw residuals).
-  raw_resid <- sapply(c("a", "b"), function(v) residuals(lm(as.formula(paste(v, "~ d")), data = df)))
-  expect_false(isTRUE(all.equal(unname(pc$cormat[1, 2]),
-                                unname(cor(raw_resid, method = "spearman")[1, 2]),
-                                tolerance = 1e-6)))
+  raw_resid <- sapply(c("a", "b"), function(v) {
+    residuals(lm(as.formula(paste(v, "~ d")), data = df))
+  })
+  expect_false(isTRUE(all.equal(
+    unname(pc$cormat[1, 2]),
+    unname(cor(raw_resid, method = "spearman")[1, 2]),
+    tolerance = 1e-6
+  )))
 })
 
 test_that("kendall partial correlation matches the first-order partial tau", {
@@ -218,14 +344,28 @@ test_that("kendall partial correlation matches the first-order partial tau", {
 test_that("compute_partial_correlation excludes self-controls and survives odd names", {
   df <- make_test_df(30)
   # "c" appears in both sets: controlling for itself would give a NaN row.
-  pc <- compute_partial_correlation(df, c("a", "b", "c"), c("c", "d"), method = "pearson")
+  pc <- compute_partial_correlation(
+    df,
+    c("a", "b", "c"),
+    c("c", "d"),
+    method = "pearson"
+  )
   expect_equal(pc$k, 1L)
   expect_equal(dim(pc$cormat), c(3L, 3L))
   expect_true(all(is.finite(pc$cormat)))
 
-  names(df)[1:4] <- c("Organic Matter (%)", "pH (1:2.5)", "Clay content", "Slope [deg]")
-  pc2 <- compute_partial_correlation(df, c("Organic Matter (%)", "pH (1:2.5)"),
-                                     "Slope [deg]", method = "pearson")
+  names(df)[1:4] <- c(
+    "Organic Matter (%)",
+    "pH (1:2.5)",
+    "Clay content",
+    "Slope [deg]"
+  )
+  pc2 <- compute_partial_correlation(
+    df,
+    c("Organic Matter (%)", "pH (1:2.5)"),
+    "Slope [deg]",
+    method = "pearson"
+  )
   expect_true(all(is.finite(pc2$cormat)))
   expect_equal(colnames(pc2$cormat), c("Organic Matter (%)", "pH (1:2.5)"))
 })
@@ -240,8 +380,12 @@ test_that("compute_partial_correlation reports missing columns instead of guessi
 test_that("generate_partial_correlation renders with labelled (spaced) names", {
   df <- make_test_df(30)
   names(df)[1:3] <- c("Organic Matter (%)", "pH (1:2.5)", "Clay content")
-  p <- generate_partial_correlation(df, c("Organic Matter (%)", "pH (1:2.5)"),
-                                    control_vars = "Clay content", method = "spearman")
+  p <- generate_partial_correlation(
+    df,
+    c("Organic Matter (%)", "pH (1:2.5)"),
+    control_vars = "Clay content",
+    method = "spearman"
+  )
   expect_s3_class(p, "ggplot")
 })
 
@@ -260,20 +404,41 @@ test_that("the spatial cross-correlogram bins by DISTANCE, not by row order", {
   # meant "k rows down the uploaded table", so simply re-sorting the upload
   # changed the published curve. Distance binning cannot depend on row order.
   df <- make_xcorr_df(200)
-  res <- compute_spatial_cross_correlogram(df, "a", "b", "x", "y", src_crs = 32633)
+  res <- compute_spatial_cross_correlogram(
+    df,
+    "a",
+    "b",
+    "x",
+    "y",
+    src_crs = 32633
+  )
   expect_null(res$message)
   expect_true(all(c("dist", "np", "gamma", "rho") %in% names(res$bins)))
 
   set.seed(99)
   shuffled <- df[sample(nrow(df)), ]
-  res2 <- compute_spatial_cross_correlogram(shuffled, "a", "b", "x", "y", src_crs = 32633)
+  res2 <- compute_spatial_cross_correlogram(
+    shuffled,
+    "a",
+    "b",
+    "x",
+    "y",
+    src_crs = 32633
+  )
   expect_equal(res2$bins, res$bins, tolerance = 1e-12)
   expect_equal(res2$r0, res$r0, tolerance = 1e-12)
 })
 
 test_that("cross-correlation is the standardised cross-covariance r - gamma12(h)", {
   df <- make_xcorr_df(200)
-  res <- compute_spatial_cross_correlogram(df, "a", "b", "x", "y", src_crs = 32633)
+  res <- compute_spatial_cross_correlogram(
+    df,
+    "a",
+    "b",
+    "x",
+    "y",
+    src_crs = 32633
+  )
   expect_equal(res$bins$rho, res$r0 - res$bins$gamma, tolerance = 1e-12)
   # r0 is the ordinary non-spatial correlation of the two variables.
   expect_equal(res$r0, cor(df$a, df$b), tolerance = 1e-8)
@@ -283,36 +448,71 @@ test_that("cross-correlation is the standardised cross-covariance r - gamma12(h)
 
 test_that("an unstructured variable gives a flat cross-correlogram near zero", {
   df <- make_xcorr_df(200)
-  res <- compute_spatial_cross_correlogram(df, "a", "c", "x", "y", src_crs = 32633)
+  res <- compute_spatial_cross_correlogram(
+    df,
+    "a",
+    "c",
+    "x",
+    "y",
+    src_crs = 32633
+  )
   expect_null(res$message)
   expect_lt(max(abs(res$bins$rho)), 0.35)
 })
 
 test_that("the rank-based cross-correlogram runs on ranks and is flagged", {
   df <- make_xcorr_df(150)
-  res <- compute_spatial_cross_correlogram(df, "a", "b", "x", "y", src_crs = 32633,
-                                           method = "spearman")
+  res <- compute_spatial_cross_correlogram(
+    df,
+    "a",
+    "b",
+    "x",
+    "y",
+    src_crs = 32633,
+    method = "spearman"
+  )
   expect_true(res$ranked)
   expect_equal(res$r0, cor(df$a, df$b, method = "spearman"), tolerance = 1e-8)
 })
 
 test_that("the cross-correlogram explains itself instead of blanking", {
   df <- make_xcorr_df(60)
-  expect_match(compute_spatial_cross_correlogram(df, "a", "b", NULL, NULL, NULL)$message,
-               "Coordinates are not mapped")
-  expect_match(compute_spatial_cross_correlogram(df, "a", "a", "x", "y", 32633)$message,
-               "two different variables")
-  expect_match(compute_spatial_cross_correlogram(df[1:5, ], "a", "b", "x", "y", 32633)$message,
-               "Insufficient data")
+  expect_match(
+    compute_spatial_cross_correlogram(df, "a", "b", NULL, NULL, NULL)$message,
+    "Coordinates are not mapped"
+  )
+  expect_match(
+    compute_spatial_cross_correlogram(df, "a", "a", "x", "y", 32633)$message,
+    "two different variables"
+  )
+  expect_match(
+    compute_spatial_cross_correlogram(
+      df[1:5, ],
+      "a",
+      "b",
+      "x",
+      "y",
+      32633
+    )$message,
+    "Insufficient data"
+  )
   df$a <- 1
-  expect_match(compute_spatial_cross_correlogram(df, "a", "b", "x", "y", 32633)$message,
-               "constant")
+  expect_match(
+    compute_spatial_cross_correlogram(df, "a", "b", "x", "y", 32633)$message,
+    "constant"
+  )
 })
 
 test_that("generate_spatial_cross_correlogram returns a ggplot in both states", {
   df <- make_xcorr_df(120)
-  expect_s3_class(generate_spatial_cross_correlogram(df, "a", "b", "x", "y", 32633), "ggplot")
-  expect_s3_class(generate_spatial_cross_correlogram(df, "a", "b", NULL, NULL, NULL), "ggplot")
+  expect_s3_class(
+    generate_spatial_cross_correlogram(df, "a", "b", "x", "y", 32633),
+    "ggplot"
+  )
+  expect_s3_class(
+    generate_spatial_cross_correlogram(df, "a", "b", NULL, NULL, NULL),
+    "ggplot"
+  )
 })
 
 # ── check_collinearity ────────────────────────────────────────────────────
@@ -347,6 +547,8 @@ test_that("desc_empty_dt returns a renderable placeholder, never NULL", {
 
 test_that("complete_case_note states the sample and the rows it dropped", {
   expect_equal(complete_case_note(50, 50), "Complete cases: n = 50 of 50 rows.")
-  expect_equal(complete_case_note(37, 50),
-               "Complete cases: n = 37 of 50 rows (13 dropped for missing values).")
+  expect_equal(
+    complete_case_note(37, 50),
+    "Complete cases: n = 37 of 50 rows (13 dropped for missing values)."
+  )
 })

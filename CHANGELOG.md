@@ -13,6 +13,7 @@ All notable changes to Monolith are documented in this file.
 - Cluster startup failures restore `mc.cores`. Classification cleans up superseded models, failed-run files and session files, preserving cancellation while a worker finishes.
 
 ### Changed
+- Both Windows and Linux pinned CI test jobs must pass for the workflow to succeed.
 - Auxiliary correlations use a category-filtered table with signed Pearson r, raw p and paired n, explicit target/scope labels and unavailable-candidate explanations. The screened target itself is excluded from ranks. Auxiliary predictor correlation targets follow Actual or uploaded CVE/SS views, with an Actual/prediction switch and an independent SS subset switch initialized from Context. Calculated screens refresh when their context changes. 
 - Single-locality Scientific Analysis selects the locality directly and shows its summaries; combined choices are reserved for multi-locality runs.
 - Recorded baseline provenance tracks `gstat`, `sf`, `terra` and `classInt`. `spdep` remains an application dependency, and Moran's I diagnostics remain covered by the test suite. The four recorded baseline values do not include Moran's I.
