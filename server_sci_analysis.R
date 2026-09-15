@@ -458,7 +458,7 @@
   # localities ("Total (Combined)" = the localities that run covered), and
   # the prediction column that run mapped, only when it mapped predictions.
   output$stats_table_total <- DT::renderDataTable({
-    req(rv$user_data)
+    req(rv$user_data, length(rv$loc_names) > 1)
     meta <- get_display_meta()
     req(meta)
     sv <- stats_table_vectors(rv$user_data, meta, rv$mapping$loc, meta$localities)
@@ -601,8 +601,8 @@
     area_ha_to_df(ha, params)
   })
 
-  output$area_table_total_act <- DT::renderDataTable({ req(input$color_style %in% c("agro", "bin")); sci_dt(area_df_total_act()) })
-  output$area_table_total_pre <- DT::renderDataTable({ req(input$color_style %in% c("agro", "bin")); sci_dt(area_df_total_pre()) })
+  output$area_table_total_act <- DT::renderDataTable({ req(length(rv$loc_names) > 1, input$color_style %in% c("agro", "bin")); sci_dt(area_df_total_act()) })
+  output$area_table_total_pre <- DT::renderDataTable({ req(length(rv$loc_names) > 1, input$color_style %in% c("agro", "bin")); sci_dt(area_df_total_pre()) })
 
   output$area_table_loc_act <- DT::renderDataTable({
     req(rv$rast_list_act, input$color_style %in% c("agro", "bin")); loc <- input$sel_loc_stats
@@ -1130,4 +1130,3 @@
       })
     }
   )
-

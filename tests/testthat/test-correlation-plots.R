@@ -2,6 +2,78 @@
 # generate_correlation_network, generate_partial_correlation, generate_correlogram,
 # generate_lagged_correlation, and check_collinearity.
 
+test_that("auxiliary ranks use the mapped target and SS partition", {
+  df <- data.frame(loc = rep(c("A", "B"), each = 6),
+                   SubSet = rep(c("Train", "Train", "Train", "Test", "Test", "Test"), 2),
+                   x = 1:12, y = 12:1, actual = 1:12,
+                   custom_cve = c(3, 1, 2, 6, 4, 5, 9, 7, 8, 12, 10, 11),
+                   custom_ss = c(3, 2, 1, 4, 5, 6, 9, 8, 7, 10, 11, 12),
+                   aux = 1:12)
+  mapping <- list(loc = "loc", x = "x", y = "y", vars = list(list(
+    actual = "actual", pred = "custom_cve", pred_ss = "custom_ss")))
+  actual <- rank_auxiliary_correlations(df, mapping, "actual", "actual", "predictions", "A", "Test")
+  cve <- rank_auxiliary_correlations(df, mapping, "actual", "pred", "predictions", "A", "Test")
+  ss <- rank_auxiliary_correlations(df, mapping, "actual", "pred_ss", "predictions", "A", "Train")
+  ss_actual <- rank_auxiliary_correlations(df, mapping, "actual", "pred_ss", "actual", "A", "Train")
+  aux_corr <- function(res) res$results$Corr[res$results$Variable == "aux"]
+  expect_equal(aux_corr(actual), 1)
+  expect_identical(actual$target, "actual")
+  expect_identical(cve$target, "custom_cve")
+  expect_equal(cve$n, 6L) # CVE ignores the hidden SS subset control.
+  expect_equal(aux_corr(cve), 23 / 35) # Centred product sum 11.5 / square sum 17.5.
+  expect_equal(cve$results$Pval[cve$results$Variable == "aux"], 2 * pt(-abs((23 / 35) * sqrt(4 / (1 - (23 / 35)^2))), 4))
+  expect_identical(ss$target, "custom_ss")
+  expect_equal(ss$n, 3L)
+  expect_equal(aux_corr(ss), -1)
+  expect_equal(aux_corr(ss_actual), 1)
+  expect_identical(ss_actual$subset, "Train")
+  expect_setequal(cve$results$Variable, c("custom_ss", "aux"))
+  expect_setequal(actual$results$Variable, c("custom_cve", "custom_ss", "aux"))
+  expect_equal(rank_auxiliary_correlations(df, mapping, "actual", "pred_ss", "predictions", "ALL")$n, 12L)
+  mapping$vars[[1]]$pred_ss <- NA_character_
+  expect_error(rank_auxiliary_correlations(df, mapping, "actual", "pred_ss"), "prediction column")
+})
+
+test_that("auxiliary ranks count finite pairs and explain unrankable candidates", {
+  df <- data.frame(actual = c(1:5, NA, Inf), good = c(1, 3, 2, 4, NA, 6, 7),
+                   constant = 1, sparse = c(1, 2, rep(NA, 5)))
+  mapping <- list(vars = list(list(actual = "actual")))
+  res <- rank_auxiliary_correlations(df, mapping, "actual")
+  expect_identical(res$results$Variable, "good")
+  expect_equal(res$results$N, 4L)
+  expect_equal(res$results$Corr, 0.8) # Centred product sum 4 / square sum 5.
+  expect_setequal(res$skipped, c("constant", "sparse"))
+  empty <- rank_auxiliary_correlations(df[1:2, ], mapping, "actual")
+  expect_equal(nrow(empty$results), 0L)
+})
+
+test_that("golden auxiliary ranks agree with centred Pearson and Student t definitions", {
+  df <- golden_soil("core")
+  cols <- golden_meta()$columns
+  cve <- grep("_cve$", cols$pred, value = TRUE)[1]
+  target <- sub("_cve$", "", cve)
+  ss <- sub("_cve$", "_ss", cve)
+  loc <- unique(df$locality)[1]
+  partition <- unique(df$subset)[1]
+  mapping <- list(loc = "locality", x = "x", y = "y", vars = list(list(
+    actual = target, pred = cve, pred_ss = ss)))
+  for (mode in c("actual", "pred", "pred_ss")) {
+    res <- rank_auxiliary_correlations(df, mapping, target, mode, "predictions", loc, partition)
+    ref <- df[df$locality == loc, , drop = FALSE]
+    if (mode == "pred_ss") ref <- ref[ref$subset == partition, , drop = FALSE]
+    response <- switch(mode, actual = target, pred = cve, pred_ss = ss)
+    x <- ref[[response]]; y <- ref[[cols$covariate_main]]
+    ok <- is.finite(x) & is.finite(y)
+    x <- x[ok] - mean(x[ok]); y <- y[ok] - mean(y[ok])
+    r <- sum(x * y) / sqrt(sum(x^2) * sum(y^2))
+    n <- sum(ok)
+    row <- res$results[res$results$Variable == cols$covariate_main, ]
+    expect_equal(row$Corr, r, tolerance = 1e-12)
+    expect_equal(row$Pval, 2 * pt(-abs(r * sqrt((n - 2) / (1 - r^2))), n - 2), tolerance = 1e-12)
+    expect_equal(row$N, n)
+  }
+})
+
 # ── melt_cormat ────────────────────────────────────────────────────────────
 
 test_that("melt_cormat produces correct melted format", {

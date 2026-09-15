@@ -257,6 +257,23 @@ code, pre, .mn-mono { font-family: var(--mn-mono); }
   margin-bottom: 12px;
 }
 .mn-subsection > *:last-child { margin-bottom: 0; }
+.mn-aux-panel { min-width: 0; }
+.mn-corr-results { border-top: 1px solid var(--mn-line); margin-top: 12px; padding-top: 10px; }
+.mn-corr-scope { display: grid; grid-template-columns: auto minmax(0, 1fr); gap: 4px 10px; font-size: 12px; margin-bottom: 12px; }
+.mn-corr-scope dt { color: var(--mn-text-2); font-weight: 500; }
+.mn-corr-scope dd { margin: 0; overflow-wrap: anywhere; color: var(--mn-text); }
+.mn-corr-table-wrap { max-height: 340px; overflow: auto; border: 1px solid var(--mn-line); border-radius: var(--mn-radius); }
+.mn-corr-table { width: 100%; min-width: 300px; table-layout: fixed; border-collapse: separate; border-spacing: 0; font-size: 12px; background: var(--mn-surface); }
+.mn-corr-table caption { padding: 6px 8px; color: var(--mn-text-3); font-size: 11px; }
+.mn-corr-table th, .mn-corr-table td { padding: 7px 5px; border-bottom: 1px solid var(--mn-line); text-align: right; font-variant-numeric: tabular-nums; }
+.mn-corr-table th { position: sticky; top: 0; background: var(--mn-surface-2); color: var(--mn-text-2); z-index: 1; }
+.mn-corr-table th:first-child, .mn-corr-table td:first-child { width: 49%; text-align: left; overflow-wrap: anywhere; }
+.mn-corr-table th:nth-child(2) { width: 18%; }
+.mn-corr-table th:nth-child(3) { width: 22%; }
+.mn-corr-table th:nth-child(4) { width: 11%; }
+.mn-corr-table tbody tr:last-child td { border-bottom: 0; }
+.mn-corr-table tbody tr:hover { background: var(--mn-accent-weak); }
+.mn-corr-note { font-size: 11px; color: var(--mn-text-3); line-height: 1.5; margin: 10px 0 0; overflow-wrap: anywhere; }
 .mn-subsection:has(> #loc_res_table:empty):has(> #strict_buffer_note:empty) { display: none; }
 
 details.sidebar-section { border: 0; }

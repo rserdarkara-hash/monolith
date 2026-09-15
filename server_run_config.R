@@ -544,9 +544,18 @@
   })
 
   output$locality_selector_ui <- renderUI({
-      req(rv$loc_names); selectInput("sel_loc_stats", "Filter Analysis View:", choices = c("Total (Combined)", rv$loc_names))
-    })
+    req(rv$loc_names)
+    choices <- if (length(rv$loc_names) > 1) c("Total (Combined)", rv$loc_names) else rv$loc_names
+    current <- isolate(input$sel_loc_stats)
+    selected <- if (isTruthy(current) && current %in% choices) current else choices[1]
+    selectInput("sel_loc_stats", "Filter Analysis View:", choices = choices, selected = selected)
+  })
   
+  output$sci_multiple_localities <- renderText({
+    if (length(rv$loc_names) > 1) "yes" else "no"
+  })
+  outputOptions(output, "sci_multiple_localities", suspendWhenHidden = FALSE)
+
   output$covariate_selector_ui <- renderUI({
     req(rv$user_data, input$var_id)
     cols <- colnames(rv$user_data)
@@ -569,139 +578,113 @@
                 options = list(`live-search` = TRUE, `actions-box` = TRUE))
   })
 
-      observeEvent(input$calc_corr, {
-        req(rv$user_data, input$var_id)
-        # Scope the correlations to the Context panel's locality selection:
-        # ranks computed across ALL samples can be driven by between-locality
-        # contrasts and mislead covariate choice for a single-locality run.
-        df_base <- rv$user_data
-        scope_lbl <- "all localities"
-        if (!is.null(rv$mapping$loc) && rv$mapping$loc %in% colnames(df_base) &&
-            length(input$locality) > 0 && !("ALL" %in% input$locality)) {
-          df_base <- df_base[as.character(df_base[[rv$mapping$loc]]) %in% input$locality, , drop = FALSE]
-          scope_lbl <- paste(input$locality, collapse = ", ")
-        }
-        if (nrow(df_base) < 3) {
-          showNotification("Fewer than 3 samples in the selected localities - cannot rank predictors.", type = "error")
-          return()
-        }
-        df <- df_base[sapply(df_base, is.numeric)]
-        df <- df[, !(colnames(df) %in% c(rv$mapping$x, rv$mapping$y))]
+  corr_source_value <- reactiveVal("predictions")
+  corr_subset_value <- reactiveVal("all")
+  # Reset the source when Primary View changes. The server state is authoritative
+  # while the updated control makes its browser round trip.
+  observeEvent(input$value_type, {
+    corr_source_value("predictions")
+    shinyWidgets::updateRadioGroupButtons(session, "corr_source", selected = "predictions")
+  }, priority = 10)
+  observeEvent(input$corr_source, {
+    req(input$corr_source %in% c("predictions", "actual"))
+    corr_source_value(input$corr_source)
+  })
 
-        target <- input$var_id
-        if(!(target %in% colnames(df))) {
-          showNotification("Target variable not in numeric data.", type = "error")
-          return()
-        }
-        
-        # Each rank is an independent bivariate screen, so it uses every sample
-        # that has both values (pairwise deletion) rather than the rows complete
-        # across all candidates. The n therefore differs between predictors and
-        # is reported per row. Selecting the pair explicitly - cor.test drops
-        # incomplete pairs itself, and its `use` argument does not exist - lets a
-        # pair with too few shared samples be skipped instead of erroring into
-        # the tryCatch and vanishing without explanation.
-        res_list <- lapply(setdiff(colnames(df), target), function(v) {
-          ok <- stats::complete.cases(df[[target]], df[[v]])
-          if (sum(ok) < 3) return(NULL)
-          test <- tryCatch(cor.test(df[[target]][ok], df[[v]][ok]), error = function(e) NULL)
-          if(!is.null(test)) {
-             data.frame(Variable = v, Corr = unname(test$estimate), Pval = test$p.value,
-                        N = sum(ok), stringsAsFactors = FALSE)
-          } else {
-             NULL
-          }
-        })
-        res_df <- do.call(rbind, Filter(Negate(is.null), res_list))
-        
-        if(is.null(res_df) || nrow(res_df) == 0) {
-          showNotification("Could not calculate correlations. Ensure numeric data is available.", type = "error")
-          return()
-        }
-        
-        rv$full_cor_matrix <- res_df # Re-using variable name but storing dataframe instead of matrix
-        # The scope's sample count is not the n behind any one coefficient: each
-        # rank carries its own n, shown alongside it.
-        rv$cor_scope_label <- sprintf("%s, %d samples", scope_lbl, nrow(df_base))
-        rv$show_corr_panel <- TRUE
-      })
-    
-      output$corr_results_ui <- renderUI({
-        req(rv$show_corr_panel, rv$full_cor_matrix, input$var_id)
-        res_df <- rv$full_cor_matrix
-        target <- input$var_id
-        
-        thresh <- as.numeric(input$corr_pval_thresh %||% 1)
-        if(thresh < 1) {
-           res_df <- res_df[!is.na(res_df$Pval) & res_df$Pval <= thresh, ]
-        }
-        
-        if(nrow(res_df) == 0) return(tags$p("No variables meet the significance threshold."))
-        
-        vars_metadata <- rv$mapping$vars
-        var_to_cat <- sapply(res_df$Variable, function(v) {
-          match <- Filter(function(x) x$actual == v, vars_metadata)
-          if(length(match) > 0) match[[1]]$category else "Uploaded Data"
-        })
+  corr_subset_choices <- reactive({
+    req(rv$user_data)
+    col <- find_subset_column(names(rv$user_data))
+    vals <- if (!is.na(col)) sort(unique(na.omit(as.character(rv$user_data[[col]])))) else character()
+    c("All" = "all", setNames(vals, vals))
+  })
+  observeEvent(list(input$value_type, input$subset, corr_subset_choices()), {
+    choices <- corr_subset_choices()
+    selected <- input$subset %||% "all"
+    if (!selected %in% choices) selected <- "all"
+    corr_subset_value(selected)
+    shinyWidgets::updateRadioGroupButtons(session, "corr_subset", choices = choices, selected = selected)
+  }, priority = 10)
+  observeEvent(input$corr_subset, {
+    req(input$corr_subset %in% corr_subset_choices())
+    corr_subset_value(input$corr_subset)
+  })
+  output$corr_subset_ui <- renderUI({
+    req(input$value_type == "pred_ss")
+    div(class = "mn-seg-grid",
+        shinyWidgets::radioGroupButtons("corr_subset", "Correlation data subset",
+          choices = corr_subset_choices(), selected = isolate(corr_subset_value()), size = "sm"))
+  })
 
-        var_to_label <- sapply(res_df$Variable, function(v) {
-          match <- Filter(function(x) x$actual == v, vars_metadata)
-          if(length(match) > 0 && !is.null(match[[1]]$label) && match[[1]]$label != "") {
-            match[[1]]$label
-          } else {
-            v # Fallback to column name
-          }
-        })
-        
-        res_df$Category <- var_to_cat
-        res_df$Label <- var_to_label
-        res_df$AbsCorr <- abs(res_df$Corr)
+  corr_ranks <- reactive({
+    req(rv$user_data, input$var_id, isTruthy(input$calc_corr) && input$calc_corr > 0)
+    # Button starts the screen; changing its context then refreshes it. No fit,
+    # future or interpolation worker is involved in this bivariate calculation.
+    tryCatch(rank_auxiliary_correlations(rv$user_data, rv$mapping, input$var_id,
+      input$value_type %||% "actual", corr_source_value(), input$locality, corr_subset_value()),
+      error = function(e) list(error = conditionMessage(e)))
+  })
 
-        cats <- unique(res_df$Category)
+  corr_display_data <- reactive({
+    ranks <- corr_ranks()
+    if (!is.null(ranks$error)) return(NULL)
+    df <- ranks$results
+    df$Label <- get_var_labels(df$Variable, rv$mapping$vars)
+    df$Category <- vapply(df$Variable, function(v) {
+      m <- Filter(function(x) identical(x$actual, v), rv$mapping$vars)
+      if (length(m) && isTruthy(m[[1]]$category)) m[[1]]$category else "Uploaded Data"
+    }, character(1))
+    df
+  })
+  output$corr_category_ui <- renderUI({
+    df <- corr_display_data()
+    req(df, nrow(df) > 0)
+    cats <- sort(unique(df$Category))
+    current <- isolate(input$corr_category)
+    selected <- if (isTruthy(current) && current %in% cats) current else "__all__"
+    selectInput("corr_category", "Predictor category", choices = c("All categories" = "__all__", setNames(cats, cats)),
+                selected = selected)
+  })
 
-        tabs <- list()
-
-        results_all <- res_df[order(res_df$AbsCorr, decreasing = TRUE), ]
-        res_all <- head(results_all, 8)
-
-        tabs[[1]] <- tabPanel("All",
-          tags$ul(style="font-size: 0.85em; padding-left: 15px; margin-top: 5px; list-style-type: none;",
-            lapply(seq_len(nrow(res_all)), function(i) {
-              tags$li(sprintf("%s: %.3f (p=%.3f, n=%d)", res_all$Label[i], res_all$Corr[i],
-                              res_all$Pval[i], res_all$N[i]))
-            })
-          )
-        )
-
-        cat_dfs <- split(res_df, res_df$Category)
-        cat_tabs <- lapply(names(cat_dfs), function(cat) {
-          results_cat <- cat_dfs[[cat]]
-          results_cat <- results_cat[order(results_cat$AbsCorr, decreasing = TRUE), ]
-          res_cat <- head(results_cat, 8)
-          
-          tabPanel(cat,
-            tags$ul(style="font-size: 0.85em; padding-left: 15px; margin-top: 5px; list-style-type: none;",
-              lapply(seq_len(nrow(res_cat)), function(i) {
-                tags$li(sprintf("%s: %.3f (p=%.3f, n=%d)", res_cat$Label[i], res_cat$Corr[i],
-                                res_cat$Pval[i], res_cat$N[i]))
-              })
-            )
-          )
-        })
-        
-        tabs <- c(list(tabs[[1]]), cat_tabs)
-        tagList(
-          hr(),
-          tags$h6("Predictor Ranks (Correlation):"),
-          # Scope stamp: ranks are frozen at Calculate time, so make the data
-          # subset they refer to explicit even if the locality selection has
-          # changed since (press Calculate again to refresh).
-          if (!is.null(rv$cor_scope_label))
-            tags$p(style = "font-size: 0.78em; color: var(--mn-text-3); margin: 0 0 4px 0;",
-                   paste0("Scope: ", rv$cor_scope_label)),
-          tags$div(style = "overflow-x: auto; white-space: nowrap; border-bottom: 1px solid #ddd; margin-bottom: 5px;",
-            do.call(tabsetPanel, c(list(id = "cor_tabs", type = "pills"), tabs))
-          )
-        )
-      })
-    
+  output$corr_results_ui <- renderUI({
+    ranks <- corr_ranks()
+    if (!is.null(ranks$error)) return(div(class = "mn-corr-results", tags$p(ranks$error)))
+    tagList(
+      div(class = "mn-corr-results",
+        tags$h6("Predictor correlations"),
+        tags$dl(class = "mn-corr-scope",
+          tags$dt("Target"), tags$dd(paste0(ranks$source, ": ", ranks$target)),
+          tags$dt("Localities"), tags$dd(ranks$scope),
+          tags$dt("Rows"), tags$dd(paste0(ranks$n, " | Subset: ", if (ranks$subset == "all") "All" else ranks$subset))),
+        uiOutput("corr_category_ui"),
+        uiOutput("corr_table_ui"),
+        tags$p(class = "mn-corr-note", "Pearson r, ordered by |r|. n = finite paired observations. Raw two-sided p-values are exploratory; spatial dependence and multiple screening are not adjusted."),
+        if (length(ranks$skipped)) tags$details(class = "mn-corr-note",
+          tags$summary(sprintf("%d predictors unavailable", length(ranks$skipped))),
+          tags$p("Fewer than 3 finite pairs or a constant variable: ", paste(ranks$skipped, collapse = ", ")))
+      )
+    )
+  })
+  output$corr_table_ui <- renderUI({
+    df <- corr_display_data()
+    req(df)
+    thresh <- as.numeric(input$corr_pval_thresh %||% 1)
+    df <- df[is.finite(df$Pval) & df$Pval <= thresh, , drop = FALSE]
+    category <- input$corr_category %||% "__all__"
+    if (category != "__all__" && category %in% corr_display_data()$Category) {
+      df <- df[df$Category == category, , drop = FALSE]
+    }
+    if (nrow(df) == 0) return(tags$p("No predictors meet this filter or have enough varying paired observations."))
+    div(class = "mn-corr-table-wrap", tabindex = "0", role = "region", `aria-label` = "Predictor correlation ranks",
+      tags$table(class = "mn-corr-table",
+        tags$caption(sprintf("%d predictors", nrow(df))),
+        tags$thead(tags$tr(tags$th("Predictor", scope = "col"), tags$th("r", scope = "col"),
+                          tags$th("p (raw)", scope = "col"), tags$th("n", scope = "col"))),
+        tags$tbody(lapply(seq_len(nrow(df)), function(i) {
+          tags$tr(tags$td(title = df$Variable[i], df$Label[i]),
+                  tags$td(sprintf("%+.3f", df$Corr[i])),
+                  tags$td(title = format(df$Pval[i], digits = 6), format_p_value(df$Pval[i])),
+                  tags$td(df$N[i]))
+        }))
+      )
+    )
+  })

@@ -286,15 +286,15 @@ ui_main_tabs <- mainPanel(width = 9,
                                 tags$p(style="font-size: 0.85em; color: var(--mn-text-2); font-style: italic;",
                                        "Area coverage by class appears here when the map Styling is set to Agronomical or Binned.")
                               ),
-                              # Keyed to the DISPLAYED run (disp_method is '' before the first
-                              # run, so no bare titles pre-run): the Total tables describe the
-                              # run's combined coverage - a single-locality run included - and
-                              # the Locality rows appear when the analysis filter picks one.
+                              # Combined summaries apply to multi-locality displayed runs;
+                              # selected-locality summaries also cover single-locality runs.
                               conditionalPanel(condition = "['agro', 'bin'].includes(input.color_style) && output.disp_method && output.disp_method != ''",
                                 h5("Area Coverage"),
-                                fluidRow(
-                                  column(6, sci_table("area_table_total_act", "Total - Actual", title_tag = h6)),
-                                  column(6, div(id = "area_total_pred_col", sci_table("area_table_total_pre", "Total - Predicted", title_tag = h6)))
+                                conditionalPanel(condition = "output.sci_multiple_localities == 'yes'",
+                                  fluidRow(
+                                    column(6, sci_table("area_table_total_act", "Total - Actual", title_tag = h6)),
+                                    column(6, div(id = "area_total_pred_col", sci_table("area_table_total_pre", "Total - Predicted", title_tag = h6)))
+                                  )
                                 ),
                                 conditionalPanel(condition = "input.sel_loc_stats && input.sel_loc_stats != 'Total (Combined)'",
                                   fluidRow(
@@ -305,7 +305,9 @@ ui_main_tabs <- mainPanel(width = 9,
                                 hr()
                               ),
                               conditionalPanel(condition = "output.disp_method && output.disp_method != ''",
-                                sci_table("stats_table_total", "Descriptive Statistics"),
+                                conditionalPanel(condition = "output.sci_multiple_localities == 'yes'",
+                                  sci_table("stats_table_total", "Descriptive Statistics")
+                                ),
                                 sci_table("stats_table_loc", label = "Selected locality descriptive statistics")
                               )
                             ),

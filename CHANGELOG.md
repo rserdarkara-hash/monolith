@@ -8,16 +8,18 @@ All notable changes to Monolith are documented in this file.
 - Spatial TPS fits preserve the common coordinate scale in both fitting and lambda optimization. TPS surfaces, CV metrics and selected lambdas change where the sample extent caused artificial anisotropy.
 - Shared unnamed uploaded boundaries use each locality's selected sidebar boundary. Combined class-area tables and exports require disjoint locality domains, preventing duplicated hectares.
 - Manual Matérn uses smoothness 1.5; its preview reports the Auto-Fit weighted SSE criterion and prefills the stored model family.
-- Geographic and non-metre projected input is transformed to local UTM before interpolation and optimization. Classification enforces metric Target CRSs and refuses unsuitable targets; Data Setup warns above 1% input-projection distortion.
 - Jenks classification targets are reproducible when classInt samples large inputs.
 - TPS parameters include the fitted lambda and effective degrees of freedom, with numeric exports and a near-planar warning below effective df 3.5.
 - Cluster startup failures restore `mc.cores`. Classification cleans up superseded models, failed-run files and session files, preserving cancellation while a worker finishes.
 
 ### Changed
+- Auxiliary correlations use a category-filtered table with signed Pearson r, raw p and paired n, explicit target/scope labels and unavailable-candidate explanations. The screened target itself is excluded from ranks. Auxiliary predictor correlation targets follow Actual or uploaded CVE/SS views, with an Actual/prediction switch and an independent SS subset switch initialized from Context. Calculated screens refresh when their context changes. 
+- Single-locality Scientific Analysis selects the locality directly and shows its summaries; combined choices are reserved for multi-locality runs.
 - Recorded baseline provenance tracks `gstat`, `sf`, `terra` and `classInt`. `spdep` remains an application dependency, and Moran's I diagnostics remain covered by the test suite. The four recorded baseline values do not include Moran's I.
+- Geographic and non-metre projected input is transformed to local UTM before interpolation and optimization. Classification enforces metric Target CRSs and refuses unsuitable targets; Data Setup warns above 1% input-projection distortion.
 
 ### Testing
-- Full suite: 3,215 passing assertions, 0 failing, 0 skipped, across 35 test files (up from 3,132 at 1.1.1). All four recorded baseline values remain exactly unchanged.
+- Full suite: 3,280 passing assertions, 0 failing, 26 warnings, 0 skipped, across 35 test files (2026-09-15; 781.1 seconds). All four recorded baseline values remain exactly unchanged.
 
 ## [1.1.1] - 2026-09-13 - Updated renv.lock / CRS recognition optimization / Directional variogram on both surfaces / Baseline provenance / User's own reproducibility conditions
 

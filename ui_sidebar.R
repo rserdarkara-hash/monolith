@@ -87,13 +87,16 @@ ui_sidebar_panel <- sidebarPanel(width = 3,
             ),
 
                        conditionalPanel(condition = "['RK', 'RFK', 'CK'].includes(input.method)",
-                         div(class = "mn-subsection",
-                           h5(HTML(paste0("Auxiliary Variables", info_tooltip("aux_info", "Select secondary variables to assist interpolation (e.g. Elevation). Ensure they are strongly correlated with the target. If VIF > 10, they are dropped to avoid multicollinearity.")))),
+                         div(class = "mn-subsection mn-aux-panel",
+                           h5(HTML(paste0("Auxiliary Variables", info_tooltip("aux_info", "Select secondary variables to assist interpolation (e.g. Elevation). Pearson correlation screens linear associations; RFK can also use nonlinear relationships. The run-time collinearity check offers Auto-Drop, Keep or Cancel when VIF > 10 or pairwise |r| > 0.95.")))),
                            uiOutput("covariate_selector_ui"),
-                           fluidRow(
-                             column(6, selectInput("corr_pval_thresh", "Max P-Value:", choices = c("All" = 1, "0.05" = 0.05, "0.01" = 0.01, "0.001" = 0.001), selected = 1)),
-                             column(6, actionButton("calc_corr", "RANK BY CORR.", class = "btn-default btn-block", style="margin-top:25px;"))
+                           conditionalPanel(condition = "['pred', 'pred_ss', 'resid'].includes(input.value_type)",
+                             div(class = "mn-seg-grid", shinyWidgets::radioGroupButtons("corr_source", "Correlation target",
+                               choices = c("ML predictions" = "predictions", "Actual values" = "actual"), selected = "predictions", size = "sm"))
                            ),
+                           uiOutput("corr_subset_ui"),
+                           selectInput("corr_pval_thresh", "Maximum p (raw)", choices = c("All" = 1, "0.05" = 0.05, "0.01" = 0.01, "0.001" = 0.001), selected = 1),
+                           actionButton("calc_corr", "Rank by correlation", class = "btn-default btn-block"),
                            uiOutput("corr_results_ui")
                          )
                        ),

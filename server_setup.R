@@ -462,8 +462,6 @@
     loc_resolutions = list(), # Track spatial resolutions per locality
     idw_factors = list(), tps_lambdas = list(), # Regional Parameters
     tps_gcv_data = list(), # GCV Diagnostic Data
-    full_cor_matrix = NULL, # Correlation Matrix for all numeric variables
-    show_corr_panel = FALSE, # Toggle for sidebar correlation panel
     pop_up_vars = NULL, # Selected variables for pop-ups
     model_summaries = list(), # summaries for UK/RK
     rf_models = list(), # trained random forests

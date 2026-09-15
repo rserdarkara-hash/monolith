@@ -704,6 +704,48 @@ is_valid_col_ref <- function(x) {
   !is.null(x) && length(x) == 1 && !is.na(x) && nzchar(x)
 }
 
+# Sidebar bivariate screen, independent of interpolation and its CV. SS uses
+# the chosen partition on both sources; CVE and Actual use all scoped rows.
+rank_auxiliary_correlations <- function(data, mapping, variable, value_type = "actual",
+                                       source = "predictions", localities = NULL, subset = "all") {
+  meta <- Filter(function(m) identical(m$actual, variable), mapping$vars)
+  if (length(meta) == 0) stop("Target variable is not mapped.")
+  meta <- meta[[1]]
+  predicted <- value_type %in% c("pred", "pred_ss", "resid") && source == "predictions"
+  target <- if (predicted) {
+    if (value_type == "pred_ss") meta$pred_ss else meta$pred
+  } else meta$actual
+  if (!is_valid_col_ref(target) || !target %in% names(data)) {
+    stop(if (predicted) "The mapped prediction column is unavailable." else "Target column is unavailable.")
+  }
+  if (!is.numeric(data[[target]])) stop("Target column must be numeric.")
+  locs <- resolve_selected_localities(localities, data, mapping$loc)
+  if (is_valid_col_ref(mapping$loc) && mapping$loc %in% names(data)) {
+    data <- data[as.character(data[[mapping$loc]]) %in% locs, , drop = FALSE]
+  }
+  subset_col <- find_subset_column(names(data))
+  subset <- if (value_type == "pred_ss" && !is.na(subset_col)) subset else "all"
+  if (subset != "all") {
+    data <- data[!is.na(data[[subset_col]]) & as.character(data[[subset_col]]) == subset, , drop = FALSE]
+  }
+  # Retain the existing candidate set, excluding the screened target itself.
+  exclude <- c(mapping$x, mapping$y, meta$actual, target)
+  candidates <- setdiff(names(data)[vapply(data, is.numeric, logical(1))], exclude)
+  rows <- lapply(candidates, function(v) {
+    ok <- is.finite(data[[target]]) & is.finite(data[[v]])
+    if (sum(ok) < 3 || stats::sd(data[[target]][ok]) == 0 || stats::sd(data[[v]][ok]) == 0) return(NULL)
+    test <- stats::cor.test(data[[target]][ok], data[[v]][ok], method = "pearson")
+    data.frame(Variable = v, Corr = unname(test$estimate), Pval = test$p.value,
+               N = sum(ok), stringsAsFactors = FALSE)
+  })
+  results <- do.call(rbind, rows)
+  if (is.null(results)) results <- data.frame(Variable = character(), Corr = numeric(), Pval = numeric(), N = integer())
+  results <- results[order(abs(results$Corr), decreasing = TRUE), , drop = FALSE]
+  list(results = results, target = target, source = if (predicted) "ML predictions" else "Actual values",
+       scope = if (length(locs)) paste(locs, collapse = ", ") else "all localities",
+       subset = subset, n = nrow(data), skipped = setdiff(candidates, results$Variable))
+}
+
 detect_pred_column <- function(target, candidates, type = "cve") {
   if (is.null(target) || is.na(target) || length(candidates) == 0) return(NA)
   

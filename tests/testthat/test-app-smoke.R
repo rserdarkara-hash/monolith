@@ -311,6 +311,53 @@ test_that("variogram tuning context tracks the method and the fitting mode", {
   app$wait_for_idle()
 })
 
+test_that("auxiliary correlation switches and table work in the browser", {
+  app <- smoke_app()
+  df <- data.frame(locality = rep(c("A", "B"), each = 6),
+                   subset = rep(rep(c("Train", "Test"), each = 3), 2),
+                   x = 450000 + 1:12 * 10, y = 5819000 + rep(1:3, 4) * 10,
+                   actual = 1:12, actual_cve = c(3, 1, 2, 6, 4, 5, 9, 7, 8, 12, 10, 11),
+                   actual_ss = c(3, 2, 1, 4, 5, 6, 9, 8, 7, 10, 11, 12), aux = 1:12)
+  csv <- tempfile(fileext = ".csv")
+  withr::defer(unlink(csv))
+  utils::write.csv(df, csv, row.names = FALSE)
+  app$upload_file(user_file = csv)
+  app$set_inputs(var_id = "actual", locality = "A", method = "RK", value_type = "actual")
+  app$wait_for_idle()
+  visible <- function(id) isTRUE(app$get_js(sprintf(
+    "var el = document.getElementById('%s'); !!el && el.getClientRects().length > 0;", id)))
+  expect_false(visible("corr_source"))
+  app$click("calc_corr")
+  app$wait_for_idle()
+  expect_true(grepl("Actual values: actual", app$get_html("#corr_results_ui"), fixed = TRUE))
+  app$set_inputs(value_type = "pred")
+  app$wait_for_idle()
+  expect_true(visible("corr_source"))
+  expect_equal(app$get_value(input = "corr_source"), "predictions")
+  expect_true(grepl("ML predictions: actual_cve", app$get_html("#corr_results_ui"), fixed = TRUE))
+  expect_false(visible("corr_subset"))
+  app$set_inputs(corr_source = "actual")
+  app$wait_for_idle()
+  expect_true(grepl("Actual values: actual", app$get_html("#corr_results_ui"), fixed = TRUE))
+  app$set_inputs(value_type = "pred_ss")
+  app$set_inputs(subset = "Train")
+  app$wait_for_idle()
+  expect_equal(app$get_value(input = "corr_source"), "predictions")
+  expect_equal(app$get_value(input = "corr_subset"), "Train")
+  expect_true(visible("corr_subset"))
+  expect_true(grepl("ML predictions: actual_ss", app$get_html("#corr_results_ui"), fixed = TRUE))
+  expect_true(grepl("-1.000", app$get_html("#corr_table_ui"), fixed = TRUE))
+  app$set_inputs(corr_subset = "Test")
+  app$wait_for_idle()
+  expect_equal(app$get_value(input = "subset"), "Train")
+  expect_true(grepl("+1.000", app$get_html("#corr_table_ui"), fixed = TRUE))
+  expect_equal(as.numeric(app$get_js("document.querySelectorAll('.mn-corr-table thead th').length;")), 4)
+  app$set_inputs(value_type = "actual")
+  app$wait_for_idle()
+  expect_false(visible("corr_source"))
+  expect_false(visible("corr_subset"))
+})
+
 # Shut the app down here rather than at suite teardown: global.R sets
 # future::plan(multisession), so the app process keeps one worker per core
 # alive for as long as it lives (~2 GB of RSS on an 16-core machine), and
