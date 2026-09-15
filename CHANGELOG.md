@@ -5,6 +5,7 @@ All notable changes to Monolith are documented in this file.
 ## [1.1.2] - 2026-09-15 - TPS scaling in fitting and optimization/ UI redundancy removal / Manual Matérn fit fallback / Correlation check categorisation in RFK, RK and CK
 
 ### Fixed
+- **Test helpers select sequential processing before application sourcing**, preventing an unused Windows CI startup pool from timing out. Normal app runs use multisession.
 - **Spatial TPS fits preserve the common coordinate scale** in both fitting and lambda optimization. TPS surfaces, CV metrics and selected lambdas change where the sample extent caused artificial anisotropy.
 - **Shared unnamed uploaded boundaries use each locality's selected sidebar boundary.** Combined class-area tables and exports require disjoint locality domains, preventing duplicated hectares.
 - **Manual Matérn uses smoothness 1.5**; its preview reports the Auto-Fit weighted SSE criterion and prefills the stored model family.
@@ -20,7 +21,7 @@ All notable changes to Monolith are documented in this file.
 - **Geographic and non-metre projected input is transformed to local UTM before interpolation and optimization.** Classification enforces metric Target CRSs and refuses unsuitable targets; Data Setup warns above 1% input-projection distortion.
 
 ### Testing
-- Full suite: 3,280 passing assertions, 0 failing, 26 warnings, 0 skipped, across 35 test files (2026-09-15; 781.1 seconds). All four recorded baseline values remain exactly unchanged.
+- Suite validation: 3,286 passing assertions, 0 failing, 26 warnings across 35 test files (2026-09-15; full suite plus a separate browser smoke run). All four recorded baseline values remain exactly unchanged.
 
 ## [1.1.1] - 2026-09-13 - Updated renv.lock / CRS recognition optimization / Directional variogram on both surfaces / Baseline provenance / User's own reproducibility conditions
 

@@ -14,7 +14,8 @@ while (!file.exists(file.path(proj_root, "global.R"))) {
 proj_root <- normalizePath(proj_root, winslash = "/")
 
 # helper.R handles all application sourcing (with shinyApp no-oping, setwd()
-# management, and idempotency).  setup.R sets the sequential future plan.
+# management, and idempotency) and requests sequential startup before sourcing.
+# setup.R retains the sequential future plan for the test files.
 # There is no need to source anything here — testthat will run helper.R and
 # setup.R automatically before the test files.
 testthat::test_dir(

@@ -170,7 +170,11 @@ addResourcePath("assets", file.path(getwd(), "assets"))
 # The cap covers a whole .shp set in one request; tables keep their 30 MB limit.
 options(shiny.maxRequestSize = 200 * 1024^2)
 
-if (!inherits(future::plan(), "multisession")) {
+# The test helper opts in before sourcing; setup.R runs too late to prevent
+# an otherwise unused startup pool from failing its Windows socket handshake.
+if (isTRUE(getOption("monolith_test_sequential", FALSE))) {
+  future::plan(future::sequential)
+} else if (!inherits(future::plan(), "multisession")) {
   future::plan(future::multisession)
 }
 

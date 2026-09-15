@@ -22,22 +22,26 @@ if (!exists(".monolith_sourced") || !isTRUE(.monolith_sourced)) {
   setwd(proj_root)
   on.exit(setwd(old_wd), add = TRUE)
 
-  suppressPackageStartupMessages({
-    suppressMessages({
-      source(file.path(proj_root, "global.R"))
+  # Helpers load before setup.R, so request sequential startup for both app
+  # sources. Restore the option afterward so normal Shiny startup is unchanged.
+  withr::with_options(list(monolith_test_sequential = TRUE), {
+    suppressPackageStartupMessages({
+      suppressMessages({
+        source(file.path(proj_root, "global.R"))
+      })
     })
-  })
 
-  # monolith.R defines validate_crs, estimate_run_duration, and the Shiny
-  # app.  Source it with shinyApp temporarily no-opped so it doesn't launch.
-  if (requireNamespace("shiny", quietly = TRUE)) {
-    .real_shinyApp <- shiny::shinyApp
-    utils::assignInNamespace("shinyApp", function(ui, server, ...) {}, "shiny")
-    on.exit(utils::assignInNamespace("shinyApp", .real_shinyApp, "shiny"),
-            add = TRUE)
-  }
-  suppressMessages({
-    source(file.path(proj_root, "monolith.R"))
+    # monolith.R defines validate_crs, estimate_run_duration, and the Shiny
+    # app.  Source it with shinyApp temporarily no-opped so it doesn't launch.
+    if (requireNamespace("shiny", quietly = TRUE)) {
+      .real_shinyApp <- shiny::shinyApp
+      utils::assignInNamespace("shinyApp", function(ui, server, ...) {}, "shiny")
+      on.exit(utils::assignInNamespace("shinyApp", .real_shinyApp, "shiny"),
+              add = TRUE)
+    }
+    suppressMessages({
+      source(file.path(proj_root, "monolith.R"))
+    })
   })
 
   setwd(old_wd)

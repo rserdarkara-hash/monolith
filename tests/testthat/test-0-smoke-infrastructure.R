@@ -17,6 +17,63 @@ test_that("testthat infrastructure loads application functions", {
   expect_true(exists("estimate_run_duration"), label = "estimate_run_duration from monolith.R")
 })
 
+test_that("application sourcing honors sequential test startup without changing the app plan", {
+  root <- normalizePath(file.path(testthat::test_path(), "..", ".."))
+  blocks <- Filter(
+    function(expr) {
+      is.call(expr) &&
+        identical(expr[[1]], as.name("if")) &&
+        grepl(
+          "future::plan",
+          paste(deparse(expr), collapse = " "),
+          fixed = TRUE
+        )
+    },
+    as.list(parse(file = file.path(root, "global.R")))
+  )
+  expect_length(blocks, 1L)
+
+  calls <- list()
+  current <- future::sequential
+  testthat::local_mocked_bindings(
+    plan = function(strategy = NULL, ...) {
+      if (is.null(strategy)) {
+        return(current)
+      }
+      calls[[length(calls) + 1L]] <<- strategy
+      current <<- strategy
+    },
+    .package = "future"
+  )
+
+  # Exercise the real startup branch without opening sockets. A parallel
+  # worker attempt during test sourcing must fail even on a healthy runner.
+  withr::with_options(list(monolith_test_sequential = TRUE), {
+    eval(blocks[[1]])
+    expect_identical(calls, list(future::sequential))
+  })
+
+  calls <- list()
+  current <- future::sequential
+  withr::with_options(list(monolith_test_sequential = NULL), {
+    eval(blocks[[1]])
+    expect_identical(calls, list(future::multisession))
+    eval(blocks[[1]])
+    expect_length(calls, 1L) # Re-sourcing keeps the existing app pool.
+  })
+
+  # Re-load the actual helper to cover both sources and option restoration.
+  calls <- list()
+  current <- future::sequential
+  old_option <- getOption("monolith_test_sequential")
+  helper_env <- new.env(parent = globalenv())
+  helper_env$.monolith_sourced <- FALSE
+  withr::defer(showtext::showtext_auto(FALSE))  # Keep setup.R plotting isolation.
+  source(file.path(root, "tests", "testthat", "helper.R"), local = helper_env)
+  expect_identical(calls, list(future::sequential, future::sequential))
+  expect_identical(getOption("monolith_test_sequential"), old_option)
+})
+
 test_that("fixture factories produce valid objects", {
   pts <- make_test_points(20)
   expect_s3_class(pts, "sf")
