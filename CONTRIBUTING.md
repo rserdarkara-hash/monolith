@@ -339,9 +339,8 @@ Two workflows, answering two different questions:
 - **`tests.yaml`**: the pinned suite (`renv.lock`) on Ubuntu 24.04 and Windows,
   on every push to `main` and every pull request. It must be green before a pull
   request merges. The Linux runner is pinned to a release because GDAL, GEOS and
-  PROJ come from Ubuntu's own packages there. Whether the Windows leg blocks is
-  set by the `continue-on-error` line in that file; if it fails, read it, do not
-  ignore it.
+  PROJ come from Ubuntu's own packages there. Both the Linux and Windows jobs
+  must pass for the workflow to succeed; investigate a failure on either platform.
 - **`upstream.yaml`**: the same numeric suite against today's CRAN, weekly and on
   manual dispatch. A failure here is **news, not a regression**: a package moved
   a number the fixture records. It never blocks anything. If you see it red,
