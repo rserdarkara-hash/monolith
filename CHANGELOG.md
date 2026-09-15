@@ -2,7 +2,7 @@
 
 All notable changes to Monolith are documented in this file.
 
-## [Unreleased]
+## [1.1.2] - 2026-09-15 - TPS scaling in fitting and optimization/ UI redundancy removal / Manual Matérn fit fallback / Correlation check categorisation in RFK, RK and CK
 
 ### Fixed
 - Spatial TPS fits preserve the common coordinate scale in both fitting and lambda optimization. TPS surfaces, CV metrics and selected lambdas change where the sample extent caused artificial anisotropy.

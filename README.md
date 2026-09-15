@@ -1,8 +1,8 @@
 ![Monolith: Spatial Analysis Dashboard](assets/banner.png)
 
-# Monolith Spatial Analysis Dashboard (v1.1.1)
+# Monolith Spatial Analysis Dashboard (v1.1.2)
 
-[![Version](https://img.shields.io/badge/version-1.1.1-6f42c1)](#)
+[![Version](https://img.shields.io/badge/version-1.1.2-6f42c1)](#)
 [![R](https://img.shields.io/badge/R-%E2%89%A5%204.5.0-276DC3?logo=r&logoColor=white)](https://cran.r-project.org/)
 [![Shiny](https://img.shields.io/badge/built%20with-Shiny-1f77b4)](https://shiny.posit.co/)
 [![Tests](https://github.com/rserdarkara-hash/monolith/actions/workflows/tests.yaml/badge.svg)](https://github.com/rserdarkara-hash/monolith/actions/workflows/tests.yaml)
@@ -268,7 +268,7 @@ The full dependency suite, grouped by function:
 | **CRS catalogue** | `DBI`, `RSQLite` |
 
 <details>
-<summary><strong>Tested version matrix</strong>: the exact package versions Monolith 1.1.1 is developed and validated against (click to expand)</summary>
+<summary><strong>Tested version matrix</strong>: the exact package versions Monolith 1.1.2 is developed and validated against (click to expand)</summary>
 
 <br>
 
@@ -464,9 +464,9 @@ Stating what the application does not do is part of using it correctly:
 
 ## Development and AI Assistance
 
-Monolith was built with AI-assisted development tools and is disclosed here in the interest of scientific transparency: the codebase was structured into a Shiny App with **Antigravity CLI** (Google DeepMind), then systematically audited and refined with **Claude Code (Fable 5; Anthropic)**, covering debugging, performance optimization, and line-by-line verification of the mathematical implementations (interpolation engines, variogram fitting, cross-validation metrics).
+Monolith was built with AI-assisted development tools and is disclosed here in the interest of scientific transparency: the codebase was initially structured into a Shiny App with **Antigravity CLI** (Google DeepMind), then systematically audited, refined and upgraded with **Claude Code (Fable 5; Anthropic)** and **Codex (GPT Astra; OpenAI)**, covering debugging, performance optimization, maintenance of function flows, and user interface/experience modifications.
 
-Human oversight remained central throughout: all methodological choices, model formulations, and scientific decisions were specified, reviewed, and validated by the author. Numeric behavior is guarded by the `testthat` suite described [above](#testing-and-reproducibility), and any change that alters numeric results is treated as a scientific decision requiring explicit justification. Responsibility for the correctness of the software rests with the author, not the tools. This disclosure mirrors the statement in the associated publication.
+Human oversight remained central throughout: all methodological choices, model formulations, interpolation engines, variogram fitting, cross-validation metrics, mathematical implementations, and scientific decisions were specified, reviewed, and validated by the author. Numeric behavior is guarded by the `testthat` suite described [above](#testing-and-reproducibility), and any change that alters numeric results is treated as a scientific decision requiring explicit justification. Responsibility for the correctness of the software rests with the author, not the tools. This disclosure mirrors the statement in the associated publication.
 
 ## Author
 
@@ -479,7 +479,7 @@ Human oversight remained central throughout: all methodological choices, model f
   title     = {Monolith: A Spatial Analysis Dashboard for Geostatistical Modeling and Mapping},
   author    = {Kara, R. Serdar},
   year      = {2026},
-  version   = {1.1.1},
+  version   = {1.1.2},
   doi       = {10.5281/zenodo.21130951},
   publisher = {Zenodo},
   url       = {https://github.com/rserdarkara-hash/monolith},
