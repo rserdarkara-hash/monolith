@@ -42,6 +42,27 @@ test_that("compute_governing_factors importance is a non-empty data.frame", {
   expect_true("dropout_loss" %in% colnames(result$importance))
 })
 
+test_that("governing-factors importance is the RMSE increase over the fitted model", {
+  df <- make_test_df(30)
+  result <- compute_governing_factors(df, "a", c("b", "c"),
+                                      n_permutations = 2, rf_ntree = 30)
+
+  raw <- with_seed(12345, {
+    fit <- randomForest::randomForest(a ~ ., data = df[, c("a", "b", "c")],
+                                      ntree = 30, importance = TRUE)
+    explainer <- DALEX::explain(fit, data = df[, c("b", "c")], y = df$a,
+                                label = "Random Forest", verbose = FALSE)
+    as.data.frame(DALEX::model_parts(explainer, B = 2, type = "raw"))
+  })
+  baseline <- sqrt(mean((df$a - predict(result$model, df))^2))
+  expect_equal(mean(raw$dropout_loss[raw$variable == "_full_model_"]), baseline)
+  raw <- raw[!raw$variable %in% c("_baseline_", "_full_model_"), ]
+  expected <- aggregate(dropout_loss ~ variable, data = raw, FUN = mean)
+  expected$dropout_loss <- expected$dropout_loss - baseline
+  expect_equal(result$importance[order(result$importance$variable), ],
+               expected[order(expected$variable), ], tolerance = 1e-8)
+})
+
 test_that("compute_governing_factors top_var is among the predictors", {
   df <- make_test_df(30)
   predictors <- c("b", "c", "d")

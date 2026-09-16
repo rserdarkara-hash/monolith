@@ -10,6 +10,22 @@ manual_vgm <- function(psill, model, range, nugget) {
              kappa = if (identical(model, "Mat")) 1.5 else 0.5)
 }
 
+# NULL when a manual model can be kriged, else the reason it cannot. A zero
+# total sill leaves no covariance to solve; a pure nugget (psill 0, nugget > 0)
+# is a valid, spatially unstructured model.
+validate_manual_vgm <- function(psill, nugget, range) {
+  vals <- suppressWarnings(as.numeric(c(psill, nugget, range)))
+  if (length(vals) != 3 || any(!is.finite(vals))) {
+    return("Nugget, partial sill and range must all be finite numbers.")
+  }
+  if (vals[1] < 0 || vals[2] < 0) return("Nugget and partial sill cannot be negative.")
+  if (vals[1] + vals[2] <= 0) {
+    return("Nugget + partial sill is 0: the model has no variance, so there is nothing to krige.")
+  }
+  if (vals[3] <= 0) return("The range must be greater than 0.")
+  NULL
+}
+
 # gstat fit.method = 7: the criterion shown by Auto-Fit.
 vgm_weighted_sse <- function(v_emp, model) {
   line <- gstat::variogramLine(model, dist_vector = v_emp$dist)
@@ -89,6 +105,31 @@ suggest_lmc_model <- function(primary_vgm) {
   switch(m, "Sph" = 1, "Exp" = 3, "Gau" = sqrt(3), 1)
 }
 
+# Nugget share of the total sill when the model's structure has a parabolic
+# origin (Gaussian, or Matern with nu >= 1), NA for any other model. With little
+# or no nugget such a structure makes the kriging covariance matrix
+# near-singular (Posa 1989; Ababou et al. 1994) and produces large negative
+# kriging weights that place predictions outside the observed range (Deutsch
+# 1996). Spherical and Exponential structures rise linearly from the origin and
+# are not affected.
+vgm_smooth_nugget_share <- function(model) {
+  if (is.null(model) || NROW(model) == 0) return(NA_real_)
+  mdl <- as.character(model$model)
+  st <- which(mdl != "Nug")
+  total <- sum(model$psill)
+  if (!length(st) || !isTRUE(total > 0)) return(NA_real_)
+  smooth <- identical(mdl[st[1]], "Gau") ||
+    (identical(mdl[st[1]], "Mat") && isTRUE(model$kappa[st[1]] >= 1))
+  if (!smooth) return(NA_real_)
+  sum(model$psill[mdl == "Nug"]) / total
+}
+
+# A supplied (manual) Gaussian or Matern model with a nugget below this share of
+# the total sill is flagged, not changed. Advisory only: on the reference data,
+# 5% bounded the overshoot beyond the observed range to 0.02 of its span in
+# every locality, while 1% allowed up to 0.5.
+VGM_SMOOTH_NUGGET_WARN_SHARE <- 0.05
+
 #' Default empirical-variogram lags: cutoff = half the bounding-box diagonal of
 #' the points, split into 15 bins. Returns `list(width, cutoff)` in CRS units.
 calc_scientific_lags <- function(sf_pts) {
@@ -158,7 +199,8 @@ clean_gstat_env <- function(vgm_obj) {
 #' Automated variogram fit. Screens 4 families (Sph, Exp, Gau, Mat with
 #' nu = 1.5) x 4 starting ranges with gstat::fit.variogram. A candidate is
 #' eligible when its practical range lies between max lag / 100 and 2 x max
-#' lag, its partial sill is positive and its nugget non-negative; the lowest
+#' lag, its partial sill is positive, its nugget non-negative, and, for a
+#' Gaussian or Matern structure, its nugget positive; the lowest
 #' SSErr wins, converged candidates before flawed ones. Returns a vgm carrying
 #' attr "vgm_diagnostics", plus "flawed_winner", or "is_fallback" for the
 #' heuristic Spherical model used when nothing is eligible or the empirical
@@ -236,10 +278,19 @@ robust_vgm_fit <- function(v_emp, v_data) {
       # attr(, "direct") - which gstat::variogram() sets and every call site
       # here supplies. Keep this test so eligibility does not depend on that
       # attribute surviving, or on the clamp staying in a future gstat.
+      # A Gaussian or Matern fit whose nugget sits at its lower bound of zero
+      # is ineligible: the least-squares fit wanted a negative nugget, i.e. the
+      # parabolic origin of the family cannot follow the short-lag rise of the
+      # empirical variogram, and without a nugget that origin gives a
+      # near-singular kriging system and predictions far outside the data
+      # range (vgm_smooth_nugget_share). On the reference data such winners
+      # overshot the observed range by up to 1990 times its span.
+      smooth_share <- vgm_smooth_nugget_share(f)
       in_window <- !is.null(sse) && !is.na(sse) &&
                    prange > (max_dist/100) && prange < max_dist * 2 &&
                    f$psill[2] > 0 &&
-                   is.finite(f$psill[1]) && f$psill[1] >= 0
+                   is.finite(f$psill[1]) && f$psill[1] >= 0 &&
+                   !isTRUE(smooth_share <= 1e-8)
       candidates[[length(candidates) + 1]] <- list(fit = f, sse = sse, flawed = flawed, in_window = in_window)
     }
   }

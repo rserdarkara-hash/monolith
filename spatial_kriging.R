@@ -519,31 +519,18 @@ apply_kriging_pipeline <- function(engine = c("OK", "RK", "RFK"), data, target_v
     res <- run_cv_with_repeats(res, cv_ok, method_params, nrow(data), "OK", l, prefix)
     res$res_sf <- krige(form_ok, data, grid_p, model = res$fit, debug.level = 0)
 
-    # A zero-nugget model over near-coincident points makes the kriging
-    # covariance matrix singular, and gstat does not raise there: it returns NA
-    # for every location. The 2 dp dedup removes exact co-location, not points a
-    # centimetre apart, and robust_vgm_fit produces nugget = 0 routinely.
-    # Measured (gstat 2.1.5): 40 points with 8 pairs 11 mm apart under
-    # Gau(psill 1, range 900, nugget 0) -> 100/100 NA predictions, no condition;
-    # the same model with a micro-nugget -> 0/100 NA. RK/RFK/CK each have a
-    # named fallback for their own failure; OK had none, so the locality was
-    # simply absent from the map with nothing said. Retry ONCE with 1e-6 of the
-    # sill - far below any measurable signal - and only when the surface is
-    # already unusable, so this is numerically inert on every run that works.
+    # gstat returns NA for every location, without a condition, when the
+    # kriging system is singular - measured (gstat 2.1.5) for a zero-nugget
+    # Gaussian model over samples a centimetre apart. The model is never
+    # altered here: a nugget small enough to leave it unchanged also leaves the
+    # system unstable, and the all-NA surface is skipped and reported by
+    # run_regional_interpolation. This names the likely cause.
     if (!is.null(res$res_sf) && "var1.pred" %in% names(res$res_sf) &&
         all(is.na(res$res_sf$var1.pred)) &&
-        identical(as.character(res$fit$model[1]), "Nug") &&
-        isTRUE(res$fit$psill[1] <= 0)) {
-      write_warning_file(l, prefix, paste0(
-        "Ordinary Kriging produced no predictions with a zero-nugget model (singular ",
-        "covariance matrix, typically near-coincident samples); retried with a micro-nugget."))
+        isTRUE(vgm_smooth_nugget_share(res$fit) < VGM_SMOOTH_NUGGET_WARN_SHARE)) {
       res$log_msg <- paste0(res$log_msg,
-        " [OK] Zero-nugget model gave an empty surface; retried with a micro-nugget (1e-6 of sill).")
-      fit_eps <- res$fit
-      fit_eps$psill[1] <- max(sum(res$fit$psill, na.rm = TRUE) * 1e-6, .Machine$double.eps)
-      res$fit <- fit_eps
-      res$res_sf <- krige(form_ok, data, grid_p, model = res$fit, debug.level = 0)
-      res <- run_cv_with_repeats(res, cv_ok, method_params, nrow(data), "OK", l, prefix)
+        " [OK] The Gaussian/Matern variogram has a nugget below 5% of its sill, which ",
+        "makes the kriging system singular at these sample locations; add a nugget.")
     }
   } else {
     update_progress_file(l, prefix, 10, 100)
@@ -613,7 +600,8 @@ apply_kriging_pipeline <- function(engine = c("OK", "RK", "RFK"), data, target_v
         cv_rk <- function(seed) {
           perform_kriging_loocv(data, target_var, aux_vars, calc_scientific_lags, robust_vgm_fit,
                                 model_type = "lm", l, prefix,
-                                cv_strategy = method_params$cv_strategy, fold_seed = seed)
+                                cv_strategy = method_params$cv_strategy, fold_seed = seed,
+                                cov_params = method_params$cov_params %||% method_params)
         }
         res <- run_cv_with_repeats(res, cv_rk, method_params, nrow(data), "RK", l, prefix)
       } else if (engine == "RFK") {
@@ -678,7 +666,8 @@ apply_kriging_pipeline <- function(engine = c("OK", "RK", "RFK"), data, target_v
         cv_rfk <- function(seed) {
           perform_kriging_loocv(data, target_var, aux_vars, calc_scientific_lags, robust_vgm_fit,
                                 model_type = "rf", l, prefix, rf_ntree = rf_ntree,
-                                cv_strategy = method_params$cv_strategy, fold_seed = seed)
+                                cv_strategy = method_params$cv_strategy, fold_seed = seed,
+                                cov_params = method_params$cov_params %||% method_params)
         }
         res <- run_cv_with_repeats(res, cv_rfk, method_params, nrow(data), "RFK", l, prefix)
       }

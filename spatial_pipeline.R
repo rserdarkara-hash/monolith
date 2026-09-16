@@ -208,7 +208,7 @@ compute_governing_factors <- function(df, target_col, predictors, n_permutations
     # cannot be interrupted mid-call, so this checkpoint bounds cancel latency at
     # one importance run (as the tuning grid search does in the classifier).
     check_cancel()
-    vip <- DALEX::model_parts(explainer_rf, B = n_permutations)
+    vip <- DALEX::model_parts(explainer_rf, B = n_permutations, type = "difference")
 
     vip_df <- as.data.frame(vip)
     vip_df <- vip_df[vip_df$variable != "_baseline_" & vip_df$variable != "_full_model_", ]
@@ -814,7 +814,7 @@ run_regional_interpolation <- function(item, current_method, current_crs, aux_va
             "R² / NSE / CCC / RPD / RPIQ are undefined."))
         }
         lags_a <- calc_scientific_lags(pts_a)
-        mp_a <- list(idw_p = m_params$idw_p_act, idw_nmax = m_params$idw_nmax, tps_lambda = m_params$tps_lambda_act, pre_fit = m_params$pre_fit_act, grid_aux = grid_aux, cv_strategy = m_params$cv_strategy, cv_repeats = m_params$cv_repeats, cancel_file = cancel_file_val, rfk_uncertainty = m_params$rfk_uncertainty, rf_ntree = m_params$rf_ntree, ck_nmax = m_params$ck_nmax, aux_kept = aux_kept_a)
+        mp_a <- list(idw_p = m_params$idw_p_act, idw_nmax = m_params$idw_nmax, cov_params = list(idw_p = m_params$idw_p_act, idw_nmax = m_params$idw_nmax), tps_lambda = m_params$tps_lambda_act, pre_fit = m_params$pre_fit_act, grid_aux = grid_aux, cv_strategy = m_params$cv_strategy, cv_repeats = m_params$cv_repeats, cancel_file = cancel_file_val, rfk_uncertainty = m_params$rfk_uncertainty, rf_ntree = m_params$rf_ntree, ck_nmax = m_params$ck_nmax, aux_kept = aux_kept_a)
         if (!is.null(cancel_file_val) && file.exists(cancel_file_val)) stop("Model generation cancelled by user.")
         res_a_list <- apply_interpolation(pts_a, "v", current_method, grid_p, aux_vars, lags_a, mp_a, l, "act", vif_threshold)
         res_out$v_emp_act <- res_a_list$v_emp; res_out$v_fit_act <- res_a_list$fit; res_out$cv_act <- res_a_list$cv_metrics; res_out$cv_obj_act <- res_a_list$cv_obj
@@ -874,7 +874,7 @@ run_regional_interpolation <- function(item, current_method, current_crs, aux_va
                 "R² / NSE / CCC / RPD / RPIQ are undefined."))
             }
             lags_p <- calc_scientific_lags(pts_p)
-            mp_p <- list(idw_p = m_params$idw_p_pre, idw_nmax = m_params$idw_nmax, tps_lambda = m_params$tps_lambda_pre, pre_fit = m_params$pre_fit_pre, grid_aux = grid_aux, cv_strategy = m_params$cv_strategy, cv_repeats = m_params$cv_repeats, cancel_file = cancel_file_val, rfk_uncertainty = m_params$rfk_uncertainty, rf_ntree = m_params$rf_ntree, ck_nmax = m_params$ck_nmax, aux_kept = aux_kept_p)
+            mp_p <- list(idw_p = m_params$idw_p_pre, idw_nmax = m_params$idw_nmax, cov_params = list(idw_p = m_params$idw_p_act, idw_nmax = m_params$idw_nmax), tps_lambda = m_params$tps_lambda_pre, pre_fit = m_params$pre_fit_pre, grid_aux = grid_aux, cv_strategy = m_params$cv_strategy, cv_repeats = m_params$cv_repeats, cancel_file = cancel_file_val, rfk_uncertainty = m_params$rfk_uncertainty, rf_ntree = m_params$rf_ntree, ck_nmax = m_params$ck_nmax, aux_kept = aux_kept_p)
             if (!is.null(cancel_file_val) && file.exists(cancel_file_val)) stop("Model generation cancelled by user.")
             res_p_list <- apply_interpolation(pts_p, "pv", current_method, grid_p, aux_vars, lags_p, mp_p, l, "pre", vif_threshold)
             res_out$v_emp_pre <- res_p_list$v_emp; res_out$v_fit_pre <- res_p_list$fit; res_out$cv_pre <- res_p_list$cv_metrics; res_out$cv_obj_pre <- res_p_list$cv_obj
@@ -1197,6 +1197,10 @@ interp_run_item <- function(item, run_params) {
 # Per-locality worker for the sidebar "OPTIMIZE ALL VARIOGRAMS" button.
 # item = list(l, act = data.frame(x, y, v), pre = data.frame(x, y, v) | NULL).
 autofit_vgm_item <- function(item, current_crs) {
+  display_sse <- function(fit) {
+    sse <- attr(fit, "SSErr")
+    if (length(sse) == 1L && is.finite(sse)) signif(sse, 4) else "N/A"
+  }
   res_a <- list(emp = NULL, fit = NULL, mod = "FAIL", sse = "N/A")
   sub_a_raw <- sf::st_as_sf(item$act, coords = c("x", "y"), crs = current_crs)
   sub_a <- validate_and_project_sf(sub_a_raw)
@@ -1209,7 +1213,7 @@ autofit_vgm_item <- function(item, current_crs) {
     res_a$emp <- v_emp_a
     res_a$fit <- best_f_a
     res_a$mod <- if (!is.null(best_f_a)) as.character(best_f_a$model[2]) else "FAIL"
-    res_a$sse <- if (!is.null(best_f_a)) round(attr(best_f_a, "SSErr") %||% 0, 6) else "N/A"
+    res_a$sse <- display_sse(best_f_a)
   }
 
   res_p <- list(emp = NULL, fit = NULL, mod = "FAIL", sse = "N/A")
@@ -1225,7 +1229,7 @@ autofit_vgm_item <- function(item, current_crs) {
       res_p$emp <- v_emp_p
       res_p$fit <- best_f_p
       res_p$mod <- if (!is.null(best_f_p)) as.character(best_f_p$model[2]) else "FAIL"
-      res_p$sse <- if (!is.null(best_f_p)) round(attr(best_f_p, "SSErr") %||% 0, 6) else "N/A"
+      res_p$sse <- display_sse(best_f_p)
     }
   }
 

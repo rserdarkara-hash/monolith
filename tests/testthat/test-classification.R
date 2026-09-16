@@ -121,8 +121,10 @@ test_that("run_classification_cv produces valid pooled metrics and confusion mat
 
   acc <- cv$metrics$.estimate[cv$metrics$.metric == "accuracy"]
   expect_true(acc >= 0 && acc <= 1)
-  # A signal-bearing target should beat the ~1/3 no-information rate.
-  expect_gt(acc, 0.4)
+  # Accuracy is the fraction of correct out-of-fold map-task predictions;
+  # interpolating held-out covariates need not preserve the measured signal.
+  expect_equal(acc, mean(as.character(cv$predictions$.pred_class) ==
+                         as.character(cv$predictions$soil)))
 
   expect_setequal(cv$per_class$class, c("Low", "Med", "High"))
   expect_equal(sum(cv$conf_mat$table), nrow(pts))
@@ -132,6 +134,72 @@ test_that("run_classification_cv produces valid pooled metrics and confusion mat
   prob_cols <- paste0(".pred_", levs)
   psum <- rowSums(cv$predictions[, prob_cols])
   expect_true(all(abs(psum - 1) < 1e-6))
+})
+
+test_that("classification holdout predictions do not use the held-out covariate", {
+  pts <- make_classif_points(n = 60)
+  changed <- pts
+  changed$elev[1] <- changed$elev[1] + 50
+  run_cv <- function(x) run_classification_cv(
+    x, "soil", c("elev", "slope", "parent"), method = "multinom",
+    strategy = "standard", v = 5L, depth = "none")
+  a <- suppressWarnings(run_cv(pts))$predictions
+  b <- suppressWarnings(run_cv(changed))$predictions
+  prob_cols <- paste0(".pred_", levels(pts$soil))
+  expect_equal(as.numeric(b[b$.row == 1, prob_cols]),
+               as.numeric(a[a$.row == 1, prob_cols]), tolerance = 1e-8)
+})
+
+test_that("an integer covariate survives held-out and grid kriging", {
+  # read.csv stores whole-number columns as integer; kriged values are double,
+  # which a workflow trained on the integer column refused.
+  pts <- make_classif_points(n = 60)
+  pts$elev <- as.integer(round(pts$elev * 10))
+  cv <- suppressWarnings(run_classification_cv(
+    pts, "soil", c("elev", "slope"), method = "rf",
+    strategy = "standard", v = 5L, depth = "none"))
+  expect_equal(nrow(cv$predictions), 60)
+  model <- fit_classification_model(pts, "soil", c("elev", "slope"), method = "rf")
+  grid <- pts[1:5, "soil"]
+  grid$elev <- pts$elev[1:5] + 0.5
+  grid$slope <- pts$slope[1:5]
+  surf <- predict_classification_surface(model, sf::st_drop_geometry(grid))
+  expect_equal(nrow(surf), 5)
+})
+
+test_that("classification tuning resamples score fold-kriged covariates", {
+  pts <- make_classif_points(n = 40)
+  predictors <- c("elev", "slope", "parent")
+  train_df <- sf::st_drop_geometry(pts)[, c("soil", predictors)]
+  fold_id <- classif_make_fold_id(pts, "standard", target = "soil", v = 5L)
+  assess_df <- .classif_fold_assessment(pts, train_df, predictors, fold_id)
+  rset <- classif_folds_to_rset(train_df, fold_id, assess_df)
+  idx <- which(fold_id == sort(unique(fold_id))[1])
+  expected <- build_classification_grid_aux(
+    pts[-idx, ], pts[idx, "soil", drop = FALSE], predictors)
+  actual <- rsample::assessment(rset$splits[[1]])
+
+  expect_equal(actual$elev, expected$elev)
+  expect_equal(actual$slope, expected$slope)
+  expect_identical(as.character(actual$parent), as.character(expected$parent))
+  expect_gt(max(abs(actual$elev - train_df$elev[idx])), 1e-6)
+
+  # Both the CV grid search and the final model's own search must hand tune
+  # an rset with reconstructed assessment rows, never the measured rows.
+  seen <- logical(0)
+  original <- classif_folds_to_rset
+  assign("classif_folds_to_rset", function(train_df, fold_id, assess_df = NULL) {
+    seen <<- c(seen, !is.null(assess_df))
+    original(train_df, fold_id, assess_df)
+  }, envir = globalenv())
+  on.exit(assign("classif_folds_to_rset", original, envir = globalenv()), add = TRUE)
+  suppressWarnings(run_classification_cv(
+    pts, "soil", predictors, method = "multinom", strategy = "standard",
+    v = 5L, depth = "light"))
+  suppressWarnings(fit_classification_model(
+    pts, "soil", predictors, method = "multinom", strategy = "standard",
+    v = 5L, depth = "light"))
+  expect_identical(seen, c(TRUE, TRUE))
 })
 
 test_that("a fold that never sees a class still pools its predictions", {
@@ -1071,6 +1139,37 @@ test_that("pipeline persists a reusable model bundle and reports lift/importance
   nd <- data.frame(elev = c(0, 5, 10), slope = 7)
   p <- predict(b$workflow, nd, type = "prob")
   expect_equal(rowSums(as.matrix(p)), rep(1, 3), tolerance = 1e-6)
+})
+
+test_that("classification reports the rows used for CV and the final fit", {
+  d <- make_classif_scope_df(nA = 35, nB = 30)
+  d$elev[1:5] <- NA
+  d$soil[6:7] <- NA
+  d$x[8] <- NA
+  coordinate_valid <- !is.na(d$x) & !is.na(d$y)
+  n_model <- sum(coordinate_valid & stats::complete.cases(d[, c("soil", "elev", "slope")]))
+  rds <- tempfile(fileext = ".rds")
+  on.exit(unlink(rds), add = TRUE)
+
+  res <- run_classification_pipeline(
+    d, target = "soil", predictors = c("elev", "slope"),
+    x_col = "x", y_col = "y", src_crs = 32633, proj_crs = "EPSG:32633",
+    method = "multinom", strategy = "standard", depth = "none",
+    v = 4, make_surface = FALSE, model_rds_path = rds
+  )
+  expect_equal(res$n, n_model)
+  expect_equal(readRDS(rds)$n_train, n_model)
+  expect_equal(nrow(res$cv_predictions), n_model)
+  expect_equal(sum(res$conf_mat), n_model)
+
+  nn <- run_classification_pipeline(
+    d, target = "soil", predictors = character(0),
+    x_col = "x", y_col = "y", src_crs = 32633, proj_crs = "EPSG:32633",
+    strategy = "standard", v = 4, make_surface = FALSE
+  )
+  n_nn <- sum(coordinate_valid & !is.na(d$soil))
+  expect_equal(nn$n, n_nn)
+  expect_equal(nrow(nn$cv_predictions), n_nn)
 })
 
 test_that("classif_scope_adequacy names the offending classes and shortfalls", {

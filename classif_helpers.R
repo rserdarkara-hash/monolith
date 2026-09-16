@@ -335,14 +335,60 @@ classif_make_fold_id <- function(pts_sf, strategy = c("spatial", "standard"),
 #' Turn an integer fold vector into an rsample rset over `train_df`, so the same
 #' fold assignment can drive tune::fit_resamples / tune_grid. Each fold's
 #' assessment set is the rows tagged with that fold id.
-classif_folds_to_rset <- function(train_df, fold_id) {
+classif_folds_to_rset <- function(train_df, fold_id, assess_df = NULL) {
   ids <- sort(unique(fold_id))
+  data <- if (is.null(assess_df)) train_df else dplyr::bind_rows(train_df, assess_df)
+  offset <- if (is.null(assess_df)) 0L else nrow(train_df)
   splits <- lapply(ids, function(i) {
-    assess <- which(fold_id == i)
+    assess <- offset + which(fold_id == i)
     analysis <- which(fold_id != i)
-    rsample::make_splits(list(analysis = analysis, assessment = assess), data = train_df)
+    rsample::make_splits(list(analysis = analysis, assessment = assess), data = data)
   })
   rsample::manual_rset(splits, ids = paste0("Fold", seq_along(ids)))
+}
+
+#' Integer covariates stored as double. Held-out and grid covariates are kriged
+#' (double), and a workflow trained on an integer column refuses them at
+#' prediction ("loss of precision"). Values are unchanged.
+.classif_numeric_as_double <- function(df, predictors) {
+  for (p in predictors) {
+    if (is.integer(df[[p]])) df[[p]] <- as.double(df[[p]])
+  }
+  df
+}
+
+#' Build the covariates each fold would have at its held-out locations using
+#' only that fold's analysis rows. Target labels are retained for scoring, but
+#' never passed to the covariate-surface builder.
+.classif_fold_assessment <- function(keep_sf, train_df, predictors, fold_id,
+                                     cancel_file = NULL, progress = NULL) {
+  assess_df <- train_df
+  ids <- sort(unique(fold_id))
+  for (k in seq_along(ids)) {
+    .classif_check_cancel(cancel_file)
+    idx <- which(fold_id == ids[k])
+    grid <- sf::st_sf(geometry = sf::st_geometry(keep_sf[idx, ]))
+    cov <- sf::st_drop_geometry(build_classification_grid_aux(
+      keep_sf[fold_id != ids[k], ], grid, predictors,
+      cancel_file = cancel_file,
+      progress = function(f) {
+        if (is.function(progress)) progress((k - 1 + f) / length(ids))
+      }))
+    for (p in predictors) {
+      values <- cov[[p]]
+      if (is.factor(train_df[[p]])) {
+        values <- factor(as.character(values), levels = levels(train_df[[p]]),
+                         ordered = is.ordered(train_df[[p]]))
+      } else if (is.character(train_df[[p]])) {
+        values <- as.character(values)
+      } else if (is.logical(train_df[[p]])) {
+        values <- as.logical(as.character(values))
+      }
+      assess_df[[p]][idx] <- values
+    }
+    if (is.function(progress)) progress(k / length(ids))
+  }
+  assess_df
 }
 
 # ── Metrics ─────────────────────────────────────────────────────────────────
@@ -582,7 +628,7 @@ run_classification_cv <- function(pts_sf, target, predictors,
   full_df <- as.data.frame(sf::st_drop_geometry(pts_sf))
   cc <- stats::complete.cases(full_df[, c(target, predictors), drop = FALSE])
   keep_sf <- pts_sf[cc, ]
-  train_df <- full_df[cc, c(target, predictors), drop = FALSE]
+  train_df <- .classif_numeric_as_double(full_df[cc, c(target, predictors), drop = FALSE], predictors)
   # droplevels, not as.factor alone: classif_build_target() carries EVERY bin
   # label as a level (an equal-interval or Jenks break can enclose no samples),
   # and dropping rows with missing covariates can empty a level that the scoped
@@ -621,21 +667,24 @@ run_classification_cv <- function(pts_sf, target, predictors,
   if (weights_applied) wf <- workflows::add_case_weights(wf, .case_wt)
 
   fold_id <- classif_make_fold_id(keep_sf, strategy, target = target, v = v, seed = seed)
-  rset <- classif_folds_to_rset(train_df, fold_id)
+  nested_active <- isTRUE(nested) && length(tune_params) > 0
+  # progress_cb reports progress within the CV stage. Covariate reconstruction
+  # has its own share because it can dominate the old fold-fitting work.
+  cov_share <- 0.25
+  tune_share <- if (length(tune_params) > 0 && !nested_active) 0.25 else 0
+  fold_share <- 1 - cov_share - tune_share
+  report_cv <- if (is.function(progress_cb)) progress_cb else function(...) invisible(NULL)
+  report_cv(0, "Interpolating held-out covariates...")
+  assess_df <- .classif_fold_assessment(
+    keep_sf, train_df, predictors, fold_id, cancel_file = cancel_file,
+    progress = function(f) report_cv(cov_share * f,
+                                      "Interpolating held-out covariates..."))
+  rset <- classif_folds_to_rset(train_df, fold_id, assess_df)
 
   resample_metrics <- classif_resample_metric_set()
-
   fit_wf <- wf
   best_params <- NULL
-  nested_active <- isTRUE(nested) && length(tune_params) > 0
   tune_grid_df <- NULL
-  # Share of this stage's bar given to the non-nested tuning search, which runs
-  # before the fold loop and can rival it in cost (it fits grid x folds models).
-  # Under nesting the search happens inside the folds, so the fold loop owns the
-  # whole stage. progress_cb(frac, label) reports progress WITHIN the CV stage;
-  # the pipeline maps it onto the overall bar.
-  tune_share <- if (length(tune_params) > 0 && !nested_active) 0.30 else 0
-  report_cv <- if (is.function(progress_cb)) progress_cb else function(...) invisible(NULL)
   if (length(tune_params) > 0) {
     # One space-filling grid shared by every tuning pass. Finalising the
     # parameter set against the full predictor frame leaks nothing label-borne
@@ -653,7 +702,7 @@ run_classification_cv <- function(pts_sf, target, predictors,
     # step and is unaffected; `nested = TRUE` removes the optimism at ~inner_v
     # times the cost.
     .classif_check_cancel(cancel_file)
-    report_cv(0, "Tuning hyperparameters (grid search)...")
+    report_cv(cov_share, "Tuning hyperparameters (grid search)...")
     tuned <- .classif_with_seed(seed, {
       tune::tune_grid(wf, resamples = rset, grid = tune_grid_df,
                       metrics = resample_metrics,
@@ -661,7 +710,7 @@ run_classification_cv <- function(pts_sf, target, predictors,
     })
     best_params <- tune::select_best(tuned, metric = "accuracy")
     fit_wf <- tune::finalize_workflow(wf, best_params)
-    report_cv(tune_share)
+    report_cv(cov_share + tune_share)
   }
 
   # Manual out-of-fold loop: fit on the analysis rows, predict hard class AND
@@ -685,10 +734,10 @@ run_classification_cv <- function(pts_sf, target, predictors,
       .classif_check_cancel(cancel_file)
       # Reported at the START of the fold, so the label names the fold that is
       # actually running and the fraction counts folds already finished.
-      report_cv(tune_share + (1 - tune_share) * ((k - 1) / n_fold),
+      report_cv(cov_share + tune_share + fold_share * ((k - 1) / n_fold),
                 sprintf("Cross-validation: fold %d of %d", k, n_fold))
       tr <- train_df[fold_id != i, , drop = FALSE]
-      te <- train_df[fold_id == i, , drop = FALSE]
+      te <- assess_df[fold_id == i, , drop = FALSE]
       if (weights_applied) {
         # Recompute weights from the analysis rows only (no held-out
         # class-prevalence leaks into the fold's fit).
@@ -704,7 +753,13 @@ run_classification_cv <- function(pts_sf, target, predictors,
         inner_id <- classif_make_fold_id(keep_sf[fold_id != i, , drop = FALSE],
                                          strategy, target = target,
                                          v = inner_v, seed = seed + i)
-        inner_rset <- classif_folds_to_rset(tr, inner_id)
+        inner_assess <- .classif_fold_assessment(
+          keep_sf[fold_id != i, , drop = FALSE], tr, predictors, inner_id,
+          cancel_file = cancel_file,
+          progress = function(f) report_cv(
+            cov_share + tune_share + fold_share * ((k - 1 + 0.25 * f) / n_fold),
+            sprintf("Interpolating inner-fold covariates: fold %d of %d", k, n_fold)))
+        inner_rset <- classif_folds_to_rset(tr, inner_id, inner_assess)
         tuned_i <- tune::tune_grid(wf, resamples = inner_rset, grid = tune_grid_df,
                                    metrics = resample_metrics,
                                    control = tune::control_grid(save_pred = FALSE, verbose = FALSE))
@@ -778,6 +833,7 @@ run_classification_cv <- function(pts_sf, target, predictors,
     method = method,
     strategy = strategy,
     fold_id = fold_id,
+    assessment_df = assess_df,
     n_folds = length(unique(fold_id)),
     # The levels actually modelled (complete cases, empty levels dropped) — the
     # single source of truth for the surface columns and the exported bundle.
@@ -1202,11 +1258,12 @@ fit_classification_model <- function(pts_sf, target, predictors,
                                      method = "rf", depth = "none",
                                      strategy = c("spatial", "standard"),
                                      v = 10L, seed = 12345L,
-                                     class_weights = FALSE) {
+                                     class_weights = FALSE,
+                                     cv_assessment_df = NULL, cv_fold_id = NULL) {
   strategy <- match.arg(strategy)
   full_df <- as.data.frame(sf::st_drop_geometry(pts_sf))
   cc <- stats::complete.cases(full_df[, c(target, predictors), drop = FALSE])
-  train_df <- full_df[cc, c(target, predictors), drop = FALSE]
+  train_df <- .classif_numeric_as_double(full_df[cc, c(target, predictors), drop = FALSE], predictors)
   # Same droplevels contract as run_classification_cv, so `model$levels` (which
   # names the surface probability columns and the exported bundle's classes) can
   # never claim a class the fitted engine has no column for.
@@ -1232,7 +1289,13 @@ fit_classification_model <- function(pts_sf, target, predictors,
   if (length(tune_params) > 0) {
     keep_sf <- pts_sf[cc, ]
     fold_id <- classif_make_fold_id(keep_sf, strategy, target = target, v = v, seed = seed)
-    rset <- classif_folds_to_rset(train_df, fold_id)
+    assess_df <- if (!is.null(cv_assessment_df) && identical(fold_id, cv_fold_id) &&
+                     nrow(cv_assessment_df) == nrow(train_df)) {
+      cv_assessment_df
+    } else {
+      .classif_fold_assessment(keep_sf, train_df, predictors, fold_id)
+    }
+    rset <- classif_folds_to_rset(train_df, fold_id, assess_df)
     tuned <- .classif_with_seed(seed, {
       pset <- hardhat::extract_parameter_set_dials(wf)
       pset <- dials::finalize(pset, x = train_df[, predictors, drop = FALSE])
@@ -1610,16 +1673,20 @@ build_classification_grid_aux <- function(pts_proj, grid_p, predictors,
     kc <- krige_covariates(pts_proj, grid_p, num_preds, lags, mp,
                            on_var = function(i, total) {
                              .classif_check_cancel(cancel_file)
-                             if (is.function(progress)) progress(i / total)
+                             if (is.function(progress)) progress(i / length(predictors))
                            })
     grid_aux <- kc$grid_aux
   }
   if (length(cat_preds) > 0) {
+    .classif_check_cancel(cancel_file)
     nn <- FNN::get.knnx(sf::st_coordinates(pts_proj),
                         sf::st_coordinates(grid_p), k = 1)$nn.index[, 1]
-    for (cp in cat_preds) {
+    for (j in seq_along(cat_preds)) {
+      .classif_check_cancel(cancel_file)
+      cp <- cat_preds[j]
       grid_aux[[cp]] <- factor(as.character(df[[cp]])[nn],
                                levels = levels(as.factor(df[[cp]])))
+      if (is.function(progress)) progress((length(num_preds) + j) / length(predictors))
     }
   }
   grid_aux
@@ -1988,7 +2055,7 @@ run_classification_pipeline <- function(df, target, predictors,
       fold_id = cv$fold_id, n_folds = cv$n_folds,
       class_gaps = cv$class_gaps,
       method = "nn", strategy = strategy, depth = "none",
-      n = nrow(pts), levels = cv$levels, predictors = character(0),
+      n = length(cv$fold_id), levels = cv$levels, predictors = character(0),
       target_col = target,
       cv_predictions = cv$predictions,
       majority_acc = cv$majority_acc,
@@ -2043,7 +2110,7 @@ run_classification_pipeline <- function(df, target, predictors,
     # them; NULL in the ordinary case. A CV-design caveat the module reports.
     class_gaps = cv$class_gaps,
     method = method, strategy = strategy, depth = depth,
-    n = nrow(pts), levels = levs, predictors = predictors,
+    n = length(cv$fold_id), levels = levs, predictors = predictors,
     target_col = target,
     # Pooled out-of-fold predictions (small: n rows) power the main session's
     # confidence-threshold coverage/selective-accuracy readout.
@@ -2061,7 +2128,9 @@ run_classification_pipeline <- function(df, target, predictors,
   model <- fit_classification_model(pts, target, predictors, method = method,
                                     depth = depth, strategy = strategy,
                                     v = v, seed = seed,
-                                    class_weights = class_weights)
+                                    class_weights = class_weights,
+                                    cv_assessment_df = cv$assessment_df,
+                                    cv_fold_id = cv$fold_id)
   report("fit", 1)
 
   .classif_check_cancel(cancel_file)
@@ -2104,7 +2173,7 @@ run_classification_pipeline <- function(df, target, predictors,
       # The CRS the run was actually computed in (the UTM fallback when the
       # requested target CRS was geographic), not the one that was asked for.
       proj_crs   = if (is.null(work_crs$wkt) || is.na(work_crs$wkt)) proj_crs else work_crs$wkt,
-      n_train    = nrow(pts),
+      n_train    = out$n,
       trained_at = Sys.time(),
       versions   = list(
         r = R.version.string,

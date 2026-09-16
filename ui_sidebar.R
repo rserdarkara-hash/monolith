@@ -33,9 +33,11 @@ ui_sidebar_panel <- sidebarPanel(width = 3,
                        condition = "['pred', 'pred_ss', 'resid'].includes(input.value_type)",
                        hr(),
                        h5("Actual vs Predicted"),
-                       checkboxInput("comp_mode", HTML(paste0("Comparison Mode", info_tooltip("comp_mode", "Splits the viewer to compare the Actual (observed) map against the map of your uploaded ML predictions. Useful for visual validation."))), FALSE)
-                     ),          conditionalPanel(condition = "input.comp_mode && ['pred', 'pred_ss'].includes(input.value_type)", 
-                           checkboxInput("sep_fit", HTML(paste0("Fit Actual/Predicted Separately", info_tooltip("sep_fit_info", "If checked, optimizes variograms separately for actual and predicted data. If unchecked, applies actual variogram to predictions."))), TRUE),
+                       checkboxInput("comp_mode", HTML(paste0("Comparison Mode", info_tooltip("comp_mode", "Splits the viewer to compare the Actual (observed) map against the map of your uploaded ML predictions. Useful for visual validation."))), FALSE),
+                       # Every prediction or residual view kriges a predicted
+                       # surface, so this governs it with or without Comparison Mode.
+                       checkboxInput("sep_fit", HTML(paste0("Fit Actual/Predicted Separately", info_tooltip("sep_fit_info", "Checked (recommended): the predicted surface is kriged with its own variogram, fitted to the uploaded prediction values, which form a field with their own spatial structure. Unchecked: the predicted surface reuses the Actual variogram, so both are interpolated under one spatial model; manual tuning then offers only the Actual target."))), TRUE)
+                     ),          conditionalPanel(condition = "input.comp_mode && ['pred', 'pred_ss'].includes(input.value_type)",
                            checkboxInput("match_scales", HTML(paste0("Match Scales", info_tooltip("match_info", "Forces the map legends for Actual and Predicted data to use the same color range."))), FALSE))
         ))
       )
@@ -123,11 +125,11 @@ ui_sidebar_panel <- sidebarPanel(width = 3,
                     div(h5(HTML(paste0("Manual Tuning", info_tooltip("m_tune", "Switch to the Scientific Analysis tab to view the Variogram plot interactively updating as you slide the Nugget, Partial Sill, and Range sliders.")))), style="margin-bottom:5px;"),
                     selectInput("k_mod", "Variogram Model", choices = c("Sph", "Exp", "Gau", "Mat")),
                     selectInput("m_loc", "Locality to Tune", choices = NULL),
-                    conditionalPanel(condition = "input.comp_mode == true || ['pred', 'pred_ss', 'resid'].includes(input.value_type)",
+                    conditionalPanel(condition = "(input.comp_mode == true || ['pred', 'pred_ss', 'resid'].includes(input.value_type)) && input.sep_fit == true",
                       shinyWidgets::radioGroupButtons("m_target", "Target", choices = c("Actual" = "act", "Predicted" = "pre"), size = "sm", justified = TRUE)
                     ),
-                    sliderInput("m_nugget", "Nugget", min = 0, max = 1, value = 0, step = 0.01),
-                    sliderInput("m_psill", "Partial Sill", min = 0, max = 1, value = 1, step = 0.01),
+                    sliderInput("m_nugget", "Nugget", min = 0, max = 1, value = 0, step = 0.01, ticks = FALSE),
+                    sliderInput("m_psill", "Partial Sill", min = 0, max = 1, value = 1, step = 0.01, ticks = FALSE),
                     sliderInput("m_range", "Range", min = 1, max = 1000, value = 100),
                     actionButton("apply_manual", "Apply manual model", class = "btn-default btn-block"),
                     # A hand-tuned fit describes the VALUE-scale variogram, so

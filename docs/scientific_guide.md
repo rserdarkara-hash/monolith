@@ -22,7 +22,7 @@ Unlike simple kriging, OK assumes an unknown but constant global mean (<i>&mu;</
 
 **Agronomical example:** predicting soil pH across a relatively uniform field where variation is driven by soil-forming processes rather than abrupt topography or management.
 
-**Algorithmic stability (micro-nugget):** when the smallest empirical semivariance is exactly zero, the variogram search starts its nugget at `max(initial_sill * 1e-6, 1e-6)` instead of zero; the fitted nugget can still be zero. A zero-nugget model over near-coincident samples makes the kriging matrix singular, and gstat then returns an undefined prediction at every grid node without raising an error. When that happens, Ordinary Kriging refits the surface once with a nugget of 1e-6 of the total sill and records the retry in the run log.
+**Algorithmic stability:** when the smallest empirical semivariance is exactly zero, the variogram search starts its nugget at `max(initial_sill * 1e-6, 1e-6)` instead of zero. A singular kriging system, such as a Gaussian or Matern model without a nugget over samples a centimetre apart, makes gstat return an undefined prediction at every grid node without raising an error. The variogram is not altered: a nugget small enough to leave the model unchanged makes the system solvable but not stable (on the reference data a nugget of 10⁻⁶ of the sill still placed predictions up to 33 times the observed span outside the observed range). The locality is skipped with a named warning, and the run log names a Gaussian or Matern model with a nugget below 5% of its sill as the likely cause (Section 4.1).
 
 ### 1.2 Regression Kriging (RK)
 
@@ -59,7 +59,7 @@ An ordinary least-squares linear model (`lm`) fits the trend <i>m(x)</i> from se
 
 **Covariate standardization and its cross-validation leak:** every auxiliary variable is standardized to zero mean and unit variance before the LMC is fitted, using the mean and standard deviation of the **full** data set. The target is not rescaled, so predictions, metrics and plotted variograms stay in the variable's own units. Cross-validation then holds points out of an already centred frame, so each held-out observation contributed, by a factor of 1/n, to the centring of its own predictors. The optimism this creates is affine, second order and O(1/n): it cannot change the rank ordering of predictions and touches only the covariates. Removing it would require re-standardizing inside every fold, replacing `gstat.cv()` with a hand-rolled co-kriging loop; that cost was reviewed and declined in favour of documenting the approximation. Read CK metrics as marginally optimistic relative to OK metrics on the same data.
 
-**Cross-validation holdout convention (full-row removal):** CK cross-validation removes the entire held-out row, the primary observation *and* its co-located covariate observations, from the co-kriging system (`gstat.cv(..., remove.all = TRUE)`). The gstat default removes only the primary variable, which is right when secondary data are exhaustively available (a collocated sensor raster). Here the covariates are co-sampled laboratory measurements, so at real grid locations CK has no covariate values and predicts them jointly through the LMC. Scoring with the covariates left in would evaluate the model under an information regime the map never enjoys, and would be inconsistent with RK/RFK, whose leave-one-out procedure removes full rows. CK metrics are therefore honest with respect to the prediction task, and correspondingly lower than under the gstat default.
+**Cross-validation holdout convention (full-row removal):** CK cross-validation removes the entire held-out row, the primary observation *and* its co-located covariate observations, from the co-kriging system (`gstat.cv(..., remove.all = TRUE)`). The gstat default removes only the primary variable, which is right when secondary data are exhaustively available (a collocated sensor raster). Here the covariates are co-sampled laboratory measurements, so at real grid locations CK has no covariate values and predicts them jointly through the LMC. RK and RFK likewise exclude the held-out row's measured covariates: each fold kriges them from its training rows before evaluating the trend. Their maps also use covariate observations from rows with a missing target, which cannot enter a target-labelled CV fold. The CV scores the prediction task available from the fold's training rows, while CK still reuses a full-data LMC (Section 5).
 
 **The LMC fits sills only; one range is shared and held fixed.** A linear model of coregionalization requires a *common* range across every direct and cross variogram (Goovaerts 1997; Wackernagel 2003), so `fit.lmc()` runs with `fit.ranges = FALSE` (Pebesma 2004). Two consequences follow, and they point in opposite directions. The starting **sill** is inert: with model type and range held fixed the variogram is *linear in its sill parameters*, so the weighted-least-squares solution does not depend on it (verified empirically, starting sills spanning 1e-6 to 1e12 on one empirical variogram return a bit-identical fitted sill). The starting **range**, by contrast, is not fitted and therefore *is* the final range of every variogram in the LMC. It is set to the range that weighted least squares fitted to the primary variable's own omnidirectional variogram, so the coregionalization length reflects the data's measured spatial structure. When that fit is itself the heuristic fallback, or returns no usable range, the seed falls back to the extent heuristic (half the variogram cutoff, i.e. a quarter of the bounding-box diagonal) and the run log says so. Read the CK range as the primary variable's range imposed on the whole system, not as a separately fitted quantity per covariate.
 
@@ -274,9 +274,13 @@ Geostatistical models require a theoretical curve fitted to this empirical scatt
 
 **The nugget must be non-negative.** A candidate whose fitted nugget <i>C<sub>0</sub></i> is below zero is refused outright, before any error comparison. Such a model makes <i>&gamma;(h)</i> negative for small <i>h</i>, so it is not a valid (conditionally negative definite) covariance model and the kriging system built from it has no solution. The failure is silent rather than loud: `gstat` does not raise there, it returns an undefined prediction at every location, which would surface as a blank locality and an empty metrics row behind a variogram panel reporting a clean converged fit. This is an *eligibility* rule, not a preference: an invalid model must not be comparable on fit error at all.
 
+**Gaussian and Matern candidates need a positive nugget.** Both families rise parabolically from the origin; the Gaussian model implies infinitely differentiable realizations (Stein 1999). A Gaussian or Matern candidate whose fitted nugget is zero is refused before the error comparison. `gstat::fit.variogram` returns a zero nugget when the non-negativity bound is active, meaning the unconstrained fit wanted a negative nugget: the family's origin cannot follow the rise of the empirical variogram over the first lags. Without a nugget such a model makes the kriging matrix near-singular (Posa 1989; Ababou et al. 1994) and produces large negative kriging weights that carry predictions outside the observed range (Deutsch 1996). On the reference data the rule changed 12 of 98 locality/variable fits. It removed the four surfaces that left the observed range, the worst by 1990 times the observed span, and leave-one-out error was equal or lower in 10 of the 12. The rule applies wherever the search runs: ordinary kriging, the RK/RFK residual variograms, covariate kriging, the co-kriging seed and every cross-validation fold refit. Spherical and exponential candidates are unaffected.
+
+A screen on the condition number of the kriging matrix was measured and rejected because it does not separate these cases. On the reference data a surface with condition number 281 left the observed range by 0.4 of its span, while one at 19,300 stayed inside it: the damage comes from the model's negative weights, not from floating-point error.
+
 **Candidates are screened on the practical range.** Each fitted candidate must fall inside a sanity window (between one hundredth and twice the largest empirical lag distance) before it can win, and the test is applied to the **practical range**, the distance at which the model reaches about 95% of its sill. gstat's range parameter *a* means a different ground distance in every family: the practical range is *a* for spherical, 3*a* for exponential, &radic;3·*a* for Gaussian and about 4.75·*a* for Matern with &nu; = 1.5 (Goovaerts 1997). A window applied to the raw *a* would therefore judge families by different standards, admitting an exponential structure extending three times further than a spherical one on the same test, so eligibility would depend on the family rather than on fit quality. Converting first makes the window mean the same physical distance for every candidate. This affects only which candidates are *eligible*; the winner among them is still the lowest weighted-least-squares error, converged fits preferred.
 
-**Manual override.** Automated fits can settle in local minima or chase outliers at long lags. **Manual Tuning** lets you prioritize the fit at short lags, which carry the greatest weight in kriging.
+**Manual override.** Automated fits can settle in local minima or chase outliers at long lags. **Manual Tuning** lets you prioritize the fit at short lags, which carry the greatest weight in kriging. The sliders are scaled to the tuned locality's data: nugget and partial sill run from 0 to twice the larger of the sample variance and the stored total sill, and range up to the larger of 1.5 times the bounding-box diagonal and three times the stored range, each in 200 steps. A model whose nugget and partial sill are both zero has no covariance and is refused. A manual model is used as applied. A Gaussian or Matern model with a nugget below 5% of its total sill is flagged when applied, in the variogram subtitle and on the map. This threshold is advisory: on the reference data a 5% nugget kept the overshoot beyond the observed range to at most 0.02 of its span in each of six localities, while 1% allowed up to 0.5.
 
 ### 4.2 IDW optimization
 
@@ -311,7 +315,7 @@ All fold assignments use a fixed seed (`CV_FOLD_SEED = 12345`); see Section 9.1 
 
 > **What each engine refits inside a fold. Read this before comparing engines.**
 >
-> * **RK and RFK** refit everything inside every fold: the trend model (`lm` or `randomForest`) *and* the residual variogram are estimated from the fold's training points alone (`perform_kriging_loocv`). Their metrics are a clean out-of-sample estimate of the whole modelling procedure.
+> * **RK and RFK** refit the covariate variograms and interpolate each held-out covariate from the fold's training rows, using the map's IDW fallback settings when needed. They also refit the trend model (`lm` or `randomForest`) and residual variogram on those rows (`perform_kriging_loocv`). The held-out measured covariates never enter their own prediction.
 > * **OK, CK and IDW** are cross-validated through `gstat::krige.cv` / `gstat::gstat.cv`, which re-solve the kriging system per fold but **do not refit the variogram**: the model fitted once on the full point set (an LMC for CK) is reused in every fold, so each held-out point contributed to the spatial-structure model that predicts it.
 >
 > The resulting optimism is second order and usually small, since a variogram summarises every pair in the data set and removing one point moves it little, but it is **systematic and one-directional**: OK and CK metrics are mildly optimistic *relative to* RK and RFK on the same data. Read a narrow RMSE or R² advantage for OK/CK accordingly. Comparisons within an engine, across localities or variables, are unaffected. IDW carries the same reuse for its power exponent (Section 4.2) and TPS for a fixed lambda (Section 4.3).
@@ -630,10 +634,12 @@ Every other constant that shapes a result, grouped by stage. Values exposed as s
 | Minimum points per locality surface | 3 | `run_regional_interpolation` |
 | Empirical variogram cutoff and lag width | cutoff = half the bounding-box diagonal; width = cutoff / 15 | `calc_scientific_lags` (`spatial_vgm.R`) |
 | Auto-fit candidates | Sph, Exp, Gau, Mat (&nu; = 1.5) × starting ranges max lag / 10, / 5, / 4, / 2 [4.1] | `robust_vgm_fit` (`spatial_vgm.R`) |
-| Candidate eligibility window | practical range in (max lag / 100, 2 × max lag); partial sill > 0; nugget &ge; 0 [4.1] | `robust_vgm_fit` |
+| Candidate eligibility window | practical range in (max lag / 100, 2 × max lag); partial sill > 0; nugget &ge; 0; Gau and Mat nugget > 0 [4.1] | `robust_vgm_fit` |
 | Practical-range factors | Sph 1, Exp 3, Gau &radic;3, Mat (&nu; = 1.5) 4.75 [4.1] | `.vgm_practical_range_factor` (`spatial_vgm.R`) |
 | Heuristic fallback variogram | fewer than 5 lag bins, or no eligible candidate: Sph, 80% partial sill, range max lag / 2; nugget-dominated (95% nugget, range max lag / 10) when the smallest semivariance exceeds 80% of the variance [4.1] | `robust_vgm_fit` |
-| Starting micro-nugget / OK retry nugget | max(variance × 10⁻⁶, 10⁻⁶) / 10⁻⁶ of the total sill [1.1] | `robust_vgm_fit`; `apply_kriging_pipeline` (`spatial_kriging.R`) |
+| Starting nugget when the smallest semivariance is zero | max(variance × 10⁻⁶, 10⁻⁶) [1.1] | `robust_vgm_fit` |
+| Manual Gau/Mat nugget advisory | nugget below 5% of the total sill [4.1] | `VGM_SMOOTH_NUGGET_WARN_SHARE` (`spatial_vgm.R`) |
+| Manual variogram sliders | nugget and partial sill 0 to 2 × max(variance, stored total sill); range to max(1.5 × bounding-box diagonal, 3 × stored range); 200 steps [4.1] | `manual_vgm_slider_spec` (`ui_formatting.R`) |
 
 **Engines**
 
@@ -695,6 +701,8 @@ Every other constant that shapes a result, grouped by stage. Values exposed as s
 | Normality test | Shapiro-Wilk below n = 5000, Lilliefors at or above; &alpha; = 0.05; no test below n = 3 | `compute_normality` (`desc_exploratory_module.R`) |
 | Governing Factors | at least 10 complete rows; seed 12345; Permutations 10 to 100 (default 50), trees 50 to 500 (default 100), SHAP sample 50 to 1000 (default 100) | `compute_governing_factors` (`spatial_pipeline.R`), `gov_module.R` |
 
+Governing Factors permutation importance is the mean RMSE after shuffling a predictor minus the unshuffled forest's RMSE on the same DALEX evaluation sample (up to 1,000 complete-case rows by default). `DALEX::model_parts(type = "difference")` applies this baseline subtraction for each permutation. Zero indicates no observed increase under the shuffles; a negative value means the shuffled predictor reduced RMSE. The table reports OOB variance explained separately as a model-quality diagnostic.
+
 **Classification Suite**
 
 | Constant | Value | Where |
@@ -736,6 +744,10 @@ The default validation is **spatial blocked CV** (`spatialsample::spatial_cluste
 
 Predictions are collected **out-of-fold and pooled** before any metric is computed: each fold's model predicts hard classes *and* full class-probability vectors on its held-out points, and metrics are evaluated once on the pooled set. Pooling avoids the undefined per-fold macro-metrics that arise when a spatially contiguous fold contains a single class, and it lets every metric, probability metrics included, be evaluated once over the full class set.
 
+Each assessment point receives covariates built from that fold's training rows: numeric variables use the same kriging/IDW builder as the map, and categorical variables take the nearest training point's class. The measured covariates at held-out points are excluded. Outer-fold scoring, out-of-fold permutation importance and every tuning resample use this map input path, including the inner resamples of nested tuning. The spatial 1-NN baseline still uses only the training coordinates and labels. The map's covariate surfaces can additionally use rows with a missing target, while CV folds contain only target-labelled complete cases. CV therefore estimates the map task from the fold's available training data whether or not **Predict maps** is selected; predicting at new sites with measured covariates is a different task.
+
+The reported sample size and exported model bundle's `n_train` count the rows entering CV and the final fit. For covariate models, these have valid coordinates, target and every selected predictor. For a covariate-free spatial 1-NN run, valid coordinates and a present target suffice. Each included row receives one out-of-fold prediction.
+
 Reported metrics: overall accuracy, Cohen's kappa (Cohen 1960), balanced accuracy (Brodersen et al. 2010), macro-averaged precision, recall and F1 (so minority classes are not masked), multiclass ROC AUC (Hand & Till 2001), multiclass log-loss, and the Brier score (Brier 1950). The confusion matrix is accompanied by per-class **producer accuracy** (recall, the omission-error complement) and **user accuracy** (precision, the commission-error complement), the standard per-class report in soil and land-cover classification (Congalton 1991).
 
 **Classes absent from a fold's training rows.** Spatial folds are not class-stratified, since the blocks are defined by geometry, so a spatially clustered class can fall entirely inside one held-out block; class-stratified random folds have the same hole for a singleton class, which necessarily lands in one fold. That fold's model is then fitted on data containing none of that class and can never predict it. The suite treats this as a property of the validation design rather than an error: the absent class receives probability **0** from that fold, which is the model's genuine posterior since a class it never saw carries no mass, the held-out samples of that class score as misses, and the run reports which classes were affected. The reported producer accuracy for such a class is therefore pessimistic by construction and the pooled log-loss carries the corresponding penalty; overall accuracy and kappa are depressed only in proportion to the affected sample count. The remedies are the usual ones: fewer classes, quantile rather than equal-interval breaks (which distribute samples evenly and rarely strand a class), standard random k-fold when an in-domain estimate is wanted, or a wider spatial scope.
@@ -760,7 +772,7 @@ The classifier is trained at sample locations, but map prediction requires covar
 * **Numeric covariates** are interpolated to the grid with the same ordinary-kriging covariate builder RK and RFK use (`krige_covariates`, with an IDW fallback at p = 2, nmax = 12).
 * **Categorical covariates** cannot be kriged; each grid cell inherits the class of its nearest training point.
 
-Both transfers are approximations whose smoothing and blocking error propagates into the classified map, the probability surfaces and the entropy surface. Where wall-to-wall covariate rasters exist (DEM derivatives, satellite bands), sampling them at grid nodes outside the app remains the more rigorous DSM design. The cross-validated performance metrics, computed strictly at sample locations, are unaffected by this approximation.
+Both transfers are approximations whose smoothing and blocking error propagates into the classified map, the probability surfaces and the entropy surface. Where wall-to-wall covariate rasters exist (DEM derivatives, satellite bands), sampling them at grid nodes outside the app remains the more rigorous DSM design. Cross-validation rebuilds these transfers from each fold's training rows, so its metrics include their prediction error. A model applied to measured covariates at new sites answers a different prediction task.
 
 ### 10.5 Spatial scope and the prediction domain
 
@@ -864,6 +876,8 @@ predict(b$workflow, new_data, type = "prob")   # or type = "class"
 
 Every work below is cited somewhere in this guide, and every citation in the text resolves here. Each entry carries a DOI, or an ISBN or proceedings reference where no DOI exists.
 
+Ababou, R., Bagtzoglou, A. C., & Wood, E. F. (1994). On the condition number of covariance matrices in kriging, estimation, and simulation of random fields. *Mathematical Geology*, 26(1), 99-133. https://doi.org/10.1007/BF02065878
+
 Abdi, H., & Williams, L. J. (2010). Principal component analysis. *WIREs Computational Statistics*, 2(4), 433-459. https://doi.org/10.1002/wics.101
 
 Bellon-Maurel, V., Fernandez-Ahumada, E., Palagos, B., Roger, J.-M., & McBratney, A. (2010). Critical review of chemometric indicators commonly used for assessing the quality of the prediction of soil attributes by NIR spectroscopy. *TrAC Trends in Analytical Chemistry*, 29(9), 1073-1081. https://doi.org/10.1016/j.trac.2010.05.006
@@ -895,6 +909,8 @@ Congalton, R. G. (1991). A review of assessing the accuracy of classifications o
 Craven, P., & Wahba, G. (1978). Smoothing noisy data with spline functions: estimating the correct degree of smoothing by the method of generalized cross-validation. *Numerische Mathematik*, 31(4), 377-403. https://doi.org/10.1007/BF01404567
 
 Cressie, N. (1985). Fitting variogram models by weighted least squares. *Journal of the International Association for Mathematical Geology*, 17(5), 563-586. https://doi.org/10.1007/BF01032109
+
+Deutsch, C. V. (1996). Correcting for negative weights in ordinary kriging. *Computers & Geosciences*, 22(7), 765-773. https://doi.org/10.1016/0098-3004(96)00005-2
 
 Dietterich, T. G. (1998). Approximate statistical tests for comparing supervised classification learning algorithms. *Neural Computation*, 10(7), 1895-1923. https://doi.org/10.1162/089976698300017197
 
@@ -964,6 +980,8 @@ Pebesma, E. J. (2004). Multivariable geostatistics in S: the gstat package. *Com
 
 Ploton, P., Mortier, F., Réjou-Méchain, M., Barbier, N., Picard, N., Rossi, V., Dormann, C., Cornu, G., Viennois, G., Bayol, N., Lyapustin, A., Gourlet-Fleury, S., & Pélissier, R. (2020). Spatial validation reveals poor predictive performance of large-scale ecological mapping models. *Nature Communications*, 11, 4540. https://doi.org/10.1038/s41467-020-18321-y
 
+Posa, D. (1989). Conditioning of the stationary kriging matrices for some well-known covariance models. *Mathematical Geology*, 21(7), 755-765. https://doi.org/10.1007/BF00893320
+
 Roberts, D. R., Bahn, V., Ciuti, S., Boyce, M. S., Elith, J., Guillera-Arroita, G., Hauenstein, S., Lahoz-Monfort, J. J., Schröder, B., Thuiller, W., Warton, D. I., Wintle, B. A., Hartig, F., & Dormann, C. F. (2017). Cross-validation strategies for data with temporal, spatial, hierarchical, or phylogenetic structure. *Ecography*, 40(8), 913-929. https://doi.org/10.1111/ecog.02881
 
 Rousseeuw, P. J., & Van Driessen, K. (1999). A fast algorithm for the minimum covariance determinant estimator. *Technometrics*, 41(3), 212-223. https://doi.org/10.1080/00401706.1999.10485670
@@ -973,6 +991,8 @@ Schratz, P., Muenchow, J., Iturritxa, E., Richter, J., & Brenning, A. (2019). Hy
 Shannon, C. E. (1948). A mathematical theory of communication. *Bell System Technical Journal*, 27(3), 379-423. https://doi.org/10.1002/j.1538-7305.1948.tb01338.x
 
 Shepard, D. (1968). A two-dimensional interpolation function for irregularly-spaced data. *Proceedings of the 1968 23rd ACM National Conference*, 517-524. https://doi.org/10.1145/800186.810616
+
+Stein, M. L. (1999). *Interpolation of Spatial Data: Some Theory for Kriging*. Springer, New York. https://doi.org/10.1007/978-1-4612-1494-6
 
 Strobl, C., Boulesteix, A.-L., Kneib, T., Augustin, T., & Zeileis, A. (2008). Conditional variable importance for random forests. *BMC Bioinformatics*, 9, 307. https://doi.org/10.1186/1471-2105-9-307
 

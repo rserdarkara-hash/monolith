@@ -877,6 +877,7 @@
       # LOOCV contribute their single (deterministic) frame - see
       # build_cv_repeat_summary.
       reps_act <- list(); reps_pre <- list()
+      run_fits <- list()
 
       for(res in res_all) {
           l <- res$l
@@ -901,7 +902,10 @@
           if(!is.null(res$pts)) sf_list[[length(sf_list)+1]] <- res$pts
           
           if(!is.null(res$v_emp_act)) rv$v_emp_list[[paste0(l, "_act")]] <- res$v_emp_act
-          if(!is.null(res$v_fit_act)) rv$v_fit_list[[paste0(l, "_act")]] <- res$v_fit_act
+          if(!is.null(res$v_fit_act)) {
+            rv$v_fit_list[[paste0(l, "_act")]] <- res$v_fit_act
+            run_fits[[paste0(l, "_act")]] <- res$v_fit_act
+          }
           if(!is.null(res$cv_act)) rv$cv_metrics_act[[l]] <- res$cv_act
           if(!is.null(res$cv_obj_act)) rv$cv_data_act[[l]] <- res$cv_obj_act
           if(cv_repeats_val > 1) {
@@ -912,7 +916,10 @@
           if(!is.null(res$gstat_act)) rv$gstat_objs[[paste0(l, "_act")]] <- res$gstat_act
           
           if(!is.null(res$v_emp_pre)) rv$v_emp_list[[paste0(l, "_pre")]] <- res$v_emp_pre
-          if(!is.null(res$v_fit_pre)) rv$v_fit_list[[paste0(l, "_pre")]] <- res$v_fit_pre
+          if(!is.null(res$v_fit_pre)) {
+            rv$v_fit_list[[paste0(l, "_pre")]] <- res$v_fit_pre
+            run_fits[[paste0(l, "_pre")]] <- res$v_fit_pre
+          }
           if(!is.null(res$cv_pre)) rv$cv_metrics_pre[[l]] <- res$cv_pre
           if(!is.null(res$cv_obj_pre)) rv$cv_data_pre[[l]] <- res$cv_obj_pre
           if(cv_repeats_val > 1) {
@@ -922,6 +929,7 @@
           if(!is.null(res$rf_pre)) rv$rf_models[[paste0(l, "_pre")]] <- res$rf_pre
           if(!is.null(res$gstat_pre)) rv$gstat_objs[[paste0(l, "_pre")]] <- res$gstat_pre
       }
+      rv$disp$v_fits <- run_fits
 
       if (cv_repeats_val > 1) {
         # Summarised once per run (not per render): the pooled rows reproject

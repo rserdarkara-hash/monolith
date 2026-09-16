@@ -310,7 +310,7 @@
         vgm_target <- if (lab %in% c("actual", "Actual")) "act"
                       else if (lab %in% c("pred", "pred_ss", "Predicted")) "pre"
                       else NULL  # residual maps derive from both fits
-        vgm_warn_html <- build_vgm_warning_html(rv$v_fit_list, target = vgm_target)
+        vgm_warn_html <- build_vgm_warning_html(rv$disp$v_fits, target = vgm_target)
         if (!is.null(vgm_warn_html)) {
           m <- m %>% addControl(html = vgm_warn_html, position = "bottomleft")
         }
@@ -877,12 +877,7 @@
    # affect the plot (the short-circuit reads mirror the plot's own logic).
    vgm_manual_overlay_key <- function(target) {
      if (identical(input$vgm_mode, "manual") && identical(input$sel_loc_stats, input$m_loc)) {
-       applies <- if (target == "act") {
-         is.null(input$m_target) || input$m_target == "act"
-       } else {
-         identical(input$m_target, "pre")
-       }
-       if (applies) return(list(input$m_psill, input$k_mod, input$m_range, input$m_nugget))
+       if (identical(manual_vgm_target(), target)) return(list(input$m_psill, input$k_mod, input$m_range, input$m_nugget))
      }
      NULL
    }
@@ -977,12 +972,15 @@
      v_fit <- rv$v_fit_list[[paste0(loc, "_", target)]]
      manual_model <- NULL; sub <- NULL
      manual_applies <- input$vgm_mode == "manual" && loc == input$m_loc &&
-       (if (target == "act") is.null(input$m_target) || input$m_target == "act"
-        else !is.null(input$m_target) && input$m_target == "pre")
+       identical(manual_vgm_target(), target)
      if (isTRUE(manual_applies)) {
        manual_model <- manual_vgm(input$m_psill, input$k_mod, input$m_range, input$m_nugget)
        sub <- paste("Manual model (red dashed) - weighted SSE (same criterion as Auto-Fit):",
                     signif(vgm_weighted_sse(v_emp, manual_model), 4))
+       if (isTRUE(vgm_smooth_nugget_share(manual_model) < VGM_SMOOTH_NUGGET_WARN_SHARE)) {
+         sub <- paste0(sub, "\nUnstable in kriging: ", input$k_mod,
+                       " with a nugget below 5% of the sill")
+       }
      }
      build_variogram_ggplot(v_emp, v_fit,
                             title = paste0("Fitted (", tgt_label, "): ", loc),

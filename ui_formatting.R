@@ -471,6 +471,44 @@ vgm_params_export_df <- function(v_fit_list, locs = NULL, round_values = FALSE) 
   do.call(rbind, rows)
 }
 
+# Manual variogram sliders for one locality and target. Bounds come from the
+# data being tuned (its variance and bounding-box diagonal) and widen only when
+# the stored model lies beyond them, so applying a model never narrows them.
+# Nugget and partial sill share one axis. Steps are 1/200 of each axis at two
+# significant digits. ion.rangeSlider reads its decimal count from the step's
+# JavaScript string, which switches to exponent notation below 1e-6, so
+# `step_ok` is FALSE when the sill axis cannot be represented (variance below
+# about 1e-4). NULL without a positive variance and extent.
+manual_vgm_slider_spec <- function(variance, max_dist, fit = NULL) {
+  if (!isTRUE(is.finite(variance) && variance > 0 && is.finite(max_dist) && max_dist > 0)) {
+    return(NULL)
+  }
+  model <- NULL
+  nugget <- 0
+  psill <- variance
+  range <- max_dist / 4
+  if (!is.null(fit) && NROW(fit) > 0) {
+    mdl <- as.character(fit$model)
+    st <- which(mdl != "Nug")
+    nugget <- sum(fit$psill[mdl == "Nug"])
+    psill <- if (length(st)) fit$psill[st[1]] else 0
+    if (length(st)) {
+      range <- fit$range[st[1]]
+      model <- mdl[st[1]]
+    }
+  }
+  sill_max <- signif(2 * max(variance, nugget + psill), 3)
+  sill_step <- signif(sill_max / 200, 2)
+  range_max <- signif(max(1.5 * max_dist, 3 * range), 3)
+  range_min <- signif(range_max / 1000, 2)
+  list(model = model,
+       nugget = list(min = 0, max = sill_max, value = nugget, step = sill_step),
+       psill = list(min = 0, max = sill_max, value = psill, step = sill_step),
+       range = list(min = range_min, max = range_max, value = max(range, range_min),
+                    step = signif(range_max / 200, 2)),
+       step_ok = sill_step >= 1e-6)
+}
+
 # Every importance measure a randomForest recorded, one row per covariate,
 # ordered by the first. A regression forest grown with importance = TRUE stores
 # %IncMSE and IncNodePurity; without it, only IncNodePurity. Raw column names:

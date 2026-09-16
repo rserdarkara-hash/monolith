@@ -31,7 +31,7 @@ gov_factors_ui <- function(id) {
               shiny::icon("circle-notch", class = "fa-spin fa-4x", style = "color: var(--mn-text-3); margin-bottom: 20px;"),
               shiny::h3("Executing Machine Learning Analytics...", style = "color: var(--mn-text); font-weight: 600; margin-bottom: 10px;"),
               shiny::p("Fitting high-dimensional Random Forest models and extracting explanatory SHAP, PDP, and ALE profiles in the background.", style = "color: var(--mn-text-2); font-size: 1.1em;"),
-              shiny::p("The dashboard becomes responsive once the module starts (up to a minute or two); recommended use is one large fitting per session (memory optimisation is in progress for the module).", style = "color: var(--mn-text-3); font-style: italic; font-size: 0.9em; margin-top: 15px;"),
+              shiny::p("The dashboard becomes responsive once the module starts (up to a minute or two - when the 'Running...' indicator appears on the button at the left side); recommended use is one large fitting per session (memory optimisation is in progress for the module).", style = "color: var(--mn-text-3); font-style: italic; font-size: 0.9em; margin-top: 15px;"),
               shiny::actionButton(ns("gov_cancel_btn"), "Cancel Run",
                                   icon = shiny::icon("stop"),
                                   class = "btn-danger btn-sm",
@@ -282,7 +282,7 @@ gov_factors_server <- function(id, data_reactive, vars_metadata_reactive) {
                         subtitle = if (!is.null(gov_rv$res$n_used)) {
                           complete_case_note(gov_rv$res$n_used, gov_rv$res$n_total)
                         },
-                        x = "Variable", y = "Dropout Loss (RMSE increase)") +
+                        x = "Variable", y = "RMSE increase after permutation") +
           ggplot2::theme_minimal(base_size = base_size)
       } else if (plot_type == "interaction_a") {
         shap_df <- gov_rv$res$shap
@@ -381,7 +381,7 @@ gov_factors_server <- function(id, data_reactive, vars_metadata_reactive) {
           vip_df
         )
       }
-      colnames(vip_df) <- c("Governing Factor / Metric", "Value (Dropout Loss | OOB %)")
+      colnames(vip_df) <- c("Governing Factor / Metric", "Value (RMSE increase | OOB %)")
 
       # paging off: dom = 't' shows no paging controls, so rows past the first
       # page would be unreachable on screen and missing from a copy.

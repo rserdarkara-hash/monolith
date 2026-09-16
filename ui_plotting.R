@@ -24,6 +24,7 @@ build_vgm_warning_html <- function(v_fit_list, target = NULL) {
 
   fallback_keys <- character(0)
   flawed_keys <- character(0)
+  smooth_keys <- character(0)
   for (n in names(v_fit_list)) {
     if (!is.null(target) && !grepl(paste0("_", target, "$"), n)) next
     if (isTRUE(attr(v_fit_list[[n]], "is_fallback"))) {
@@ -31,8 +32,11 @@ build_vgm_warning_html <- function(v_fit_list, target = NULL) {
     } else if (isTRUE(attr(v_fit_list[[n]], "flawed_winner"))) {
       flawed_keys <- c(flawed_keys, display_key(n))
     }
+    if (isTRUE(vgm_smooth_nugget_share(v_fit_list[[n]]) < VGM_SMOOTH_NUGGET_WARN_SHARE)) {
+      smooth_keys <- c(smooth_keys, display_key(n))
+    }
   }
-  if (length(fallback_keys) == 0 && length(flawed_keys) == 0) return(NULL)
+  if (length(fallback_keys) == 0 && length(flawed_keys) == 0 && length(smooth_keys) == 0) return(NULL)
 
   red_part <- if (length(fallback_keys) > 0) {
     paste0("<span style='color:var(--mn-danger);'>Note: Variogram fit failed for some localities (",
@@ -44,11 +48,16 @@ build_vgm_warning_html <- function(v_fit_list, target = NULL) {
            paste(flawed_keys, collapse = ", "),
            ".<br>No candidate model converged cleanly, so the best-scoring (lowest-error) fit was used to build this map. The map is still valid to explore, but variogram parameters may be imprecise &mdash; interpret interpolations with caution.</span>")
   } else ""
-  sep <- if (nzchar(red_part) && nzchar(amber_part)) "<br>" else ""
+  smooth_part <- if (length(smooth_keys) > 0) {
+    paste0("<span style='color:var(--mn-warn);'>Gaussian or Mat&eacute;rn variogram with a nugget below 5% of the sill for: ",
+           paste(smooth_keys, collapse = ", "),
+           ".<br>Kriging with such a model can place predictions far outside the observed range &mdash; check the map against the data, or add a nugget.</span>")
+  } else ""
+  parts <- c(red_part, amber_part, smooth_part)
 
   paste0("<div class='vgm-fallback-warn' style='font-weight:bold; background:var(--mn-surface); border:1px solid var(--mn-line); padding:5px 25px 5px 5px; border-radius:4px; position:relative;'>",
          "<button onclick='this.parentElement.style.display=\"none\";' style='position:absolute; top:2px; right:2px; background:none; border:none; color:var(--mn-danger); font-size:16px; font-weight:bold; cursor:pointer;'>&times;</button>",
-         red_part, sep, amber_part,
+         paste(parts[nzchar(parts)], collapse = "<br>"),
          "</div>")
 }
 
@@ -186,7 +195,7 @@ build_variogram_ggplot <- function(v_emp, v_fit = NULL, title = "", subtitle = N
     labs(title = title, subtitle = subtitle, x = "Distance (m)", y = "Semivariance") +
     theme_minimal(base_size = 12) +
     theme(plot.title = element_text(size = 12, face = "bold"),
-          plot.subtitle = element_text(size = 9, color = "grey30"))
+          plot.subtitle = element_text(size = 9, color = "grey30", lineheight = 1.3))
 }
 
 # Directional variogram (anisotropy diagnostic) from calc_directional_variogram:

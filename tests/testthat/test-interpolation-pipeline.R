@@ -766,13 +766,14 @@ test_that("apply_interpolation dispatches IDW identically to apply_IDW", {
   expect_equal(res_d$cv_metrics, res_i$cv_metrics)
 })
 
-test_that("OK retries with a micro-nugget when a zero-nugget model gives an empty surface", {
-  # A zero-nugget model over near-coincident samples makes the kriging
+test_that("OK keeps a supplied model that gives an empty surface and names the cause", {
+  # A zero-nugget Gaussian over near-coincident samples makes the kriging
   # covariance matrix singular, and gstat does NOT raise there: it returns NA
-  # for every location. RK/RFK/CK each route their own failure to a named OK
-  # fallback; OK had no failure path at all, so the locality simply vanished
-  # from the map with nothing said. Measured on gstat 2.1.5: this fixture
-  # returns 100% NA under the zero-nugget model and 0% NA after the retry.
+  # for every location. A nugget small enough to leave the model unchanged
+  # does not make the system stable (on the reference data a nugget of 1e-6 of
+  # the sill still put predictions up to 33 spans outside the observed range),
+  # so the model is kept, the empty surface reaches run_regional_interpolation's
+  # skip path, and the log names the cause.
   set.seed(19)
   n <- 40
   # A 1 km extent under a 900 m Gaussian range: the near-degenerate regime a
@@ -796,14 +797,12 @@ test_that("OK retries with a micro-nugget when a zero-nugget model gives an empt
     pts, "v", "OK", grid, character(0), lags,
     list(pre_fit = zero_nug, cv_strategy = "loocv"), "region", "act"))
 
-  expect_false(all(is.na(res$res_sf$var1.pred)))
-  expect_gt(res$fit$psill[1], 0)
-  expect_match(res$log_msg, "micro-nugget", fixed = TRUE)
+  expect_true(all(is.na(res$res_sf$var1.pred)))
+  expect_identical(res$fit$psill, zero_nug$psill)
+  expect_match(res$log_msg, "nugget below 5% of its sill", fixed = TRUE)
 })
 
-test_that("a healthy OK run is untouched by the micro-nugget retry", {
-  # The retry is gated on an already all-NA surface, so it must be numerically
-  # inert on every run that produces one.
+test_that("a healthy OK run keeps its supplied model and reports no instability", {
   pts <- make_test_points(25)
   grid <- make_test_grid_safe(pts, res = 200)
   lags <- calc_scientific_lags(pts)
@@ -815,7 +814,7 @@ test_that("a healthy OK run is untouched by the micro-nugget retry", {
 
   expect_equal(res$res_sf$var1.pred, ref$var1.pred)
   expect_identical(res$fit$psill[1], 0)
-  expect_false(grepl("micro-nugget", res$log_msg, fixed = TRUE))
+  expect_false(grepl("nugget below 5%", res$log_msg, fixed = TRUE))
 })
 
 test_that("apply_interpolation returns error result for unknown method", {
@@ -986,6 +985,27 @@ test_that("autofit_vgm_item fits actual and predicted variograms per item", {
   expect_equal(res$act$emp$gamma, v_emp$gamma)
   expect_equal(as.character(res$act$fit$model[2]),
                as.character(robust_vgm_fit(v_emp, sub_a$v)$model[2]))
+
+  # A small-valued variable has a nonzero weighted SSE below six decimal
+  # places; the diagnostics must not print it as a perfect fit.
+  small <- df_a
+  small$v <- small$v * 1e-4
+  small_fit <- autofit_vgm_item(list(l = "LocA", act = small, pre = NULL), 32633)$act
+  fit_sse <- attr(small_fit$fit, "SSErr")
+  expect_true(is.finite(fit_sse) && fit_sse > 0)
+  expect_equal(small_fit$sse, signif(fit_sse, 4))
+  expect_gt(small_fit$sse, 0)
+
+  fit_original <- robust_vgm_fit
+  assign("robust_vgm_fit", function(...) {
+    fit <- fit_original(...)
+    attr(fit, "SSErr") <- NULL
+    fit
+  }, envir = globalenv())
+  on.exit(assign("robust_vgm_fit", fit_original, envir = globalenv()), add = TRUE)
+  expect_identical(autofit_vgm_item(
+    list(l = "LocA", act = df_a, pre = NULL), 32633)$act$sse, "N/A")
+  assign("robust_vgm_fit", fit_original, envir = globalenv())
 
   # no predicted data -> FAIL placeholder result, actual side unaffected
   res2 <- autofit_vgm_item(list(l = "LocB", act = df_a, pre = NULL), current_crs = 32633)

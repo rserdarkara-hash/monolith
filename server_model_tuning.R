@@ -550,51 +550,86 @@ observeEvent(list(input$vgm_mode, input$m_loc), {
   }
 })
 
+# Surface the manual variogram tools address. The Target switch is shown in
+# Comparison Mode or for a prediction value type, and only while the surfaces
+# are fitted separately: otherwise the run kriges the predicted surface with
+# the Actual fit (ui_sidebar.R). The red preview, the slider sync and Apply all
+# resolve it with this one rule.
+manual_vgm_target <- function() {
+  shown <- (isTRUE(input$comp_mode) ||
+              isTRUE(input$value_type %in% c("pred", "pred_ss", "resid"))) &&
+    isTRUE(input$sep_fit)
+  if (shown && identical(input$m_target, "pre")) "pre" else "act"
+}
+
+# The only owner of the manual sliders. Bounds come from the tuned locality's
+# data for the tuned target (the same point set OPTIMIZE ALL VARIOGRAMS fits:
+# NA-free, projected, deduplicated); values come from the stored fit when one
+# exists. See manual_vgm_slider_spec().
 observeEvent(
   list(
     input$vgm_mode,
     input$m_loc,
     input$comp_mode,
     input$m_target,
+    input$sep_fit,
+    input$var_id,
+    input$value_type,
+    rv$user_data,
+    rv$mapping,
     rv$v_fit_list
   ),
   {
-    req(input$vgm_mode == "manual", input$m_loc)
+    req(input$vgm_mode == "manual", input$m_loc, rv$user_data,
+        rv$mapping$x, rv$mapping$y, rv$mapping$crs)
     loc <- input$m_loc
-
-    target <- if (input$comp_mode && !is.null(input$m_target)) {
-      input$m_target
+    target <- manual_vgm_target()
+    meta <- get_current_meta()
+    req(meta)
+    col <- if (target == "pre") {
+      if (identical(input$value_type, "pred_ss")) meta$pred_ss else meta$pred
     } else {
-      "act"
+      meta$actual
     }
-    fit <- rv$v_fit_list[[paste0(loc, "_", target)]]
+    ud <- rv$user_data
+    req(is_valid_col_ref(col), col %in% names(ud),
+        rv$mapping$x %in% names(ud), rv$mapping$y %in% names(ud))
+    if (!is.null(rv$mapping$loc) && rv$mapping$loc %in% names(ud)) {
+      ud <- ud[ud[[rv$mapping$loc]] %in% loc, , drop = FALSE]
+    }
+    d <- stats::na.omit(data.frame(x = ud[[rv$mapping$x]], y = ud[[rv$mapping$y]], v = ud[[col]]))
+    req(nrow(d) >= 3, is.numeric(d$v))
+    pts <- tryCatch(
+      validate_and_project_sf(sf::st_as_sf(d, coords = c("x", "y"), crs = rv$mapping$crs)),
+      error = function(e) NULL
+    )
+    req(pts)
+    pts <- pts[!duplicated(round(sf::st_coordinates(pts), 2)), ]
+    bb <- sf::st_bbox(pts)
+    spec <- manual_vgm_slider_spec(
+      stats::var(pts$v),
+      sqrt((bb[["xmax"]] - bb[["xmin"]])^2 + (bb[["ymax"]] - bb[["ymin"]])^2),
+      rv$v_fit_list[[paste0(loc, "_", target)]]
+    )
+    req(spec)
 
-    if (!is.null(fit)) {
-      nugget_val <- fit$psill[1]
-      psill_val <- fit$psill[2]
-      range_val <- fit$range[2]
-      mdl <- as.character(fit$model[2])
-      if (mdl %in% c("Sph", "Exp", "Gau", "Mat")) {
-        updateSelectInput(session, "k_mod", selected = mdl)
-      }
-
-      updateSliderInput(
-        session,
-        "m_nugget",
-        value = nugget_val,
-        max = round(max(nugget_val + psill_val, 0.1), 2)
-      )
-      updateSliderInput(
-        session,
-        "m_psill",
-        value = psill_val,
-        max = round(max((nugget_val + psill_val) * 1.5, 0.1), 2)
-      )
-      updateSliderInput(
-        session,
-        "m_range",
-        value = range_val,
-        max = round(max(range_val * 3, 100), 0)
+    if (!is.null(spec$model) && spec$model %in% c("Sph", "Exp", "Gau", "Mat")) {
+      updateSelectInput(session, "k_mod", selected = spec$model)
+    }
+    for (id in c("nugget", "psill", "range")) {
+      s <- spec[[id]]
+      updateSliderInput(session, paste0("m_", id),
+                        min = s$min, max = s$max, value = s$value, step = s$step)
+    }
+    if (isTRUE(spec$step_ok)) {
+      removeNotification("m_slider_scale")
+    } else {
+      showNotification(
+        paste0("The variance of this variable in ", loc, " is ", signif(stats::var(pts$v), 3),
+               ". The sliders cannot represent steps below 1e-6, so the nugget and partial ",
+               "sill cannot be tuned at this scale. Rescale the variable in the uploaded file ",
+               "(for example % to g/kg) to tune it manually."),
+        id = "m_slider_scale", type = "warning", duration = NULL
       )
     }
   }
@@ -603,22 +638,33 @@ observeEvent(
 observeEvent(input$apply_manual, {
   req(input$vgm_mode == "manual", input$m_loc)
   loc <- input$m_loc
-  target <- if (input$comp_mode && !is.null(input$m_target)) {
-    input$m_target
-  } else {
-    "act"
+  target <- manual_vgm_target()
+  invalid <- validate_manual_vgm(input$m_psill, input$m_nugget, input$m_range)
+  if (!is.null(invalid)) {
+    showNotification(paste("Manual model not applied:", invalid), type = "error")
+    return()
   }
 
-  rv$v_fit_list[[paste0(loc, "_", target)]] <- manual_vgm(
+  model <- manual_vgm(
     input$m_psill,
     input$k_mod,
     input$m_range,
     input$m_nugget
   )
+  rv$v_fit_list[[paste0(loc, "_", target)]] <- model
   showNotification(
     paste("Manual model applied to", loc, "(", target, ")"),
     type = "message"
   )
+  if (isTRUE(vgm_smooth_nugget_share(model) < VGM_SMOOTH_NUGGET_WARN_SHARE)) {
+    showNotification(
+      paste0("A ", input$k_mod, " model with a nugget below 5% of its sill makes kriging ",
+             "unstable: predictions can fall far outside the observed range, or the ",
+             "locality can come back empty. The model is used as applied; add a nugget ",
+             "to avoid this."),
+      type = "warning", duration = 15
+    )
+  }
 })
 
 observeEvent(

@@ -108,7 +108,7 @@ Two explainability frameworks are available:
 *   Each point is the per-observation SHAP attribution (Lundberg & Lee 2017) of the most important predictor: how much that predictor shifts the model's prediction for that sample away from the dataset-mean prediction, in the target variable's own units. Across all predictors the values sum to the deviation of the sample's prediction from the mean.
 
 **5.4 Tabular data metrics**
-*   The metrics table lists the permutation importance (dropout loss) of each governing factor and leads with an **RF model quality row, out-of-bag (OOB) % variance explained**, so the reliability of the random forest behind the importance and SHAP results can be judged directly. Low OOB values mean the explainability outputs describe a weak model and should be interpreted cautiously.
+*   The metrics table lists each governing factor's mean increase in RMSE after permutation relative to the unshuffled forest, in the target's units. Values near zero indicate little change in model error. It leads with an **RF model quality row, out-of-bag (OOB) % variance explained**, so the reliability of the random forest behind the importance and SHAP results can be judged directly. Low OOB values mean the explainability outputs describe a weak model and should be interpreted cautiously.
 
 ---
 

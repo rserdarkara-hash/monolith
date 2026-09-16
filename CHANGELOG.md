@@ -2,9 +2,15 @@
 
 All notable changes to Monolith are documented in this file.
 
-## [1.1.2] - 2026-09-15 - TPS scaling in fitting and optimization/ UI redundancy removal / Manual Matérn fit fallback / Correlation check categorisation in RFK, RK and CK
+## [1.1.2] - 2026-09-16 - TPS scaling in fitting and optimization/ UI redundancy removal / Manual Matérn fit fallback / Correlation check categorisation in RFK, RK and CK / Covariate interpolation in RK and RFK matching Classification Suite
 
 ### Fixed
+- **Manual variogram **Apply** and the slider values follow the *Predicted* target whenever that switch is shown**, including outside Comparison Mode. **Fit Actual/Predicted Separately** is shown for every prediction or residual view, and while it is off the Predicted manual target is hidden.
+- **Governing Factors importance reports RMSE increase after permutation**, with the unshuffled model's RMSE subtracted from each shuffled loss. The plot and table use the same quantity.
+- **Classification sample counts match fitted rows.** The run badge and exported model bundle count rows with a target and all selected covariates; covariate-free spatial 1-NN counts rows with a target.
+- **Variogram auto-fit refuses Gaussian and Matérn models at a zero nugget**, in every search: OK, RK/RFK residuals, covariate kriging, the CK seed and CV fold refits. On the reference data 12 of 98 fits change, and the four surfaces that left the observed range (the worst by 1990 times its span) no longer do.
+- **Kriging keeps a variogram that gives an empty surface unaltered.** The locality is skipped and the log names the cause. Manual Gaussian/Matérn models with a nugget below 5% of the sill are flagged at Apply, in the variogram subtitle and on the map.
+- **Manual variogram sliders are scaled to the tuned locality's variance and extent**, so small-variance variables can be tuned. Apply refuses a model whose nugget and partial sill are both zero.
 - **Test helpers select sequential processing before application sourcing**, preventing an unused Windows CI startup pool from timing out. Normal app runs use multisession.
 - **Spatial TPS fits preserve the common coordinate scale** in both fitting and lambda optimization. TPS surfaces, CV metrics and selected lambdas change where the sample extent caused artificial anisotropy.
 - **Shared unnamed uploaded boundaries use each locality's selected sidebar boundary.** Combined class-area tables and exports require disjoint locality domains, preventing duplicated hectares.
@@ -15,13 +21,16 @@ All notable changes to Monolith are documented in this file.
 
 ### Changed
 - **Both Windows and Linux pinned CI test jobs must pass** for the workflow to succeed.
+- **Auto-fit diagnostics retain small nonzero SSE values** and mark unavailable SSE as `N/A`; Map Viewer variogram warnings use only the displayed run's fits.
+- **RK/RFK cross-validation now interpolates each held-out covariate within its fold**, matching the map's covariate path and IDW fallback.
+- **Classification CV, tuning and out-of-fold importance now score covariates** reconstructed from each fold's training points, including when map generation is off.
 - **Auxiliary correlations use a category-filtered table** with signed Pearson r, raw p and paired n, explicit target/scope labels and unavailable-candidate explanations. The screened target itself is excluded from ranks. Auxiliary predictor correlation targets follow Actual or uploaded CVE/SS views, with an Actual/prediction switch and an independent SS subset switch initialized from Context. Calculated screens refresh when their context changes. 
 - **Single-locality Scientific Analysis selects the locality directly** and shows its summaries; combined choices are reserved for multi-locality runs.
 - **Recorded baseline provenance tracks `gstat`, `sf`, `terra` and `classInt`.** `spdep` remains an application dependency, and Moran's I diagnostics remain covered by the test suite. The four recorded baseline values do not include Moran's I.
 - **Geographic and non-metre projected input is transformed to local UTM before interpolation and optimization.** Classification enforces metric Target CRSs and refuses unsuitable targets; Data Setup warns above 1% input-projection distortion.
 
 ### Testing
-- Suite validation: 3,286 passing assertions, 0 failing, 26 warnings across 35 test files (2026-09-15; full suite plus a separate browser smoke run). All four recorded baseline values remain exactly unchanged.
+- Suite validation: 3,355 passing assertions, 0 failing, 0 skipped, 32 warnings across 35 test files (2026-09-16; full suite including the browser smoke tests). All four recorded baseline values remain exactly unchanged.
 
 ## [1.1.1] - 2026-09-13 - Updated renv.lock / CRS recognition optimization / Directional variogram on both surfaces / Baseline provenance / User's own reproducibility conditions
 

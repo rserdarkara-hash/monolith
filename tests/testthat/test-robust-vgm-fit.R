@@ -17,6 +17,56 @@ test_that("manual Matern uses nu 1.5 and the Auto-Fit weighted criterion", {
   expect_equal(vgm_weighted_sse(emp, fit), attr(fit, "SSErr"), tolerance = 1e-10)
 })
 
+test_that("a manual model with no total sill is refused; a pure nugget is not", {
+  expect_null(validate_manual_vgm(psill = 1, nugget = 0.2, range = 300))
+  expect_null(validate_manual_vgm(psill = 0, nugget = 0.5, range = 300))
+  expect_match(validate_manual_vgm(psill = 0, nugget = 0, range = 300), "no variance")
+  expect_match(validate_manual_vgm(psill = 1, nugget = 0, range = 0), "range")
+  expect_match(validate_manual_vgm(psill = -1, nugget = 2, range = 300), "negative")
+  expect_match(validate_manual_vgm(psill = NA, nugget = 0.2, range = 300), "finite")
+})
+
+test_that("manual sliders are scaled to the data, not to fixed decimals", {
+  # Kale total nitrogen: variance 7.2e-4, auto-fit nugget 2.49e-4. Fixed
+  # rounding gave a sill axis of max 0 and a step of 0.01.
+  fit <- gstat::vgm(psill = 3.7e-4, model = "Sph", range = 3371, nugget = 2.49e-4)
+  s <- manual_vgm_slider_spec(7.2e-4, 5000, fit)
+  expect_gt(s$nugget$max, fit$psill[1])
+  expect_gt(s$psill$max, fit$psill[2])
+  expect_lte(s$nugget$step, 7.2e-4 / 50)
+  expect_equal(s$nugget$value, fit$psill[1])
+  expect_equal(s$range$value, 3371)
+  expect_identical(s$model, "Sph")
+  expect_true(s$step_ok)
+
+  # Large-variance variable: same proportions.
+  k <- manual_vgm_slider_spec(2.5e4, 5000)
+  expect_equal(k$psill$value, 2.5e4)
+  expect_equal(k$nugget$max, 5e4)
+  expect_equal(k$range$max, 7500)
+  expect_equal(k$range$value, 1250)
+
+  # Bounds follow the data: a short-range or small-sill model does not narrow
+  # them, and a model beyond them widens them.
+  short <- manual_vgm_slider_spec(1, 5000, gstat::vgm(0.1, "Exp", 10, 0.01))
+  expect_equal(short$range$max, 7500)
+  expect_equal(short$nugget$max, 2)
+  wide <- manual_vgm_slider_spec(1, 5000, gstat::vgm(3, "Exp", 9000, 1))
+  expect_gte(wide$psill$max, 8)
+  expect_gte(wide$range$max, 27000)
+
+  # A single-row pure-nugget model has no structure to read a range from.
+  nug <- manual_vgm_slider_spec(1, 5000, gstat::vgm(0.5, "Nug", 0))
+  expect_equal(nug$nugget$value, 0.5)
+  expect_equal(nug$psill$value, 0)
+  expect_equal(nug$range$value, 1250)
+  expect_null(nug$model)
+
+  # ion.rangeSlider cannot represent a step below 1e-6.
+  expect_false(manual_vgm_slider_spec(1e-5, 5000)$step_ok)
+  expect_null(manual_vgm_slider_spec(0, 5000))
+})
+
 test_that("candidate screening emits no warnings on hostile data", {
   h <- make_hostile_vgm_input(seed = 1) # emits 17 warnings before this change
   expect_no_warning(robust_vgm_fit(h$v_emp, h$v_data))
@@ -104,18 +154,61 @@ test_that("muffling does not change selection on a clean-winner fixture", {
 })
 
 test_that("a clean candidate is preferred over a lower-SSErr flawed one", {
-  # Discovery (2026-07-04): pure-SSErr selection picks a non-converged Gau
-  # for this fixture; clean preference must select the converged Mat.
+  # Candidate table for this fixture (2026-09-16, gstat 2.1.6): clean Mat at
+  # nugget 0 (SSErr 11.4508), clean Exp at nugget 0 (12.1713), flawed Sph
+  # (lowest 11.9040) and flawed Gau at nugget 0 (10.9345). The zero-nugget
+  # Mat and Gau are ineligible, so the converged Exp must beat the
+  # lower-SSErr flawed Sph.
   pts <- make_test_points(30)
   lags <- calc_scientific_lags(pts)
   v_emp <- gstat::variogram(v ~ 1, pts, width = lags$width, cutoff = lags$cutoff)
   fit <- robust_vgm_fit(v_emp, pts$v)
-  expect_identical(as.character(fit$model[2]), "Mat")
+  expect_identical(as.character(fit$model[2]), "Exp")
   expect_equal(fit$psill[1], 0, tolerance = 1e-6)
-  expect_equal(fit$psill[2], 114.613972, tolerance = 1e-3)
-  expect_equal(fit$range[2], 32.241131, tolerance = 1e-3)
+  expect_equal(fit$psill[2], 124.889, tolerance = 1e-3)
+  expect_equal(fit$range[2], 93.046, tolerance = 1e-3)
   expect_false(isTRUE(attr(fit, "flawed_winner")))
   expect_gt(attr(fit, "vgm_diagnostics")$n_flawed, 0)
+})
+
+test_that("the smooth-origin nugget share covers Gaussian and Matern only", {
+  expect_equal(vgm_smooth_nugget_share(gstat::vgm(0.8, "Gau", 300, 0.2)), 0.2)
+  expect_equal(vgm_smooth_nugget_share(manual_vgm(1, "Mat", 300, 0)), 0)
+  # Matern nu = 0.5 is the exponential model: linear at the origin.
+  expect_true(is.na(vgm_smooth_nugget_share(gstat::vgm(1, "Mat", 300, 0, kappa = 0.5))))
+  expect_true(is.na(vgm_smooth_nugget_share(gstat::vgm(1, "Exp", 300, 0))))
+  expect_true(is.na(vgm_smooth_nugget_share(gstat::vgm(1, "Sph", 300, 0))))
+  expect_true(is.na(vgm_smooth_nugget_share(gstat::vgm(0.5, "Nug", 0))))
+  expect_true(is.na(vgm_smooth_nugget_share(NULL)))
+})
+
+test_that("auto-fit never returns a Gaussian or Matern structure at a zero nugget", {
+  # make_test_points(30): the lowest-SSErr clean candidate is a Matern at
+  # nugget 0 (see the candidate table above).
+  pts <- make_test_points(30)
+  lags <- calc_scientific_lags(pts)
+  v_emp <- gstat::variogram(v ~ 1, pts, width = lags$width, cutoff = lags$cutoff)
+  expect_false(isTRUE(vgm_smooth_nugget_share(robust_vgm_fit(v_emp, pts$v)) <= 1e-8))
+
+  # Golden Acipayam, available P (83 points): the lowest-SSErr clean candidate
+  # is a Gaussian at nugget 0, whose ordinary-kriging surface left the observed
+  # range by 0.32 of its span and went negative for a non-negative variable.
+  g <- golden_sf("full", "Acipayam")
+  g$v <- g$p
+  g <- dedup_valid_points(g, "v")
+  lags <- calc_scientific_lags(g)
+  v_emp <- gstat::variogram(v ~ 1, g, width = lags$width, cutoff = lags$cutoff)
+  fit <- suppressWarnings(robust_vgm_fit(v_emp, g$v))
+  expect_false(isTRUE(vgm_smooth_nugget_share(fit) <= 1e-8))
+
+  hull <- sf::st_convex_hull(sf::st_union(g))
+  grid <- sf::st_as_sf(sf::st_make_grid(hull, n = c(40, 40), what = "centers"))
+  sf::st_geometry(grid) <- "geometry"
+  grid <- grid[lengths(sf::st_intersects(grid, hull)) > 0, ]
+  pred <- gstat::krige(v ~ 1, g, grid, model = fit, debug.level = 0)$var1.pred
+  span <- diff(range(g$v))
+  expect_gte(min(pred), min(g$v) - 0.1 * span)
+  expect_lte(max(pred), max(g$v) + 0.1 * span)
 })
 
 test_that("flawed winner is tagged when no clean candidate exists", {
@@ -191,6 +284,17 @@ test_that("build_vgm_warning_html filters by target and strips the suffix", {
 
   # NULL when the only flagged fits belong to the other target
   expect_null(build_vgm_warning_html(list(LocA_act = f_fb), target = "pre"))
+})
+
+test_that("build_vgm_warning_html flags a Gaussian or Matern model with a small nugget", {
+  html <- build_vgm_warning_html(list(LocA_act = manual_vgm(1, "Gau", 300, 0.02),
+                                      LocB_act = manual_vgm(1, "Gau", 300, 0.2),
+                                      LocC_act = manual_vgm(1, "Exp", 300, 0)))
+  expect_match(html, "nugget below 5% of the sill for: LocA (actual)", fixed = TRUE)
+  expect_no_match(html, "LocB", fixed = TRUE)
+  expect_no_match(html, "LocC", fixed = TRUE)
+  expect_no_match(html, "non-converged or singular", fixed = TRUE)
+  expect_null(build_vgm_warning_html(list(LocB_act = manual_vgm(1, "Mat", 300, 0.2))))
 })
 
 test_that("banner close button targets its own container, not a fixed id", {

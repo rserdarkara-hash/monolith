@@ -467,52 +467,6 @@
   # in degrees. The projection is cached against (data, mapping, CRS) so the
   # slider-bounds observer below does not re-transform every coordinate each
   # time a run finishes or the diagnostics locality changes.
-  projected_max_dist <- reactive({
-    req(rv$user_data)
-    x_col <- rv$mapping$x
-    y_col <- rv$mapping$y
-    req(x_col, y_col, x_col %in% colnames(rv$user_data), y_col %in% colnames(rv$user_data))
-    req(rv$mapping$crs, input$crs_selection)
-    coords_df <- rv$user_data[, c(x_col, y_col)]
-    coords_df <- coords_df[complete.cases(coords_df), , drop = FALSE]
-    tryCatch({
-      pts_proj <- st_transform(st_as_sf(coords_df, coords = c(x_col, y_col), crs = rv$mapping$crs), input$crs_selection)
-      bb <- st_bbox(pts_proj)
-      as.numeric(sqrt((bb["xmax"] - bb["xmin"])^2 + (bb["ymax"] - bb["ymin"])^2))
-    }, error = function(e) NA_real_)
-  })
-
-  observeEvent(list(input$var_id, input$m_loc, input$crs_selection, rv$user_data, rv$v_fit_list), {
-    req(rv$user_data, input$var_id, rv$mapping$vars)
-    meta <- get_current_meta()
-    req(meta)
-
-    col_name <- meta$actual
-    v_data <- rv$user_data[[col_name]]
-    if (!is.null(v_data) && is.numeric(v_data) && length(na.omit(v_data)) >= 3) {
-      variance <- var(v_data, na.rm = TRUE)
-      if (!is.na(variance) && variance > 0) {
-        max_sill <- round(variance * 2, 2)
-        step_val <- round(variance / 100, 4)
-        if(step_val == 0) step_val <- 0.01
-
-        max_dist <- tryCatch(projected_max_dist(), error = function(e) NA_real_)
-        if (!is.null(max_dist) && !is.na(max_dist) && max_dist > 0) {
-          max_range <- round(max_dist * 1.5, 0)
-          step_range <- round(max_range / 100, 0)
-          if(step_range == 0) step_range <- 1
-
-          fit <- rv$v_fit_list[[paste0(input$m_loc %||% "global", "_act")]]
-          if (is.null(fit)) {
-            updateSliderInput(session, "m_nugget", min = 0, max = max_sill, value = 0, step = step_val)
-            updateSliderInput(session, "m_psill", min = 0, max = max_sill, value = round(variance, 2), step = step_val)
-            updateSliderInput(session, "m_range", min = 1, max = max_range, value = round(max_dist / 4, 0), step = step_range)
-          }
-        }
-      }
-    }
-  })
-
   output$agro_options <- renderUI({
     req(input$color_style == "agro", input$agro_method == "limits")
     # input$var_id is only a reactive dependency before the first run;

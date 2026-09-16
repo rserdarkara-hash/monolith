@@ -122,3 +122,27 @@ test_that("a comfortably-specified lm passes the rank guard", {
   expect_false(inherits(res, "error") &&
                  grepl("regression coefficients", conditionMessage(res)))
 })
+
+test_that("RK and RFK holdout predictions do not use the held-out covariate", {
+  set.seed(42)
+  n <- 16L
+  aux <- rnorm(n)
+  pts <- sf::st_as_sf(data.frame(
+    x = runif(n, 450000, 451000), y = runif(n, 5800000, 5801000),
+    aux1 = aux, v = 5 * aux + rnorm(n, 0, 0.3)
+  ), coords = c("x", "y"), crs = 32633)
+  changed <- pts
+  changed$aux1[1] <- changed$aux1[1] + 100
+
+  for (type in c("lm", "rf")) {
+    cv <- suppressWarnings(perform_kriging_loocv(
+      pts, "v", "aux1", calc_scientific_lags, robust_vgm_fit,
+      model_type = type, cv_strategy = "loocv", rf_ntree = 50))
+    cv_changed <- suppressWarnings(perform_kriging_loocv(
+      changed, "v", "aux1", calc_scientific_lags, robust_vgm_fit,
+      model_type = type, cv_strategy = "loocv", rf_ntree = 50))
+    expect_true(is.finite(cv$var1.pred[1]))
+    expect_true(is.finite(cv_changed$var1.pred[1]))
+    expect_equal(cv_changed$var1.pred[1], cv$var1.pred[1], tolerance = 1e-8)
+  }
+})

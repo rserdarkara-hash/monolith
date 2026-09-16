@@ -589,11 +589,11 @@ build_cv_repeat_summary <- function(reps_by_loc) {
 }
 
 #' Cross-validation for RK (`model_type = "lm"`) and RFK (`"rf"`). Every fold
-#' refits the trend and the residual variogram on its training rows and
-#' predicts the held-out rows as trend + kriged residual; folds come from
+#' refits the covariate surfaces, trend and residual variogram on its training
+#' rows and predicts the held-out rows as trend + kriged residual; folds come from
 #' make_cv_folds(). Returns an sf with `observed`, `var1.pred` and `residual`,
 #' ordered like the complete-case input rows, or NULL below 3 such rows.
-perform_kriging_loocv <- function(pts, target_var, aux_vars, lags_func, vgm_fit_func, model_type = c("lm", "rf"), l = "region", prefix = "act", rf_ntree = 200, cv_strategy = "auto", fold_seed = CV_FOLD_SEED) {
+perform_kriging_loocv <- function(pts, target_var, aux_vars, lags_func, vgm_fit_func, model_type = c("lm", "rf"), l = "region", prefix = "act", rf_ntree = 200, cv_strategy = "auto", fold_seed = CV_FOLD_SEED, cov_params = list()) {
   model_type <- match.arg(model_type)
   pts <- pts[complete.cases(sf::st_drop_geometry(pts)[, c(target_var, aux_vars), drop=FALSE]), ]
   n <- nrow(pts)
@@ -636,18 +636,20 @@ perform_kriging_loocv <- function(pts, target_var, aux_vars, lags_func, vgm_fit_
     fold_fn <- function(i) {
       test_idx <- which(folds == i)
       train <- pts[-test_idx, ]; test <- pts[test_idx, ]
+      lags <- lags_func(train)
+      test_cov <- sf::st_drop_geometry(krige_covariates(
+        train, test[, "orig_idx", drop = FALSE], aux_vars, lags, cov_params)$grid_aux)
 
       if (model_type == "lm") {
         lm_mod <- lm(form_reg, data = train)
         train$residuals <- residuals(lm_mod)
-        pred_trend <- predict(lm_mod, newdata = test)
+        pred_trend <- predict(lm_mod, newdata = test_cov)
       } else {
         rf_mod <- randomForest::randomForest(form_reg, data = train, ntree = rf_ntree)
         train$residuals <- train[[target_var]] - rf_mod$predicted
-        pred_trend <- predict(rf_mod, test)
+        pred_trend <- predict(rf_mod, test_cov)
       }
 
-      lags <- lags_func(train)
       v_emp <- variogram(residuals ~ 1, train, width = lags$width, cutoff = lags$cutoff)
       v_fit <- vgm_fit_func(v_emp, train$residuals)
       tryCatch({
