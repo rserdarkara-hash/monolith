@@ -5,7 +5,7 @@ All notable changes to Monolith are documented in this file.
 ## [1.1.2] - 2026-09-16 - TPS scaling in fitting and optimization/ UI redundancy removal / Manual Matérn fit fallback / Correlation check categorisation in RFK, RK and CK / Covariate interpolation in RK and RFK matching Classification Suite
 
 ### Fixed
-- **Manual variogram **Apply** and the slider values follow the *Predicted* target whenever that switch is shown**, including outside Comparison Mode. **Fit Actual/Predicted Separately** is shown for every prediction or residual view, and while it is off the Predicted manual target is hidden.
+- **Manual variogram `Apply` and the slider values follow the *Predicted* target whenever that switch is shown**, including outside Comparison Mode.
 - **Governing Factors importance reports RMSE increase after permutation**, with the unshuffled model's RMSE subtracted from each shuffled loss. The plot and table use the same quantity.
 - **Classification sample counts match fitted rows.** The run badge and exported model bundle count rows with a target and all selected covariates; covariate-free spatial 1-NN counts rows with a target.
 - **Variogram auto-fit refuses Gaussian and Matérn models at a zero nugget**, in every search: OK, RK/RFK residuals, covariate kriging, the CK seed and CV fold refits. On the reference data 12 of 98 fits change, and the four surfaces that left the observed range (the worst by 1990 times its span) no longer do.
@@ -21,6 +21,7 @@ All notable changes to Monolith are documented in this file.
 
 ### Changed
 - **Both Windows and Linux pinned CI test jobs must pass** for the workflow to succeed.
+- **Fit Actual/Predicted Separately** is shown for every prediction or residual view, and while it is off the Predicted manual target is hidden.
 - **Auto-fit diagnostics retain small nonzero SSE values** and mark unavailable SSE as `N/A`; Map Viewer variogram warnings use only the displayed run's fits.
 - **RK/RFK cross-validation now interpolates each held-out covariate within its fold**, matching the map's covariate path and IDW fallback.
 - **Classification CV, tuning and out-of-fold importance now score covariates** reconstructed from each fold's training points, including when map generation is off.
