@@ -46,15 +46,9 @@
     # overlay lists the sizes a run used.
     df <- data.frame(
       Locality = names(res_list),
-      Resolution = sapply(res_list, function(x) {
-        if (res_mode_val == "fixed") {
-          paste0(round(manual_res_val, 1), " m")
-        } else if (res_mode_val == "global") {
-          "Shared, set at run"
-        } else {
-          "Own, set at run"
-        }
-      })
+      Resolution = if (res_mode_val == "fixed") paste0(round(manual_res_val, 1), " m")
+                   else if (res_mode_val == "global") "Shared, set at run"
+                   else "Own, set at run"
     )
     
     if (show_buffer) {
@@ -91,7 +85,8 @@
   output$strict_buffer_note <- renderUI({
     if (!identical(input$boundary_type, "strict")) return(NULL)
     if (!identical(input$res_mode %||% "local", "fixed")) return(NULL)
-    msg <- strict_buffer_message(input$buff_dist %||% 250, input$grid_res %||% 50)
+    msg <- strict_buffer_message(input$buff_dist %||% 250, input$grid_res %||% 50,
+                                 res_floor = 1)
     if (is.null(msg)) return(NULL)
     p(style = paste("font-size: 0.78em; margin-top: 8px; border-left: 2px solid var(--mn-warn);",
                     "padding-left: 8px; color: var(--mn-text-2); line-height: 1.35;"),
@@ -170,10 +165,10 @@
     }
     legend_id <- "rast_legend"
     # The layer comes from the view menu, which offers SE/variance views only
-    # for a method with a prediction variance; the method test stays as a
-    # guard against a stale menu value from the previous run.
+    # for a run that produced a variance band; the band test stays as a guard
+    # against a stale menu value carried over from the previous run.
     uncert_layer <- map_view_layer()
-    is_uncert_view <- uncert_layer %in% c("se", "var") && method_has_variance(meta$method)
+    is_uncert_view <- uncert_layer %in% c("se", "var") && isTRUE(meta$has_variance)
     # NULL when an uncertainty view meets a raster without a variance band:
     # that locality is left undrawn rather than painted with its predictions
     # under a variance legend.
@@ -282,7 +277,8 @@
 
   # draw_map builds the full widget only for STRUCTURAL changes (new run,
   # view switch): styling reads are isolate()d here, and pure styling ticks
-  # (palette, continuous/binned/agro, class breaks, uncertainty toggle) are
+  # (palette, continuous/binned/agro, class breaks, the view menu's SE or
+  # variance layer) are
   # handled by the proxy restyler observer below. Cheap overlays (styled
   # points, borders, north arrow, scale, resolution box, base tiles) are
   # applied by leafletProxy observers keyed on map_overlay_rev.
@@ -336,7 +332,7 @@
         if (!is.null(vgm_warn_html)) {
           m <- m %>% addControl(html = vgm_warn_html, position = "bottomleft")
         }
-        # Styling reads (palette, class breaks, uncertainty toggles) are
+        # Styling reads (palette, class breaks, SE/variance layer) are
         # isolated: a styling tick must invalidate only the proxy restyler,
         # never this full widget build.
         isolate({
@@ -595,14 +591,17 @@
   # context change in the sidebar can never blank the displayed map.
   # Re-renders only when a run is dispatched/completed, defaulting to the view
   # implied by the committed run configuration.
-  # The SE and variance views are offered for the displayed run's method, so
-  # they follow what is on screen, not the method picked for the next run.
+  # The SE and variance views are offered when the displayed run PRODUCED a
+  # prediction-variance band (rv$disp$has_variance, stamped with the export
+  # items), so they follow what is on screen rather than the method picked for
+  # the next run, and a kriging run that returned no variance band offers no
+  # view that would come up blank.
   output$map_view_ui <- renderUI({
     req(rv$disp)
     d <- isolate(rv$disp)
     choices <- map_view_choices(has_pred = length(rv$rast_list_pre) > 0,
                                 has_resid = length(rv$rast_list_res) > 0,
-                                has_variance = method_has_variance(d$method))
+                                has_variance = isTRUE(d$has_variance))
     all_ids <- unlist(choices, use.names = FALSE)
 
     default_view <- if (identical(d$value_type, "resid")) "view_resid"
@@ -630,7 +629,7 @@
   }, priority = 100)
 
   map_layer_title <- function() {
-    if (!method_has_variance(rv$disp$method)) return("")
+    if (!isTRUE(rv$disp$has_variance)) return("")
     switch(map_view_layer(), se = ": Standard Error", var = ": Variance", "")
   }
 

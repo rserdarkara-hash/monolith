@@ -122,6 +122,25 @@ test_that("get_method_label returns empty string for empty/NA input", {
   expect_equal(get_method_label(NULL), "")
 })
 
+test_that("res_mode_label names the resolution logic the sidebar offers", {
+  # The run record stores the raw id, so the reader has to print the wording
+  # the user chose from: pin the ids to the selector itself, or a renamed
+  # choice would be printed back unlabelled.
+  root <- normalizePath(file.path(testthat::test_path(), "..", ".."), mustWork = TRUE)
+  sidebar <- paste(readLines(file.path(root, "ui_sidebar.R"), warn = FALSE), collapse = "\n")
+  expect_match(sidebar,
+    'choices = c("Auto (Per Locality)" = "local", "Auto (Global)" = "global", "Fixed" = "fixed")',
+    fixed = TRUE)
+  expect_equal(res_mode_label("fixed"), "Fixed")
+  expect_equal(res_mode_label("global"), "Auto (Global)")
+  expect_equal(res_mode_label("local"), "Auto (Per Locality)")
+  # An archived run from an older session carries no value at all.
+  expect_equal(res_mode_label(NULL), "not recorded")
+  expect_equal(res_mode_label(NA), "not recorded")
+  # Anything unrecognised is passed through rather than mislabelled.
+  expect_equal(res_mode_label("other"), "other")
+})
+
 # ── get_buffer_multiplier ─────────────────────────────────────────────────
 
 test_that("get_buffer_multiplier returns correct values per method", {

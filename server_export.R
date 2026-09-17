@@ -69,7 +69,7 @@
       tags$br(),
       tags$span(paste0("Subset: ", cfg$subset, " | View: ", cfg$value_type, " | CRS: ", cfg$crs)),
       tags$br(),
-      tags$span(paste0("Boundary: ", cfg$boundary_type, " | Buffer: ", if (is.null(cfg$buffer_mode) || cfg$buffer_mode == "fixed") paste0(cfg$buffer_dist, "m") else "Dynamic", " | Resolution: ", cfg$resolution, " (", cfg$res_mode, ")")),
+      tags$span(paste0("Boundary: ", cfg$boundary_type, " | Buffer: ", if (is.null(cfg$buffer_mode) || cfg$buffer_mode == "fixed") paste0(cfg$buffer_dist, "m") else "Dynamic", " | Resolution: ", cfg$resolution, " (", res_mode_label(cfg$res_mode), ")")),
       # Method-agnostic settings that used to be invisible here even though they
       # change the reported numbers; the method-specific ones print only where
       # they apply (they are NA for the other engines).
@@ -359,7 +359,10 @@
     # the currently selected view.
     meta <- get_display_meta(); req(meta)
     view <- map_view_base()
-    layer <- if (method_has_variance(meta$method)) map_view_layer() else "value"
+    # Same authority as the view menu and the viewer: what the run produced,
+    # so a stale menu value cannot send an uncertainty export from a map that
+    # is showing concentrations.
+    layer <- if (isTRUE(meta$has_variance)) map_view_layer() else "value"
     # An SE or variance view exports that layer as its own single-band raster,
     # the same product the run registered as "Uncertainty Map".
     uncert_layer <- function(r) {
@@ -367,7 +370,12 @@
       ru <- terra::unwrap(r)
       if (!"var1.var" %in% names(ru)) return(NULL)
       v <- ru[["var1.var"]]
-      terra::wrap(if (layer == "se") sqrt(v) else v)
+      if (layer == "se") {
+        # The layer name becomes the GeoTIFF band description.
+        v <- sqrt(v)
+        names(v) <- "var1.se"
+      }
+      terra::wrap(v)
     }
     target <- switch(view,
       "view_pred"  = uncert_layer(rv$rast_pred),
@@ -451,7 +459,7 @@
                             if (image_only_map) {
                               tags$p(style = "font-size: 0.8em; color: var(--mn-text-2); background: var(--mn-surface-2); border: 1px solid var(--mn-line); border-left: 2px solid var(--mn-warn); padding: 8px; border-radius: 3px;",
                                      icon("exclamation-triangle"),
-                                     " This item is not a single raster surface (a paired comparison map, or point geometry), so it exports as an image only. For GIS layers of point and polygon geometry, use the Export Class Zones and Export Drawn Polygons buttons on the Map Viewer toolbar.")
+                                     " This item is not a single raster surface (a paired comparison map, or point geometry), so it exports as an image only. For GIS layers of point and polygon geometry, use the Class zones and Drawn polygons entries in the Map Viewer toolbar's Downloads menu.")
                             },
                             conditionalPanel(
                               condition = "input.styler_format != 'gtiff'",

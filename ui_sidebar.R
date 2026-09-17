@@ -232,15 +232,26 @@ ui_sidebar_panel <- sidebarPanel(width = 3,
                          choices = c("Auto (Per Locality)" = "local", "Auto (Global)" = "global", "Fixed" = "fixed"),
                          size = "sm", direction = "vertical", justified = TRUE),
             conditionalPanel(condition = "input.res_mode == 'fixed'",
-              sliderInput("grid_res", "Manual Resolution", min = 5, max = 500, value = 50)
+              # 1 m floor, the same frame server_data_setup.R rebuilds the
+              # slider with once a Target Mapping CRS is set. The ~4M candidate
+              # cell cap in the run (spatial_pipeline.R) is what bounds memory,
+              # not this minimum.
+              sliderInput("grid_res", "Manual Resolution", min = 1, max = 500, value = 50, step = 1)
             ),
             
-            div(class = "mn-subsection", 
+            div(class = "mn-subsection",
+                # The table describes the settings above, i.e. the NEXT run. In
+                # the Auto modes the cell size follows the boundaries the run
+                # builds, so the column names that instead of printing a figure
+                # no grid will use; the Map Viewer's resolution overlay lists
+                # the sizes the displayed run gridded at.
+                p(style = "font-size: 0.78em; margin: 0 0 4px 0; color: var(--mn-text-3);",
+                  "Grid and buffer for the next run:"),
                 tableOutput("loc_res_table"),
                 uiOutput("strict_buffer_note"),
                 conditionalPanel(condition = "input.res_mode == 'fixed' && input.boundary_type == 'wrapped' && input.buff_mode == 'dynamic'",
                   p(style="font-size: 0.78em; margin-top: 8px; border-left: 2px solid var(--mn-accent); padding-left: 8px; color: var(--mn-text-3); font-style: italic; line-height: 1.35;", 
-                    "Note: Dynamic buffers scale with the physical sample density (spacing) to prevent spatial clipping, completely independent of your manual grid pixel size.")
+                    "Note: under Fixed resolution the dynamic buffer is a multiple of your manual cell size - 1x for TPS, 2x for IDW, 3x for the kriging engines - clamped to 5-2000 m, so changing the resolution moves the buffer in the table above. In the Auto modes it scales with sample spacing instead.")
                 )
             ),
             

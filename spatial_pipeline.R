@@ -9,6 +9,14 @@
 # the suite can shrink it and assert the clip is block-invariant.
 .GRID_CLIP_BLOCK_CELLS <- 2e5
 
+# How many BOUNDING-BOX cells a prediction grid may consider before its
+# resolution is coarsened. The raster template spans the full bbox before the
+# boundary clip, so this bounds the candidate grid, not the surviving one, and
+# all three resolution modes are floored by it. Named, like the Classification
+# Suite's .CLASSIF_MAX_CANDIDATE_CELLS, so the suite can shrink it and exercise
+# the cap without allocating the budget.
+.INTERP_MAX_CANDIDATE_CELLS <- 4e6
+
 
 # Workers cannot touch Shiny reactives, so run state travels to the main
 # session as small files under the session's progress directory. Both writers
@@ -102,13 +110,16 @@ strict_buffer_gap <- function(buffer, res) {
 # Plain-text advisory for an incoherent strict buffer/resolution pair; NULL
 # when the pair is fine (or unusable). `label` prefixes the locality/scope
 # name when there is one.
-strict_buffer_message <- function(buffer, res, label = NULL) {
+#
+# `res_floor` is the smallest cell size the CALLING suite lets a user set, and
+# a corrective size below it is dropped from the message: advice the user
+# cannot act on is worse than the buffer arm alone. The interpolation suite
+# passes 1 (its Fixed slider), the Classification Suite takes the default 5
+# (its own slider, and the floor every Auto rule clamps to).
+strict_buffer_message <- function(buffer, res, label = NULL, res_floor = 5) {
   g <- strict_buffer_gap(buffer, res)
   if (is.null(g) || !g$short) return(NULL)
-  # Both suites' manual-resolution sliders stop at 5 m and the Auto rules clamp
-  # there as well, so a corrective cell size below that is not something the
-  # user could actually set; widening the buffer is then the only real fix.
-  res_arm <- if (floor(g$req_res) < 5) "" else sprintf(
+  res_arm <- if (floor(g$req_res) < res_floor) "" else sprintf(
     ", or lower the resolution to %s m or less", format(floor(g$req_res), trim = TRUE))
   sprintf(paste0(
     "%sStrict Measured buffer (%s m) is smaller than half the diagonal of a ",
@@ -697,11 +708,19 @@ run_regional_interpolation <- function(item, current_method, current_crs, aux_va
     cap_res <- function(res, what) {
       dx <- as.numeric(bbox["xmax"] - bbox["xmin"])
       dy <- as.numeric(bbox["ymax"] - bbox["ymin"])
-      min_res_cap <- sqrt(dx * dy / 4e6)
+      min_res_cap <- sqrt(dx * dy / .INTERP_MAX_CANDIDATE_CELLS)
       if (is.finite(min_res_cap) && res < min_res_cap) {
-        write_warning_file(l, "act", sprintf(
-          "%s %.1f m over this extent exceeds ~4M cells; coarsened to %.1f m to avoid exhausting memory.",
-          what, res, min_res_cap))
+        msg <- sprintf(
+          "%s %.1f m over this extent would need more than %s candidate cells; coarsened to %.1f m to keep the run inside memory.",
+          what, res,
+          format(.INTERP_MAX_CANDIDATE_CELLS, big.mark = ",", scientific = FALSE),
+          min_res_cap)
+        # Two channels, for the reason spelled out at the strict-buffer check
+        # below: the progress panel keeps one warning per locality and closes
+        # with the run, so the [WARN] log line is what still tells the user the
+        # surface was not computed at the size they asked for.
+        write_warning_file(l, "act", msg)
+        res_out$log_msg <<- paste0(res_out$log_msg, "\n[WARN] ", l, ": ", msg)
         res <- min_res_cap
       }
       res
@@ -711,7 +730,7 @@ run_regional_interpolation <- function(item, current_method, current_crs, aux_va
 
     if (!is.null(res_mode) && res_mode == "fixed") {
       actual_res <- cap_res(grid_res_safe, "Fixed grid resolution")
-      # Absolute sanity floor only. The slider itself cannot go below 5 m, but a
+      # Absolute sanity floor only. The slider itself stops at 1 m, but a
       # restored run-config could carry any value, and a sub-decimetre grid over
       # any real extent is a memory accident rather than an intent.
       actual_res <- max(actual_res, 0.1)
@@ -733,7 +752,10 @@ run_regional_interpolation <- function(item, current_method, current_crs, aux_va
       if (identical(res_mode, "global")) {
         write_warning_file(l, "act", "The shared Auto (Global) resolution could not be computed; this locality uses its own Auto resolution.")
       }
-      actual_res <- auto_grid_resolution(area_m2)
+      # Capped like the other two modes: the target is ~100,000 cells inside
+      # the BOUNDARY, and a strict point-buffer boundary occupies a small
+      # fraction of its own bounding box, which is what the template spans.
+      actual_res <- cap_res(auto_grid_resolution(area_m2), "Auto grid resolution")
     }
 
     # Authoritative strict-boundary coherence check: only here is the effective
@@ -743,7 +765,10 @@ run_regional_interpolation <- function(item, current_method, current_crs, aux_va
     # reads as sampled points sitting on blank map. Advisory only - the run is
     # scientifically valid, the support is just under-resolved.
     if (identical(b_type, "strict") && is.null(local_shp)) {
-      sb_msg <- strict_buffer_message(b_dist_local, actual_res)
+      # res_floor 1: the corrective cell size is set on the Fixed slider, which
+      # reaches 1 m. In an Auto mode that means switching to Fixed, the same
+      # move a 5 m suggestion would need.
+      sb_msg <- strict_buffer_message(b_dist_local, actual_res, res_floor = 1)
       if (!is.null(sb_msg)) {
         # Two channels, because neither alone reaches the user reliably. The
         # progress panel holds ONE warning per locality/prefix (.write_status_file
@@ -809,15 +834,19 @@ run_regional_interpolation <- function(item, current_method, current_crs, aux_va
       # unclipped grid, exactly as the `inside <- NULL` branch did.
       grid_p <- grid_block(1L, nrow(grid_xy))
     } else if (!any(keep_mask)) {
-      # A coarse fixed resolution over a small boundary can leave NO grid node
-      # inside it. The engines would then krige the full bbox and the mask
+      # A coarse cell size over a small boundary can leave NO grid node inside
+      # it - a Fixed value, or the shared Auto (Global) size taken from a much
+      # larger boundary elsewhere in the run. The engines would then krige the full bbox and the mask
       # would discard every cell - a blank locality with no message, after
       # paying for the whole interpolation. Name the cause and skip instead
       # (the surface was all-NA in this state before; nothing displayable is
       # lost). classif_build_grid stops loudly in the same situation.
       write_warning_file(l, "act", sprintf(
-        "No grid node falls inside this locality's boundary at %.1f m resolution; the surface would be empty. Reduce the fixed grid resolution or widen the boundary/buffer.",
-        actual_res))
+        "No grid node falls inside this locality's boundary at %.1f m resolution; the surface would be empty. %s",
+        actual_res,
+        if (identical(res_mode, "fixed")) "Reduce the fixed grid resolution or widen the boundary/buffer."
+        else if (shared_grid) "The Auto (Global) cell size comes from the largest boundary of the run and is too coarse for this one: switch to Auto (Per Locality), or set a Fixed resolution, or widen the boundary/buffer."
+        else "Widen the boundary/buffer, or set a Fixed resolution."))
       res_out$log_msg <- paste0(res_out$log_msg, "\nWarning in ", l,
         ": no grid cells fall inside the boundary at this resolution; locality skipped.")
       return(res_out)

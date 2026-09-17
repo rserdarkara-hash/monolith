@@ -2,9 +2,18 @@
 
 All notable changes to Monolith are documented in this file.
 
-## [Unreleased] - Strict kriging cross-validation and tuning-value identity
+## [1.1.2] - 2026-09-18 - TPS scaling in fitting and optimization/ UI redundancy removal / Manual Matérn fit fallback / Correlation check categorisation in RFK, RK and CK / Covariate interpolation in RK and RFK matching Classification Suite / Strict kriging cross-validation and tuning-value identity
 
 ### Fixed
+- **Manual variogram `Apply` and the slider values follow the *Predicted* target whenever that switch is shown**, including outside Comparison Mode.
+- **Governing Factors importance reports RMSE increase after permutation**, with the unshuffled model's RMSE subtracted from each shuffled loss. The plot and table use the same quantity.
+- **Classification sample counts match fitted rows.** The run badge and exported model bundle count rows with a target and all selected covariates; covariate-free spatial 1-NN counts rows with a target.
+- **Variogram auto-fit refuses Gaussian and Matérn models at a zero nugget**, in every search: OK, RK/RFK residuals, covariate kriging, the CK seed and CV fold refits. On the reference data 12 of 98 fits change, and the four surfaces that left the observed range (the worst by 1990 times its span) no longer do.
+- **Test helpers select sequential processing before application sourcing**, preventing an unused Windows CI startup pool from timing out. Normal app runs use multisession.
+- **Spatial TPS fits preserve the common coordinate scale** in both fitting and lambda optimization. TPS surfaces, CV metrics and selected lambdas change where the sample extent caused artificial anisotropy.
+- **Shared unnamed uploaded boundaries use each locality's selected sidebar boundary.** Combined class-area tables and exports require disjoint locality domains, preventing duplicated hectares.
+- **Jenks classification targets are reproducible** when classInt samples large inputs.
+- **Cluster startup failures restore `mc.cores`.** Classification cleans up superseded models, failed-run files and session files, preserving cancellation while a worker finishes.
 - **Stored variograms belong to the variable and data subset they were tuned on**, carry that key and their source, and are used only for that combination. Uploading data, reassigning localities or changing the X, Y, locality or Input CRS mapping clears every tuning store.
 - **Stored IDW powers and TPS lambdas are keyed the same way** and no longer win over the sidebar value for another variable or subset.
 - **Manual IDW and TPS `Apply` reaches the Predicted surface** in every view that computes one, not only in Comparison Mode.
@@ -17,43 +26,30 @@ All notable changes to Monolith are documented in this file.
 - **The residual variogram and the observed-versus-predicted scatter tolerate missing CV predictions.**
 - **A locality is projected once, from every row with coordinates, before the covariate filter**, so the working CRS cannot depend on the covariate selection.
 - **Kendall partial correlations condition each pair on the chosen controls only.** Adding a target no longer changes the other pairs' coefficients, matching Pearson, Spearman and the p-values.
-- **Degree-range coordinates are set to EPSG:4326 only with evidence**: longitude/latitude column names, or a boundary shapefile containing at least half the points read as degrees. Otherwise the Data Setup tab asks for confirmation, since a local metre grid fits the same ranges.
-- **Auto (Global) resolution gives every locality one cell size**, the Auto size of the largest boundary, on a shared grid lattice.
 - **Grid cells are square and exactly the stated resolution** in interpolation and classification. The grid grows by whole cells from the bounding box corner; cells were stretched to fit the box before (45.45 × 44.44 m for 45 m).
 - **The Map Viewer resolution box, the Domain & Grid table and the run configuration report the cell size the run used**, not the pre-run suggestion.
+- **The ~4 million candidate-cell grid guard applies in all three resolution modes**, and a locality with no grid node inside its boundary names the control the active mode has.
+- **An exported standard-error GeoTIFF names its band `var1.se`**, not the variance it was derived from.
+- **Classification permutation importance scores only the covariates a model used.** Under Auto-Drop each fold scores the covariates it kept, a covariate is pooled over the folds that kept it, and one no fold kept is absent from the chart. Importance values move under Auto-Drop.
 - **Quick export and the class-zone download follow the uncertainty view on screen.** Class breaks and class areas no longer change when an uncertainty map is shown under Match Scales.
-- **Uncertainty maps never use a diverging palette**; a diverging choice is shown as Viridis on SE and variance maps, in the Map Viewer and the Export Styler.
 - **Classification Auto-Drop reruns the VIF screen inside every CV fold, tuning resample and nested inner fold**, and class weights are recomputed from each tuning resample's own training rows. The final model is fitted on the covariates the screen keeps on all rows; the run summary lists them with per-fold drop counts. Classification CV metrics move when Auto-Drop or Balance classes is on.
 - **The boundary-based CRS identification margin is 5% of the boundary diagonal in metres**; it was a fraction of a millimetre with s2 on.
 - **Every equation and symbol in the Scientific Guide renders in the documentation drawer.** Sections 2.5, 3.2-3.7 and 9.2 are written in the HTML/entity notation the rest of the guide uses; the `lm`, `**absolute**` and `**NMAE (%)**` markers in sections 1.3 and 5.1, and the collinearity threshold in the Descriptive and Exploratory guide, render as formatting instead of literal characters.
+- **The colour-palette picker offers every palette a variable can open on.** Magnesium, iron, manganese and copper get PuBuGn, Purples, GnBu and YlGn; the picker lists fourteen scales.
+- **The Fixed resolution slider covers 1 to 500 m in the sidebar**, the range the app rebuilds it with and the guides state. Memory is bounded by the ~4 million candidate-cell guard, not by the slider minimum.
+- **The Domain & Grid buffer note describes the buffer it sits under**: with Fixed resolution the dynamic buffer is a method multiple of the manual cell size (TPS 1x, IDW 2x, kriging 3x), clamped to 5-2000 m.
+- **The Export Styler's image-only note points at the Map Viewer's Downloads menu**, where the Class zones and Drawn polygons exports live.
+- **The strict-buffer advisory offers a corrective cell size down to 1 m** in interpolation, the floor of the slider that sets it; the Classification Suite keeps its own 5 m floor.
 
 ### Changed
-- **Uncertainty maps moved to the Map Viewer's View dropdown**: SE and variance views of the Actual, Predicted and comparison surfaces for kriging runs, restyled in place. The Map Styling panel keeps the Uncertainty Mapping note. Match Scales also applies to them.
-- **OK, CK and the OK fallback refit their variogram inside every cross-validation fold**, and RK, RFK and CK re-run the covariate screen on each fold's training samples. Only a variogram saved with **Apply manual model** is reused, and its row is labelled conditional. Kriging CV metrics move; no prediction surface does.
-- **Each RFK fold draws its forest from its own seed**, so a held-out sample cannot move its own prediction.
-- **Ordinary Kriging gets a CV Population switch** (Native / Comparable) and every cross-validation row carries a population ID, the expected and predicted sample counts, and an INCOMPLETE mark below full coverage.
-- **A failed fold leaves NA for its own samples** and is reported through coverage, never filled from another engine.
-- **Standard LOOCV is slower for OK and CK**: measured on 355 samples with two covariates, about 50 s (OK) and 100 s (CK).
-- **Manual fitting mode uses only applied models**; other localities fit their own variogram in the run.
-
-## [1.1.2] - 2026-09-16 - TPS scaling in fitting and optimization/ UI redundancy removal / Manual Matérn fit fallback / Correlation check categorisation in RFK, RK and CK / Covariate interpolation in RK and RFK matching Classification Suite
-
-### Fixed
-- **Manual variogram `Apply` and the slider values follow the *Predicted* target whenever that switch is shown**, including outside Comparison Mode.
-- **Governing Factors importance reports RMSE increase after permutation**, with the unshuffled model's RMSE subtracted from each shuffled loss. The plot and table use the same quantity.
-- **Classification sample counts match fitted rows.** The run badge and exported model bundle count rows with a target and all selected covariates; covariate-free spatial 1-NN counts rows with a target.
-- **Variogram auto-fit refuses Gaussian and Matérn models at a zero nugget**, in every search: OK, RK/RFK residuals, covariate kriging, the CK seed and CV fold refits. On the reference data 12 of 98 fits change, and the four surfaces that left the observed range (the worst by 1990 times its span) no longer do.
 - **Kriging keeps a variogram that gives an empty surface unaltered.** The locality is skipped and the log names the cause. Manual Gaussian/Matérn models with a nugget below 5% of the sill are flagged at Apply, in the variogram subtitle and on the map.
 - **Manual variogram sliders are scaled to the tuned locality's variance and extent**, so small-variance variables can be tuned. Apply refuses a model whose nugget and partial sill are both zero.
-- **Test helpers select sequential processing before application sourcing**, preventing an unused Windows CI startup pool from timing out. Normal app runs use multisession.
-- **Spatial TPS fits preserve the common coordinate scale** in both fitting and lambda optimization. TPS surfaces, CV metrics and selected lambdas change where the sample extent caused artificial anisotropy.
-- **Shared unnamed uploaded boundaries use each locality's selected sidebar boundary.** Combined class-area tables and exports require disjoint locality domains, preventing duplicated hectares.
 - **Manual Matérn uses smoothness 1.5**; its preview reports the Auto-Fit weighted SSE criterion and prefills the stored model family.
-- **Jenks classification targets are reproducible** when classInt samples large inputs.
 - **TPS parameters include the fitted lambda and effective degrees of freedom**, with numeric exports and a near-planar warning below effective df 3.5.
-- **Cluster startup failures restore `mc.cores`.** Classification cleans up superseded models, failed-run files and session files, preserving cancellation while a worker finishes.
-
-### Changed
+- **Degree-range coordinates are set to EPSG:4326 only with evidence**: longitude/latitude column names, or a boundary shapefile containing at least half the points read as degrees. Otherwise the Data Setup tab asks for confirmation, since a local metre grid fits the same ranges.
+- **Auto (Global) resolution gives every locality one cell size**, the Auto size of the largest boundary, on a shared grid lattice.
+- **The run configuration reports "set at run" while an Auto resolution mode has not yet gridded**, and names the resolution logic in words.
+- **Uncertainty maps never use a diverging palette**; a diverging choice is shown as Viridis on SE and variance maps, in the Map Viewer and the Export Styler.
 - **Both Windows and Linux pinned CI test jobs must pass** for the workflow to succeed.
 - **Fit Actual/Predicted Separately** is shown for every prediction or residual view, and while it is off the Predicted manual target is hidden.
 - **Auto-fit diagnostics retain small nonzero SSE values** and mark unavailable SSE as `N/A`; Map Viewer variogram warnings use only the displayed run's fits.
@@ -63,9 +59,18 @@ All notable changes to Monolith are documented in this file.
 - **Single-locality Scientific Analysis selects the locality directly** and shows its summaries; combined choices are reserved for multi-locality runs.
 - **Recorded baseline provenance tracks `gstat`, `sf`, `terra` and `classInt`.** `spdep` remains an application dependency, and Moran's I diagnostics remain covered by the test suite. The four recorded baseline values do not include Moran's I.
 - **Geographic and non-metre projected input is transformed to local UTM before interpolation and optimization.** Classification enforces metric Target CRSs and refuses unsuitable targets; Data Setup warns above 1% input-projection distortion.
+- **Uncertainty maps moved to the Map Viewer's View dropdown**: SE and variance views of the Actual, Predicted and comparison surfaces, offered whenever the displayed run produced a prediction variance, and restyled in place. The Map Styling panel keeps the Uncertainty Mapping note. Match Scales also applies to them.
+- **OK, CK and the OK fallback refit their variogram inside every cross-validation fold**, and RK, RFK and CK re-run the covariate screen on each fold's training samples. Only a variogram saved with **Apply manual model** is reused, and its row is labelled conditional. Kriging CV metrics move; no prediction surface does.
+- **Each RFK fold draws its forest from its own seed**, so a held-out sample cannot move its own prediction.
+- **Ordinary Kriging gets a CV Population switch** (Native / Comparable) and every cross-validation row carries a population ID, the expected and predicted sample counts, and an INCOMPLETE mark below full coverage.
+- **A failed fold leaves NA for its own samples** and is reported through coverage, never filled from another engine.
+- **Standard LOOCV is slower for OK and CK**: measured on 355 samples with two covariates, about 50 s (OK) and 100 s (CK).
+- **Manual fitting mode uses only applied models**; other localities fit their own variogram in the run.
+- **A coarsened grid resolution reaches the run log and a notification**, not only the progress panel, so the cell size a surface was computed at survives the run.
 
 ### Testing
-- Suite validation: 3,355 passing assertions, 0 failing, 0 skipped, 32 warnings across 35 test files (2026-09-16; full suite including the browser smoke tests). All four recorded baseline values remain exactly unchanged.
+- Fixed-resolution slider bounds and step are checked against both CRS-update branches. Grid documentation records the 1 m suggestion floor, mode-dependent buffer basis and approximate candidate-cell budget.
+- Suite validation: 3,724 passing assertions, 0 failing, 0 skipped across 35 test files (2026-09-17; full suite including the browser smoke tests). All four recorded baseline values remain exactly unchanged.
 
 ## [1.1.1] - 2026-09-13 - Updated renv.lock / CRS recognition optimization / Directional variogram on both surfaces / Baseline provenance / User's own reproducibility conditions
 

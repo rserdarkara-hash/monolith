@@ -927,7 +927,9 @@
     min_res_by_dim <- spacing$max_dim / 300
 
     final_rec <- max(rec_res, min_res_by_dim)
-    final_rec <- max(0.1, min(500, round(final_rec, 1)))
+    # Clamped to the slider's own frame (1-500 m), so the figure prefilled here
+    # is the figure the widget can hold.
+    final_rec <- max(1, min(500, round(final_rec, 1)))
 
     updateSliderInput(session, "grid_res", value = final_rec)
 
@@ -951,16 +953,6 @@
         temp_res[[l]] <- l_res
     }
     rv$loc_resolutions <- temp_res
-  })
-
-  # In fixed mode the stored per-locality values mirror the slider, so moving
-  # it must refresh them or the map resolution overlay shows the old value.
-  observeEvent(input$grid_res, {
-    req(isTRUE(input$res_mode == "fixed"), length(rv$loc_resolutions) > 0)
-    rv$loc_resolutions <- setNames(
-      as.list(rep(input$grid_res, length(rv$loc_resolutions))),
-      names(rv$loc_resolutions)
-    )
   })
 
   observeEvent(input$meta_file, {

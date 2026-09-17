@@ -890,9 +890,10 @@ run_classification_cv <- function(pts_sf, target, predictors,
         fold_wf <- tune::finalize_workflow(wf, bp_i)
       }
       fit_i <- parsnip::fit(fold_wf, data = tr)
-      if (length(classif_screened_out(fit_i))) {
+      screened_i <- classif_screened_out(fit_i)
+      if (length(screened_i)) {
         fold_screen[[length(fold_screen) + 1]] <<-
-          data.frame(fold = i, covariate = classif_screened_out(fit_i), stringsAsFactors = FALSE)
+          data.frame(fold = i, covariate = screened_i, stringsAsFactors = FALSE)
       }
       # Out-of-fold permutation importance: score THIS fold's model on the rows
       # it never saw, before they are used for anything else. Done here because
@@ -917,11 +918,18 @@ run_classification_cv <- function(pts_sf, target, predictors,
       # importance is requested — for every learner, including any stochastic
       # one added later — and each fold's importance is independently
       # reproducible from `seed` and `k` alone.
-      if (isTRUE(oof_importance) && length(predictors)) {
+      # A covariate this fold's own Auto-Drop screen removed is not in its
+      # model, so permuting it would score a zero for a covariate the fold
+      # never used and drag the pooled importance of a genuinely used one down.
+      # It is left out of this fold's contribution, and the pool averages each
+      # covariate over the folds that kept it.
+      imp_preds <- setdiff(predictors, screened_i)
+      if (isTRUE(oof_importance) && length(imp_preds)) {
         imp_parts[[length(imp_parts) + 1]] <<-
-          .classif_with_seed(seed + 977L + k,
-            .classif_perm_delta(fit_i, te, target, predictors,
-                                n_rep = importance_reps, cancel_file = cancel_file))
+          c(.classif_with_seed(seed + 977L + k,
+              .classif_perm_delta(fit_i, te, target, imp_preds,
+                                  n_rep = importance_reps, cancel_file = cancel_file)),
+            list(predictors = imp_preds))
       }
       cls <- predict(fit_i, te, type = "class")
       # Pad any class this fold's model never saw, so every fold contributes the
@@ -1365,10 +1373,22 @@ classif_permutation_importance <- function(model, train_df, target, predictors,
   if (!length(parts)) return(NULL)
   w <- vapply(parts, function(z) as.numeric(z$n), numeric(1))
   if (sum(w) <= 0) return(NULL)
-  dl <- do.call(cbind, lapply(parts, function(z) z$delta))   # n_pred x n_fold
-  delta <- as.numeric(dl %*% w) / sum(w)
+  # n_pred x n_fold, NA where a fold's own Auto-Drop screen removed the
+  # covariate, so each covariate is averaged over the folds that used it and a
+  # covariate no fold kept is left out of the table entirely. Without a screen
+  # every part carries every predictor and this is the plain weighted mean.
+  dl <- matrix(NA_real_, nrow = length(predictors), ncol = length(parts),
+               dimnames = list(predictors, NULL))
+  for (j in seq_along(parts)) {
+    dl[parts[[j]]$predictors %||% predictors, j] <- parts[[j]]$delta
+  }
+  used <- !is.na(dl)
+  denom <- vapply(seq_len(nrow(dl)), function(r) sum(w[used[r, ]]), numeric(1))
+  dl[!used] <- 0
+  keep <- denom > 0
+  delta <- as.numeric(dl %*% w)[keep] / denom[keep]
   base <- sum(vapply(parts, function(z) z$baseline, numeric(1)) * w) / sum(w)
-  .classif_importance_frame(predictors, delta, base, "out-of-fold")
+  .classif_importance_frame(predictors[keep], delta, base, "out-of-fold")
 }
 
 # ── Final fit ───────────────────────────────────────────────────────────────
@@ -2300,8 +2320,11 @@ run_classification_pipeline <- function(df, target, predictors,
   } else {
     report("importance", 0, "Scoring permutation feature importance...")
     train_cc <- sf::st_drop_geometry(pts)
+    # model$predictors: the covariates the final model uses. One its Auto-Drop
+    # screen removed is not in the model, so permuting it would report it as
+    # unimportant rather than as absent.
     out$importance <- tryCatch(
-      classif_permutation_importance(model, train_cc, target, predictors,
+      classif_permutation_importance(model, train_cc, target, model$predictors,
                                      n_rep = importance_reps, seed = seed,
                                      cancel_file = cancel_file,
                                      progress = function(f) report("importance", f)),
@@ -2319,6 +2342,12 @@ run_classification_pipeline <- function(df, target, predictors,
       target     = target,
       levels     = levs,
       predictors = model$predictors,
+      # Provenance of the covariate list above: which covariates the Auto-Drop
+      # screen removed and at which VIF threshold, so a bundle whose predictor
+      # list is shorter than the run's selection explains itself. NULL when no
+      # screen ran (Keep All).
+      screened_out = model$screened_out,
+      vif_threshold = out$vif_threshold,
       class_weights_applied = isTRUE(model$weights_applied),
       tuning_depth = depth,
       # The exported workflow's OWN tuned hyperparameters (full-data tuning in

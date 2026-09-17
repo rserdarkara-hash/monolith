@@ -2199,11 +2199,18 @@ test_that("strict_buffer_message speaks only for an incoherent pair", {
   expect_match(strict_buffer_message(240, 350), "under 1% of isolated samples",
                fixed = TRUE)
 
-  # Both manual-resolution sliders stop at 5 m, so a corrective cell size the
-  # user could not set is left out and only the buffer arm remains.
+  # A corrective cell size the calling suite cannot set is left out, so only
+  # the buffer arm remains. floor(3 * sqrt(2)) = 4 m: below the Classification
+  # Suite's 5 m slider floor (the default), reachable on the interpolation
+  # suite's own slider.
   expect_match(strict_buffer_message(3, 5), "Raise the buffer to 4 m or more\\.$")
   expect_false(grepl("lower the resolution", strict_buffer_message(3, 5),
                      fixed = TRUE))
+  expect_match(strict_buffer_message(3, 5, res_floor = 1),
+               "or lower the resolution to 4 m or less\\.$")
+  # Still dropped below the stated floor: floor(0.6 * sqrt(2)) = 0 m.
+  expect_match(strict_buffer_message(0.6, 5, res_floor = 1),
+               "Raise the buffer to 4 m or more\\.$")
 
   expect_null(strict_buffer_message(250, 350))
   expect_null(strict_buffer_message(175, NA))
@@ -2239,6 +2246,52 @@ test_that("run_regional_interpolation names an incoherent strict buffer", {
     item, "IDW", 32633, character(0), NULL, "wrapped", "fixed", 100,
     "fixed", 350, "EPSG:4326", FALSE, "actual"))
   expect_false(grepl("Strict Measured buffer", res_wrap$log_msg))
+})
+
+test_that("a coarsened grid reaches both the progress panel and the run log", {
+  # The candidate-cell cap changes the cell size the surface is computed at, so
+  # it has to survive the run: the progress panel holds one warning per
+  # locality and closes when the maps are revealed.
+  pts_data <- data.frame(x = c(0, 100, 200, 300, 150), y = c(0, 100, 0, 150, 250),
+                         v = c(1.2, 3.4, 2.1, 2.8, 1.9), pv = NA, Locality = "LocA")
+  item <- list(l = "LocA", pts_data = pts_data,
+               m_params = list(idw_p_act = 2, idw_p_pre = 2, idw_nmax = 12,
+                               tps_lambda_act = -1, tps_lambda_pre = -1,
+                               pre_fit_act = NULL, pre_fit_pre = NULL,
+                               cv_strategy = "auto", rfk_uncertainty = "jackknife"))
+
+  tmp <- withr::local_tempdir("cap_res_")
+  # run_regional_interpolation sets these options itself and never restores
+  # them; local_options puts the session's own values back at test exit.
+  withr::local_options(monolith_progress_dir = tmp, monolith_session_id = "cap_res")
+  # Shrink the budget rather than widen the extent: firing the real 4e6 cap
+  # allocates 4e6 candidate cells by construction, which is what it exists to
+  # prevent.
+  orig <- .INTERP_MAX_CANDIDATE_CELLS
+  withr::defer(assign(".INTERP_MAX_CANDIDATE_CELLS", orig, envir = globalenv()))
+  assign(".INTERP_MAX_CANDIDATE_CELLS", 100, envir = globalenv())
+  res <- suppressWarnings(run_regional_interpolation(
+    item, "IDW", 32633, character(0), NULL, "wrapped", "dynamic", 250,
+    "fixed", 5, "EPSG:32633", FALSE, "actual",
+    progress_dir_val = tmp, session_id_val = "cap_res"))
+  assign(".INTERP_MAX_CANDIDATE_CELLS", orig, envir = globalenv())
+
+  expect_false(grepl("Error in", res$log_msg))
+  # sqrt(bbox area / budget): the continuous-area target. Whole-cell
+  # extension means the raster's actual candidate count is approximate.
+  bb <- sf::st_bbox(res$bound)
+  expect_equal(res$actual_res,
+               sqrt(as.numeric(bb["xmax"] - bb["xmin"]) *
+                    as.numeric(bb["ymax"] - bb["ymin"]) / 100))
+  expect_gt(res$actual_res, 5)
+
+  # Durable channel: [WARN] also raises it as a notification (server_sci_analysis.R).
+  expect_match(res$log_msg, "[WARN] LocA: Fixed grid resolution", fixed = TRUE)
+  expect_match(res$log_msg, "coarsened to", fixed = TRUE)
+  # Progress-panel channel.
+  wf <- file.path(tmp, "warn_cap_res_LocA_act.txt")
+  expect_true(file.exists(wf))
+  expect_match(paste(readLines(wf), collapse = " "), "coarsened to")
 })
 
 # ── Numeric contracts: the engines' arithmetic ─────────────────────────────

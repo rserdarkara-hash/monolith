@@ -938,9 +938,16 @@ test_that("Auto-Drop reruns inside CV and the final model carries no custom step
 
   cv <- suppressWarnings(run_classification_cv(pts, "soil", preds, method = "rf",
                                                strategy = "standard", v = 3,
-                                               vif_threshold = 10))
+                                               vif_threshold = 10,
+                                               oof_importance = TRUE,
+                                               importance_reps = 1L))
   expect_s3_class(cv$fold_screen, "data.frame")
   expect_setequal(unique(cv$fold_screen$fold), unique(cv$fold_id))
+  # A covariate every fold's screen removed is absent from the pooled
+  # importance, not reported as an unimportant one.
+  dropped_everywhere <- names(Filter(function(k) k == length(unique(cv$fold_id)),
+                                     as.list(table(cv$fold_screen$covariate))))
+  expect_setequal(cv$importance$predictor, setdiff(preds, dropped_everywhere))
 
   m <- suppressWarnings(fit_classification_model(pts, "soil", preds, method = "rf",
                                                  strategy = "standard", v = 3,
@@ -1410,6 +1417,30 @@ test_that("fit_classification_model rejects an unknown CV strategy", {
 })
 
 # ── Out-of-fold permutation importance ──────────────────────────────────────
+
+test_that("pooled out-of-fold importance averages each covariate over the folds that used it", {
+  # Fold 2 dropped "b" (its Auto-Drop screen removed it), so only fold 1 can
+  # speak for it. Hand-computed: a = (1*10 + 3*30)/40, b = 2 (fold 1 alone),
+  # and "c", which no fold kept, is not in the table at all.
+  parts <- list(
+    list(delta = c(1, 2), baseline = 0.4, n = 10, predictors = c("a", "b")),
+    list(delta = 3,       baseline = 0.6, n = 30, predictors = "a")
+  )
+  pooled <- .classif_pool_fold_importance(parts, c("a", "b", "c"))
+  expect_setequal(pooled$predictor, c("a", "b"))
+  expect_equal(pooled$importance[pooled$predictor == "a"], (1 * 10 + 3 * 30) / 40)
+  expect_equal(pooled$importance[pooled$predictor == "b"], 2)
+  # The baseline stays the sample-weighted mean over every fold.
+  expect_equal(unique(pooled$baseline_logloss), (0.4 * 10 + 0.6 * 30) / 40)
+
+  # Without a screen every part carries every predictor, and pooling is then
+  # the plain sample-weighted mean it has always been.
+  plain <- list(list(delta = c(1, 2), baseline = 0.4, n = 10),
+                list(delta = c(3, 4), baseline = 0.6, n = 30))
+  pp <- .classif_pool_fold_importance(plain, c("a", "b"))
+  expect_equal(pp$importance[pp$predictor == "a"], (1 * 10 + 3 * 30) / 40)
+  expect_equal(pp$importance[pp$predictor == "b"], (2 * 10 + 4 * 30) / 40)
+})
 
 test_that("out-of-fold importance is scored on held-out rows and labelled", {
   pts <- make_classif_points(80)

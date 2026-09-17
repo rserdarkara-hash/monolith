@@ -12,7 +12,7 @@
 #' fallback inherits that column too — so a bare `"var1.var" %in% names()` test
 #' is not enough to decide whether an uncertainty product exists. Single source
 #' of truth for the pipeline's rasterization, the export registry and the map
-#' viewer's uncertainty toggle.
+#' viewer's SE and variance views.
 METHODS_WITH_VARIANCE <- c("OK", "RK", "RFK", "CK")
 
 # Rows per block for the RFK grid trend prediction, expressed in matrix CELLS:

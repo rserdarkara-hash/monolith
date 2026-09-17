@@ -598,7 +598,12 @@
       boundary_type = input$boundary_type,
       buffer_mode = input$buff_mode,
       buffer_dist = input$buff_dist,
-      resolution = input$grid_res,
+      # In the Auto modes the cell size follows each locality's boundary area
+      # and is not known until the run has built them, so the sidebar slider
+      # (which holds the global recommendation there, not a size any grid
+      # uses) must not be recorded as the resolution. The completion handler
+      # below replaces this with the sizes the run actually gridded at.
+      resolution = if (identical(input$res_mode, "fixed")) input$grid_res else "set at run",
       res_mode = input$res_mode,
       comp_mode = input$comp_mode,
       # Actual/Predicted variogram sharing is an Ordinary Kriging control.
@@ -1094,12 +1099,20 @@
       # Uncertainty products exist for the kriging engines only. IDW's var1.var
       # is all NA and TPS has none at all, so registering these for those
       # methods shipped two blank rasters into the export panel (the map
-      # viewer's uncertainty toggle already carried this guard).
+      # viewer's SE/variance views already carried this guard).
       temp_rast_a <- terra::unwrap(rv$rast)
       if (method_has_variance(current_method) && "var1.var" %in% names(temp_rast_a)) {
         uncert_var_a <- temp_rast_a[["var1.var"]]
+        # The layer name travels into the GeoTIFF as the band description, so
+        # the square root must not be shipped describing itself as a variance.
+        uncert_se_a <- sqrt(uncert_var_a)
+        names(uncert_se_a) <- "var1.se"
+        # The Map Viewer offers its SE/variance views on this flag, so the menu
+        # and the export registry agree about whether the run has a variance
+        # band at all - not just about whether its method normally would.
+        rv$disp$has_variance <- TRUE
         register_export_item("map_uncert_var_act", paste(meta$label, "- Uncertainty Map (Variance - Actual)"), "map", terra::wrap(uncert_var_a), meta$category, kind = "uncertainty")
-        register_export_item("map_uncert_se_act", paste(meta$label, "- Uncertainty Map (SE - Actual)"), "map", terra::wrap(sqrt(uncert_var_a)), meta$category, kind = "uncertainty")
+        register_export_item("map_uncert_se_act", paste(meta$label, "- Uncertainty Map (SE - Actual)"), "map", terra::wrap(uncert_se_a), meta$category, kind = "uncertainty")
       }
     }
     if(length(valid_p) > 0) {
@@ -1110,8 +1123,11 @@
       temp_rast_p <- terra::unwrap(rv$rast_pred)
       if (method_has_variance(current_method) && "var1.var" %in% names(temp_rast_p)) {
         uncert_var_p <- temp_rast_p[["var1.var"]]
+        uncert_se_p <- sqrt(uncert_var_p)
+        names(uncert_se_p) <- "var1.se"
+        rv$disp$has_variance <- TRUE
         register_export_item("map_uncert_var_pre", paste(meta$label, "- Uncertainty Map (Variance - Predicted)"), "map", terra::wrap(uncert_var_p), meta$category, kind = "uncertainty")
-        register_export_item("map_uncert_se_pre", paste(meta$label, "- Uncertainty Map (SE - Predicted)"), "map", terra::wrap(sqrt(uncert_var_p)), meta$category, kind = "uncertainty")
+        register_export_item("map_uncert_se_pre", paste(meta$label, "- Uncertainty Map (SE - Predicted)"), "map", terra::wrap(uncert_se_p), meta$category, kind = "uncertainty")
       }
     }
     if(length(valid_r) > 0) {

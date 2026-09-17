@@ -188,6 +188,15 @@ method_labels <- c(
   "TPS" = "Thin Plate Spline"
 )
 
+# Resolution-logic id -> the sidebar's own wording, for records that print the
+# stored value ("local"/"global"/"fixed") back to the user.
+res_mode_label <- function(res_mode) {
+  if (is.null(res_mode) || length(res_mode) != 1 || is.na(res_mode)) return("not recorded")
+  switch(as.character(res_mode),
+         "fixed" = "Fixed", "global" = "Auto (Global)",
+         "local" = "Auto (Per Locality)", as.character(res_mode))
+}
+
 get_method_label <- function(method) {
   if (is.null(method) || length(method) == 0 || is.na(method) || method == "") return("")
   if (method %in% names(method_labels)) {

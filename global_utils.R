@@ -1287,7 +1287,12 @@ crs_choice_groups <- function(base, near = integer(0), extra = NULL) {
   lapply(groups[lengths(groups) > 0], as.list)
 }
 
-dashboard_palettes <- c("viridis", "Greens", "Blues", "Oranges", "YlOrRd", "RdYlBu", "BrBG", "YlOrBr", "Greys", "Spectral")
+# Every palette get_default_palette() can return must be listed here, or the
+# picker cannot show it and the variable's default is replaced by the first
+# entry. The nutrient defaults come first, in nutrient order.
+dashboard_palettes <- c("viridis", "Greens", "Blues", "Oranges", "YlOrRd",
+                        "PuBuGn", "Purples", "GnBu", "YlGn", "YlOrBr",
+                        "RdYlBu", "BrBG", "Greys", "Spectral")
 
 palette_choices_precomputed <- (function() {
   pals <- dashboard_palettes

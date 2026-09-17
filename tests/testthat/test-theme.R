@@ -303,6 +303,28 @@ test_that("the sticky run dock reaches the bottom of the sidebar card", {
   expect_equal(length(grep("mn-sidebar-tail", sidebar, fixed = TRUE)), 2)
 })
 
+test_that("the Fixed resolution slider keeps its frame after CRS selection", {
+  root <- normalizePath(file.path(testthat::test_path(), "..", ".."), winslash = "/")
+  frames <- list()
+  # Inspect calls, not text: comments and unrelated sliders must not count.
+  collect_frames <- function(expr) {
+    if (missing(expr)) return(invisible(NULL))
+    if (!is.call(expr) && !is.expression(expr)) return(invisible(NULL))
+    if (is.call(expr) && as.character(expr[[1]])[1] %in%
+        c("sliderInput", "updateSliderInput")) {
+      args <- as.list(expr)[-1]
+      if ("grid_res" %in% args && !is.null(args$min)) {
+        frames[[length(frames) + 1L]] <<- args[c("min", "max", "step")]
+      }
+    }
+    for (child in as.list(expr)[if (is.call(expr)) -1 else TRUE]) collect_frames(child)
+  }
+  collect_frames(parse(file.path(root, "ui_sidebar.R")))
+  collect_frames(parse(file.path(root, "server_data_setup.R")))
+  expect_length(frames, 3L) # declaration, Fixed CRS update, Auto CRS update
+  for (frame in frames) expect_equal(frame, list(min = 1, max = 500, step = 1))
+})
+
 test_that("button focus is shown to keyboard users only", {
   css <- monolith_theme_css()
 
