@@ -82,6 +82,13 @@
                                                                      "block" = "Spatial Block CV",
                                                                      "Auto")) else "CV strategy: not recorded",
         if (!is.null(cfg$cv_repeats) && !is.na(cfg$cv_repeats) && cfg$cv_repeats > 1) paste0(" | Repeated CV: ", cfg$cv_repeats, " fold realizations") else "",
+        # What the metrics were measured on and what each fold re-estimated:
+        # two runs that differ only here produce different numbers from the
+        # same data, so the record has to separate them.
+        if (!is.null(cfg$cv_population) && !is.na(cfg$cv_population)) paste0(" | CV population: ", cfg$cv_population) else "",
+        if (!is.null(cfg$cv_refit) && !is.na(cfg$cv_refit)) paste0(" | Model refit: ", cfg$cv_refit) else "",
+        if (!is.null(cfg$cv_covariate_screen) && !is.na(cfg$cv_covariate_screen)) paste0(" | Covariate screen: ", cfg$cv_covariate_screen) else "",
+        if (!is.null(cfg$sep_fit) && !is.na(cfg$sep_fit)) paste0(" | Fit Actual/Predicted separately: ", if (isTRUE(cfg$sep_fit)) "yes" else "no") else "",
         if (!is.null(cfg$vif_threshold) && !is.na(cfg$vif_threshold)) paste0(" | Collinearity gate: ", if (is.finite(cfg$vif_threshold)) paste0("VIF > ", cfg$vif_threshold, " dropped") else "Keep all (user override)") else "",
         # Printed only when the CRS distorts distances enough to matter, so a
         # well-chosen CRS adds no noise and an overridden one leaves a trace.
@@ -351,21 +358,35 @@
     # Export exactly what the viewer shows: the committed run's surface for
     # the currently selected view.
     meta <- get_display_meta(); req(meta)
-    view <- input$map_view %||% "view_act"
+    view <- map_view_base()
+    layer <- if (method_has_variance(meta$method)) map_view_layer() else "value"
+    # An SE or variance view exports that layer as its own single-band raster,
+    # the same product the run registered as "Uncertainty Map".
+    uncert_layer <- function(r) {
+      if (is.null(r) || layer == "value") return(r)
+      ru <- terra::unwrap(r)
+      if (!"var1.var" %in% names(ru)) return(NULL)
+      v <- ru[["var1.var"]]
+      terra::wrap(if (layer == "se") sqrt(v) else v)
+    }
     target <- switch(view,
-      "view_pred"  = rv$rast_pred,
+      "view_pred"  = uncert_layer(rv$rast_pred),
       "view_resid" = rv$rast_res,
-      "view_comp"  = if (!is.null(rv$rast) && !is.null(rv$rast_pred)) list(act = rv$rast, pre = rv$rast_pred) else NULL,
-      rv$rast)
+      "view_comp"  = {
+        a <- uncert_layer(rv$rast); p <- uncert_layer(rv$rast_pred)
+        if (!is.null(a) && !is.null(p)) list(act = a, pre = p) else NULL
+      },
+      uncert_layer(rv$rast))
     req(target)
 
     type <- if (view == "view_comp") "map_combined" else "map"
-    kind <- if (view == "view_resid") "residual" else "value"
+    kind <- if (view == "view_resid") "residual" else if (layer != "value") "uncertainty" else "value"
     view_lab <- switch(view,
       "view_pred" = "Predicted", "view_resid" = "Residuals",
       "view_comp" = "Actual vs Predicted", "Actual")
+    if (layer != "value") view_lab <- paste0(if (layer == "se") "SE" else "Variance", " - ", view_lab)
 
-    id <- paste0("quick_", view, "_", meta$actual)
+    id <- paste0("quick_", view, if (layer != "value") paste0("_", layer), "_", meta$actual)
     label <- paste("Quick Export:", meta$label, "(", view_lab, ")")
 
     register_export_item(id, label, type, target, meta$category, kind = kind)

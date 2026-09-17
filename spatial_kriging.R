@@ -238,6 +238,31 @@ check_vif <- function(df, threshold = 10) {
               dropped_vif = res$dropped_vif))
 }
 
+#' The constant/VIF covariate screen, in ONE place: the surface's own gate and
+#' every cross-validation fold call it, so a fold can never screen by a
+#' different rule than the map it scores. Fewer than two candidates pass
+#' through — the gate needs a pair to compare, and a sole degenerate covariate
+#' is deliberately kept and named by `run_regional_interpolation` instead.
+#' `detect_multicollinearity_engine`'s "only one covariate remains" notice is
+#' muffled here: a per-fold screen raises it once per fold (measured: 30 for 30
+#' folds) and it says nothing the covariate-gate run-log line does not.
+screen_covariates <- function(df, candidates, vif_threshold = 10) {
+  candidates <- as.character(candidates)
+  if (length(candidates) < 2) {
+    return(list(kept = candidates, dropped = character(0),
+                dropped_constant = character(0), dropped_vif = character(0)))
+  }
+  if (inherits(df, "sf")) df <- sf::st_drop_geometry(df)
+  withCallingHandlers(
+    check_vif(df[, candidates, drop = FALSE], threshold = vif_threshold),
+    warning = function(w) {
+      if (grepl("VIF Iterative Pruning", conditionMessage(w), fixed = TRUE)) {
+        invokeRestart("muffleWarning")
+      }
+    }
+  )
+}
+
 #' Resolve the covariate gate for one surface. `run_regional_interpolation`
 #' resolves it up front on this exact point set and hands the survivors down as
 #' `method_params$aux_kept` (so dropped covariates are never kriged onto the
@@ -247,7 +272,7 @@ check_vif <- function(df, threshold = 10) {
 #' the same reason on both paths.
 .resolve_aux_gate <- function(data, aux_vars, method_params, vif_threshold) {
   if (is.null(method_params$aux_kept)) {
-    return(check_vif(st_drop_geometry(data)[, aux_vars, drop = FALSE], threshold = vif_threshold))
+    return(screen_covariates(data, aux_vars, vif_threshold))
   }
   drop_all <- setdiff(aux_vars, method_params$aux_kept)
   cst <- drop_all[vapply(drop_all, function(v) {
@@ -319,13 +344,15 @@ init_interpolation_res <- function() {
   # trimmed CV frame per fold realization (see add_cv_repeats).
   list(v_emp = NULL, fit = NULL, cv_metrics = NULL, model_summary = NULL,
        rf_model = NULL, gstat_obj = NULL, res_sf = NULL, log_msg = "", cv_obj = NULL,
-       cv_obj_reps = NULL, residuals = NULL)
+       cv_obj_reps = NULL)
 }
 
-#' Evaluate one CV expression into `res`: the CV object, its perform_cv()
-#' metrics and its residuals. A failure is written to the run log and leaves
-#' all three empty instead of stopping the engine.
-safe_run_cv <- function(res, expr, label, n_data) {
+#' Evaluate one CV expression into `res`: the CV object and its perform_cv()
+#' metrics. A failure is written to the run log and leaves both empty instead
+#' of stopping the engine. CV residuals are read off `res$cv_obj` by whoever
+#' needs them (get_cv_residuals), so they are never carried as a separate
+#' vector whose length has to match a point set it does not name.
+safe_run_cv <- function(res, expr, label) {
   cv_obj <- tryCatch({
     expr
   }, error = function(e) {
@@ -338,17 +365,28 @@ safe_run_cv <- function(res, expr, label, n_data) {
     res$log_msg <- paste0(res$log_msg, cv_obj$error_msg)
     cv_obj <- NULL
   }
-  
+  notes <- attr(cv_obj, "cv_notes")
+  if (length(notes)) {
+    res$log_msg <- paste0(res$log_msg, "\n[", label, " CV] ", paste(notes, collapse = "; "))
+  }
+  # A fold screens its covariates on its own training rows, so it can keep a
+  # different set than the surface does. Say so when it happened: it is the
+  # explanation for a CV number that does not match the map's covariate list.
+  screen <- attr(cv_obj, "cv_screen")
+  if (!is.null(screen)) {
+    res$cv_screen <- screen
+    if (screen$n_differ > 0) {
+      res$log_msg <- paste0(
+        res$log_msg, "\n[", label, " CV] the covariate screen kept a different set in ",
+        screen$n_differ, " of ", screen$n_folds, " folds",
+        if (length(screen$dropped)) paste0("; dropped: ", paste0(
+          names(screen$dropped), " (", as.integer(screen$dropped), ")", collapse = ", ")) else "",
+        ".")
+    }
+  }
+
   res$cv_obj <- cv_obj
   res$cv_metrics <- perform_cv(cv_obj)
-  if (!is.null(cv_obj)) {
-    res$residuals <- get_cv_residuals(cv_obj, n_data)
-  } else {
-    # CV failed: drop any training residuals set earlier (RK/RFK set them
-    # for the variogram step) so model_resid_* never mixes semantics:
-    # res$residuals holds CV residuals or nothing.
-    res$residuals <- NULL
-  }
   return(res)
 }
 
@@ -403,8 +441,54 @@ add_cv_repeats <- function(res, cv_fun, method_params, n_data, label,
 # run with repeats switched off), then the optional extra realizations.
 run_cv_with_repeats <- function(res, cv_fun, method_params, n_data, label,
                                 l = "region", prefix = "act") {
-  res <- safe_run_cv(res, cv_fun(CV_FOLD_SEED), label, n_data)
+  res <- safe_run_cv(res, cv_fun(CV_FOLD_SEED), label)
   add_cv_repeats(res, cv_fun, method_params, n_data, label, l, prefix)
+}
+
+#' The CV population and fold plan a kriging engine scores: the run's
+#' (`method_params$cv_data` / `cv_plan`) when supplied, else the engine's own
+#' data folded by build_cv_plan().
+.engine_cv_plan <- function(method_params, data) {
+  pop <- method_params$cv_data %||% data
+  # A supplied population can be smaller than the surface's own point set (OK
+  # scored on the covariate-complete rows). Below three samples there is
+  # nothing to fold: the CV is skipped with a named log line and the map, which
+  # is fitted on the full point set, still runs.
+  if (nrow(pop) < 3) {
+    stop("the cross-validation population holds fewer than 3 samples (", nrow(pop), ")")
+  }
+  plan <- method_params$cv_plan %||%
+    build_cv_plan(pop, method_params$cv_strategy, method_params$cv_repeats)
+  if (!isTRUE(plan$n == nrow(pop))) {
+    stop("CV plan population size (", plan$n, ") does not match the CV population (",
+         nrow(pop), " rows).")
+  }
+  list(plan = plan, pop = pop)
+}
+
+#' Kriging cross-validation through the CV plan. `cv_one(pop, folds, row_id,
+#' progress)` returns one realization's CV object. Realization r (seed
+#' CV_FOLD_SEED + r - 1, the run_cv_with_repeats contract) takes the plan's
+#' r-th fold vector; a plan error surfaces as a CV error, never an engine fallback.
+.run_kriging_cv <- function(res, cv_one, method_params, data, label, l, prefix) {
+  cvp <- tryCatch(.engine_cv_plan(method_params, data), error = function(e) e)
+  cv_fun <- function(seed) {
+    if (inherits(cvp, "error")) stop(conditionMessage(cvp))
+    r <- seed - CV_FOLD_SEED + 1L
+    if (r < 1L || r > length(cvp$plan$folds)) stop("The CV plan has no fold realization ", r, ".")
+    progress <- if (r == 1L) {
+      list(l = l, prefix = prefix, from = 50, to = if (length(cvp$plan$folds) > 1L) 55 else 90)
+    }
+    cv_one(cvp$pop, cvp$plan$folds[[r]], cvp$plan$row_id, progress)
+  }
+  n_data <- if (inherits(cvp, "error")) nrow(data) else cvp$plan$n
+  res <- run_cv_with_repeats(res, cv_fun, method_params, n_data, label, l, prefix)
+  # A CV that failed outright scored none of its population: 0 of n expected.
+  if (is.null(res$cv_obj) && !inherits(cvp, "error")) {
+    res$cv_metrics$n_expected <- cvp$plan$n
+    res$cv_metrics$coverage <- 0
+  }
+  res
 }
 
 # Scrub non-finite prediction and variance cells (NaN/Inf produced by degenerate
@@ -465,6 +549,50 @@ rf_infinitesimal_jackknife_var <- function(pred_individual, inbag, chunk = 2000L
   out
 }
 
+#' The fold function OK and the OK fallback cross-validate with: lags,
+#' empirical variogram and the full `robust_vgm_fit` candidate search are
+#' re-estimated from the fold's TRAINING rows, then the target is kriged at the
+#' held-out coordinates. Nothing about a held-out row but its position enters.
+#'
+#' `fixed_fit` is the one exception: an applied manual model encodes the user's
+#' judgement and cannot be refitted, so it is reused in every fold and the CV is
+#' labelled conditional. `vgm_col` is D7 — the Predicted surface kriged with the
+#' variogram of the MEASURED values, refitted here from the training rows that
+#' carry one. (The map's shared fit comes from all Actual rows; the fold's from
+#' its own training rows. Same accepted asymmetry as the RK covariate surfaces.)
+#' The candidate search is deliberately run in full per fold: do not shrink it
+#' or warm-start it from the full-data fit.
+.ok_fold_fun <- function(form_ok, target_var, fixed_fit = NULL, vgm_col = NULL) {
+  function(train, newdata, i) {
+    if (!is.null(fixed_fit)) {
+      fit_i <- fixed_fit
+    } else {
+      vcol <- vgm_col %||% target_var
+      vg <- if (is.null(vgm_col)) train else train[!is.na(train[[vgm_col]]), ]
+      if (nrow(vg) < 3) {
+        stop("only ", nrow(vg), " training rows carry a measured `", vcol,
+             "` value, too few to fit a variogram")
+      }
+      lags_i <- calc_scientific_lags(vg)
+      v_i <- variogram(reformulate("1", response = vcol), vg,
+                       width = lags_i$width, cutoff = lags_i$cutoff)
+      fit_i <- robust_vgm_fit(v_i, vg[[vcol]])
+    }
+    kr <- krige(form_ok, train, newdata, model = fit_i, debug.level = 0)
+    list(pred = kr$var1.pred, var = kr$var1.var,
+         meta = list(is_fallback = isTRUE(attr(fit_i, "is_fallback"))))
+  }
+}
+
+#' How many folds set a logical flag in their `cv_fold_meta` entry, and how many
+#' folds reported one at all.
+.cv_fold_flag_count <- function(cv_obj, field) {
+  meta <- attr(cv_obj, "cv_fold_meta")
+  if (!length(meta)) return(list(n = 0L, total = 0L))
+  list(n = sum(vapply(meta, function(m) isTRUE(m[[field]]), logical(1))),
+       total = length(meta))
+}
+
 # Shared "the covariate engine failed, fall back to Ordinary Kriging" tail,
 # used by apply_kriging_pipeline (RK/RFK) and apply_CK. Refits the variogram of
 # the MEASURED values (not residuals - there is no trend model left) and runs
@@ -482,16 +610,26 @@ rf_infinitesimal_jackknife_var <- function(pred_individual, inbag, chunk = 2000L
   res$fit <- robust_vgm_fit(res$v_emp, data[[target_var]])
   res$res_sf <- krige(form_ok, data, grid_p, model = res$fit, debug.level = 0)
   if (tag_model_type) res$res_sf$model_type <- "Ordinary Kriging (Fallback)"
-  # Consistent with every other CV path: an explicit seeded fold vector
-  # (make_cv_folds) instead of a scalar nfold, so gstat never draws its own
-  # unseeded folds here. Also honours the user's CV strategy on this path.
-  coords_okfb <- sf::st_coordinates(data)
-  cv_okfb <- function(seed) {
-    krige.cv(form_ok, data, model = res$fit,
-             nfold = make_cv_folds(coords_okfb, method_params$cv_strategy, nrow(data), seed),
-             debug.level = 0)
+  # Same plan, fold runner and schema as every kriging engine. The fallback
+  # never reuses a supplied model: it exists because the covariate engine
+  # failed, so there is nothing the user applied to this surface.
+  fold_okfb <- .ok_fold_fun(form_ok, target_var)
+  cv_one <- function(pop, folds, row_id, progress) {
+    run_kriging_folds(pop, target_var, row_id, folds, fold_okfb, method_params$cancel_file, progress)
   }
-  run_cv_with_repeats(res, cv_okfb, method_params, nrow(data), cv_label, l, prefix)
+  res <- .run_kriging_cv(res, cv_one, method_params, data, cv_label, l, prefix)
+  .log_vgm_fold_fallbacks(res, cv_label)
+}
+
+#' Append a run-log line naming the folds whose variogram came from the
+#' heuristic fallback rather than a fitted candidate.
+.log_vgm_fold_fallbacks <- function(res, label) {
+  fb <- .cv_fold_flag_count(res$cv_obj, "is_fallback")
+  if (fb$n > 0) {
+    res$log_msg <- paste0(res$log_msg, "\n[", label, " CV] ", fb$n, " of ", fb$total,
+                          " folds fell back to the heuristic variogram.")
+  }
+  res
 }
 
 #' Shared engine for OK, RK and RFK. OK kriges the target directly; RK (lm) and
@@ -507,16 +645,27 @@ apply_kriging_pipeline <- function(engine = c("OK", "RK", "RFK"), data, target_v
     update_progress_file(l, prefix, 20, 100)
     form_ok <- reformulate("1", response = target_var)
     res$v_emp <- variogram(form_ok, data, width = lags$width, cutoff = lags$cutoff)
-    res$fit <- if(!is.null(method_params$pre_fit)) method_params$pre_fit else robust_vgm_fit(res$v_emp, data[[target_var]])
+    res$fit <- method_params$pre_fit %||% method_params$shared_fit %||% robust_vgm_fit(res$v_emp, data[[target_var]])
     
     update_progress_file(l, prefix, 50, 100)
-    coords_ok <- sf::st_coordinates(data)
-    cv_ok <- function(seed) {
-      krige.cv(form_ok, data, model = res$fit,
-               nfold = make_cv_folds(coords_ok, method_params$cv_strategy, nrow(data), seed),
-               debug.level = 0)
+    # Every fold re-estimates the variogram from its own training rows, unless
+    # the user applied a manual model (conditional CV, D6). With the measured
+    # variogram shared onto the Predicted surface (D7) the fold refits THAT
+    # variogram, from the training rows carrying a measured value.
+    if (!is.null(method_params$pre_fit)) res$cv_conditional <- "applied variogram"
+    # `vgm_col` names the shared variogram's column and travels with
+    # `shared_fit`, exactly as res$fit above resolves them.
+    shared_col <- if (is.null(method_params$pre_fit) && !is.null(method_params$shared_fit)) {
+      method_params$vgm_col
     }
-    res <- run_cv_with_repeats(res, cv_ok, method_params, nrow(data), "OK", l, prefix)
+    res$cv_vgm_col <- shared_col
+    fold_ok <- .ok_fold_fun(form_ok, target_var,
+                            fixed_fit = method_params$pre_fit, vgm_col = shared_col)
+    cv_one <- function(pop, folds, row_id, progress) {
+      run_kriging_folds(pop, target_var, row_id, folds, fold_ok, method_params$cancel_file, progress)
+    }
+    res <- .run_kriging_cv(res, cv_one, method_params, data, "OK", l, prefix)
+    res <- .log_vgm_fold_fallbacks(res, "OK")
     res$res_sf <- krige(form_ok, data, grid_p, model = res$fit, debug.level = 0)
 
     # gstat returns NA for every location, without a condition, when the
@@ -534,6 +683,10 @@ apply_kriging_pipeline <- function(engine = c("OK", "RK", "RFK"), data, target_v
     }
   } else {
     update_progress_file(l, prefix, 10, 100)
+    # The full selected set: every CV fold re-screens THIS list on its own
+    # training rows, so the screen is never decided with the held-out row's
+    # measured covariates in hand.
+    candidates <- aux_vars
     krig_res <- tryCatch({
       if (engine %in% c("RK", "RFK") && length(aux_vars) > 1) {
         # run_regional_interpolation resolves this gate up front, on this exact
@@ -584,7 +737,6 @@ apply_kriging_pipeline <- function(engine = c("OK", "RK", "RFK"), data, target_v
         res$model_summary <- summary(lm_mod)
         
         data$residuals <- residuals(lm_mod)
-        res$residuals <- residuals(lm_mod)
         
         res$v_emp <- variogram(residuals ~ 1, data, width = lags$width, cutoff = lags$cutoff)
         res$fit <- robust_vgm_fit(res$v_emp, data$residuals)
@@ -597,21 +749,22 @@ apply_kriging_pipeline <- function(engine = c("OK", "RK", "RFK"), data, target_v
           var1.pred = as.vector(pred_trend$fit + res_krig$var1.pred), 
           var1.var = as.vector(trend_var + res_krig$var1.var)
         )
-        cv_rk <- function(seed) {
-          perform_kriging_loocv(data, target_var, aux_vars, calc_scientific_lags, robust_vgm_fit,
+        cv_rk <- function(pop, folds, row_id, progress) {
+          perform_kriging_loocv(pop, target_var, aux_vars, calc_scientific_lags, robust_vgm_fit,
                                 model_type = "lm", l, prefix,
-                                cv_strategy = method_params$cv_strategy, fold_seed = seed,
-                                cov_params = method_params$cov_params %||% method_params)
+                                cv_strategy = method_params$cv_strategy,
+                                cov_params = method_params$cov_params %||% method_params,
+                                folds = folds, row_id = row_id,
+                                cancel_file = method_params$cancel_file, progress = progress,
+                                candidates = candidates, vif_threshold = vif_threshold)
         }
-        res <- run_cv_with_repeats(res, cv_rk, method_params, nrow(data), "RK", l, prefix)
+        res <- .run_kriging_cv(res, cv_rk, method_params, data, "RK", l, prefix)
       } else if (engine == "RFK") {
         rf_ntree <- if (!is.null(method_params$rf_ntree)) method_params$rf_ntree else 200
         rf_mod <- randomForest::randomForest(form_reg, data = data, ntree = rf_ntree, importance = TRUE, keep.inbag = TRUE)
         res$rf_model <- rf_mod
         
-        residuals_val <- data[[target_var]] - rf_mod$predicted
-        data$residuals <- residuals_val
-        res$residuals <- residuals_val
+        data$residuals <- data[[target_var]] - rf_mod$predicted
         
         res$v_emp <- variogram(residuals ~ 1, data, width = lags$width, cutoff = lags$cutoff)
         res$fit <- robust_vgm_fit(res$v_emp, data$residuals)
@@ -663,13 +816,16 @@ apply_kriging_pipeline <- function(engine = c("OK", "RK", "RFK"), data, target_v
           var1.pred = as.vector(pred_mean + res_krig$var1.pred), 
           var1.var = as.vector(trend_var + res_krig$var1.var)
         )
-        cv_rfk <- function(seed) {
-          perform_kriging_loocv(data, target_var, aux_vars, calc_scientific_lags, robust_vgm_fit,
+        cv_rfk <- function(pop, folds, row_id, progress) {
+          perform_kriging_loocv(pop, target_var, aux_vars, calc_scientific_lags, robust_vgm_fit,
                                 model_type = "rf", l, prefix, rf_ntree = rf_ntree,
-                                cv_strategy = method_params$cv_strategy, fold_seed = seed,
-                                cov_params = method_params$cov_params %||% method_params)
+                                cv_strategy = method_params$cv_strategy,
+                                cov_params = method_params$cov_params %||% method_params,
+                                folds = folds, row_id = row_id,
+                                cancel_file = method_params$cancel_file, progress = progress,
+                                candidates = candidates, vif_threshold = vif_threshold)
         }
-        res <- run_cv_with_repeats(res, cv_rfk, method_params, nrow(data), "RFK", l, prefix)
+        res <- .run_kriging_cv(res, cv_rfk, method_params, data, "RFK", l, prefix)
       }
       res
     }, error = function(e) {
@@ -707,6 +863,117 @@ apply_RFK <- function(data, target_var, grid_p, lags, method_params, aux_vars, l
   apply_kriging_pipeline("RFK", data, target_var, grid_p, lags, method_params, aux_vars, l, prefix, vif_threshold)
 }
 
+#' Centre and scale each covariate on the rows it is handed, so the LMC's
+#' cross-variograms live on a comparable scale. The map standardizes from the
+#' surface's own rows and every CV fold from its own training rows, so a
+#' held-out row never contributes to the centring that predicts it.
+#' as.numeric: scale() returns an n x 1 MATRIX, and assigning that into an sf
+#' column leaves a matrix-valued column that propagates through
+#' variogram()/fit.lmc() and confuses any later dplyr verb on the object.
+.ck_standardize <- function(df, aux_vars) {
+  for (av in aux_vars) df[[av]] <- as.numeric(scale(df[[av]]))
+  df
+}
+
+#' Build and fit the co-kriging LMC on one set of already standardized rows.
+#' The map and every CV fold call it, so a fold refits exactly what the map
+#' fitted, from its own rows. Returns `g` (the fitted gstat object, NULL on
+#' failure), `error_msg`, the run-log text and whether the shared range was
+#' seeded from the extent heuristic rather than the primary fit.
+.ck_fit_lmc <- function(data_scaled, target_var, aux_vars, lags, ck_nmax) {
+  log_msg <- ""
+  form_ok <- reformulate("1", response = target_var)
+  g <- gstat(NULL, id = target_var, formula = form_ok, data = data_scaled, nmax = ck_nmax)
+  for (av in aux_vars) {
+    g <- gstat(g, id = av, formula = as.formula(paste0("`", av, "` ~ 1")), data = data_scaled, nmax = ck_nmax)
+  }
+
+  vm <- variogram(g, width = lags$width, cutoff = lags$cutoff)
+
+  v_emp_ok <- variogram(form_ok, data_scaled, width = lags$width, cutoff = lags$cutoff)
+  fit_ok_init <- robust_vgm_fit(v_emp_ok, data_scaled[[target_var]])
+  m_type <- suggest_lmc_model(fit_ok_init)
+
+  # The single `model` argument is used by gstat as the STARTING model for
+  # every direct and cross variogram (fit.lmc copies it over each id), so this
+  # seeds the standardized covariate variograms — whose sills are 1.0 by
+  # construction — with the target's raw variance, which can be many orders of
+  # magnitude larger. That looks like a bug and was reported as one, but it is
+  # inert here and must not be "fixed" by rescaling the seed: fit.lmc calls
+  # fit.variogram with fit.ranges = FALSE, and with the range and model type
+  # held fixed the variogram is LINEAR in its sill parameters, so the weighted
+  # least-squares solve has a closed-form optimum that does not depend on the
+  # starting sill. Verified 2026-07-20: starting sills spanning 1e-6 to 1e12
+  # on the same empirical variogram all return a bit-identical fitted sill,
+  # and per-id seeding from each variogram's own empirical plateau reproduces
+  # the current fitted LMC exactly (target variances up to 3.5e8, 3
+  # covariates). The starting values would matter immediately if fit.ranges
+  # were ever set TRUE — the same probe then spread the fitted sill over
+  # 1.0 to 3179 with no-convergence warnings — so scale the seeds per id at
+  # the same time as any such change.
+  # The LMC needs ONE range shared by every direct and cross variogram, which
+  # is why fit.lmc's fit.ranges = FALSE default is correct and stays. But that
+  # is exactly what makes the SEED range the FINAL range: unlike the seed sill
+  # (see the note above) it is not inert - verified, the fitted LMC reports the
+  # seed value back on every id. The seed was lags$cutoff / 2, i.e. a quarter
+  # of the bounding-box diagonal, a geometric heuristic unrelated to the data,
+  # while the range weighted least squares fitted to the primary variable was
+  # already in hand as fit_ok_init$range[2] and thrown away apart from its
+  # model family. Measured on a short-range fixture (fitted a = 243 m against
+  # the heuristic's 685 m): the CK surface moved by up to 18% of the field's
+  # standard deviation. Fall back to the old heuristic only when the primary
+  # fit is itself a heuristic (is_fallback) or its range is unusable, so a CK
+  # run is never worse informed than it was.
+  lmc_range <- suppressWarnings(as.numeric(fit_ok_init$range[2])[1])
+  # gstat's `a` only means a ground distance once the FAMILY and, for Matern,
+  # the smoothness are fixed. vgm() defaults kappa to 0.5 while robust_vgm_fit
+  # fits Matern at 1.5, so seeding "Mat" without its kappa would carry the
+  # range across a smoothness change (practical range 3a at nu = 0.5 against
+  # 4.75a at nu = 1.5) and quietly stretch the modelled correlation length.
+  # Inert for Sph/Exp/Gau, which ignore kappa - verified identical curves.
+  lmc_kappa <- suppressWarnings(as.numeric(fit_ok_init$kappa[2])[1])
+  if (!isTRUE(is.finite(lmc_kappa))) lmc_kappa <- 0.5
+  heuristic_seed <- !isTRUE(is.finite(lmc_range)) || lmc_range <= 0 ||
+    isTRUE(attr(fit_ok_init, "is_fallback"))
+  if (heuristic_seed) {
+    lmc_range <- lags$cutoff / 2
+    lmc_kappa <- 0.5
+    log_msg <- paste0(log_msg,
+      "\n[CK] Primary variogram gave no usable range; LMC seeded with the extent heuristic (cutoff/2 = ",
+      signif(lmc_range, 4), ").")
+  } else {
+    log_msg <- paste0(log_msg,
+      "\n[CK] LMC range fixed at the primary variable's fitted range (",
+      signif(lmc_range, 4), "); fit.lmc fits sills only.")
+  }
+
+  fit_obj <- tryCatch(
+    fit.lmc(vm, g, vgm(var(data_scaled[[target_var]]), m_type, lmc_range, 0, kappa = lmc_kappa),
+            correct.diagonal = 1.01),
+    error = function(e) structure(paste0("LMC Fit Failed: ", e$message, ". Falling back to OK."),
+                                  class = "ck_lmc_error"))
+  if (inherits(fit_obj, "ck_lmc_error")) {
+    return(list(g = NULL, error_msg = as.character(fit_obj),
+                log_msg = paste0(log_msg, as.character(fit_obj)),
+                heuristic_seed = heuristic_seed))
+  }
+  list(g = fit_obj, error_msg = NULL,
+       log_msg = paste0(log_msg, "\nLMC fitted with correct.diagonal = 1.01 (standard stabilization applied to every CK fit to keep the coregionalization matrices positive definite)."),
+       heuristic_seed = heuristic_seed)
+}
+
+#' How often a fold's covariate screen kept a different set than the map's, and
+#' which of the map's covariates the folds dropped.
+.fold_screen_summary <- function(cv_obj, map_kept) {
+  kept <- lapply(attr(cv_obj, "cv_fold_meta"), function(m) m$kept)
+  kept <- kept[!vapply(kept, is.null, logical(1))]
+  if (!length(kept)) return(NULL)
+  dropped <- unlist(lapply(kept, function(k) setdiff(map_kept, k)), use.names = FALSE)
+  list(n_folds = length(kept),
+       n_differ = sum(vapply(kept, function(k) !setequal(k, map_kept), logical(1))),
+       dropped = if (length(dropped)) table(dropped) else integer(0))
+}
+
 # Co-Kriging: predict the target jointly with its auxiliary variables through a
 # linear model of coregionalization (LMC). Covariates are standardized first so
 # the cross-variograms live on a comparable scale; the LMC is stabilized with
@@ -733,6 +1000,10 @@ apply_CK <- function(data, target_var, grid_p, lags, method_params, aux_vars, l 
     # run_regional_interpolation resolves the gate up front on this exact point
     # set and passes the survivors as method_params$aux_kept; recompute only
     # when apply_CK is called directly.
+    # The full selected set: every CV fold re-screens THIS list on its own
+    # training rows, so the screen is never decided with the held-out row's
+    # measured covariates in hand.
+    candidates <- aux_vars
     if (length(aux_vars) > 1) {
       vif_res <- .resolve_aux_gate(data, aux_vars, method_params, vif_threshold)
       if (length(vif_res$dropped) > 0) {
@@ -753,132 +1024,43 @@ apply_CK <- function(data, target_var, grid_p, lags, method_params, aux_vars, l 
       }
     }
 
-    data_scaled <- data
-    for(av in aux_vars) {
-      # as.numeric: scale() returns an n x 1 matrix, and assigning that into an
-      # sf column leaves a matrix-valued column that propagates through
-      # variogram()/fit.lmc() and confuses any later dplyr verb on the object.
-      #
-      # KNOWN, ACCEPTED LEAK: these means and standard deviations come from the
-      # FULL data set, and gstat.cv() below then holds points out of an already
-      # centred and scaled frame — so each held-out point contributed (by 1/n)
-      # to the centring of its own predictors. The leak is affine, second order
-      # and O(1/n), it touches the covariates only (the target is never scaled),
-      # and it cannot move a prediction's rank ordering. Removing it means
-      # restandardizing inside every fold, which means abandoning gstat.cv() for
-      # a hand-rolled co-kriging CV loop; that cost was reviewed and declined.
-      # Documented in scientific_guide.md 4.4 / 9.1. Do not silently "fix" this
-      # by scaling somewhere else — only a per-fold refit actually removes it.
-      data_scaled[[av]] <- as.numeric(scale(data_scaled[[av]]))
+    # Same standardization and LMC fit the folds run, on this surface's rows.
+    data_scaled <- .ck_standardize(data, aux_vars)
+    lmc <- .ck_fit_lmc(data_scaled, target_var, aux_vars, lags, ck_nmax)
+    res$log_msg <- paste0(res$log_msg, lmc$log_msg)
+    g <- lmc$g
+    if (is.null(g)) {
+      write_warning_file(l, prefix, "LMC model fit failed, using Ordinary Kriging fallback.")
     }
 
-    form_ok <- reformulate("1", response = target_var)
-    g <- gstat(NULL, id = target_var, formula = form_ok, data = data_scaled, nmax = ck_nmax)
-    for(av in aux_vars) {
-      g <- gstat(g, id = av, formula = as.formula(paste0("`", av, "` ~ 1")), data = data_scaled, nmax = ck_nmax)
-    }
-    
-    vm <- variogram(g, width = lags$width, cutoff = lags$cutoff)
-    
-    v_emp_ok <- variogram(form_ok, data_scaled, width = lags$width, cutoff = lags$cutoff)
-    fit_ok_init <- robust_vgm_fit(v_emp_ok, data_scaled[[target_var]])
-    m_type <- suggest_lmc_model(fit_ok_init)
-    
-    # The single `model` argument is used by gstat as the STARTING model for
-    # every direct and cross variogram (fit.lmc copies it over each id), so this
-    # seeds the standardized covariate variograms — whose sills are 1.0 by
-    # construction — with the target's raw variance, which can be many orders of
-    # magnitude larger. That looks like a bug and was reported as one, but it is
-    # inert here and must not be "fixed" by rescaling the seed: fit.lmc calls
-    # fit.variogram with fit.ranges = FALSE, and with the range and model type
-    # held fixed the variogram is LINEAR in its sill parameters, so the weighted
-    # least-squares solve has a closed-form optimum that does not depend on the
-    # starting sill. Verified 2026-07-20: starting sills spanning 1e-6 to 1e12
-    # on the same empirical variogram all return a bit-identical fitted sill,
-    # and per-id seeding from each variogram's own empirical plateau reproduces
-    # the current fitted LMC exactly (target variances up to 3.5e8, 3
-    # covariates). The starting values would matter immediately if fit.ranges
-    # were ever set TRUE — the same probe then spread the fitted sill over
-    # 1.0 to 3179 with no-convergence warnings — so scale the seeds per id at
-    # the same time as any such change.
-    # The LMC needs ONE range shared by every direct and cross variogram, which
-    # is why fit.lmc's fit.ranges = FALSE default is correct and stays. But that
-    # is exactly what makes the SEED range the FINAL range: unlike the seed sill
-    # (see the note above) it is not inert - verified, the fitted LMC reports the
-    # seed value back on every id. The seed was lags$cutoff / 2, i.e. a quarter
-    # of the bounding-box diagonal, a geometric heuristic unrelated to the data,
-    # while the range weighted least squares fitted to the primary variable was
-    # already in hand as fit_ok_init$range[2] and thrown away apart from its
-    # model family. Measured on a short-range fixture (fitted a = 243 m against
-    # the heuristic's 685 m): the CK surface moved by up to 18% of the field's
-    # standard deviation. Fall back to the old heuristic only when the primary
-    # fit is itself a heuristic (is_fallback) or its range is unusable, so a CK
-    # run is never worse informed than it was.
-    lmc_range <- suppressWarnings(as.numeric(fit_ok_init$range[2])[1])
-    # gstat's `a` only means a ground distance once the FAMILY and, for Matern,
-    # the smoothness are fixed. vgm() defaults kappa to 0.5 while robust_vgm_fit
-    # fits Matern at 1.5, so seeding "Mat" without its kappa would carry the
-    # range across a smoothness change (practical range 3a at nu = 0.5 against
-    # 4.75a at nu = 1.5) and quietly stretch the modelled correlation length.
-    # Inert for Sph/Exp/Gau, which ignore kappa - verified identical curves.
-    lmc_kappa <- suppressWarnings(as.numeric(fit_ok_init$kappa[2])[1])
-    if (!isTRUE(is.finite(lmc_kappa))) lmc_kappa <- 0.5
-    if (!isTRUE(is.finite(lmc_range)) || lmc_range <= 0 ||
-        isTRUE(attr(fit_ok_init, "is_fallback"))) {
-      lmc_range <- lags$cutoff / 2
-      lmc_kappa <- 0.5
-      res$log_msg <- paste0(res$log_msg,
-        "\n[CK] Primary variogram gave no usable range; LMC seeded with the extent heuristic (cutoff/2 = ",
-        signif(lmc_range, 4), ").")
-    } else {
-      res$log_msg <- paste0(res$log_msg,
-        "\n[CK] LMC range fixed at the primary variable's fitted range (",
-        signif(lmc_range, 4), "); fit.lmc fits sills only.")
-    }
-    g_or_err <- tryCatch({
-      fit_obj <- fit.lmc(vm, g, vgm(var(data_scaled[[target_var]]), m_type, lmc_range, 0, kappa = lmc_kappa), correct.diagonal = 1.01)
-      res$log_msg <- paste0(res$log_msg, "\nLMC fitted with correct.diagonal = 1.01 (standard stabilization applied to every CK fit to keep the coregionalization matrices positive definite).")
-      fit_obj
-    }, error = function(e) {
-      list(error_msg = paste0("LMC Fit Failed: ", e$message, ". Falling back to OK."))
-    })
-    
-    if (is.list(g_or_err) && !is.null(g_or_err$error_msg)) {
-      res$log_msg <- paste0(res$log_msg, g_or_err$error_msg)
-      g <- NULL
-      write_warning_file(l, prefix, "LMC model fit failed, using Ordinary Kriging fallback.")
-    } else {
-      g <- g_or_err
-    }
-    
     if(!is.null(g)) {
       res$gstat_obj <- g
-      coords_ck <- sf::st_coordinates(data)
-      cv_ck <- function(seed) {
-        folds_ck <- make_cv_folds(coords_ck, method_params$cv_strategy, nrow(data), seed)
-        # remove.all = TRUE: covariates here are co-sampled lab measurements, so
-        # at real prediction locations CK has no covariate observations either -
-        # each fold must remove the ENTIRE held-out row (all LMC variables), not
-        # just the primary. The default (FALSE) scores CV under a collocated-
-        # covariate information regime the map never enjoys (optimistic), and is
-        # inconsistent with RK/RFK's perform_kriging_loocv, which holds out full
-        # rows. See scientific_guide 4.4 / 9.1.
-        cv_val <- gstat.cv(g, nfold = folds_ck, remove.all = TRUE, debug.level = 0)
-        if (!is.null(cv_val)) {
-          cnames <- names(cv_val)
-          pred_col_src <- paste0(target_var, ".pred")
-          obs_col_src <- paste0(target_var, ".observed")
-          
-          if (pred_col_src %in% cnames) {
-            names(cv_val)[names(cv_val) == pred_col_src] <- "var1.pred"
-          }
-          if (obs_col_src %in% cnames) {
-            names(cv_val)[names(cv_val) == obs_col_src] <- "var1.observed"
-          }
+      # Every fold re-screens the covariates, re-standardizes and refits the
+      # LMC on its own training rows, and the held-out rows contribute their
+      # coordinates only: covariates here are co-sampled lab measurements, so
+      # the map has none at its prediction locations either.
+      cv_ck <- function(pop, folds, row_id, progress) {
+        fold_ck <- function(train, newdata, i) {
+          kept <- screen_covariates(train, candidates, vif_threshold)$kept
+          if (!length(kept)) stop("the covariate screen removed every covariate in this fold")
+          fit_i <- .ck_fit_lmc(.ck_standardize(train, kept), target_var, kept,
+                               calc_scientific_lags(train), ck_nmax)
+          if (is.null(fit_i$g)) stop(fit_i$error_msg)
+          p <- predict(fit_i$g, newdata, debug.level = 0)
+          list(pred = p[[paste0(target_var, ".pred")]], var = p[[paste0(target_var, ".var")]],
+               meta = list(kept = kept, heuristic_seed = fit_i$heuristic_seed))
         }
-        cv_val
+        cv <- run_kriging_folds(pop, target_var, row_id, folds, fold_ck,
+                                method_params$cancel_file, progress)
+        attr(cv, "cv_screen") <- .fold_screen_summary(cv, aux_vars)
+        cv
       }
-      res <- run_cv_with_repeats(res, cv_ck, method_params, nrow(data), "CK", l, prefix)
+      res <- .run_kriging_cv(res, cv_ck, method_params, data, "CK", l, prefix)
+      hs <- .cv_fold_flag_count(res$cv_obj, "heuristic_seed")
+      if (hs$n > 0) {
+        res$log_msg <- paste0(res$log_msg, "\n[CK CV] ", hs$n, " of ", hs$total,
+                              " fitted folds seeded the LMC range from the extent heuristic.")
+      }
 
       res_sf_or_err <- tryCatch({
         pred_obj <- predict(g, grid_p, debug.level = 0) %>% st_as_sf()
@@ -1019,7 +1201,6 @@ apply_TPS <- function(data, target_var, grid_p, method_params, l = "region", pre
     cv_res <- tps_cv(CV_FOLD_SEED)
     res$cv_obj <- cv_res
     res$cv_metrics <- perform_cv(cv_res)
-    res$residuals <- get_cv_residuals(cv_res, nrow(data))
     res <- add_cv_repeats(res, tps_cv, method_params, n_pts, "TPS", l, prefix)
 
     grid_p %>% mutate(var1.pred = as.vector(p_v))
@@ -1034,8 +1215,7 @@ apply_TPS <- function(data, target_var, grid_p, method_params, l = "region", pre
     fb <- apply_IDW(data, target_var, grid_p, method_params, l, prefix)
     out <- fb$res_sf
     attr(out, "tps_fallback") <- list(cv_obj = fb$cv_obj, cv_metrics = fb$cv_metrics,
-                                      residuals = fb$residuals, cv_obj_reps = fb$cv_obj_reps,
-                                      err = e$message)
+                                      cv_obj_reps = fb$cv_obj_reps, err = e$message)
     out
   })
 
@@ -1044,7 +1224,6 @@ apply_TPS <- function(data, target_var, grid_p, method_params, l = "region", pre
     res$tps_fit <- NULL
     res$cv_obj <- fb$cv_obj
     res$cv_metrics <- fb$cv_metrics
-    res$residuals <- fb$residuals
     res$cv_obj_reps <- fb$cv_obj_reps
     res$log_msg <- paste0(res$log_msg, "\nTPS failed: ", fb$err, ". Falling back to IDW.")
     attr(res$res_sf, "tps_fallback") <- NULL
@@ -1088,7 +1267,7 @@ apply_interpolation <- function(data, target_var, method, grid_p, aux_vars, lags
     list(
       v_emp = NULL, fit = NULL, cv_metrics = NULL, model_summary = NULL, 
       rf_model = NULL, gstat_obj = NULL, res_sf = NULL, 
-      log_msg = paste0("Error in apply_interpolation: ", e$message), cv_obj = NULL, residuals = NULL
+      log_msg = paste0("Error in apply_interpolation: ", e$message), cv_obj = NULL
     )
   })
   

@@ -84,25 +84,23 @@
     rv$drawn_feature <- NULL
   })
   
-  get_regional_param <- function(type, loc, target, default = NULL) {
+  # Stored entries are list(value, key): a value is used only for the tuning
+  # key (column + effective subset) it was tuned or applied for.
+  get_regional_param <- function(type, loc, target, default = NULL, key) {
     field <- if(type == "IDW") "idw_factors" else "tps_lambdas"
-    val <- rv[[field]][[loc]][[target]]
-    if(is.null(val)) {
-      if(!is.null(default)) return(default)
-      if(type == "IDW") return(2.0)
-      if(type == "TPS") return(-1.0)
-    }
-    return(val)
+    if (is.null(default)) default <- if (type == "IDW") 2.0 else -1.0
+    resolve_regional_param(rv[[field]][[loc]][[target]], key, default)
   }
-  
-  set_regional_param <- function(type, loc, target, value) {
+
+  set_regional_param <- function(type, loc, target, value, key) {
     field <- if(type == "IDW") "idw_factors" else "tps_lambdas"
+    entry <- list(value = value, key = key)
     if(is.null(rv[[field]][[loc]])) {
       params <- list()
-      params[[target]] <- value
+      params[[target]] <- entry
       rv[[field]][[loc]] <- params
     } else {
-      rv[[field]][[loc]][[target]] <- value
+      rv[[field]][[loc]][[target]] <- entry
     }
   }
 

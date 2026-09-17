@@ -85,6 +85,11 @@
          req(obs_col, pre_col)
          cv_obj$residual <- cv_obj[[obs_col]] - cv_obj[[pre_col]]
       }
+      # gstat::variogram() stops on an NA response, which a failed CV fold
+      # leaves behind; use the scored samples only.
+      if (inherits(cv_obj, "Spatial")) cv_obj <- sf::st_as_sf(cv_obj)
+      cv_obj <- cv_obj[is.finite(cv_obj$residual), ]
+      req(nrow(cv_obj) >= 3)
 
       tryCatch({
          lags <- calc_scientific_lags(cv_obj)
@@ -154,14 +159,16 @@
      if(!is.null(rv$cv_metrics_act[[l]])) {
        n_obs_l <- if(!is.null(rv$cv_data_act[[l]])) nrow(rv$cv_data_act[[l]]) else NA
        cv_table <- cv_metrics_export_df(rv$cv_metrics_act[[l]], "Actual Model",
-                                        cv_type_label(n_obs_l, rv$cv_strategy_sel))
+                                        cv_type_label(n_obs_l, rv$cv_strategy_sel),
+                                        rv$cv_info_act[[l]])
        register_export_item(paste0("table_cv_loc_", l), paste(meta$label, "-", l, "- Model CV Metrics (Actual)"), "table", cv_table, meta$category)
      }
 
      if((comp_mode || val_type != "actual") && !is.null(rv$cv_metrics_pre[[l]])) {
        n_obs_l_p <- if(!is.null(rv$cv_data_pre[[l]])) nrow(rv$cv_data_pre[[l]]) else NA
        cv_table_p <- cv_metrics_export_df(rv$cv_metrics_pre[[l]], "Predicted Model",
-                                          cv_type_label(n_obs_l_p, rv$cv_strategy_sel))
+                                          cv_type_label(n_obs_l_p, rv$cv_strategy_sel),
+                                          rv$cv_info_pre[[l]])
        register_export_item(paste0("table_cv_pre_loc_", l), paste(meta$label, "-", l, "- Model CV Metrics (Predicted)"), "table", cv_table_p, meta$category)
      }
 
@@ -187,17 +194,17 @@
 
      # Variogram exports register the same ggplot builders the Scientific
      # Analysis tab renders (former lattice look retired; numbers unchanged).
-     if(!is.null(rv$v_emp_list[[paste0(l, "_act")]])) {
-       v_emp <- rv$v_emp_list[[paste0(l, "_act")]]
-       v_fit <- rv$v_fit_list[[paste0(l, "_act")]]
+     if(!is.null(rv$disp$v_emps[[paste0(l, "_act")]])) {
+       v_emp <- rv$disp$v_emps[[paste0(l, "_act")]]
+       v_fit <- rv$disp$v_fits[[paste0(l, "_act")]]
        p_vgm <- build_variogram_ggplot(v_emp, v_fit, title = paste("Variogram (Actual):", l))
        register_export_item(paste0("plot_vgm_act_", l), paste(meta$label, "-", l, "- Variogram (Actual)"), "plot", p_vgm, meta$category)
        df_vgm <- as.data.frame(v_emp) %>% select(np, dist, gamma, dir.hor, dir.ver)
        register_export_item(paste0("table_vgm_act_", l), paste(meta$label, "-", l, "- Variogram Data (Actual)"), "table", df_vgm, meta$category)
      }
-     if((comp_mode || val_type != "actual") && !is.null(rv$v_emp_list[[paste0(l, "_pre")]])) {
-       v_emp_p <- rv$v_emp_list[[paste0(l, "_pre")]]
-       v_fit_p <- rv$v_fit_list[[paste0(l, "_pre")]]
+     if((comp_mode || val_type != "actual") && !is.null(rv$disp$v_emps[[paste0(l, "_pre")]])) {
+       v_emp_p <- rv$disp$v_emps[[paste0(l, "_pre")]]
+       v_fit_p <- rv$disp$v_fits[[paste0(l, "_pre")]]
        p_vgm_p <- build_variogram_ggplot(v_emp_p, v_fit_p, title = paste("Variogram (Predicted):", l))
        register_export_item(paste0("plot_vgm_pre_", l), paste(meta$label, "-", l, "- Variogram (Predicted)"), "plot", p_vgm_p, meta$category)
        df_vgm_p <- as.data.frame(v_emp_p) %>% select(np, dist, gamma, dir.hor, dir.ver)
@@ -207,7 +214,7 @@
      # The FITTED model (model family, nugget, sill, range, structural
      # dependency). Only the empirical points were exportable before, so the
      # parameters the kriging system actually solved with left no record.
-     vgm_par_l <- vgm_params_export_df(rv$v_fit_list, locs = l)
+     vgm_par_l <- vgm_params_export_df(rv$disp$v_fits, locs = l)
      if(!is.null(vgm_par_l)) {
        register_export_item(paste0("table_vgm_params_", l), paste(meta$label, "-", l, "- Variogram Parameters"), "table", vgm_par_l, meta$category)
      }
@@ -240,16 +247,16 @@
      # Like the variogram above, the GCV curve exports as BOTH the figure and
      # the lambda/GCV grid it was drawn from - the numeric record of how the
      # smoothing parameter was chosen.
-     if(method == "TPS" && !is.null(rv$tps_gcv_data[[paste0(l, "_act")]])) {
-       df_gcv <- rv$tps_gcv_data[[paste0(l, "_act")]]
+     if(method == "TPS" && !is.null(rv$disp$tps_gcv_data[[paste0(l, "_act")]])) {
+       df_gcv <- rv$disp$tps_gcv_data[[paste0(l, "_act")]]
        p_gcv <- ggplot(df_gcv, aes(x = lambda, y = gcv)) +
          geom_line(color = "steelblue") + geom_point() + scale_x_log10() +
          labs(title = paste("TPS GCV Diagnostics (Actual):", l)) + theme_minimal()
        register_export_item(paste0("plot_tps_gcv_", l), paste(meta$label, "-", l, "- TPS GCV Curve (Actual)"), "plot", p_gcv, meta$category)
        register_export_item(paste0("table_tps_gcv_", l), paste(meta$label, "-", l, "- TPS GCV Data (Actual)"), "table", as.data.frame(df_gcv), meta$category)
      }
-     if(method == "TPS" && (comp_mode || val_type != "actual") && !is.null(rv$tps_gcv_data[[paste0(l, "_pre")]])) {
-       df_gcv_p <- rv$tps_gcv_data[[paste0(l, "_pre")]]
+     if(method == "TPS" && (comp_mode || val_type != "actual") && !is.null(rv$disp$tps_gcv_data[[paste0(l, "_pre")]])) {
+       df_gcv_p <- rv$disp$tps_gcv_data[[paste0(l, "_pre")]]
        p_gcv_p <- ggplot(df_gcv_p, aes(x = lambda, y = gcv)) +
          geom_line(color = "firebrick") + geom_point() + scale_x_log10() +
          labs(title = paste("TPS GCV Diagnostics (Predicted):", l)) + theme_minimal()
@@ -435,6 +442,14 @@
   map_overlay_rev <- reactiveVal(0L)
   overlay_map_ids <- c("main_map", "comp_map_left", "comp_map_right")
 
+  # The Map Viewer's view menu, split into the surfaces shown and the layer
+  # drawn from them (parse_map_view). reactiveVals invalidate only on a real
+  # change, so moving between a surface and its SE/variance view restyles the
+  # live widgets through the proxy (zoom and pan kept) instead of rebuilding
+  # them. Written by the observer in server_map_viewer.R.
+  map_view_base <- reactiveVal("view_act")
+  map_view_layer <- reactiveVal("value")
+
   rv <- reactiveValues(
     user_data = NULL, # Uploaded data
     has_predictions = FALSE, # Tracks interpolation state
@@ -458,6 +473,9 @@
     cv_strategy_sel = "auto", # CV strategy applied in the last run (for labels)
     cv_repeats_sel = 1L, # Fold realizations requested by the last run (1 = off)
     cv_repeats_act = NULL, cv_repeats_pre = NULL, # Repeated-CV mean/SD report
+    # Per-locality CV population of the last run: what was scored, how many
+    # samples were expected, and the id two archived runs are matched on.
+    cv_info_act = list(), cv_info_pre = list(),
 
     loc_resolutions = list(), # Track spatial resolutions per locality
     idw_factors = list(), tps_lambdas = list(), # Regional Parameters

@@ -238,9 +238,18 @@
           "Applying re-encodes every visible map layer and recomputes class areas - expect a few seconds, longer for multi-locality or comparison views."))
   })
 
+  # Pooled prediction values of both surfaces under Match Scales. Always the
+  # PREDICTION band: class breaks are computed from it, and they describe the
+  # concentration surfaces whichever layer the Map Viewer is showing.
   joint_vv <- reactive({
-    is_uncertainty <- isTruthy(input$show_uncertainty) && method_has_variance(rv$disp$method %||% "")
-    get_joint_scale_values(rv$rast, rv$rast_pred, input$match_scales, is_uncertainty)
+    get_joint_scale_values(rv$rast, rv$rast_pred, input$match_scales, "value")
+  })
+  # Display-only twin for the SE/variance views: one colour range across both
+  # surfaces' uncertainty layers under Match Scales. Never used for breaks.
+  joint_uncert_vv <- reactive({
+    layer <- map_view_layer()
+    if (!layer %in% c("se", "var")) return(NULL)
+    get_joint_scale_values(rv$rast, rv$rast_pred, input$match_scales, layer)
   })
 
   # Values the class breaks are computed on: joint scale when Match Scales is
@@ -248,7 +257,7 @@
   classification_values <- function(meta, n_min) {
     vv <- joint_vv()
     if (is.null(vv)) {
-      vv <- if (identical(input$map_view, "view_pred") || identical(input$map_view, "view_comp")) rast_vals_pre() else rast_vals_act()
+      vv <- if (map_view_base() %in% c("view_pred", "view_comp")) rast_vals_pre() else rast_vals_act()
     }
     if (is.null(vv)) {
       v_data <- rv$user_data[[meta$actual]]

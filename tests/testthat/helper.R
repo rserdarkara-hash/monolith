@@ -50,6 +50,11 @@ if (!exists(".monolith_sourced") || !isTRUE(.monolith_sourced)) {
   .monolith_sourced <- TRUE
 }
 
+# The common cross-validation schema every kriging engine returns
+# (run_kriging_folds). IDW and TPS keep their own engines' column sets.
+KRIGING_CV_SCHEMA <- c("row_id", "fold", "observed", "var1.pred", "var1.var",
+                       "residual", "geometry")
+
 # ── Synthetic data factories (no external file dependencies) ────────────────
 
 #' Create a small sf POINT dataframe for spatial tests.

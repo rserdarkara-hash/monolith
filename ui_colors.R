@@ -34,6 +34,16 @@ resolve_resid_palette <- function(input) {
   pal
 }
 
+# Palette for standard-error and variance maps. Uncertainty is a non-negative
+# magnitude with no meaningful midpoint, and a diverging palette would draw
+# one, so a diverging choice (RColorBrewer category "div") becomes viridis.
+# Sequential choices pass through. Used by the Map Viewer and the Export Styler.
+uncertainty_palette <- function(pal) {
+  pal <- as.character(pal %||% "viridis")[1]
+  info <- RColorBrewer::brewer.pal.info
+  if (pal %in% rownames(info) && identical(as.character(info[pal, "category"]), "div")) "viridis" else pal
+}
+
 # Descriptive-suite palette catalogue. Every option must yield usable colours
 # for ANY group count: Brewer palettes are ramped past their native maximum
 # instead of degrading to NA colours.

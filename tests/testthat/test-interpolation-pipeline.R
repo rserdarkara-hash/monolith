@@ -14,7 +14,7 @@ test_that("init_interpolation_res returns list with all expected names", {
   res <- init_interpolation_res()
   expected_names <- c("v_emp", "fit", "cv_metrics", "model_summary",
                       "rf_model", "gstat_obj", "res_sf", "log_msg",
-                      "cv_obj", "cv_obj_reps", "residuals")
+                      "cv_obj", "cv_obj_reps")
   expect_setequal(names(res), expected_names)
   expect_equal(res$log_msg, "")
   expect_null(res$v_emp)
@@ -56,18 +56,9 @@ test_that("sanitize_spatial_predictions handles sf without var1.pred column", {
 
 test_that("safe_run_cv catches errors and stores error message", {
   res <- init_interpolation_res()
-  res <- safe_run_cv(res, stop("forced error"), "TEST", 10)
+  res <- safe_run_cv(res, stop("forced error"), "TEST")
   expect_match(res$log_msg, "TEST CV Error: forced error")
   expect_null(res$cv_obj)
-})
-
-test_that("safe_run_cv drops pre-set training residuals when CV fails", {
-  res <- init_interpolation_res()
-  res$residuals <- 1:5  # training residuals, set by RK/RFK for the variogram step
-  res <- safe_run_cv(res, stop("boom"), "RK", 5)
-  expect_null(res$cv_obj)
-  expect_null(res$residuals)
-  expect_match(res$log_msg, "RK CV Error", fixed = TRUE)
 })
 
 test_that("safe_run_cv stores cv_obj on success", {
@@ -79,24 +70,10 @@ test_that("safe_run_cv stores cv_obj on success", {
     y = sf::st_coordinates(pts)[, 2]
   )
   res <- init_interpolation_res()
-  res <- safe_run_cv(res, cv_df, "TEST_OK", 10)
+  res <- safe_run_cv(res, cv_df, "TEST_OK")
   expect_false(is.null(res$cv_obj))
   expect_false(is.null(res$cv_metrics))
   expect_false(is.na(res$cv_metrics$rmse))
-})
-
-test_that("safe_run_cv computes residuals when cv_obj is available", {
-  pts <- make_test_points(8)
-  cv_df <- data.frame(
-    var1.pred     = pts$v + rnorm(8, 0, 0.3),
-    var1.observed = pts$v,
-    x = sf::st_coordinates(pts)[, 1],
-    y = sf::st_coordinates(pts)[, 2]
-  )
-  res <- init_interpolation_res()
-  res <- safe_run_cv(res, cv_df, "TEST_RESID", 8)
-  expect_equal(length(res$residuals), 8)
-  expect_true(is.numeric(res$residuals))
 })
 
 # ── suggest_lmc_model ─────────────────────────────────────────────────────
@@ -227,30 +204,138 @@ test_that("merge_wrapped_rasters merges multiple rasters", {
 # ── get_joint_scale_values ────────────────────────────────────────────────
 
 test_that("get_joint_scale_values returns NULL when match_scales is FALSE", {
-  expect_null(get_joint_scale_values(NULL, NULL, match_scales = FALSE, is_uncertainty = FALSE))
+  expect_null(get_joint_scale_values(NULL, NULL, match_scales = FALSE))
+  expect_null(get_joint_scale_values(NULL, NULL, match_scales = FALSE, layer = "se"))
 })
 
-test_that("get_joint_scale_values returns NULL for is_uncertainty = TRUE", {
-  expect_null(get_joint_scale_values(NULL, NULL, match_scales = TRUE, is_uncertainty = TRUE))
+test_that("get_joint_scale_values pools the band the view shows", {
+  mk <- function(pred, var) {
+    r <- terra::rast(nrows = 2, ncols = 2, xmin = 0, xmax = 2, ymin = 0, ymax = 2,
+                     crs = "EPSG:32633", nlyrs = 2)
+    names(r) <- c("var1.pred", "var1.var")
+    terra::values(r) <- cbind(rep(pred, 4), rep(var, 4))
+    terra::wrap(r)
+  }
+  a <- mk(10, 4); p <- mk(20, 9)
+  expect_setequal(get_joint_scale_values(a, p, TRUE), c(10, 20))
+  expect_setequal(get_joint_scale_values(a, p, TRUE, "var"), c(4, 9))
+  expect_setequal(get_joint_scale_values(a, p, TRUE, "se"), c(2, 3))
+
+  # A surface without a variance band contributes nothing to an uncertainty
+  # scale, never its predictions.
+  pred_only <- terra::rast(nrows = 2, ncols = 2, xmin = 0, xmax = 2, ymin = 0, ymax = 2,
+                           crs = "EPSG:32633", vals = 50)
+  names(pred_only) <- "var1.pred"
+  expect_setequal(get_joint_scale_values(a, terra::wrap(pred_only), TRUE, "se"), 2)
+  expect_null(raster_value_layer(terra::wrap(pred_only), "var1.var"))
+  expect_equal(unique(raster_value_layer(terra::wrap(pred_only))), 50)
 })
 
-test_that("get_joint_scale_values returns combined values from two rasters", {
-  pts <- make_test_points(10)
-  bbox <- sf::st_bbox(pts)
-  r1 <- terra::rast(terra::ext(bbox), resolution = 80,
-                    crs = sf::st_crs(pts)$wkt)
-  values(r1) <- 10
-  r1$var1.pred <- r1
+# ── Map Viewer views ──────────────────────────────────────────────────────
 
-  r2 <- terra::rast(terra::ext(bbox), resolution = 80,
-                    crs = sf::st_crs(pts)$wkt)
-  values(r2) <- 20
-  r2$var1.pred <- r2
+test_that("parse_map_view splits a view id into surfaces and layer", {
+  expect_equal(parse_map_view("view_pred_se"), list(base = "view_pred", layer = "se"))
+  expect_equal(parse_map_view("view_comp_var"), list(base = "view_comp", layer = "var"))
+  expect_equal(parse_map_view("view_act"), list(base = "view_act", layer = "value"))
+  # The residual view has no variance band; unknown or missing ids fall back.
+  expect_equal(parse_map_view("view_resid_se"), list(base = "view_resid", layer = "value"))
+  expect_equal(parse_map_view(NULL), list(base = "view_act", layer = "value"))
+  expect_equal(parse_map_view("nonsense"), list(base = "view_act", layer = "value"))
+})
 
-  vals <- get_joint_scale_values(terra::wrap(r1), terra::wrap(r2),
-                                 match_scales = TRUE, is_uncertainty = FALSE)
-  expect_true(is.numeric(vals))
-  expect_true(length(vals) > 0)
+test_that("map_view_choices offers SE and variance views for variance methods only", {
+  plain <- map_view_choices(has_pred = TRUE, has_resid = TRUE, has_variance = FALSE)
+  expect_false(any(grepl("_se$|_var$", unlist(plain))))
+  expect_setequal(unname(plain), c("view_act", "view_pred", "view_comp", "view_resid"))
+
+  krig <- map_view_choices(has_pred = TRUE, has_resid = TRUE, has_variance = TRUE)
+  ids <- unlist(krig, use.names = FALSE)
+  expect_setequal(ids, c("view_act", "view_pred", "view_comp", "view_resid",
+                         "view_act_se", "view_pred_se", "view_comp_se",
+                         "view_act_var", "view_pred_var", "view_comp_var"))
+  # Every id the menu offers parses back to itself.
+  for (v in ids) {
+    pv <- parse_map_view(v)
+    expect_equal(if (pv$layer == "value") pv$base else paste0(pv$base, "_", pv$layer), v)
+  }
+  actual_only <- unlist(map_view_choices(FALSE, FALSE, TRUE), use.names = FALSE)
+  expect_setequal(actual_only, c("view_act", "view_act_se", "view_act_var"))
+})
+
+test_that("uncertainty maps never take a diverging palette", {
+  expect_equal(uncertainty_palette("RdYlBu"), "viridis")
+  expect_equal(uncertainty_palette("Spectral"), "viridis")
+  expect_equal(uncertainty_palette("BrBG"), "viridis")
+  expect_equal(uncertainty_palette("YlOrRd"), "YlOrRd")
+  expect_equal(uncertainty_palette("viridis"), "viridis")
+})
+
+# ── Grid template and Auto (Global) resolution ────────────────────────────
+
+test_that("grid_template gives square cells of exactly the requested size", {
+  bb <- c(xmin = 500000, ymin = 4200000, xmax = 501000, ymax = 4200800)
+  # terra::rast(ext, resolution = 45) would stretch these to 45.45 x 44.44 m.
+  g <- grid_template(bb, 45, "EPSG:32635")
+  expect_equal(terra::res(g), c(45, 45))
+  e <- unname(as.vector(terra::ext(g)))
+  expect_equal(e[c(1, 3)], c(500000, 4200000))
+  expect_true(e[2] >= 501000 && e[2] - 501000 < 45)
+  expect_true(e[4] >= 4200800 && e[4] - 4200800 < 45)
+
+  # Snapped grids of two boxes share one lattice.
+  g2 <- grid_template(c(xmin = 503017, ymin = 4201333, xmax = 504100, ymax = 4202000),
+                      45, "EPSG:32635", snap = TRUE)
+  g1 <- grid_template(bb, 45, "EPSG:32635", snap = TRUE)
+  on_lattice <- function(v) isTRUE(all.equal(v / 45, round(v / 45)))
+  expect_true(all(vapply(as.vector(terra::ext(g1)), on_lattice, logical(1))))
+  expect_true(all(vapply(as.vector(terra::ext(g2)), on_lattice, logical(1))))
+  expect_equal(terra::res(g2), c(45, 45))
+})
+
+test_that("Auto (Global) grids every locality at the Auto size of the largest boundary", {
+  proj_root <- normalizePath(file.path(testthat::test_path(), "..", ".."), winslash = "/")
+  mk_item <- function(l, n, x0, span, seed) {
+    set.seed(seed)
+    pts_data <- data.frame(x = x0 + runif(n, 0, span), y = 4400000 + runif(n, 0, span),
+                           v = rnorm(n, 10, 2), pv = NA, Locality = l)
+    list(l = l, pts_data = pts_data,
+         m_params = list(idw_p_act = 2, idw_p_pre = 2, idw_nmax = 12,
+                         tps_lambda_act = -1, tps_lambda_pre = -1,
+                         pre_fit_act = NULL, pre_fit_pre = NULL,
+                         cv_strategy = "auto", rfk_uncertainty = "jackknife"))
+  }
+  items <- list(mk_item("Small", 20, 500000, 300, 1), mk_item("Large", 30, 520000, 3000, 2))
+  rp <- list(main_wd = proj_root, current_method = "IDW", current_crs = 32635,
+             aux_vars = character(0), shp_bound = NULL, b_type = "convex",
+             buff_mode = "dynamic", b_dist = 250, res_mode = "global", grid_res = 50,
+             crs_sel = "EPSG:32635", comp_mode = FALSE, val_type = "actual",
+             progress_dir_val = tempdir(), session_id_val = "global_res",
+             cancel_file_val = NULL, vif_threshold = 10)
+
+  # Reference from the definition: the Auto size of the larger convex hull.
+  areas <- vapply(items, function(it) {
+    p <- sf::st_as_sf(it$pts_data, coords = c("x", "y"), crs = 32635)
+    as.numeric(sf::st_area(sf::st_convex_hull(sf::st_union(p))))
+  }, numeric(1))
+  expected <- max(5, min(1000, sqrt(max(areas) / 1e5)))
+  shared <- shared_auto_resolution(items, rp)
+  expect_equal(shared, expected)
+
+  rp$shared_res <- shared
+  runs <- lapply(items, interp_run_item, run_params = rp)
+  for (r in runs) {
+    expect_false(grepl("Error", r$log_msg))
+    expect_equal(r$actual_res, expected)
+    ras <- terra::unwrap(r$r_a)
+    expect_equal(terra::res(ras), c(expected, expected), tolerance = 1e-6)
+    ex <- as.vector(terra::ext(ras))
+    expect_equal(ex / expected, round(ex / expected), tolerance = 1e-6)
+  }
+
+  # Per Locality keeps each boundary's own Auto size.
+  rp_local <- rp; rp_local$res_mode <- "local"; rp_local$shared_res <- NULL
+  small_local <- interp_run_item(items[[1]], rp_local)
+  expect_equal(small_local$actual_res, max(5, min(1000, sqrt(areas[1] / 1e5))))
 })
 
 # ── validate_and_project_sf ───────────────────────────────────────────────
@@ -367,7 +452,8 @@ test_that("apply_IDW returns predictions, CV metrics and residuals", {
   expect_true(all(ok_preds >= min(pts$v) - 1e-9 & ok_preds <= max(pts$v) + 1e-9))
 
   expect_false(is.na(res$cv_metrics$rmse))
-  expect_length(res$residuals, 15)
+  # The CV object holds one row per sample; residuals are read off it.
+  expect_equal(nrow(res$cv_obj), 15)
 })
 
 test_that("apply_IDW reproduces observed values at data locations", {
@@ -393,7 +479,7 @@ test_that("repeated CV adds realizations without moving the reference run", {
   expect_null(off$cv_obj_reps)
   expect_equal(on$cv_metrics, off$cv_metrics)
   expect_equal(on$res_sf$var1.pred, off$res_sf$var1.pred)
-  expect_equal(on$residuals, off$residuals)
+  expect_equal(sf::st_drop_geometry(on$cv_obj), sf::st_drop_geometry(off$cv_obj))
 
   expect_length(on$cv_obj_reps, 3)
   # Realization 1 IS the reference run
@@ -560,7 +646,8 @@ test_that("apply_OK returns variogram, fit, predictions and CV results", {
   vv <- res$res_sf$var1.var
   expect_true(all(vv[!is.na(vv)] >= -1e-6))
   expect_false(is.na(res$cv_metrics$rmse))
-  expect_length(res$residuals, 20)
+  expect_equal(nrow(res$cv_obj), 20)
+  expect_identical(names(res$cv_obj), KRIGING_CV_SCHEMA)
 })
 
 test_that("apply_OK honours the Spatial Block CV strategy end-to-end", {
@@ -569,11 +656,296 @@ test_that("apply_OK honours the Spatial Block CV strategy end-to-end", {
   lags <- calc_scientific_lags(pts)
   res <- suppressWarnings(apply_OK(pts, "v", grid, lags, list(cv_strategy = "block")))
 
-  # Block folds (a length-n integer vector) must flow through krige.cv and
-  # still yield finite CV metrics over all 40 held-out points.
+  # Block folds (a length-n integer vector) must flow through the fold runner
+  # and still yield finite CV metrics over all 40 held-out points.
   expect_false(is.na(res$cv_metrics$rmse))
-  expect_length(res$residuals, 40)
+  expect_equal(nrow(res$cv_obj), 40)
+  expect_identical(names(res$cv_obj), KRIGING_CV_SCHEMA)
   expect_s3_class(res$res_sf, "sf")
+})
+
+test_that("variogram stamps preserve manual provenance and require the current key", {
+  fit <- make_mock_vgm("Sph")
+  manual <- stamp_vgm(fit, "ph [subset Test]", "manual")
+  expect_identical(attr(manual, "monolith_key"), "ph [subset Test]")
+  expect_identical(attr(manual, "monolith_source"), "manual")
+  expect_identical(attr(stamp_vgm(manual, "ph [subset Test]", "run"), "monolith_source"), "manual")
+  expect_identical(attr(stamp_vgm(fit, "ph", "autofit"), "monolith_source"), "autofit")
+})
+
+test_that("stored variograms are supplied only when applied manually for the run key", {
+  fit <- make_mock_vgm("Sph")
+  attr(fit, "monolith_key") <- "ph"
+  attr(fit, "monolith_source") <- "manual"
+  attr(fit, "formula") <- ph ~ 1
+  attr(fit, "call") <- quote(manual_vgm())
+  expect_identical(resolve_stored_vgm(fit, "manual", "ph"), clean_gstat_env(fit))
+  expect_null(resolve_stored_vgm(fit, "auto", "ph"))
+  expect_null(resolve_stored_vgm(fit, "manual", "som"))
+  expect_null(resolve_stored_vgm(fit, "manual", NA_character_))
+  attr(fit, "monolith_key") <- NULL
+  expect_null(resolve_stored_vgm(fit, "manual", "ph"))
+  attr(fit, "monolith_key") <- "ph"
+  for (source in c("autofit", "run")) {
+    attr(fit, "monolith_source") <- source
+    expect_null(resolve_stored_vgm(fit, "manual", "ph"))
+  }
+  expect_null(resolve_stored_vgm(NULL, "manual", "ph"))
+})
+
+test_that("variogram key matching rejects absent and unequal keys", {
+  fit <- make_mock_vgm("Sph")
+  expect_false(vgm_key_matches(fit, "ph"))
+  attr(fit, "monolith_key") <- "ph"
+  expect_true(vgm_key_matches(fit, "ph"))
+  expect_false(vgm_key_matches(fit, "ph [subset Test]"))
+  expect_false(vgm_key_matches(fit, NA_character_))
+  expect_false(vgm_key_matches(NULL, "ph"))
+})
+
+test_that("OK worker shares the measured variogram only when separate fitting is off", {
+  pts <- make_test_points(15)
+  xy <- sf::st_coordinates(pts)
+  df <- data.frame(x = xy[, 1], y = xy[, 2], v = pts$v,
+                   pv = 100 + 20 * pts$v, Locality = "LocA")
+  run <- function(separate, fit = NULL) suppressWarnings(run_regional_interpolation(
+    list(l = "LocA", pts_data = df, m_params = list(sep_fit = separate, pre_fit_act = fit)),
+    "OK", 32633, character(0), NULL, "convex", "dynamic", 250,
+    "fixed", 200, "EPSG:32633", FALSE, "pred"))
+  shared <- run(FALSE)
+  expect_false(is.null(shared$v_fit_act))
+  expect_identical(shared$v_fit_pre, shared$v_fit_act)
+  separate <- run(TRUE)
+  expect_false(isTRUE(all.equal(separate$v_fit_pre, separate$v_fit_act)))
+  applied <- make_mock_vgm("Sph")
+  fixed <- run(FALSE, applied)
+  expect_identical(fixed$v_fit_act, applied)
+  expect_identical(fixed$v_fit_pre, applied)
+})
+
+test_that("the Comparable CV population scores exactly the rows RK scores", {
+  # OK maps every sample with a measured target, but a comparison with RK is
+  # only a comparison when both are scored on the same information. The
+  # Comparable switch folds OK over the covariate-complete rows RK uses -
+  # including the deduplication, which is where the two populations can pick
+  # DIFFERENT members of a co-located pair: the pair's first row has no aux1,
+  # so OK Native keeps it and the covariate-complete population keeps the
+  # second.
+  set.seed(404)
+  n <- 30
+  crd <- cbind(500000 + runif(n, 0, 3000), 4000000 + runif(n, 0, 3000))
+  crd[2, ] <- crd[1, ]                     # co-located pair: rows 1 and 2
+  aux <- 10 + runif(n, 0, 5)
+  aux[c(1, 7, 12, 18, 25)] <- NA_real_     # 5 rows without the covariate
+  df <- data.frame(.mn_row_id = seq_len(n), x = crd[, 1], y = crd[, 2],
+                   v = 20 + 0.8 * (crd[, 1] - 500000) / 300 + rnorm(n, 0, 0.5),
+                   pv = NA_real_, aux1 = aux, Locality = "LocA")
+
+  run <- function(method, population) suppressWarnings(run_regional_interpolation(
+    list(l = "LocA", pts_data = df,
+         m_params = list(cv_strategy = "auto", cv_population = population,
+                         idw_p_act = 2, idw_nmax = 12)),
+    method, 32633, "aux1", NULL, "convex", "fixed", 300,
+    "fixed", 300, "EPSG:32633", FALSE, "actual"))
+
+  ok_nat <- run("OK", "native")
+  ok_cmp <- run("OK", "comparable")
+  rk     <- run("RK", "native")            # RK always uses the common rows
+  # IDW scores its own point set with its own folds, so no kriging population
+  # is folded for it and it carries no population to name or hash.
+  idw    <- run("IDW", "native")
+  expect_true(is.na(idw$cv_info_act$population))
+  expect_null(idw$cv_info_act$row_id)
+
+  # Same rows, same partition, therefore the same experiment id.
+  expect_identical(ok_cmp$cv_info_act$row_id, rk$cv_info_act$row_id)
+  expect_identical(ok_cmp$cv_info_act$folds1, rk$cv_info_act$folds1)
+  expect_identical(
+    cv_population_id("v", ok_cmp$cv_info_act$row_id, ok_cmp$cv_info_act$folds1),
+    cv_population_id("v", rk$cv_info_act$row_id, rk$cv_info_act$folds1))
+
+  # 30 rows, one co-located duplicate: OK Native scores 29. The covariate-
+  # complete population loses the five aux1-less rows but recovers the pair's
+  # second row, which the Native dedup had discarded.
+  expect_equal(ok_nat$cv_info_act$n_expected, 29)
+  expect_equal(ok_cmp$cv_info_act$n_expected, 25)
+  expect_gt(ok_nat$cv_info_act$n_expected, ok_cmp$cv_info_act$n_expected)
+  expect_true(2L %in% ok_cmp$cv_info_act$row_id)
+  expect_false(1L %in% ok_cmp$cv_info_act$row_id)
+  expect_true(1L %in% ok_nat$cv_info_act$row_id)
+  expect_identical(ok_cmp$cv_info_act$population, "common rows")
+  expect_identical(ok_nat$cv_info_act$population, "native rows")
+
+  # The residual write-back follows the CV object's own coordinates, so a
+  # Comparable run marks the samples it actually scored - not the first 25
+  # rows of a longer point set.
+  ckey <- function(sfo) {
+    cc <- sf::st_coordinates(sfo)
+    paste(round(cc[, 1], 2), round(cc[, 2], 2))
+  }
+  scored <- ckey(ok_cmp$cv_obj_act)[!is.na(ok_cmp$cv_obj_act$residual)]
+  got <- ckey(ok_cmp$pts)[!is.na(ok_cmp$pts$model_resid_act)]
+  expect_setequal(got, scored)
+  expect_equal(length(got), length(scored))
+  idx <- match(ckey(ok_cmp$cv_obj_act), ckey(ok_cmp$pts))
+  expect_equal(ok_cmp$pts$model_resid_act[idx], ok_cmp$cv_obj_act$residual)
+
+  # The row-identity column is internal and must never reach the popups or the
+  # colour-by choices, which read rv$sf (= res$pts) column by column.
+  expect_false(".mn_row_id" %in% names(ok_cmp$pts))
+  expect_false(".mn_row_id" %in% names(rk$pts))
+})
+
+test_that("a CV population too small to fold skips the CV and still draws the map", {
+  # A Comparable population can be far smaller than the surface's point set.
+  # Below three samples there is nothing to fold: the cross-validation is
+  # skipped with a named log line rather than quietly scored on OK's own,
+  # larger, Native population - and the map, fitted on every sample, still runs.
+  set.seed(606)
+  n <- 20
+  crd <- cbind(500000 + runif(n, 0, 2000), 4000000 + runif(n, 0, 2000))
+  aux <- rep(NA_real_, n)
+  aux[1:2] <- c(3, 9)
+  df <- data.frame(.mn_row_id = seq_len(n), x = crd[, 1], y = crd[, 2],
+                   v = 20 + rnorm(n), pv = NA_real_, aux1 = aux, Locality = "LocA")
+
+  res <- suppressWarnings(run_regional_interpolation(
+    list(l = "LocA", pts_data = df,
+         m_params = list(cv_strategy = "auto", cv_population = "comparable",
+                         idw_p_act = 2, idw_nmax = 12)),
+    "OK", 32633, "aux1", NULL, "convex", "fixed", 300,
+    "fixed", 300, "EPSG:32633", FALSE, "actual"))
+
+  expect_false(is.null(res$r_a))
+  expect_null(res$cv_obj_act)
+  expect_true(is.na(res$cv_act$rmse))
+  expect_match(res$log_msg, "cross-validation population (common rows) holds 2 samples",
+               fixed = TRUE)
+  expect_true(all(is.na(res$pts$model_resid_act)))
+})
+
+test_that("a locality is projected once, before the covariate filter", {
+  # D4f: the working CRS is a property of the locality, not of the covariate
+  # selection. This fixture straddles the 12 deg E UTM zone boundary so that
+  # ALL rows average into zone 32 while the covariate-complete rows average
+  # into zone 33 - projecting after the filter would put RK's samples on a
+  # different grid from OK's, which is exactly what the Comparable switch is
+  # meant to rule out.
+  set.seed(505)
+  lon <- c(runif(20, 10.5, 11.0), runif(32, 12.1, 12.5))
+  lat <- c(runif(20, 45.0, 45.4), runif(32, 45.0, 45.4))
+  aux <- c(rep(NA_real_, 20), 5 + runif(32, 0, 3))
+  n <- length(lon)
+  df <- data.frame(.mn_row_id = seq_len(n), x = lon, y = lat,
+                   v = 30 + 2 * (lon - 10.5) + rnorm(n, 0, 0.3),
+                   pv = NA_real_, aux1 = aux, Locality = "LocA")
+
+  all_sf <- sf::st_as_sf(df, coords = c("x", "y"), crs = 4326)
+  proj_all <- validate_and_project_sf(all_sf)
+  proj_filtered_first <- validate_and_project_sf(all_sf[!is.na(all_sf$aux1), ])
+  # The fixture only tests anything while the two orders disagree.
+  expect_false(sf::st_crs(proj_all) == sf::st_crs(proj_filtered_first))
+
+  run <- function(method, population) suppressWarnings(run_regional_interpolation(
+    list(l = "LocA", pts_data = df,
+         m_params = list(cv_strategy = "block", cv_population = population,
+                         idw_p_act = 2, idw_nmax = 12)),
+    method, 4326, "aux1", NULL, "convex", "fixed", 2000,
+    "fixed", 5000, "EPSG:4326", FALSE, "actual"))
+
+  ok_cmp <- run("OK", "comparable")
+  rk     <- run("RK", "native")
+
+  expected <- sf::st_coordinates(proj_all[!is.na(proj_all$aux1), ])
+  expect_equal(sf::st_coordinates(rk$cv_obj_act), expected)
+  expect_equal(sf::st_coordinates(ok_cmp$cv_obj_act), expected)
+  expect_identical(ok_cmp$cv_info_act$folds1, rk$cv_info_act$folds1)
+  expect_identical(ok_cmp$cv_info_act$row_id, rk$cv_info_act$row_id)
+})
+
+test_that("stored regional values belong only to their tuning key", {
+  expect_equal(resolve_regional_param(list(value = 3.5, key = "ph"), "ph", 2), 3.5)
+  expect_equal(resolve_regional_param(list(value = 0.25, key = "ph [subset Test]"), "ph [subset Test]", -1), 0.25)
+  for (entry in list(NULL, 4, list(value = 4), list(value = 4, key = NA_character_),
+                     list(value = 4, key = "som"), list(value = 4, key = "ph [subset Test]"))) {
+    expect_equal(resolve_regional_param(entry, "ph", 2), 2)
+  }
+  expect_equal(resolve_regional_param(list(value = 4, key = NA_character_), NA_character_, -1), -1)
+})
+
+test_that("manual parameter targets follow the switch in every prediction view", {
+  for (view in c("pred", "pred_ss", "resid")) {
+    expect_identical(manual_param_target(FALSE, view, "pre"), "pre")
+    expect_identical(manual_param_target(FALSE, view, "act"), "act")
+  }
+  expect_identical(manual_param_target(TRUE, "actual", "pre"), "pre")
+  expect_identical(manual_param_target(FALSE, "actual", "pre"), "act")
+  expect_identical(manual_param_target(FALSE, "pred", NULL), "act")
+})
+
+test_that("supplied OK CV retains gstat predictions and variances in the common schema", {
+  pts <- golden_sf("tiny")
+  lags <- calc_scientific_lags(pts)
+  fit <- golden_pin_vgm()
+  for (strategy in c("loocv", "block")) {
+    res <- suppressWarnings(apply_OK(pts, "ph", pts[1:5, ], lags,
+      list(pre_fit = fit, cv_strategy = strategy)))
+    expected <- gstat::krige.cv(ph ~ 1, pts, model = fit,
+      nfold = make_cv_folds(sf::st_coordinates(pts), strategy, nrow(pts)), debug.level = 0)
+    expect_identical(names(res$cv_obj), c("row_id", "fold", "observed", "var1.pred", "var1.var", "residual", "geometry"))
+    expect_equal(res$cv_obj$var1.pred, expected$var1.pred, tolerance = 1e-10)
+    expect_equal(res$cv_obj$var1.var, expected$var1.var, tolerance = 1e-10)
+    expect_equal(res$cv_obj$observed, pts$ph)
+  }
+})
+
+test_that("kriging engines and the OK fallback share a poolable CV schema", {
+  pts <- golden_sf("tiny"); lags <- calc_scientific_lags(pts); grid <- pts[1:5, ]
+  results <- suppressWarnings(list(
+    apply_OK(pts, "ph", grid, lags, list()),
+    apply_OK(pts, "ph", grid, lags, list(pre_fit = golden_pin_vgm())),
+    apply_RK(pts, "ph", grid, lags, list(grid_aux = data.frame(x = 1:5)), "v82"),
+    apply_RK(pts, "ph", grid, lags, list(), "v82"),
+    apply_RFK(pts, "ph", grid, lags, list(rf_ntree = 200), "v82"),
+    apply_CK(pts, "ph", grid, lags, list(), "v82")
+  ))
+  expect_match(results[[3]]$log_msg, "RK failed")
+  expect_false(grepl("Falling back to OK", results[[6]]$log_msg, fixed = TRUE))
+  for (res in results) {
+    expect_identical(names(res$cv_obj), c("row_id", "fold", "observed", "var1.pred", "var1.var", "residual", "geometry"))
+    expect_equal(nrow(res$cv_obj), nrow(pts))
+  }
+  frames <- lapply(results, function(res) res$cv_obj)
+  tps <- cv_repeat_frame(frames[[1]])
+  tps$x <- sf::st_coordinates(tps)[, 1]; tps$y <- sf::st_coordinates(tps)[, 2]
+  expect_equal(nrow(pool_cv_sf(c(frames, list(tps)))), 7 * nrow(pts))
+})
+
+test_that("kriging CV uses a supplied population and validates its plan", {
+  pts <- make_test_points(12)
+  pop <- pts[1:8, ]; pop$.mn_row_id <- 101:108
+  plan <- build_cv_plan(pop, "loocv")
+  expect_identical(.engine_cv_plan(list(cv_data = pop, cv_plan = plan), pts)$plan, plan)
+  bad <- plan; bad$n <- bad$n + 1L
+  expect_error(.engine_cv_plan(list(cv_data = pop, cv_plan = bad), pts), "CV plan population size")
+  res <- suppressWarnings(apply_OK(pts, "v", pts[1:3, ], calc_scientific_lags(pts),
+    list(cv_data = pop, cv_plan = plan, pre_fit = make_mock_vgm("Sph"))))
+  expect_identical(res$cv_obj$row_id, 101:108)
+  expect_equal(res$cv_metrics$n, nrow(pop))
+})
+
+test_that("a kriging CV that fails outright reports none of its expected samples", {
+  # Coverage is predicted over expected. A cross-validation that never produced
+  # an object scored none of its population, which is 0 of n, not 0 of 0.
+  pts <- make_test_points(12)
+  res <- .run_kriging_cv(init_interpolation_res(),
+    function(pop, folds, row_id, progress) stop("forced CV failure"),
+    list(cv_strategy = "loocv"), pts, "OK", "test", "act")
+  expect_null(res$cv_obj)
+  expect_match(res$log_msg, "OK CV Error: forced CV failure", fixed = TRUE)
+  expect_equal(res$cv_metrics$n, 0)
+  expect_equal(res$cv_metrics$n_expected, nrow(pts))
+  expect_equal(res$cv_metrics$coverage, 0)
 })
 
 test_that("apply_OK uses a supplied pre_fit variogram instead of refitting", {
@@ -586,6 +958,113 @@ test_that("apply_OK uses a supplied pre_fit variogram instead of refitting", {
     apply_OK(pts, "v", grid, lags, list(pre_fit = manual_fit))
   )
   expect_identical(res$fit, manual_fit)
+  # An applied manual model encodes the user's judgement and cannot be
+  # refitted, so it is reused in every fold and the CV is labelled conditional.
+  expect_identical(res$cv_conditional, "applied variogram")
+})
+
+test_that("an OK fold refits its variogram from its own training rows", {
+  # The held-out row's own measured value must not help fit the model that
+  # predicts it. Raising only the last row's target must therefore leave its
+  # out-of-fold prediction where it was.
+  pts <- golden_sf("tiny")
+  n <- nrow(pts)
+  grid <- pts[1:5, ]
+  lags <- calc_scientific_lags(pts)
+  raised <- pts
+  raised$ph[n] <- raised$ph[n] + 10 * sd(pts$ph)
+  run <- function(p) suppressWarnings(apply_OK(p, "ph", grid, lags, list(cv_strategy = "loocv")))
+  base <- run(pts); moved <- run(raised)
+  expect_true(is.finite(base$cv_obj$var1.pred[n]))
+  expect_equal(moved$cv_obj$var1.pred[n], base$cv_obj$var1.pred[n], tolerance = 1e-8)
+})
+
+test_that("a shared measured-value variogram is refitted inside every fold", {
+  # "Fit Actual/Predicted Separately" unticked: the Predicted surface is kriged
+  # with the variogram of the MEASURED values. Its CV must refit that variogram
+  # from each fold's training rows, so a measured value at a held-out location
+  # cannot reach that location's own prediction.
+  pts <- golden_sf("tiny")
+  n <- nrow(pts)
+  set.seed(5)
+  pts$v <- pts$ph
+  pts$pv <- pts$ph + rnorm(n, 0, 0.05)
+  grid <- pts[1:5, ]
+  lags <- calc_scientific_lags(pts)
+  shared_of <- function(p) suppressWarnings(robust_vgm_fit(
+    gstat::variogram(v ~ 1, p, width = lags$width, cutoff = lags$cutoff), p$v))
+  raised <- pts
+  raised$v[n] <- raised$v[n] + 10 * sd(pts$v)
+  expect_false(isTRUE(all.equal(shared_of(pts), shared_of(raised))))
+
+  run <- function(p) suppressWarnings(apply_OK(p, "pv", grid, lags,
+    list(shared_fit = shared_of(p), vgm_col = "v", cv_strategy = "loocv")))
+  base <- run(pts); moved <- run(raised)
+  expect_identical(base$cv_vgm_col, "v")
+  expect_true(is.finite(base$cv_obj$var1.pred[n]))
+  expect_equal(moved$cv_obj$var1.pred[n], base$cv_obj$var1.pred[n], tolerance = 1e-8)
+})
+
+test_that("the OK fallback refits its variogram inside every fold", {
+  pts <- make_test_points(12)
+  n <- nrow(pts)
+  grid <- make_test_grid_safe(pts, res = 200)
+  lags <- calc_scientific_lags(pts)
+  # A grid_aux without the covariate column makes predict.lm fail, which is the
+  # documented route into the named OK fallback.
+  bad_grid_aux <- sf::st_drop_geometry(grid)[, c("x", "y")]
+  run <- function(p) suppressWarnings(apply_RK(p, "v", grid, lags,
+    list(grid_aux = bad_grid_aux, cv_strategy = "loocv"), c("aux1")))
+  raised <- pts
+  raised$v[n] <- raised$v[n] + 10 * sd(pts$v)
+  base <- run(pts); moved <- run(raised)
+  expect_match(base$log_msg, "RK failed")
+  expect_true(is.finite(base$cv_obj$var1.pred[n]))
+  expect_equal(moved$cv_obj$var1.pred[n], base$cv_obj$var1.pred[n], tolerance = 1e-8)
+})
+
+test_that("a CK fold refits its LMC and standardization from its own rows", {
+  # Nothing about the held-out row — not its target, not its covariate, not
+  # their contribution to the standardization means — may reach its own
+  # prediction.
+  pts <- golden_sf("tiny")
+  n <- nrow(pts)
+  grid <- pts[1:5, ]
+  lags <- calc_scientific_lags(pts)
+  raised <- pts
+  raised$ph[n] <- raised$ph[n] + 10 * sd(pts$ph)
+  raised$v82[n] <- raised$v82[n] + 10 * sd(pts$v82)
+  run <- function(p) suppressWarnings(apply_CK(p, "ph", grid, lags,
+    list(cv_strategy = "loocv"), "v82"))
+  base <- run(pts); moved <- run(raised)
+  expect_false(grepl("Falling back to OK", base$log_msg, fixed = TRUE))
+  expect_true(is.finite(base$cv_obj$var1.pred[n]))
+  expect_equal(moved$cv_obj$var1.pred[n], base$cv_obj$var1.pred[n], tolerance = 1e-8)
+})
+
+test_that("a CK fold screens its covariates on its own training rows", {
+  # Same A/B construction as the RK screen test: the full-data screens differ,
+  # the last row's fold-training rows do not.
+  set.seed(7)
+  n <- 20L
+  a1 <- rnorm(n)
+  base_pts <- sf::st_as_sf(data.frame(
+    x = runif(n, 450000, 451000), y = runif(n, 5800000, 5801000),
+    aux1 = a1, aux2 = a1 + rnorm(n, 0, 0.25),
+    v = 3 * a1 + rnorm(n, 0, 0.5)
+  ), coords = c("x", "y"), crs = 32633)
+  a <- base_pts
+  b <- base_pts; b$aux2[n] <- b$aux2[n] + 5
+  expect_length(screen_covariates(a, c("aux1", "aux2"))$kept, 1)
+  expect_length(screen_covariates(b, c("aux1", "aux2"))$kept, 2)
+
+  grid <- make_test_grid_safe(base_pts, res = 400)
+  lags <- calc_scientific_lags(base_pts)
+  run <- function(p) suppressWarnings(apply_CK(p, "v", grid, lags,
+    list(cv_strategy = "loocv"), c("aux1", "aux2")))
+  res_a <- run(a); res_b <- run(b)
+  expect_true(is.finite(res_a$cv_obj$var1.pred[n]))
+  expect_equal(res_b$cv_obj$var1.pred[n], res_a$cv_obj$var1.pred[n], tolerance = 1e-8)
 })
 
 # ── apply_RK ──────────────────────────────────────────────────────────────
@@ -601,7 +1080,8 @@ test_that("apply_RK fits an lm trend and kriges its residuals", {
   expect_false(grepl("Falling back to OK", res$log_msg, fixed = TRUE))
   expect_s3_class(res$res_sf, "sf")
   expect_true(all(c("var1.pred", "var1.var") %in% colnames(res$res_sf)))
-  expect_length(res$residuals, 15)
+  expect_equal(nrow(res$cv_obj), 15)
+  expect_identical(names(res$cv_obj), KRIGING_CV_SCHEMA)
 })
 
 test_that("apply_RK falls back to OK when trend prediction fails", {
@@ -742,12 +1222,10 @@ test_that("apply_CK returns predictions labelled Co-Kriging or OK fallback", {
   expect_true(all(c("var1.pred", "model_type") %in% colnames(res$res_sf)))
   expect_true(all(res$res_sf$model_type %in%
                     c("Co-Kriging", "Ordinary Kriging (Fallback)")))
-  # The prediction column must be renamed to the engine-agnostic var1.pred,
-  # and an observed column perform_cv recognizes must be present (gstat.cv
-  # returns plain "observed"), so CV metrics compute
+  # CK cross-validation returns the common kriging CV schema, so CV metrics
+  # compute and pooling works whichever path the locality took.
   if (!is.null(res$cv_obj)) {
-    expect_true("var1.pred" %in% names(res$cv_obj))
-    expect_true(any(grepl("(^|\\.)observed$", names(res$cv_obj))))
+    expect_identical(names(res$cv_obj), c("row_id", "fold", "observed", "var1.pred", "var1.var", "residual", "geometry"))
     expect_false(is.na(res$cv_metrics$rmse))
   }
 })
@@ -1890,10 +2368,9 @@ test_that("RFK prediction is the forest trend plus the kriged residual", {
   # own fitted forest and its own OOB residuals: the claim under test is the
   # decomposition, not the forest.
   #
-  # The trend residual is recomputed from the returned forest rather than read
-  # from res$residuals: the engine kriges the OOB residual, then the CV stage
-  # overwrites res$residuals with the cross-validation residual, so the two are
-  # not the same vector.
+  # The trend residual is recomputed from the returned forest: the engine
+  # kriges the OOB residual, which is a training quantity the result list no
+  # longer carries (CV residuals live in res$cv_obj).
   dat <- pts
   dat$residuals <- pts$ph - res$rf_model$predicted
   kr <- gstat::krige(residuals ~ 1, dat, grid, model = res$fit, debug.level = 0)
@@ -1951,6 +2428,10 @@ test_that("CK is invariant to a linear rescaling of a covariate", {
                tolerance = 1e-8)
   expect_equal(rescaled$res_sf$var1.var, base$res_sf$var1.var,
                tolerance = 1e-8)
+  # Every cross-validation fold standardizes from its own training rows, so
+  # the out-of-fold predictions carry the same invariance.
+  expect_equal(rescaled$cv_obj$var1.pred, base$cv_obj$var1.pred, tolerance = 1e-8)
+  expect_equal(rescaled$cv_obj$var1.var, base$cv_obj$var1.var, tolerance = 1e-8)
 })
 
 test_that("CK is an exact interpolator at the sample locations", {

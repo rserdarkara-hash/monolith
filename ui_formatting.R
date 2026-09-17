@@ -59,7 +59,8 @@ melt_cormat <- function(cormat, value_name = "Corr") {
 # Conventions follow ppcor, which the table's p-value block already cites:
 #   pearson  - residualize the RAW values on the controls, product-moment
 #              correlation of the residuals (algebraically identical to
-#              inverting the Pearson correlation matrix).
+#              inverting the Pearson correlation matrix of the pair plus the
+#              controls).
 #   spearman - rank-transform EVERY column first, then residualize and take the
 #              product-moment correlation of the rank residuals. Correlating
 #              raw-value residuals with method = "spearman" (the old behaviour)
@@ -68,7 +69,11 @@ melt_cormat <- function(cormat, value_name = "Corr") {
 #              re-rank residuals of an unranked fit.
 #   kendall  - no residualization analogue exists; ppcor inverts the Kendall
 #              tau matrix (the multi-control generalisation of Kendall's
-#              first-order partial tau), so that is what is done here.
+#              first-order partial tau). Each PAIR inverts the tau matrix of
+#              that pair plus the controls only: inverting one matrix of every
+#              target would condition each pair on the other targets as well,
+#              so adding a target to the table would change every estimate
+#              while the p-values still counted only the controls.
 # Residualization uses one pivoted QR over the shared control design matrix
 # (model.matrix keeps factor controls and awkward column names working) — the
 # same fit lm() would produce, but computed once for all variables.
@@ -104,14 +109,25 @@ compute_partial_correlation <- function(df, vars, control_vars = NULL,
 
   if (identical(method, "kendall")) {
     tau <- stats::cor(d, method = "kendall")
-    inv <- tryCatch(solve(tau), error = function(e) NULL)
-    if (is.null(inv) || any(!is.finite(inv))) {
-      out$failed <- vars
+    pc <- diag(length(vars))
+    dimnames(pc) <- list(vars, vars)
+    bad <- character(0)
+    for (a in seq_len(length(vars) - 1L)) {
+      for (b in (a + 1L):length(vars)) {
+        idx <- c(vars[a], vars[b], ctrl)
+        inv <- tryCatch(solve(tau[idx, idx, drop = FALSE]), error = function(e) NULL)
+        if (is.null(inv) || any(!is.finite(inv))) {
+          bad <- union(bad, vars[c(a, b)])
+          next
+        }
+        pc[a, b] <- pc[b, a] <- -inv[1, 2] / sqrt(inv[1, 1] * inv[2, 2])
+      }
+    }
+    if (length(bad) > 0) {
+      out$failed <- bad
       return(out)
     }
-    pc <- -inv / sqrt(outer(diag(inv), diag(inv)))
-    diag(pc) <- 1
-    out$cormat <- pc[vars, vars, drop = FALSE]
+    out$cormat <- pc
     return(out)
   }
 
@@ -128,6 +144,38 @@ compute_partial_correlation <- function(df, vars, control_vars = NULL,
   colnames(resid_mat) <- vars
   out$cormat <- stats::cor(resid_mat, method = "pearson")
   out
+}
+
+# Map Viewer view id -> the surfaces it shows (`base`) and the layer drawn from
+# them (`layer`: "value", "se" or "var"). The uncertainty views read the
+# prediction-variance band of the same surfaces as their base view; the
+# residual view has no variance band, so its layer is always "value".
+parse_map_view <- function(view) {
+  view <- if (is.null(view) || length(view) != 1 || is.na(view)) "" else as.character(view)
+  m <- regmatches(view, regexec("^(view_(act|pred|comp|resid))(_(se|var))?$", view))[[1]]
+  if (length(m) == 0) return(list(base = "view_act", layer = "value"))
+  layer <- if (nzchar(m[5]) && m[2] != "view_resid") m[5] else "value"
+  list(base = m[2], layer = layer)
+}
+
+# Choices of the Map Viewer view menu: the surfaces the displayed run computed
+# and, for a method with a prediction variance, the standard-error and
+# variance views of those surfaces. Groups become <optgroup>s.
+map_view_choices <- function(has_pred, has_resid, has_variance) {
+  surf <- c("View: Actual" = "view_act")
+  if (has_pred) surf <- c(surf, "View: ML Predicted" = "view_pred",
+                          "View: Actual vs Predicted" = "view_comp")
+  if (has_resid) surf <- c(surf, "View: ML Residuals" = "view_resid")
+  if (!isTRUE(has_variance)) return(surf)
+  uncert <- function(prefix, suffix) {
+    u <- c("Actual" = paste0("view_act", suffix))
+    if (has_pred) u <- c(u, "ML Predicted" = paste0("view_pred", suffix),
+                         "Actual vs Predicted" = paste0("view_comp", suffix))
+    stats::setNames(as.list(u), paste0(prefix, names(u)))
+  }
+  list("Surfaces" = as.list(surf),
+       "Uncertainty: standard error" = uncert("SE: ", "_se"),
+       "Uncertainty: variance" = uncert("Variance: ", "_var"))
 }
 
 method_labels <- c(
@@ -230,12 +278,24 @@ build_regional_params_df <- function(type, loc, regional_params, has_pre, export
 # One wide row of cross-validation metrics from a perform_cv() result.
 # `cv_design` is the fold plan the row was scored under (cv_type_label()); it
 # is a column of its own here because the on-screen Source string that carries
-# it is not machine-readable.
-cv_metrics_export_df <- function(res, source_label, cv_design = NA_character_) {
+# it is not machine-readable. `cv_info` carries the same row's cross-validation
+# population: which samples it scored (`population`), the id that lets two
+# archived runs be checked for having scored the same rows in the same folds
+# (`pop_id`), and what the folds re-estimated (`refit`). Coverage comes off
+# perform_cv: metrics are computed on the predicted samples, so a row below
+# 100% describes fewer samples than the design asked for.
+cv_metrics_export_df <- function(res, source_label, cv_design = NA_character_,
+                                 cv_info = NULL) {
   if (is.null(res)) return(NULL)
+  cov_pct <- res$coverage %||% NA_real_
   out <- data.frame(Source = source_label,
                     `CV Design` = cv_design,
-                    n = as.integer(res$n %||% NA),
+                    `CV Population` = as.character(cv_info$population %||% NA_character_),
+                    `CV Population ID` = as.character(cv_info$pop_id %||% NA_character_),
+                    `CV Refit` = as.character(cv_info$refit %||% NA_character_),
+                    `n expected` = as.integer(res$n_expected %||% NA),
+                    `n predicted` = as.integer(res$n %||% NA),
+                    `Coverage (%)` = if (is.na(cov_pct)) NA_real_ else 100 * as.numeric(cov_pct),
                     check.names = FALSE, stringsAsFactors = FALSE)
   for (k in names(CV_METRIC_LABELS)) {
     v <- res[[k]]
@@ -254,6 +314,11 @@ cv_repeats_export_df <- function(summ, source_label) {
   data.frame(
     Source = source_label,
     `Fold realizations` = as.integer(summ$n_repeats),
+    # Realizations can differ in how many samples they managed to predict, so
+    # the spread of the counts travels beside the spread of the metrics.
+    `n expected` = as.integer(summ$n_expected %||% NA),
+    `min n predicted` = as.integer(summ$n_min %||% NA),
+    `max n predicted` = as.integer(summ$n_max %||% NA),
     n = as.integer(summ$n),
     Metric = unname(CV_REPEAT_METRICS[keys]),
     Mean = vapply(keys, function(k) as.numeric(summ$mean[[k]] %||% NA_real_), numeric(1)),
@@ -361,6 +426,10 @@ stats_table_vectors <- function(df, meta, loc_col, localities = NULL) {
   if (is.null(df) || is.null(meta)) return(NULL)
   if (!is.null(localities) && !is.null(loc_col) && loc_col %in% names(df)) {
     df <- df[df[[loc_col]] %in% localities, , drop = FALSE]
+  }
+  subset_col <- find_subset_column(names(df))
+  if (!is.null(meta$subset) && meta$subset != "all" && !is.na(subset_col)) {
+    df <- df[!is.na(df[[subset_col]]) & df[[subset_col]] == meta$subset, , drop = FALSE]
   }
   if (!is_valid_col_ref(meta$actual) || !meta$actual %in% names(df)) return(NULL)
   has_pred <- isTRUE(meta$comp_mode) ||
@@ -1046,4 +1115,24 @@ cv_type_label <- function(n_obs, strategy = "auto") {
 find_subset_column <- function(cols) {
   hit <- grep("^subset$", cols, ignore.case = TRUE, value = TRUE)
   if (length(hit) == 0) NA_character_ else hit[1]
+}
+
+# One row-selection rule for dispatch, tuning and previews of a run.
+effective_subset <- function(value_type, subset, cols) {
+  if (identical(value_type, "pred_ss") && is_valid_col_ref(subset) &&
+      subset != "all" && !is.na(find_subset_column(cols))) subset else "all"
+}
+
+run_locality_rows <- function(df, loc_col, l, eff_subset = "all") {
+  keep <- !is.na(df[[loc_col]]) & df[[loc_col]] %in% l
+  if (eff_subset != "all") {
+    subset_col <- find_subset_column(names(df))
+    keep <- keep & !is.na(df[[subset_col]]) & df[[subset_col]] == eff_subset
+  }
+  df[keep, , drop = FALSE]
+}
+
+tuning_key <- function(col, eff_subset = "all") {
+  if (!is_valid_col_ref(col)) return(NA_character_)
+  if (eff_subset == "all") as.character(col) else paste0(col, " [subset ", eff_subset, "]")
 }

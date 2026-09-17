@@ -62,6 +62,7 @@ run_optimizer_async <- function(
     return(invisible(NULL))
   }
 
+  tuning_revision <- rv$tuning_revision %||% 0L
   main_wd <- getwd()
   cores_hint <- tryCatch(
     as.integer(future::availableCores()),
@@ -140,6 +141,10 @@ run_optimizer_async <- function(
     # "the parallel optimization failed" and not "applying the results
     # failed" - the same split the interpolation completion handler uses.
     onFulfilled = function(res_list) {
+      if (!identical(tuning_revision, rv$tuning_revision %||% 0L)) {
+        showNotification("Data or mapping changed during optimization; please optimize the current data again.", type = "warning")
+        return(invisible(NULL))
+      }
       tryCatch(on_success(res_list), error = function(e) {
         showNotification(
           paste(
@@ -230,6 +235,9 @@ observeEvent(input$opt_tps, {
   x_col <- rv$mapping$x
   y_col <- rv$mapping$y
   value_type <- input$value_type
+  eff_subset <- effective_subset(value_type, input$subset, names(user_data))
+  keys <- c(act = tuning_key(meta$actual, eff_subset),
+            pre = tuning_key(if (value_type == "pred_ss") meta$pred_ss else meta$pred, eff_subset))
 
   jobs <- unlist(
     lapply(targets, function(tg) {
@@ -244,11 +252,10 @@ observeEvent(input$opt_tps, {
         return(NULL)
       }
       lapply(locs, function(l) {
-        sub_df <- user_data %>%
-          filter(!!sym(loc_col) == l) %>%
+        sub_df <- run_locality_rows(user_data, loc_col, l, eff_subset) %>%
           select(x = !!sym(x_col), y = !!sym(y_col), v = !!sym(val_col)) %>%
           na.omit()
-        list(l = l, target = tg, df = sub_df)
+        list(l = l, target = tg, key = keys[[tg]], df = sub_df)
       })
     }),
     recursive = FALSE
@@ -276,14 +283,15 @@ observeEvent(input$opt_tps, {
             type = "warning"
           )
         } else {
-          set_regional_param("TPS", l, target, res$best_lam)
+          set_regional_param("TPS", l, target, res$best_lam, jobs[[i]]$key)
           if (!is.null(res$gcv_data)) {
+            attr(res$gcv_data, "monolith_key") <- jobs[[i]]$key
             rv$tps_gcv_data[[paste0(l, "_", target)]] <- res$gcv_data
           }
         }
       }
 
-      all_best <- sapply(locs, function(l) get_regional_param("TPS", l, "act"))
+      all_best <- sapply(locs, function(l) get_regional_param("TPS", l, "act", key = keys[["act"]]))
       # A locality whose optimization failed never had set_regional_param
       # called, so get_regional_param returns the -1 Auto sentinel — not a
       # lambda. Keep sentinels out of the slider mean (one failure would drag
@@ -295,7 +303,7 @@ observeEvent(input$opt_tps, {
         updateSliderInput(session, "tps_lambda", value = mean(ok_best))
       }
 
-      tps_opt_vals(list(locs = locs, targets = targets))
+      tps_opt_vals(list(locs = locs, targets = targets, keys = keys))
       showNotification(
         "TPS Optimization Complete. Per-region Lambdas stored.",
         type = "message"
@@ -317,17 +325,17 @@ render_opt_summary_panel <- function(engine, vals_reactive, fmt, heading) {
     # predicted target; without one every cell was "N/A", so the column is
     # dropped rather than printed empty.
     has_pre <- "pre" %in% res$targets
+    # Values stored for this optimization's keys only; a failed locality or a
+    # value since replaced for another key shows N/A, never the sidebar value.
+    stored_cell <- function(l, target) {
+      val <- get_regional_param(engine, l, target, default = NA_real_, key = res$keys[[target]])
+      tags$td(if (is.na(val)) "N/A" else sprintf(fmt, val))
+    }
 
     rows <- lapply(res$locs, function(l) {
-      cells <- list(
-        tags$td(l),
-        tags$td(sprintf(fmt, get_regional_param(engine, l, "act")))
-      )
+      cells <- list(tags$td(l), stored_cell(l, "act"))
       if (has_pre) {
-        cells <- c(
-          cells,
-          list(tags$td(sprintf(fmt, get_regional_param(engine, l, "pre"))))
-        )
+        cells <- c(cells, list(stored_cell(l, "pre")))
       }
       do.call(tags$tr, cells)
     })
@@ -339,7 +347,7 @@ render_opt_summary_panel <- function(engine, vals_reactive, fmt, heading) {
 
     div(
       style = "margin-top: 10px; padding: 10px; background-color: var(--mn-surface-2); color: var(--mn-text-2); border: 1px solid var(--mn-line); border-radius: 4px; font-size: 0.8em;",
-      h5(heading),
+      h5(paste0(heading, " for ", res$keys[["act"]], ":")),
       tags$table(
         class = "table table-condensed table-bordered",
         style = "background-color: var(--mn-surface); color: var(--mn-text);",
@@ -354,10 +362,29 @@ output$tps_opt_panel <- render_opt_summary_panel(
   "TPS",
   tps_opt_vals,
   "%.6f",
-  "Optimization Summary (Best Lambdas):"
+  "Optimization Summary (Best Lambdas)"
 )
 
 idw_opt_vals <- reactiveVal(NULL)
+# Tuning values describe one table and one coordinate/locality mapping. Any
+# write to rv$mapping invalidates this observer (variable metadata included),
+# so the handler compares the values that define the data before clearing.
+tuning_data_sig <- NULL
+observeEvent(list(rv$user_data, rv$mapping), {
+  sig <- list(rv$user_data, rv$mapping$x, rv$mapping$y, rv$mapping$loc, rv$mapping$crs)
+  first <- is.null(tuning_data_sig)
+  if (identical(sig, tuning_data_sig)) return()
+  tuning_data_sig <<- sig
+  if (first) return()
+  stores <- c("v_fit_list", "v_emp_list", "idw_factors", "tps_lambdas", "tps_gcv_data")
+  had_values <- any(vapply(stores, function(nm) length(rv[[nm]]) > 0L, logical(1)))
+  for (nm in stores) rv[[nm]] <- list()
+  rv$tuning_revision <- (rv$tuning_revision %||% 0L) + 1L
+  rv$vgm_preview <- FALSE
+  idw_opt_vals(NULL)
+  tps_opt_vals(NULL)
+  if (had_values) showNotification("Stored tuning values cleared because the data or coordinate/locality mapping changed.", type = "message")
+})
 observeEvent(input$opt_idw, {
   req(
     rv$user_data,
@@ -394,6 +421,9 @@ observeEvent(input$opt_idw, {
   x_col <- rv$mapping$x
   y_col <- rv$mapping$y
   value_type <- input$value_type
+  eff_subset <- effective_subset(value_type, input$subset, names(user_data))
+  keys <- c(act = tuning_key(meta$actual, eff_subset),
+            pre = tuning_key(if (value_type == "pred_ss") meta$pred_ss else meta$pred, eff_subset))
 
   jobs <- unlist(
     lapply(targets, function(tg) {
@@ -408,11 +438,10 @@ observeEvent(input$opt_idw, {
         return(NULL)
       }
       lapply(locs, function(l) {
-        sub_df <- user_data %>%
-          filter(!!sym(loc_col) == l) %>%
+        sub_df <- run_locality_rows(user_data, loc_col, l, eff_subset) %>%
           select(x = !!sym(x_col), y = !!sym(y_col), v = !!sym(val_col)) %>%
           na.omit()
-        list(l = l, target = tg, df = sub_df)
+        list(l = l, target = tg, key = keys[[tg]], df = sub_df)
       })
     }),
     recursive = FALSE
@@ -436,11 +465,12 @@ observeEvent(input$opt_idw, {
           "IDW",
           jobs[[i]]$l,
           jobs[[i]]$target,
-          res_list[[i]]$best_f
+          res_list[[i]]$best_f,
+          jobs[[i]]$key
         )
       }
 
-      all_best <- sapply(locs, function(l) get_regional_param("IDW", l, "act"))
+      all_best <- sapply(locs, function(l) get_regional_param("IDW", l, "act", key = keys[["act"]]))
       # Unlike TPS there is no sentinel to filter (idw_opt_item falls back to
       # a legitimate power of 2.0 and get_regional_param defaults to the same),
       # so this only guards the slider against a non-finite value.
@@ -449,7 +479,7 @@ observeEvent(input$opt_idw, {
         updateSliderInput(session, "idw_p", value = mean(ok_best))
       }
 
-      idw_opt_vals(list(locs = locs, targets = targets))
+      idw_opt_vals(list(locs = locs, targets = targets, keys = keys))
       showNotification(
         paste("IDW Optimization Complete for:", paste(locs, collapse = ", ")),
         type = "message",
@@ -463,7 +493,7 @@ output$idw_opt_panel <- render_opt_summary_panel(
   "IDW",
   idw_opt_vals,
   "%.1f",
-  "Optimization Summary (Best Factors):"
+  "Optimization Summary (Best Factors)"
 )
 
 output$idw_metrics_table <- renderTable({
@@ -476,6 +506,8 @@ output$idw_metrics_table <- renderTable({
   ns <- sapply(m_act, function(x) x$n %||% 0)
   rmses <- sapply(m_act, function(x) x$rmse %||% NA)
   mes <- sapply(m_act, function(x) x$me %||% NA)
+  # A locality with fewer than 2 predicted pairs has no RMSE to weight.
+  ns[!is.finite(rmses)] <- 0
 
   total_n <- sum(ns, na.rm = TRUE)
   if (total_n == 0) {
@@ -562,6 +594,31 @@ manual_vgm_target <- function() {
   if (shown && identical(input$m_target, "pre")) "pre" else "act"
 }
 
+manual_vgm_column <- function(target = manual_vgm_target()) {
+  meta <- get_current_meta()
+  if (is.null(meta)) return(NULL)
+  if (target == "act") meta$actual else if (identical(input$value_type, "pred_ss")) meta$pred_ss else meta$pred
+}
+
+current_tuning_keys <- reactive({
+  eff_subset <- effective_subset(input$value_type, input$subset, names(rv$user_data))
+  c(act = tuning_key(manual_vgm_column("act"), eff_subset),
+    pre = tuning_key(manual_vgm_column("pre"), eff_subset))
+})
+
+# Tuning panels show only the selected variable/subset and localities.
+tuning_vgm_entries <- function(store) {
+  keys <- current_tuning_keys()
+  locs <- resolve_selected_localities(input$locality, rv$user_data, rv$mapping$loc)
+  wanted <- unlist(lapply(locs, function(l) paste0(l, "_", c("act", "pre"))))
+  store <- store[intersect(names(store), wanted)]
+  keep <- vapply(names(store), function(nm) {
+    target <- if (endsWith(nm, "_act")) "act" else "pre"
+    vgm_key_matches(store[[nm]], keys[[target]])
+  }, logical(1))
+  store[keep]
+}
+
 # The only owner of the manual sliders. Bounds come from the tuned locality's
 # data for the tuned target (the same point set OPTIMIZE ALL VARIOGRAMS fits:
 # NA-free, projected, deduplicated); values come from the stored fit when one
@@ -575,6 +632,7 @@ observeEvent(
     input$sep_fit,
     input$var_id,
     input$value_type,
+    input$subset,
     rv$user_data,
     rv$mapping,
     rv$v_fit_list
@@ -586,17 +644,12 @@ observeEvent(
     target <- manual_vgm_target()
     meta <- get_current_meta()
     req(meta)
-    col <- if (target == "pre") {
-      if (identical(input$value_type, "pred_ss")) meta$pred_ss else meta$pred
-    } else {
-      meta$actual
-    }
+    col <- manual_vgm_column(target)
     ud <- rv$user_data
     req(is_valid_col_ref(col), col %in% names(ud),
         rv$mapping$x %in% names(ud), rv$mapping$y %in% names(ud))
-    if (!is.null(rv$mapping$loc) && rv$mapping$loc %in% names(ud)) {
-      ud <- ud[ud[[rv$mapping$loc]] %in% loc, , drop = FALSE]
-    }
+    eff_subset <- effective_subset(input$value_type, input$subset, names(ud))
+    ud <- run_locality_rows(ud, rv$mapping$loc, loc, eff_subset)
     d <- stats::na.omit(data.frame(x = ud[[rv$mapping$x]], y = ud[[rv$mapping$y]], v = ud[[col]]))
     req(nrow(d) >= 3, is.numeric(d$v))
     pts <- tryCatch(
@@ -606,10 +659,12 @@ observeEvent(
     req(pts)
     pts <- pts[!duplicated(round(sf::st_coordinates(pts), 2)), ]
     bb <- sf::st_bbox(pts)
+    stored <- rv$v_fit_list[[paste0(loc, "_", target)]]
+    if (!vgm_key_matches(stored, current_tuning_keys()[[target]])) stored <- NULL
     spec <- manual_vgm_slider_spec(
       stats::var(pts$v),
       sqrt((bb[["xmax"]] - bb[["xmin"]])^2 + (bb[["ymax"]] - bb[["ymin"]])^2),
-      rv$v_fit_list[[paste0(loc, "_", target)]]
+      stored
     )
     req(spec)
 
@@ -651,7 +706,9 @@ observeEvent(input$apply_manual, {
     input$m_range,
     input$m_nugget
   )
-  rv$v_fit_list[[paste0(loc, "_", target)]] <- model
+  key <- current_tuning_keys()[[target]]
+  req(is_valid_col_ref(manual_vgm_column(target)), !is.na(key))
+  rv$v_fit_list[[paste0(loc, "_", target)]] <- stamp_vgm(model, key, "manual")
   showNotification(
     paste("Manual model applied to", loc, "(", target, ")"),
     type = "message"
@@ -668,16 +725,14 @@ observeEvent(input$apply_manual, {
 })
 
 observeEvent(
-  list(input$idw_mode, input$idw_m_loc, input$comp_mode, input$idw_m_target),
+  list(input$idw_mode, input$idw_m_loc, input$comp_mode, input$idw_m_target,
+       input$value_type, input$var_id, input$subset),
   {
     req(input$idw_mode == "manual", input$idw_m_loc)
     loc <- input$idw_m_loc
-    target <- if (input$comp_mode && !is.null(input$idw_m_target)) {
-      input$idw_m_target
-    } else {
-      "act"
-    }
-    val <- get_regional_param("IDW", loc, target, default = input$idw_p)
+    target <- manual_param_target(input$comp_mode, input$value_type, input$idw_m_target)
+    val <- get_regional_param("IDW", loc, target, default = input$idw_p,
+                              key = current_tuning_keys()[[target]])
     updateSliderInput(session, "idw_m_p", value = val)
   }
 )
@@ -685,29 +740,25 @@ observeEvent(
 observeEvent(input$apply_idw_manual, {
   req(input$idw_mode == "manual", input$idw_m_loc)
   loc <- input$idw_m_loc
-  target <- if (input$comp_mode && !is.null(input$idw_m_target)) {
-    input$idw_m_target
-  } else {
-    "act"
-  }
-  set_regional_param("IDW", loc, target, input$idw_m_p)
+  target <- manual_param_target(input$comp_mode, input$value_type, input$idw_m_target)
+  key <- current_tuning_keys()[[target]]
+  req(!is.na(key))
+  set_regional_param("IDW", loc, target, input$idw_m_p, key)
   showNotification(
-    paste("Manual IDW Power applied to", loc, "(", target, ")"),
+    paste("Manual IDW Power applied to", loc, "(", target, ":", key, ")"),
     type = "message"
   )
 })
 
 observeEvent(
-  list(input$tps_mode, input$tps_m_loc, input$comp_mode, input$tps_m_target),
+  list(input$tps_mode, input$tps_m_loc, input$comp_mode, input$tps_m_target,
+       input$value_type, input$var_id, input$subset),
   {
     req(input$tps_mode == "manual", input$tps_m_loc)
     loc <- input$tps_m_loc
-    target <- if (input$comp_mode && !is.null(input$tps_m_target)) {
-      input$tps_m_target
-    } else {
-      "act"
-    }
-    val <- get_regional_param("TPS", loc, target, default = input$tps_lambda)
+    target <- manual_param_target(input$comp_mode, input$value_type, input$tps_m_target)
+    val <- get_regional_param("TPS", loc, target, default = input$tps_lambda,
+                              key = current_tuning_keys()[[target]])
     updateSliderInput(session, "tps_m_lambda", value = val)
   }
 )
@@ -715,14 +766,12 @@ observeEvent(
 observeEvent(input$apply_tps_manual, {
   req(input$tps_mode == "manual", input$tps_m_loc)
   loc <- input$tps_m_loc
-  target <- if (input$comp_mode && !is.null(input$tps_m_target)) {
-    input$tps_m_target
-  } else {
-    "act"
-  }
-  set_regional_param("TPS", loc, target, input$tps_m_lambda)
+  target <- manual_param_target(input$comp_mode, input$value_type, input$tps_m_target)
+  key <- current_tuning_keys()[[target]]
+  req(!is.na(key))
+  set_regional_param("TPS", loc, target, input$tps_m_lambda, key)
   showNotification(
-    paste("Manual TPS Lambda applied to", loc, "(", target, ")"),
+    paste("Manual TPS Lambda applied to", loc, "(", target, ":", key, ")"),
     type = "message"
   )
 })
@@ -751,21 +800,22 @@ observeEvent(input$auto_fit, {
   y_col <- rv$mapping$y
   want_pre <- input$comp_mode || input$value_type != "actual"
   pred_col <- if (input$value_type == "pred_ss") meta$pred_ss else meta$pred
+  eff_subset <- effective_subset(input$value_type, input$subset, names(user_data))
 
   jobs <- lapply(locs, function(l) {
-    sub_a_raw <- user_data %>%
-      filter(!!sym(loc_col) == l) %>%
+    sub_df <- run_locality_rows(user_data, loc_col, l, eff_subset)
+    sub_a_raw <- sub_df %>%
       select(x = !!sym(x_col), y = !!sym(y_col), v = !!sym(meta$actual)) %>%
       na.omit()
 
     sub_p_raw <- NULL
     if (want_pre && !is.null(pred_col) && pred_col %in% colnames(user_data)) {
-      sub_p_raw <- user_data %>%
-        filter(!!sym(loc_col) == l) %>%
+      sub_p_raw <- sub_df %>%
         select(x = !!sym(x_col), y = !!sym(y_col), v = !!sym(pred_col)) %>%
         na.omit()
     }
-    list(l = l, act = sub_a_raw, pre = sub_p_raw)
+    list(l = l, act = sub_a_raw, pre = sub_p_raw,
+         key = c(act = tuning_key(meta$actual, eff_subset), pre = tuning_key(pred_col, eff_subset)))
   })
   req(length(jobs) > 0)
 
@@ -779,15 +829,17 @@ observeEvent(input$auto_fit, {
     on_success = function(res_list) {
       results <- list()
       rv$vgm_preview <- TRUE
-      for (res in res_list) {
+      for (i in seq_along(res_list)) {
+        res <- res_list[[i]]
         l <- res$l
+        keys <- jobs[[i]]$key
         if (!is.null(res$act$fit)) {
-          rv$v_emp_list[[paste0(l, "_act")]] <- res$act$emp
-          rv$v_fit_list[[paste0(l, "_act")]] <- res$act$fit
+          rv$v_emp_list[[paste0(l, "_act")]] <- stamp_vgm(res$act$emp, keys[["act"]], "autofit")
+          rv$v_fit_list[[paste0(l, "_act")]] <- stamp_vgm(res$act$fit, keys[["act"]], "autofit")
         }
         if (!is.null(res$pre$fit)) {
-          rv$v_emp_list[[paste0(l, "_pre")]] <- res$pre$emp
-          rv$v_fit_list[[paste0(l, "_pre")]] <- res$pre$fit
+          rv$v_emp_list[[paste0(l, "_pre")]] <- stamp_vgm(res$pre$emp, keys[["pre"]], "autofit")
+          rv$v_fit_list[[paste0(l, "_pre")]] <- stamp_vgm(res$pre$fit, keys[["pre"]], "autofit")
         }
         results[[l]] <- list(
           act_mod = res$act$mod,

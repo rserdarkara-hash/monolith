@@ -18,11 +18,12 @@
     if (is.null(cores) || is.na(cores) || cores < 1) cores <- 1L
     cores <- if (n_locs > 1) max(1L, min(cores - 1L, n_locs)) else 1L
     
+    eff_subset <- effective_subset(input$value_type, input$subset, names(rv$user_data))
     loc_sample_counts <- numeric(n_locs)
     if (length(selected_locs) > 0 && !is.null(rv$user_data) && !is.null(loc_col) && loc_col %in% colnames(rv$user_data)) {
       for (idx in seq_along(selected_locs)) {
         l <- selected_locs[idx]
-        n_samples <- nrow(rv$user_data[rv$user_data[[loc_col]] == l, ])
+        n_samples <- nrow(run_locality_rows(rv$user_data, loc_col, l, eff_subset))
         loc_sample_counts[idx] <- if (is.null(n_samples) || is.na(n_samples) || n_samples == 0) 50 else n_samples
       }
     } else {
@@ -86,8 +87,6 @@
       if (!is.null(current_cfg) && length(current_reg) > 0) {
         push_run_history(list(config = current_cfg, registry = current_reg))
       }
-    } else if (action == "discard") {
-      rv$v_fit_list <- list()
     }
     
     if (is_long_run) {
@@ -174,6 +173,20 @@
     FALSE
   }
 
+  # Which runs need auxiliary variables. RK/RFK/CK model with them; OK does not
+  # use them at all, but under the Comparable CV population they select the
+  # samples OK is trained and scored on, so a run with none is a configuration
+  # the user did not mean.
+  run_uses_covariates <- function() {
+    input$method %in% c("RK", "RFK", "CK") ||
+      (identical(input$method, "OK") && identical(input$cv_population, "comparable"))
+  }
+  covariates_required_msg <- function() {
+    if (identical(input$method, "OK"))
+      "The Comparable cross-validation population is defined by the selected covariates; select at least one, or switch the population to Native."
+    else "Please select at least one auxiliary variable for RK/RFK/CK model generation."
+  }
+
   # The covariate-collinearity screen, factored out of observeEvent(input$run)
   # so the CRS gate in front of it can hand control back here after an override
   # without the screen being written twice.
@@ -183,10 +196,9 @@
        # selected localities), not the full table: covariates can be collinear
        # within one locality but not across all of them, and vice versa.
        df_vif <- sf::st_drop_geometry(rv$user_data)
-       if (!is.null(rv$mapping$loc) && rv$mapping$loc %in% colnames(df_vif) &&
-           length(input$locality) > 0 && !("ALL" %in% input$locality)) {
-         df_vif <- df_vif[as.character(df_vif[[rv$mapping$loc]]) %in% input$locality, , drop = FALSE]
-       }
+       locs <- resolve_selected_localities(input$locality, df_vif, rv$mapping$loc)
+       eff_subset <- effective_subset(input$value_type, input$subset, names(df_vif))
+       df_vif <- run_locality_rows(df_vif, rv$mapping$loc, locs, eff_subset)
        df_aux <- df_vif[, input$aux_vars, drop = FALSE]
        vif_res <- check_vif(df_aux, threshold = 10)
 
@@ -195,6 +207,12 @@
             title = tags$div(style = "color: var(--mn-danger); font-weight: 600;", icon("exclamation-triangle"), "High Multicollinearity Detected"),
             tags$p("High correlation / multicollinearity detected among the selected variables within the selected localities. This may destabilize the spatial estimation model."),
             tags$p(tags$b("Variables recommended to be dropped:"), paste(vif_res$dropped, collapse=", ")),
+            # The answer is a rule, not a one-off edit to a covariate list: the
+            # map applies it to every sample of a locality and each CV fold
+            # applies it again to its own training samples, so a fold can keep
+            # a different set than the map.
+            tags$p(style = "font-size: 0.9em; color: var(--mn-text-2);",
+                   "Your answer sets the rule. The map applies it to all samples of each locality; cross-validation applies it again inside every fold, using only that fold's training samples, so a fold can keep a different set. Constant covariates are always dropped."),
             tags$p("What would you like to do?"),
             footer = tagList(
               actionButton("vif_drop_btn", "Auto-Drop and Continue", class = "btn-success"),
@@ -254,8 +272,8 @@
     req(rv$user_data, input$locality, rv$mapping$x, rv$mapping$y)
     if (!crs_selection_gate()) return()
 
-    if (input$method %in% c("RK", "RFK", "CK") && (is.null(input$aux_vars) || length(input$aux_vars) == 0)) {
-      showNotification("Please select at least one auxiliary variable for RK/RFK/CK model generation.", type = "error")
+    if (run_uses_covariates() && (is.null(input$aux_vars) || length(input$aux_vars) == 0)) {
+      showNotification(covariates_required_msg(), type = "error")
       return()
     }
 
@@ -418,7 +436,11 @@
     
     current_method <- input$method
     aux_vars <- input$aux_vars
-    if (current_method %in% c("RK", "RFK", "CK") && length(aux_vars) > 0) {
+    if (run_uses_covariates() && (is.null(aux_vars) || length(aux_vars) == 0)) {
+      showNotification(covariates_required_msg(), type = "error")
+      return()
+    }
+    if (run_uses_covariates() && length(aux_vars) > 0) {
       missing_vars <- setdiff(aux_vars, colnames(rv$user_data))
       if (length(missing_vars) > 0) {
         showModal(modalDialog(
@@ -491,10 +513,6 @@
 
     locs <- resolve_selected_localities(input$locality, rv$user_data, rv$mapping$loc)
 
-    if (!is.null(rv$run_config_summary) && rv$run_config_summary$method != input$method) {
-      rv$v_fit_list <- list()
-    }
-
     # Switch tabs client-side: shinyjs messages reach the browser immediately,
     # whereas updateTabsetPanel queues an input message that is only flushed
     # after this whole observer (validation + data prep + future dispatch)
@@ -543,7 +561,8 @@
     method_params_list <- list(
       "IDW" = paste0("IDW Power: ", input$idw_p, " | Nmax: ", input$idw_nmax),
       "TPS" = paste0("TPS Lambda: ", input$tps_lambda),
-      "OK"  = "Ordinary Kriging (auto variogram)",
+      "OK"  = paste0("Ordinary Kriging | Variogram: ",
+                     if (identical(input$vgm_mode, "manual")) "Manual (applied models only)" else "Auto-Fit"),
       "RK"  = paste0("Regression Kriging | Aux: ", paste(input$aux_vars, collapse=", ")),
       "RFK" = paste0("Random Forest Kriging | Aux: ", paste(input$aux_vars, collapse=", ")),
       "CK"  = paste0("Co-Kriging | Aux: ", paste(input$aux_vars, collapse=", "), " | Nmax: ", input$ck_nmax %||% 15)
@@ -563,6 +582,9 @@
     # Everything an archived run needs to be told apart from another one, and
     # everything a methods section has to state. Two runs that differ only in CV
     # strategy or in the collinearity decision used to look identical here.
+    eff_subset <- effective_subset(input$value_type, input$subset, names(rv$user_data))
+    tuning_keys <- c(act = tuning_key(meta$actual, eff_subset),
+                     pre = tuning_key(if (input$value_type == "pred_ss") meta$pred_ss else meta$pred, eff_subset))
     rv$run_config_summary <- list(
       run_id = rv$run_counter,
       timestamp = Sys.time(),
@@ -570,7 +592,7 @@
       variable = paste0(meta$label, " [", meta$actual, "]"),
       method = input$method,
       localities = paste(locs, collapse = ", "),
-      subset = input$subset,
+      subset = eff_subset,
       value_type = input$value_type,
       crs = rv$mapping$crs,
       boundary_type = input$boundary_type,
@@ -579,10 +601,24 @@
       resolution = input$grid_res,
       res_mode = input$res_mode,
       comp_mode = input$comp_mode,
-      sep_fit = input$sep_fit,
+      # Actual/Predicted variogram sharing is an Ordinary Kriging control.
+      # Meaningful only when the run kriges a Predicted surface.
+      sep_fit = if (identical(input$method, "OK") &&
+                    (isTRUE(input$comp_mode) || !identical(input$value_type, "actual"))) isTRUE(input$sep_fit) else NA,
       cv_strategy = input$cv_strategy %||% "auto",
       cv_repeats = cv_repeats_val,
-      covariates = if (input$method %in% c("RK", "RFK", "CK")) paste(input$aux_vars, collapse = ", ") else NA,
+      # What the reported metrics were measured on, and what the folds
+      # re-estimated. Two archived runs that differ only here used to look
+      # identical in this record.
+      cv_population = switch(input$method,
+        "OK" = if (identical(input$cv_population, "comparable")) "Comparable (common rows)" else "Native (every measured sample)",
+        "RK" = , "RFK" = , "CK" = "Common rows (target and every covariate)",
+        NA_character_),
+      cv_refit = if (input$method %in% c("OK", "RK", "RFK", "CK")) "per fold" else NA_character_,
+      cv_covariate_screen = if (input$method %in% c("RK", "RFK", "CK")) "per fold" else NA_character_,
+      # Manual variogram models are consumed by Ordinary Kriging only.
+      vgm_mode = if (identical(input$method, "OK")) (input$vgm_mode %||% "auto") else NA_character_,
+      covariates = if (run_uses_covariates()) paste(input$aux_vars, collapse = ", ") else NA,
       # The RESOLVED gate the dispatch passes into run_params: Inf records the
       # user's "Keep All (Not Recommended)" choice in the collinearity modal.
       vif_threshold = if (input$method %in% c("RK", "RFK", "CK")) (rv$active_vif_thresh %||% 10) else NA,
@@ -603,6 +639,7 @@
       value_type = input$value_type,
       comp_mode = isTRUE(input$comp_mode),
       localities = locs,
+      subset = eff_subset,
       # The CRS this run was computed in. The Map Viewer's ruler reports its
       # projected figure against it, so that figure keeps naming the system the
       # displayed surface, its variogram lags and its grid resolution live in
@@ -623,11 +660,12 @@
       rv$export_registry <- list()
       rv$rast_list_act <- list(); rv$rast_list_pre <- list(); sf_list <- list(); b_list <- list()
       rv$rast <- NULL; rv$rast_pred <- NULL; rv$rast_res <- NULL; rv$has_predictions <- FALSE
-    rv$v_emp_list <- list(); rv$log <- paste0("[Run #", rv$run_counter, "] Starting spatial interpolation using method: ", input$method, "...")
+    rv$log <- paste0("[Run #", rv$run_counter, "] Starting spatial interpolation using method: ", input$method, "...")
     rv$model_summaries <- list(); rv$rf_models <- list(); rv$gstat_objs <- list()
     rv$cv_metrics_act <- list(); rv$cv_metrics_pre <- list() # Reset CV metrics
     rv$cv_data_act <- list(); rv$cv_data_pre <- list()
     rv$cv_repeats_act <- NULL; rv$cv_repeats_pre <- NULL
+    rv$cv_info_act <- list(); rv$cv_info_pre <- list()
     rv$cv_strategy_sel <- input$cv_strategy %||% "auto"
     rv$cv_repeats_sel <- cv_repeats_val
     
@@ -644,7 +682,6 @@
     current_x_col <- rv$mapping$x
     current_y_col <- rv$mapping$y
     val_type <- input$value_type
-    subset_val <- input$subset
     actual_col <- meta$actual
     b_type <- input$boundary_type
     buff_mode <- input$buff_mode
@@ -658,19 +695,24 @@
     rv$run_config_summary$crs_gate_override <- crs_override
 
     comp_mode <- input$comp_mode
-    sep_fit <- input$sep_fit
+    sep_fit <- isTRUE(input$sep_fit)
+    vgm_mode <- input$vgm_mode
+    tuning_revision <- rv$tuning_revision %||% 0L
     idw_p_val <- input$idw_p
     idw_nmax_val <- input$idw_nmax
     tps_lambda_val <- input$tps_lambda
     
     update_premium_progress(35, "Organising the per-locality data chunks.", step = 1)
     
+    # Row identity: the row number in the uploaded table, stamped BEFORE any
+    # filter so a CV population can be named by the rows it holds whatever
+    # filtered it. The worker strips it again before returning rv$sf.
+    user_rows <- rv$user_data
+    user_rows[[CV_ROW_ID_COL]] <- seq_len(nrow(user_rows))
+    cv_population_sel <- if (identical(current_method, "OK")) (input$cv_population %||% "native") else "native"
+
     df_list <- lapply(locs, function(l) {
-      sub_df <- rv$user_data %>% filter(!!sym(current_loc_col) == l)
-      subset_col <- find_subset_column(colnames(sub_df))
-      if (val_type == "pred_ss" && !is.na(subset_col) && subset_val != "all") {
-        sub_df <- sub_df[!is.na(sub_df[[subset_col]]) & sub_df[[subset_col]] == subset_val, , drop = FALSE]
-      }
+      sub_df <- run_locality_rows(user_rows, current_loc_col, l, eff_subset)
       
       pts_data <- sub_df
       pts_data$x <- sub_df[[current_x_col]]
@@ -678,15 +720,18 @@
       pts_data$v <- sub_df[[actual_col]]
       pts_data$pv <- if (!is.null(pred_col) && pred_col %in% colnames(sub_df)) sub_df[[pred_col]] else NA
       
+      pre_fit_act <- resolve_stored_vgm(rv$v_fit_list[[paste0(l, "_act")]], vgm_mode, tuning_keys[["act"]])
       m_params <- list(
-        idw_p_act = get_regional_param("IDW", l, "act", default = idw_p_val %||% 2),
-        idw_p_pre = get_regional_param("IDW", l, "pre", default = idw_p_val %||% 2),
+        idw_p_act = get_regional_param("IDW", l, "act", default = idw_p_val %||% 2, key = tuning_keys[["act"]]),
+        idw_p_pre = get_regional_param("IDW", l, "pre", default = idw_p_val %||% 2, key = tuning_keys[["pre"]]),
         idw_nmax = idw_nmax_val %||% 12,
-        tps_lambda_act = get_regional_param("TPS", l, "act", default = tps_lambda_val),
-        tps_lambda_pre = get_regional_param("TPS", l, "pre", default = tps_lambda_val),
-        pre_fit_act = clean_gstat_env(rv$v_fit_list[[paste0(l, "_act")]]),
-        pre_fit_pre = clean_gstat_env(if(sep_fit) rv$v_fit_list[[paste0(l, "_pre")]] else rv$v_fit_list[[paste0(l, "_act")]]),
+        tps_lambda_act = get_regional_param("TPS", l, "act", default = tps_lambda_val, key = tuning_keys[["act"]]),
+        tps_lambda_pre = get_regional_param("TPS", l, "pre", default = tps_lambda_val, key = tuning_keys[["pre"]]),
+        pre_fit_act = pre_fit_act,
+        pre_fit_pre = if (sep_fit) resolve_stored_vgm(rv$v_fit_list[[paste0(l, "_pre")]], vgm_mode, tuning_keys[["pre"]]) else pre_fit_act,
+        sep_fit = sep_fit,
         cv_strategy = input$cv_strategy %||% "auto",
+        cv_population = cv_population_sel,
         cv_repeats = cv_repeats_val,
         rfk_uncertainty = input$rfk_uncertainty %||% "jackknife",
         rf_ntree = rfk_ntree_val,
@@ -703,6 +748,29 @@
       lapply(df_list, function(item) item$m_params[c("idw_p_act", "idw_p_pre", "tps_lambda_act", "tps_lambda_pre")]),
       vapply(df_list, function(item) item$l, character(1))
     )
+
+    # A stored IDW power / TPS lambda tuned for another variable or subset is
+    # not used; say which value replaced it.
+    run_targets <- if (comp_mode || val_type != "actual") c("act", "pre") else "act"
+    if (current_method %in% c("IDW", "TPS")) {
+      store <- if (current_method == "IDW") rv$idw_factors else rv$tps_lambdas
+      field <- if (current_method == "IDW") "idw_p_" else "tps_lambda_"
+      for (item in df_list) for (target in run_targets) {
+        entry <- store[[item$l]][[target]]
+        if (!is.null(entry) && !identical(entry$key, tuning_keys[[target]])) {
+          rv$log <- paste0(rv$log, "\n[Tuning] ", item$l, " (", target, "): the stored ", current_method,
+            " value was tuned for ", entry$key %||% "another key", "; this run uses ", tuning_keys[[target]],
+            ", so the sidebar value ", format_param_val(current_method, item$m_params[[paste0(field, target)]] %||% NA),
+            " is used. Re-run the optimizer or apply a manual value for this variable.")
+        }
+      }
+    }
+
+    # GCV curves shown for this run: only those tuned for its keys.
+    gcv_names <- intersect(names(rv$tps_gcv_data), as.vector(outer(locs, run_targets, paste, sep = "_")))
+    rv$disp$tps_gcv_data <- rv$tps_gcv_data[Filter(function(nm) {
+      vgm_key_matches(rv$tps_gcv_data[[nm]], tuning_keys[[if (endsWith(nm, "_act")) "act" else "pre"]])
+    }, gcv_names)]
     shp_shared <- tryCatch(shared_boundary_features(shp_bound, df_list, current_crs),
       error = function(e) {
         showNotification("Uploaded boundary sharing could not be checked; unnamed features will use the selected sidebar boundary.",
@@ -716,14 +784,31 @@
     # be imposed on residuals). Say so instead of ignoring the user's tuning in
     # silence. Gated on Manual mode: stored fits also come from OPTIMIZE ALL
     # VARIOGRAMS and from previous runs, where nothing was hand-tuned.
-    if (identical(input$vgm_mode, "manual") && current_method %in% c("RK", "RFK", "CK")) {
-      fit_keys <- c(paste0(locs, "_act"), paste0(locs, "_pre"))
-      if (any(fit_keys %in% names(rv$v_fit_list))) {
+    if (identical(vgm_mode, "manual") && current_method %in% c("RK", "RFK", "CK")) {
+      if (any(vapply(df_list, function(item) !is.null(item$m_params$pre_fit_act) ||
+                       !is.null(item$m_params$pre_fit_pre), logical(1)))) {
         manual_note <- paste0("Manual variogram fits are consumed by Ordinary Kriging only. ",
                               current_method, " fits its own variogram model (residual variogram for RK/RFK, linear model of coregionalization for CK), so the tuned fit will not be used in this run.")
         showNotification(manual_note, type = "warning", duration = 12)
         rv$log <- paste0(rv$log, "\n[Variogram] ", manual_note)
       }
+    }
+
+    if (identical(vgm_mode, "manual") && current_method == "OK") {
+      missing_models <- character(0)
+      for (item in df_list) {
+        for (target in if (comp_mode || val_type != "actual") c("act", "pre") else "act") {
+          if (!is.null(item$m_params[[paste0("pre_fit_", target)]])) next
+          stored_target <- if (target == "pre" && !sep_fit) "act" else target
+          key <- tuning_keys[[stored_target]]
+          stored <- rv$v_fit_list[[paste0(item$l, "_", stored_target)]]
+          other <- if (identical(attr(stored, "monolith_source"), "manual") &&
+                       !vgm_key_matches(stored, key)) paste0("; applied model belongs to ", attr(stored, "monolith_key")) else ""
+          missing_models <- c(missing_models, paste0(item$l, " (", target, ": ", key, other, ")"))
+        }
+      }
+      if (length(missing_models)) rv$log <- paste0(rv$log, "\n[Variogram] No applied model for ",
+        paste(missing_models, collapse = ", "), ". These surfaces fit their own variogram; an unseparated Predicted surface shares the Actual fit.")
     }
 
     update_premium_progress(50, "Fitting and predicting per locality in parallel. The interface stays responsive; you can keep working in other tabs.", step = 2)
@@ -784,6 +869,12 @@
       # worker's GLOBAL env; nested workers repeat this themselves inside
       # interp_run_item because they are fresh processes.
       source("spatial_helpers.R", local = FALSE)
+      # Auto (Global) needs every locality's boundary before any locality runs:
+      # the shared cell size is the Auto resolution of the largest one. Built
+      # here, in the worker, so the interface stays responsive.
+      if (identical(run_params$res_mode, "global")) {
+        run_params$shared_res <- shared_auto_resolution(df_list, run_params)
+      }
 
       nested_cl <- NULL
       old_mc_cores <- getOption("mc.cores")
@@ -877,10 +968,12 @@
       # LOOCV contribute their single (deterministic) frame - see
       # build_cv_repeat_summary.
       reps_act <- list(); reps_pre <- list()
-      run_fits <- list()
+      run_fits <- list(); run_emps <- list()
 
+      grid_res_used <- list()
       for(res in res_all) {
           l <- res$l
+          if (is.numeric(res$actual_res) && length(res$actual_res) == 1) grid_res_used[[l]] <- res$actual_res
           if (current_method == "TPS") {
             for (tgt in c("act", "pre")) {
               rv$disp$regional_params[[l]][[paste0("tps_fit_", tgt)]] <-
@@ -901,13 +994,11 @@
           if(!is.null(res$bound)) b_list[[l]] <- res$bound
           if(!is.null(res$pts)) sf_list[[length(sf_list)+1]] <- res$pts
           
-          if(!is.null(res$v_emp_act)) rv$v_emp_list[[paste0(l, "_act")]] <- res$v_emp_act
-          if(!is.null(res$v_fit_act)) {
-            rv$v_fit_list[[paste0(l, "_act")]] <- res$v_fit_act
-            run_fits[[paste0(l, "_act")]] <- res$v_fit_act
-          }
+          if(!is.null(res$v_emp_act)) run_emps[[paste0(l, "_act")]] <- res$v_emp_act
+          if(!is.null(res$v_fit_act)) run_fits[[paste0(l, "_act")]] <- res$v_fit_act
           if(!is.null(res$cv_act)) rv$cv_metrics_act[[l]] <- res$cv_act
           if(!is.null(res$cv_obj_act)) rv$cv_data_act[[l]] <- res$cv_obj_act
+          rv$cv_info_act[[l]] <- stamp_cv_population(res$cv_info_act, tuning_keys[["act"]])
           if(cv_repeats_val > 1) {
             reps_act[[l]] <- res$cv_reps_act %||% Filter(Negate(is.null), list(cv_repeat_frame(res$cv_obj_act)))
           }
@@ -915,13 +1006,29 @@
           if(!is.null(res$rf_act)) rv$rf_models[[paste0(l, "_act")]] <- res$rf_act
           if(!is.null(res$gstat_act)) rv$gstat_objs[[paste0(l, "_act")]] <- res$gstat_act
           
-          if(!is.null(res$v_emp_pre)) rv$v_emp_list[[paste0(l, "_pre")]] <- res$v_emp_pre
-          if(!is.null(res$v_fit_pre)) {
-            rv$v_fit_list[[paste0(l, "_pre")]] <- res$v_fit_pre
-            run_fits[[paste0(l, "_pre")]] <- res$v_fit_pre
+          if(!is.null(res$v_emp_pre)) run_emps[[paste0(l, "_pre")]] <- res$v_emp_pre
+          if(!is.null(res$v_fit_pre)) run_fits[[paste0(l, "_pre")]] <- res$v_fit_pre
+          if (current_method == "OK" && identical(tuning_revision, rv$tuning_revision %||% 0L)) {
+            for (target in c("act", "pre")) {
+              nm <- paste0(l, "_", target)
+              fit <- run_fits[[nm]]
+              # Unseparated, the Predicted surface borrowed the measured-value
+              # model. It was tuned on the Actual column, so it is not stored
+              # under the prediction column's key, where it would later be
+              # offered (or applied) as that column's variogram. The run
+              # snapshot below still records what the surface was kriged with.
+              if (target == "pre" && !sep_fit && identical(fit, run_fits[[paste0(l, "_act")]])) fit <- NULL
+              # A model the user applied for this key stays applied: a run,
+              # Auto-Fit included, never replaces it (author decision
+              # 2026-09-17). OPTIMIZE ALL VARIOGRAMS still does.
+              if (!is.null(resolve_stored_vgm(rv$v_fit_list[[nm]], "manual", tuning_keys[[target]]))) fit <- NULL
+              if (!is.null(fit)) rv$v_fit_list[[nm]] <- stamp_vgm(fit, tuning_keys[[target]], "run")
+              if (!is.null(run_emps[[nm]])) rv$v_emp_list[[nm]] <- stamp_vgm(run_emps[[nm]], tuning_keys[[target]], "run")
+            }
           }
           if(!is.null(res$cv_pre)) rv$cv_metrics_pre[[l]] <- res$cv_pre
           if(!is.null(res$cv_obj_pre)) rv$cv_data_pre[[l]] <- res$cv_obj_pre
+          rv$cv_info_pre[[l]] <- stamp_cv_population(res$cv_info_pre, tuning_keys[["pre"]])
           if(cv_repeats_val > 1) {
             reps_pre[[l]] <- res$cv_reps_pre %||% Filter(Negate(is.null), list(cv_repeat_frame(res$cv_obj_pre)))
           }
@@ -930,6 +1037,20 @@
           if(!is.null(res$gstat_pre)) rv$gstat_objs[[paste0(l, "_pre")]] <- res$gstat_pre
       }
       rv$disp$v_fits <- run_fits
+      rv$disp$v_emps <- run_emps
+      # The cell size each locality was gridded at. In Auto modes the sidebar
+      # cannot know it before the run (it follows the boundary area), so the
+      # Map Viewer's resolution overlay and the run record read it from here.
+      rv$disp$grid_res_used <- grid_res_used
+      if (length(grid_res_used)) {
+        used <- round(unlist(grid_res_used), 1)
+        rv$run_config_summary$resolution <- if (length(unique(used)) == 1) {
+          sprintf("%s m", format(used[1], trim = TRUE))
+        } else {
+          sprintf("%s-%s m across %d localities",
+                  format(min(used), trim = TRUE), format(max(used), trim = TRUE), length(used))
+        }
+      }
 
       if (cv_repeats_val > 1) {
         # Summarised once per run (not per render): the pooled rows reproject
@@ -1069,17 +1190,20 @@
     # before, so the figure a reader quotes for the whole run had to be
     # retyped off the screen. Pooling happens in pool_cv_sf()'s auto-UTM zone,
     # the same way the card does it.
-    pooled_cv <- function(data_list, label) {
-      all_cv <- pool_cv_sf(data_list)
-      if(is.null(all_cv) || nrow(all_cv) == 0) return(NULL)
-      cv_metrics_export_df(perform_cv(all_cv), label, "pooled per-locality CV")
+    pooled_cv <- function(data_list, metrics_list, label, infos) {
+      res <- perform_pooled_cv(data_list, metrics_list)
+      if(is.null(res)) return(NULL)
+      # The population record is taken over the localities that actually
+      # pooled, so the exported id names the rows behind the exported numbers.
+      cv_metrics_export_df(res, label, "pooled per-locality CV",
+                           pooled_cv_population(infos[names(data_list)]))
     }
-    cv_tot_a <- pooled_cv(rv$cv_data_act, "Actual Model")
+    cv_tot_a <- pooled_cv(rv$cv_data_act, rv$cv_metrics_act, "Actual Model", rv$cv_info_act)
     if(!is.null(cv_tot_a)) {
       register_export_item("table_cv_total", paste(meta$label, "- Total Model CV Metrics (Actual)"), "table", cv_tot_a, meta$category)
     }
     if(comp_mode || val_type != "actual") {
-      cv_tot_p <- pooled_cv(rv$cv_data_pre, "Predicted Model")
+      cv_tot_p <- pooled_cv(rv$cv_data_pre, rv$cv_metrics_pre, "Predicted Model", rv$cv_info_pre)
       if(!is.null(cv_tot_p)) {
         register_export_item("table_cv_pre_total", paste(meta$label, "- Total Model CV Metrics (Predicted)"), "table", cv_tot_p, meta$category)
       }
@@ -1093,7 +1217,7 @@
 
     # Every fitted variogram of the run in one sheet, one row per
     # locality/target - the combined view of the Variogram Parameters card.
-    vgm_par_total <- vgm_params_export_df(rv$v_fit_list)
+    vgm_par_total <- vgm_params_export_df(rv$disp$v_fits)
     if(!is.null(vgm_par_total)) {
       register_export_item("table_vgm_params_total", paste(meta$label, "- Variogram Parameters (all localities)"), "table", vgm_par_total, meta$category)
     }

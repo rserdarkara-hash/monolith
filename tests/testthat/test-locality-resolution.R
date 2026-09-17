@@ -3,6 +3,45 @@
 # runs on. Pins the ALL / empty / NULL / missing-column edge cases that were
 # previously handled inconsistently across ~13 inline snippets in monolith.R.
 
+test_that("effective_subset applies only to an available Single-split partition", {
+  expect_identical(effective_subset("pred_ss", "Test", c("v", "Subset")), "Test")
+  for (view in c("actual", "pred", "resid")) {
+    expect_identical(effective_subset(view, "Test", "subset"), "all")
+  }
+  expect_identical(effective_subset("pred_ss", "Test", "v"), "all")
+  expect_identical(effective_subset("pred_ss", "all", "subset"), "all")
+  expect_identical(effective_subset("pred_ss", NULL, "subset"), "all")
+})
+
+test_that("run_locality_rows filters locality and subset without introducing NA rows", {
+  df <- data.frame(loc = c("A", "A", NA, "B", "A"),
+                   Subset = c("Test", NA, "Test", "Test", "Train"), id = 1:5)
+  expect_identical(run_locality_rows(df, "loc", "A", "Test")$id, 1L)
+  expect_identical(run_locality_rows(df, "loc", "A", "all")$id, c(1L, 2L, 5L))
+  full <- golden_soil("full")
+  for (subset in c("Test", "all")) {
+    expected <- full[which(full$locality == "Kale" &
+      (subset == "all" | full$subset == subset)), , drop = FALSE]
+    expect_identical(run_locality_rows(full, "locality", "Kale", subset), expected)
+  }
+})
+
+test_that("tuning_key identifies the column and the effective subset", {
+  expect_identical(tuning_key("tn", "all"), "tn")
+  expect_identical(tuning_key("tn_ss", "Test"), "tn_ss [subset Test]")
+  expect_identical(tuning_key("tn", "Test"), "tn [subset Test]")
+  for (col in list(NULL, NA_character_, "", character(0), c("tn", "ph"))) {
+    expect_identical(tuning_key(col, "all"), NA_character_)
+  }
+})
+
+test_that("descriptive run vectors respect the committed subset on both surfaces", {
+  df <- data.frame(loc = c("A", "A", "B", "A"), subset = c("Test", "Train", "Test", NA),
+                   tn = c(2, 100, 200, 300), tn_ss = c(3, 110, 210, 310))
+  meta <- list(actual = "tn", pred_ss = "tn_ss", value_type = "pred_ss", subset = "Test")
+  expect_identical(stats_table_vectors(df, meta, "loc", "A"), list(act = 2, pre = 3))
+})
+
 test_that("analysis locality filter offers a combined view only for multiple localities", {
   local_mocked_bindings(shinyApp = .real_shinyApp, .package = "shiny")
   withr::local_dir(proj_root)

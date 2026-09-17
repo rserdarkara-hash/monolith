@@ -362,6 +362,15 @@
     if (sum(is.finite(xs) & is.finite(ys)) < 1) return()
 
     ident <- identify_input_crs(rv$user_data, input$map_x, input$map_y, rv$shp_bound)
+    # Degree ranges without evidence: EPSG:4326 is offered, never applied.
+    crs_pick$degree_suggest <- !is.null(ident) && is.null(ident$crs)
+    if (isTRUE(crs_pick$degree_suggest)) {
+      crs_pick$no_evidence <- FALSE
+      crs_pick$rows <- NULL
+      if (!isTruthy(crs_effective("map_crs")))
+        showNotification(ident$message, type = "warning", duration = 15, id = "crs_ident")
+      return()
+    }
     if (is.null(ident)) {
       # The shipped sample carries no evidence either - bare eastings, no
       # boundary - but its zone is known from its documentation and the upload
@@ -419,13 +428,24 @@
   # buttons and the run pipeline do. Everything the promise needs is read out
   # of the reactives BEFORE the call.
   crs_pick <- reactiveValues(no_evidence = FALSE, click = NULL, rows = NULL,
-                             busy = FALSE, reopen = FALSE)
+                             busy = FALSE, reopen = FALSE, degree_suggest = FALSE)
 
   crs_picker_visible <- reactive({
     isTRUE(crs_pick$no_evidence) && (!isTruthy(input$map_crs) || isTRUE(crs_pick$reopen))
   })
 
   output$crs_picker_ui <- renderUI({
+    if (isTRUE(crs_pick$degree_suggest) && !isTruthy(input$map_crs)) {
+      return(div(style = "margin-top: 14px; border-top: 1px solid var(--mn-line); padding-top: 12px;",
+          h5("Are these coordinates longitude/latitude?", style = "font-weight: 600; margin-bottom: 4px;"),
+          p(class = "setup-hint",
+            sprintf("Every X value lies within -180 to 180 and every Y value within -90 to 90, so they could be degrees. The file does not confirm it: the '%s'/'%s' columns are not named as longitude/latitude and no boundary shapefile confirms their position. A local metre grid fits these ranges too: read as degrees, a field plot with X = 2-48 m and Y = 5-60 m becomes a domain thousands of kilometres wide.",
+                    input$map_x, input$map_y)),
+          actionButton("crs_use_degrees", "Use EPSG:4326 (WGS 84 longitude/latitude)",
+                       icon = icon("check"), class = "btn-success btn-sm"),
+          p(class = "setup-hint", style = "margin-top: 6px;",
+            "If they are metres or another system, set the Input Data CRS above to the system they were recorded in.")))
+    }
     req(crs_picker_visible())
     div(style = "margin-top: 14px; border-top: 1px solid var(--mn-line); padding-top: 12px;",
         h5("Locate your study area", style = "font-weight: 600; margin-bottom: 4px;"),
@@ -607,6 +627,17 @@
 
   observeEvent(input$crs_reopen_picker, {
     crs_pick$reopen <- TRUE
+  })
+
+  # The user's confirmation that degree-range coordinates are WGS 84 lon/lat.
+  # record = FALSE: this is the user's choice, so a later re-identification
+  # must not treat it as a value the app wrote and may replace.
+  observeEvent(input$crs_use_degrees, {
+    set_input_crs("EPSG:4326", record = FALSE)
+    if (!crs_has_value("crs_selection")) set_target_crs("EPSG:4326")
+    showNotification(
+      "Input Data CRS set to EPSG:4326. Confirm on the mini-map below - the position printed under it is where your points now plot.",
+      type = "message", duration = 12, id = "crs_ident")
   })
 
   # Plausibility guard for the free-typed Input Data CRS: an unrecognized CRS,
@@ -899,30 +930,27 @@
     final_rec <- max(0.1, min(500, round(final_rec, 1)))
 
     updateSliderInput(session, "grid_res", value = final_rec)
-    
-    if (input$res_mode == "local") {
-        locs_to_calc <- locs_scope
-        temp_res <- list()
-        for (l in locs_to_calc) {
-            sub_df <- df_raw %>% filter(loc == l)
-            if (nrow(sub_df) < 2) next
-            
-            sub_pts <- tryCatch(st_as_sf(sub_df, coords=c("x","y"), crs=input$map_crs) %>% st_transform(input$crs_selection), error=function(e) { showNotification(paste("Projection failed for subset:", e$message), type = "error"); NULL })
-            if(is.null(sub_pts)) next
-            
-            if (nrow(sub_pts) > 1) {
-                 l_res <- calc_metric_spacing(sub_pts)$mean_nn * 0.5
-            } else l_res <- final_rec
 
-            l_res <- max(1, min(5000, l_res))
+    # Both Auto modes: each locality's half mean nearest-neighbour spacing, the
+    # quantity the run's dynamic buffer scales with. The cell size itself is
+    # set at run time from the boundary area, so it is not stored here.
+    temp_res <- list()
+    for (l in locs_scope) {
+        sub_df <- df_raw %>% filter(loc == l)
+        if (nrow(sub_df) < 2) next
 
-            temp_res[[l]] <- l_res        }
-        rv$loc_resolutions <- temp_res
-    } else {
-        temp_res <- list()
-        for (l in locs_scope) temp_res[[l]] <- final_rec
-        rv$loc_resolutions <- temp_res
+        sub_pts <- tryCatch(st_as_sf(sub_df, coords=c("x","y"), crs=input$map_crs) %>% st_transform(input$crs_selection), error=function(e) { showNotification(paste("Projection failed for subset:", e$message), type = "error"); NULL })
+        if(is.null(sub_pts)) next
+
+        if (nrow(sub_pts) > 1) {
+             l_res <- calc_metric_spacing(sub_pts)$mean_nn * 0.5
+        } else l_res <- final_rec
+
+        l_res <- max(1, min(5000, l_res))
+
+        temp_res[[l]] <- l_res
     }
+    rv$loc_resolutions <- temp_res
   })
 
   # In fixed mode the stored per-locality values mirror the slider, so moving

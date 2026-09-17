@@ -139,8 +139,8 @@
       build_variogram_ggplot(variogram(formula_obj, df_filtered),
                              title = paste("Pooled CV Residual Variogram", title_suffix))
     } else {
-      v_emp <- rv$v_emp_list[[paste0(loc, "_", type)]]
-      v_fit <- rv$v_fit_list[[paste0(loc, "_", type)]]
+      v_emp <- rv$disp$v_emps[[paste0(loc, "_", type)]]
+      v_fit <- rv$disp$v_fits[[paste0(loc, "_", type)]]
       if (is.null(v_emp) || is.null(v_fit)) {
         return(sci_placeholder(sprintf(paste0(
           "No fitted variogram is stored for \"%s\" %s.\nThe locality failed before the variogram step; ",
@@ -171,7 +171,7 @@
     }, cacheKeyExpr = {
       loc <- input$sel_loc_stats
       list("internal_vgm", type, loc, rv$results_rev,
-           rv$v_emp_list[[paste0(loc, "_", type)]], rv$v_fit_list[[paste0(loc, "_", type)]])
+           rv$disp$v_emps[[paste0(loc, "_", type)]], rv$disp$v_fits[[paste0(loc, "_", type)]])
     }, cache = "session")
   }
 
@@ -223,12 +223,13 @@
   # be handed NULL (see sci_dt() in ui_components.R).
   output$vgm_params_table <- DT::renderDataTable({
     loc <- input$sel_loc_stats; req(loc)
-    sci_dt(vgm_params_table_df(rv$v_fit_list, loc))
+    fits <- if (isTRUE(sci_vgm_tuning())) tuning_vgm_entries(rv$v_fit_list) else rv$disp$v_fits
+    sci_dt(vgm_params_table_df(fits, loc))
   })
   build_tps_gcv_diag <- function(target) {
     loc <- input$sel_loc_stats; req(loc, identical(rv$disp$method, "TPS"))
     tryCatch({
-      build_tps_gcv_plot(rv$tps_gcv_data, loc, target)
+      build_tps_gcv_plot(rv$disp$tps_gcv_data, loc, target)
     }, error = function(e) {
       sci_placeholder(paste("GCV Plot Error:\n", e$message), size = 4)
     })
@@ -237,9 +238,8 @@
   output$tps_gcv_plot_act <- renderCachedPlot({
     p <- build_tps_gcv_diag("act"); req(p); p
   }, cacheKeyExpr = {
-    # tps_gcv_data also changes outside runs (the Optimize button), so the
-    # whole (small) list is part of the key.
-    list("tps_gcv_act", input$sel_loc_stats, rv$results_rev, rv$disp$method, rv$tps_gcv_data)
+    # The run's own snapshot of the curves tuned for its keys.
+    list("tps_gcv_act", input$sel_loc_stats, rv$results_rev, rv$disp$method, rv$disp$tps_gcv_data)
   }, cache = "session")
 
   build_obs_pred_plot <- function(df, title, x_lab = "Observed", y_lab = "Predicted") {
@@ -259,9 +259,10 @@
     
     req(obs_col, pre_col)
     
-    obs <- df[[obs_col]]; pre <- df[[pre_col]]
-
-    df_plot <- data.frame(Observed = obs, Predicted = pre)
+    # A failed CV fold leaves NA predictions; plot the scored pairs only.
+    ok <- is.finite(df[[obs_col]]) & is.finite(df[[pre_col]])
+    req(any(ok))
+    df_plot <- data.frame(Observed = df[[obs_col]][ok], Predicted = df[[pre_col]][ok])
     # text aes on the point layer only: a per-point discrete aesthetic on the
     # smooth layer would fragment its grouping into one group per point.
     ggplot(df_plot, aes(x = Observed, y = Predicted)) +
@@ -280,7 +281,11 @@
     req(input$sel_loc_stats, data_list)
     loc <- input$sel_loc_stats
     if(loc == "Total (Combined)") {
-       df <- do.call(rbind, lapply(data_list, function(x) if(inherits(x, "sf")) st_drop_geometry(x) else as.data.frame(x)))
+       # pool_cv_sf normalizes each locality's CV schema (an engine fallback
+       # produces a different one), so the pooled scatter never goes blank.
+       df <- pool_cv_sf(data_list)
+       req(df)
+       df <- st_drop_geometry(df)
     } else {
        df <- data_list[[loc]]
        if(inherits(df, "sf")) df <- st_drop_geometry(df)
@@ -311,7 +316,7 @@
   output$tps_gcv_plot_pre <- renderCachedPlot({
     p <- build_tps_gcv_diag("pre"); req(p); p
   }, cacheKeyExpr = {
-    list("tps_gcv_pre", input$sel_loc_stats, rv$results_rev, rv$disp$method, rv$tps_gcv_data)
+    list("tps_gcv_pre", input$sel_loc_stats, rv$results_rev, rv$disp$method, rv$disp$tps_gcv_data)
   }, cache = "session")
 
   # ── Directional variogram (anisotropy diagnostic) ────────────────────────
@@ -711,31 +716,62 @@
       tags$span(style = "color: var(--mn-text-3);",
                 sprintf(" Repeated CV is on (%d fold realizations); the values here are realization 1, the spread is in the table below.", n_rep))
     }
-    # What a fold refits is engine-dependent, and the shared property is REUSE
-    # OF A PARAMETER FITTED ON THE FULL POINT SET - not "has a kriging
-    # variance", which is what method_has_variance() answers. OK's and CK's
-    # variogram/LMC, an IDW power from OPTIMIZE IDW FACTORS and a fixed TPS
-    # lambda are all chosen once on all the data and reused in every fold;
-    # RK/RFK re-estimate trend and residual variogram per fold, and TPS on
-    # Auto (GCV) re-selects lambda per fold (spatial_kriging.R, fit_tps inside
-    # the fold loop), so neither carries the reuse. The bias is small but
-    # systematic and one-directional, and it lands in exactly the table users
-    # pick an engine from. rv$disp does not record whether the power/lambda was
-    # tuned or typed (server_execution.R, rv$disp construction), so the IDW/TPS
-    # wording is conditional rather than asserted - the reader knows which
-    # button they pressed. Message only.
+    # What each fold re-estimates. Every kriging engine refits from its own
+    # training samples, so the held-out sample contributes its coordinates and
+    # nothing else; the remaining reuse is IDW's distance power and a FIXED TPS
+    # lambda, both selected once on the full point set. rv$disp records the
+    # method, not whether the power/lambda was tuned or typed, so the IDW/TPS
+    # wording stays conditional - the reader knows which button they pressed.
+    method_now <- rv$disp$method %||% ""
     reuse_txt <- switch(
-      rv$disp$method %||% "",
-      "OK" = , "CK" = " is cross-validated against a variogram fitted on the full point set (the held-out point contributed to it), whereas RK/RFK refit inside every fold. These metrics are therefore mildly optimistic relative to RK/RFK on the same data; see Scientific Guide §5.",
-      "IDW" = " re-solves each fold with one distance power. If that power came from OPTIMIZE IDW FACTORS it was selected on the full point set, so the held-out point contributed to it and these metrics are mildly optimistic relative to RK/RFK, which refit inside every fold; a power you typed yourself carries no such reuse. See Scientific Guide §5.",
-      "TPS" = " re-fits its spline inside every fold, but a fixed lambda - typed into the slider or taken from OPTIMIZE TPS LAMBDA - is reused unchanged in every fold and was selected on the full point set, so these metrics are mildly optimistic relative to RK/RFK. Auto (GCV) re-selects lambda inside each fold and carries no such reuse. See Scientific Guide §5.",
+      method_now,
+      "OK" = " refits its variogram from each fold's training samples; the held-out sample contributes its coordinates only.",
+      "CK" = " re-screens its covariates, re-standardizes them and refits the linear model of coregionalization in each fold.",
+      "RK" = , "RFK" = " re-screens its covariates, re-interpolates them at the held-out samples, and refits the trend and the residual variogram in each fold.",
+      "IDW" = " re-solves each fold with one distance power. If that power came from OPTIMIZE IDW FACTORS it was selected on the full point set, so the held-out point contributed to it, unlike the kriging engines, which refit inside every fold; a power you typed yourself carries no such reuse. See Scientific Guide §5.",
+      "TPS" = " re-fits its spline inside every fold, but a fixed lambda - typed into the slider or taken from OPTIMIZE TPS LAMBDA - is reused unchanged in every fold and was selected on the full point set, unlike the kriging engines, which refit inside every fold. Auto (GCV) re-selects lambda inside each fold and carries no such reuse. See Scientific Guide §5.",
       NULL
     )
-    refit_note <- if (!is.null(reuse_txt)) {
+    infos <- c(rv$cv_info_act, if (isTRUE(rv$has_predictions)) rv$cv_info_pre)
+    infos <- Filter(Negate(is.null), infos)
+    # An applied manual model cannot be refitted without scoring a different
+    # model than the one that drew the map, so those localities are reused and
+    # labelled conditional. Name them: it is the one exception to the sentence
+    # above.
+    cond_locs <- unique(names(Filter(function(x) !is.null(x$conditional), infos)))
+    cond_txt <- if (length(cond_locs)) {
+      paste0(" Conditional on an applied variogram (reused in every fold): ",
+             paste(cond_locs, collapse = ", "), ".")
+    }
+    # Only where the Predicted surface actually borrowed the measured-value
+    # variogram under Auto-Fit (the worker records its column). A borrowed
+    # APPLIED model is conditional instead, and cond_txt names it.
+    shared_txt <- if (isTRUE(rv$has_predictions) &&
+                      any(vapply(rv$cv_info_pre, function(x) identical(x$vgm_col, "v"), logical(1)))) {
+      " The Predicted surface is kriged with the measured-value variogram, refitted in each fold."
+    }
+    screen_txt <- {
+      diff_locs <- Filter(function(x) isTRUE((x$screen$n_differ %||% 0) > 0), infos)
+      if (length(diff_locs)) {
+        k <- sum(vapply(diff_locs, function(x) as.integer(x$screen$n_differ), integer(1)))
+        n <- sum(vapply(diff_locs, function(x) as.integer(x$screen$n_folds), integer(1)))
+        paste0(" In ", k, " of ", n, " folds (", paste(unique(names(diff_locs)), collapse = ", "),
+               ") the fold's covariate screen kept a different set than the map; see the Run Log.")
+      }
+    }
+    cov_txt <- {
+      short <- Filter(function(m) isTRUE((m$coverage %||% 1) < 1),
+                      c(rv$cv_metrics_act, if (isTRUE(rv$has_predictions)) rv$cv_metrics_pre))
+      if (length(short)) {
+        " Some rows are INCOMPLETE: part or all of their samples received no cross-validation prediction (see the Run Log), and their metrics describe the predicted samples only."
+      }
+    }
+    refit_note <- if (!is.null(reuse_txt) || !is.null(cov_txt)) {
       tags$div(
         style = "font-size: 0.82em; color: var(--mn-text-2); margin: -4px 0 8px 0;",
         tags$span(style = "color: var(--mn-text-3);",
-                  paste0(get_method_label(rv$disp$method), reuse_txt))
+                  paste0(get_method_label(rv$disp$method), reuse_txt %||% "",
+                         cond_txt %||% "", shared_txt %||% "", screen_txt %||% "", cov_txt %||% ""))
       )
     }
     tagList(
@@ -771,20 +807,49 @@
     # search failed) - it never means "no spatial structure was detected".
     na_marker <- '<span title="Not computable (see Run Log)">NA*</span>'
 
-    get_metrics_df <- function(cv_list, data_list, label) {
+    # The Source cell states WHAT was scored, not only how: the fold plan, the
+    # cross-validation population, how many of the expected samples got a
+    # prediction, and whether the folds were conditional on a model the user
+    # applied. The experiment id and the refit statement ride along as a hover,
+    # which a table cell can carry and a file cannot - the export has both as
+    # columns of their own.
+    source_cell <- function(label, design, res, info) {
+      n_pred <- res$n %||% NA_integer_
+      n_exp <- res$n_expected %||% NA_integer_
+      incomplete <- !is.na(n_exp) && n_exp > 0 && !isTRUE(n_pred == n_exp)
+      named_pop <- !is.null(info) && !is.na(info$population %||% NA_character_)
+      parts <- c(design,
+                 if (named_pop) info$population,
+                 if (incomplete) paste0("n=", n_pred, " of ", n_exp) else paste0("n=", n_pred),
+                 if (incomplete) "INCOMPLETE",
+                 if (!is.null(info$conditional)) paste0("conditional on ", info$conditional),
+                 if (isTRUE((info$n_conditional %||% 0) > 0))
+                   paste0(info$n_conditional, " of ", info$n_localities, " localities conditional"))
+      txt <- paste0(label, " (", paste(parts, collapse = ", "), ")")
+      tip <- c(if (named_pop && !is.na(info$pop_id %||% NA_character_))
+                 paste0("CV population ID: ", info$pop_id),
+               if (!is.na(info$refit %||% NA_character_))
+                 paste0("Model refit: ", info$refit))
+      if (!length(tip)) return(htmltools::htmlEscape(txt))
+      sprintf('<span title="%s">%s</span>',
+              htmltools::htmlEscape(paste(tip, collapse = ". "), attribute = TRUE),
+              htmltools::htmlEscape(txt))
+    }
+
+    get_metrics_df <- function(cv_list, data_list, label, info_list) {
       if(loc == "Total (Combined)") {
         # Pool in the auto-UTM zone of the combined centroid: pooled Moran's I
         # uses these coordinates, and EPSG:3857 distances are inflated by
         # 1/cos(latitude). perform_cv/.cv_to_df extract x/y from the geometry.
-        all_cv <- pool_cv_sf(data_list)
-        if(is.null(all_cv) || nrow(all_cv) == 0) {
+        res <- perform_pooled_cv(data_list, cv_list)
+        if(is.null(res)) {
           empty_df <- data.frame(Source=paste0(label, " (pooled CV)"), RMSE=NA, NRMSE_Pct=NA, MAE=NA, R2_Corr=NA, R2_NSE=NA, Bias_ME=NA, CCC=NA, RPD_Prec=NA, RPIQ=NA, SMAPE_Pct=NA, Moran_I=NA, Moran_P=NA)
           names(empty_df) <- metric_cols
           return(empty_df)
         }
 
-        res <- perform_cv(all_cv)
-        src_label <- paste0(label, " (pooled per-locality CV, n=", res$n, ")")
+        src_label <- source_cell(label, "pooled per-locality CV", res,
+                                 pooled_cv_population(info_list[names(data_list)]))
         rmse <- res$rmse
         nrmse <- res$nrmse_mean
         mae <- res$mae
@@ -802,7 +867,7 @@
         res <- cv_list[[loc]]
         n_obs <- if(!is.null(data_list[[loc]])) nrow(data_list[[loc]]) else NA
         src_label <- if(!is.null(res)) {
-          paste0(label, " (", cv_type_label(n_obs, rv$cv_strategy_sel), ", n=", res$n, ")")
+          source_cell(label, cv_type_label(n_obs, rv$cv_strategy_sel), res, info_list[[loc]])
         } else {
           # An all-NA row used to be labelled plain "(CV)", indistinguishable
           # from a computed one; say that CV did not produce metrics here.
@@ -851,9 +916,9 @@
                     res_df
                     }
 
-    m_act <- get_metrics_df(rv$cv_metrics_act, rv$cv_data_act, "Actual Model")
+    m_act <- get_metrics_df(rv$cv_metrics_act, rv$cv_data_act, "Actual Model", rv$cv_info_act)
     if(rv$has_predictions) {
-      m_pre <- get_metrics_df(rv$cv_metrics_pre, rv$cv_data_pre, "Predicted Model")
+      m_pre <- get_metrics_df(rv$cv_metrics_pre, rv$cv_data_pre, "Predicted Model", rv$cv_info_pre)
       # escape = FALSE keeps the tooltip-bearing spans in the two Moran columns
       sci_dt(rbind(m_act, m_pre), escape = FALSE, header_tooltips = sci_metric_tooltips())
     } else {
@@ -878,8 +943,17 @@
       num <- function(x) formatC(round(x, digits), format = "f", digits = digits, drop0trailing = TRUE)
       paste0(num(m), " ± ", if (is.finite(s)) num(s) else "NA")
     }
+    # Realizations can differ in how many samples they managed to predict, so
+    # the count is a range whenever they do, always against what was expected.
+    n_txt <- if (!isTRUE(summ$n_min == summ$n_max)) {
+      paste0("n=", summ$n_min, "-", summ$n_max)
+    } else paste0("n=", summ$n)
+    if (!is.null(summ$n_expected) && !is.na(summ$n_expected) &&
+        !isTRUE(summ$n_min == summ$n_expected && summ$n_max == summ$n_expected)) {
+      n_txt <- paste0(n_txt, " of ", summ$n_expected)
+    }
     row <- data.frame(
-      Source = paste0(label, " (", summ$n_repeats, " fold realizations, n=", summ$n, ")"),
+      Source = paste0(label, " (", summ$n_repeats, " fold realizations, ", n_txt, ")"),
       stringsAsFactors = FALSE
     )
     for (k in names(CV_REPEAT_METRICS)) {
@@ -1040,8 +1114,10 @@
       return("No interpolated surface yet. Run an interpolation first.")
     if (!isTRUE(input$color_style %in% c("agro", "bin")))
       return("Class zones exist only under Agronomical or Binned map styling. Switch Map Styling in the sidebar (Agronomical also needs Apply to maps and statistics).")
-    if (identical(input$map_view, "view_resid"))
+    if (identical(map_view_base(), "view_resid"))
       return("The residual view is not classified. Switch the Map Viewer to Actual, Predicted or Comparison to export its class zones.")
+    if (map_view_layer() %in% c("se", "var") && method_has_variance(rv$disp$method))
+      return("Standard-error and variance maps are not classified. Switch the Map Viewer to Actual, Predicted or Comparison to export their class zones.")
     NULL
   })
 
@@ -1091,7 +1167,7 @@
     if (is.null(meta)) return(NULL)
 
     labs <- if (isTruthy(input$color_style == "bin")) params$leg_labels else params$labels
-    view <- input$map_view %||% "view_act"
+    view <- map_view_base()
     sources <- switch(view,
       "view_pred"  = list(list(r = rv$rast_pred, tag = "Predicted")),
       "view_comp"  = list(list(r = rv$rast, tag = "Actual"),

@@ -31,8 +31,8 @@ tuning_ui <- function(id, label,
           h5("Manual Tuning"),
           selectInput(paste0(id, "_m_loc"), "Locality to Tune", choices = NULL),
           conditionalPanel(
-              condition = "input.comp_mode == true",
-              radioButtons(paste0(id, "_m_target"), "Target", 
+              condition = "input.comp_mode == true || ['pred', 'pred_ss', 'resid'].includes(input.value_type)",
+              radioButtons(paste0(id, "_m_target"), "Target",
                            choices = c("Actual" = "act", "Predicted" = "pre"), inline = TRUE)
           ),
           do.call(sliderInput, c(list(inputId = manual_slider_id), manual_slider_args)),

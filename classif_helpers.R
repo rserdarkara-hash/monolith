@@ -249,6 +249,91 @@ classif_build_spec <- function(method, tune_params = character(0), overrides = l
   classif_tuning_params(method, depth)
 }
 
+# ── Collinearity screen step ────────────────────────────────────────────────
+#' Recipe step that reruns the iterative VIF screen (detect_multicollinearity_engine,
+#' the engine the module's Auto-Drop modal uses) whenever the recipe is prepped.
+#' tidymodels preps a recipe on every analysis set, so the screen is repeated
+#' on the training rows of each outer fold, tuning resample and nested inner
+#' fold, and on all rows for the final model: held-out covariates never help
+#' choose the predictors that are scored on them. Trained and row-independent
+#' at bake (it only removes columns), as classif_build_recipe requires.
+step_vif_screen <- function(recipe, ..., role = NA, trained = FALSE, threshold = 10,
+                            removals = NULL, skip = FALSE,
+                            id = recipes::rand_id("vif_screen")) {
+  recipes::add_step(recipe, .step_vif_screen_new(
+    terms = rlang::enquos(...), role = role, trained = trained, threshold = threshold,
+    removals = removals, skip = skip, id = id))
+}
+
+.step_vif_screen_new <- function(terms, role, trained, threshold, removals, skip, id) {
+  recipes::step(subclass = "vif_screen", terms = terms, role = role, trained = trained,
+                threshold = threshold, removals = removals, skip = skip, id = id)
+}
+
+prep.step_vif_screen <- function(x, training, info = NULL, ...) {
+  cols <- recipes::recipes_eval_select(x$terms, training, info)
+  cols <- cols[vapply(cols, function(p) is.numeric(training[[p]]), logical(1))]
+  removals <- character(0)
+  if (length(cols) >= 2) {
+    chk <- suppressWarnings(detect_multicollinearity_engine(
+      as.data.frame(training[, cols, drop = FALSE]), vars = cols,
+      vif_threshold = x$threshold))
+    removals <- intersect(chk$dropped, cols)
+  }
+  .step_vif_screen_new(terms = x$terms, role = x$role, trained = TRUE,
+                       threshold = x$threshold, removals = removals,
+                       skip = x$skip, id = x$id)
+}
+
+bake.step_vif_screen <- function(object, new_data, ...) {
+  drop <- intersect(object$removals, names(new_data))
+  if (length(drop)) new_data <- new_data[, setdiff(names(new_data), drop), drop = FALSE]
+  new_data
+}
+
+print.step_vif_screen <- function(x, width = max(20, options()$width - 30), ...) {
+  cat("VIF screen (threshold ", x$threshold, ")",
+      if (isTRUE(x$trained)) paste0(": removed ", if (length(x$removals)) paste(x$removals, collapse = ", ") else "none"),
+      "\n", sep = "")
+  invisible(x)
+}
+
+tidy.step_vif_screen <- function(x, ...) {
+  tibble::tibble(terms = if (isTRUE(x$trained)) as.character(x$removals) else character(0),
+                 id = rep(x$id, if (isTRUE(x$trained)) length(x$removals) else 0L))
+}
+
+# Registered explicitly: the generics are called from inside the recipes and
+# generics namespaces, and a method that only lives in the global environment
+# of a sourced session or PSOCK worker must not depend on search-path lookup.
+registerS3method("prep", "step_vif_screen", prep.step_vif_screen, envir = asNamespace("recipes"))
+registerS3method("bake", "step_vif_screen", bake.step_vif_screen, envir = asNamespace("recipes"))
+registerS3method("tidy", "step_vif_screen", tidy.step_vif_screen, envir = asNamespace("generics"))
+registerS3method("print", "step_vif_screen", print.step_vif_screen)
+
+#' Numeric covariates the VIF screen removes on all rows of `train_df`;
+#' character(0) when no finite threshold is set (Keep All).
+.classif_screen_all_rows <- function(train_df, predictors, vif_threshold) {
+  if (!(is.numeric(vif_threshold) && length(vif_threshold) == 1 && is.finite(vif_threshold))) {
+    return(character(0))
+  }
+  num <- predictors[vapply(predictors, function(p) is.numeric(train_df[[p]]), logical(1))]
+  if (length(num) < 2) return(character(0))
+  intersect(suppressWarnings(detect_multicollinearity_engine(
+    as.data.frame(train_df[, num, drop = FALSE]), vars = num,
+    vif_threshold = vif_threshold))$dropped, num)
+}
+
+#' Covariates the fitted workflow's VIF screen removed (character(0) when the
+#' recipe has no screen step).
+classif_screened_out <- function(fitted_wf) {
+  tryCatch({
+    rec <- workflows::extract_recipe(fitted_wf)
+    st <- Filter(function(s) inherits(s, "step_vif_screen"), rec$steps)
+    if (length(st)) as.character(st[[1]]$removals) else character(0)
+  }, error = function(e) character(0))
+}
+
 # ── Recipe ──────────────────────────────────────────────────────────────────
 #' Shared preprocessing recipe: impute missing covariates (median / mode),
 #' absorb novel factor levels seen only at prediction time, one-hot-free dummy
@@ -259,7 +344,8 @@ classif_build_spec <- function(method, tune_params = character(0), overrides = l
 #' `train_df`; recipes auto-assigns it the case_weights role (verified: it is
 #' excluded from all_numeric_predictors and not required at predict time), so
 #' the formula can include it without it ever becoming a predictor.
-classif_build_recipe <- function(train_df, target, predictors, weight_col = NULL) {
+classif_build_recipe <- function(train_df, target, predictors, weight_col = NULL,
+                                 vif_threshold = NULL) {
   train_df <- as.data.frame(train_df)
   train_df[[target]] <- as.factor(train_df[[target]])
   keep <- c(target, predictors, weight_col)
@@ -274,10 +360,17 @@ classif_build_recipe <- function(train_df, target, predictors, weight_col = NULL
   # columns instead of raw ones. A step that mixes rows (step_pca, an
   # interaction, a spatial lag) breaks the first outright; the second detects it
   # at runtime and falls back, but the surface path does not.
-  recipes::recipe(form, data = train_df) |>
+  rec <- recipes::recipe(form, data = train_df) |>
     recipes::step_novel(recipes::all_nominal_predictors()) |>
     recipes::step_impute_median(recipes::all_numeric_predictors()) |>
-    recipes::step_impute_mode(recipes::all_nominal_predictors()) |>
+    recipes::step_impute_mode(recipes::all_nominal_predictors())
+  # Auto-Drop: the collinearity screen is part of the recipe, so it reruns on
+  # every set the recipe is prepped on (see step_vif_screen). NULL = Keep All
+  # or nothing flagged: no screen.
+  if (is.numeric(vif_threshold) && length(vif_threshold) == 1 && is.finite(vif_threshold)) {
+    rec <- step_vif_screen(rec, recipes::all_numeric_predictors(), threshold = vif_threshold)
+  }
+  rec |>
     recipes::step_dummy(recipes::all_nominal_predictors()) |>
     recipes::step_zv(recipes::all_predictors()) |>
     recipes::step_normalize(recipes::all_numeric_predictors())
@@ -335,8 +428,29 @@ classif_make_fold_id <- function(pts_sf, strategy = c("spatial", "standard"),
 #' Turn an integer fold vector into an rsample rset over `train_df`, so the same
 #' fold assignment can drive tune::fit_resamples / tune_grid. Each fold's
 #' assessment set is the rows tagged with that fold id.
-classif_folds_to_rset <- function(train_df, fold_id, assess_df = NULL) {
+#' With `target` given and a `.case_wt` column present, every split gets its
+#' own copy of its analysis rows carrying class weights recomputed from THOSE
+#' rows, so no assessment label enters the class frequencies a tuning fit is
+#' weighted by. Importance weights never enter the metrics, so the assessment
+#' rows' weights are irrelevant.
+classif_folds_to_rset <- function(train_df, fold_id, assess_df = NULL, target = NULL) {
   ids <- sort(unique(fold_id))
+  if (!is.null(target) && ".case_wt" %in% names(train_df)) {
+    parts <- list(if (is.null(assess_df)) train_df else assess_df)
+    offset <- nrow(parts[[1]])
+    idx <- vector("list", length(ids))
+    for (k in seq_along(ids)) {
+      tr <- train_df[fold_id != ids[k], , drop = FALSE]
+      tr$.case_wt <- hardhat::importance_weights(.classif_class_weights(tr[[target]]))
+      parts[[k + 1]] <- tr
+      idx[[k]] <- list(analysis = offset + seq_len(nrow(tr)),
+                       assessment = which(fold_id == ids[k]))
+      offset <- offset + nrow(tr)
+    }
+    data <- dplyr::bind_rows(parts)
+    splits <- lapply(idx, rsample::make_splits, data = data)
+    return(rsample::manual_rset(splits, ids = paste0("Fold", seq_along(ids))))
+  }
   data <- if (is.null(assess_df)) train_df else dplyr::bind_rows(train_df, assess_df)
   offset <- if (is.null(assess_df)) 0L else nrow(train_df)
   splits <- lapply(ids, function(i) {
@@ -619,6 +733,7 @@ run_classification_cv <- function(pts_sf, target, predictors,
                                   group = NULL, class_weights = FALSE,
                                   nested = FALSE, inner_v = 5L,
                                   oof_importance = FALSE, importance_reps = 5L,
+                                  vif_threshold = NULL,
                                   cancel_file = NULL, progress_cb = NULL) {
   strategy <- match.arg(strategy)
   if (!is.null(group) && length(group) != nrow(pts_sf)) {
@@ -646,10 +761,10 @@ run_classification_cv <- function(pts_sf, target, predictors,
   }
 
   # Class-imbalance weighting: inverse-frequency case weights, applied only
-  # when the engine supports them. The tuning pass uses weights computed on
-  # the full training set (tune_grid cannot recompute per split); the reported
-  # out-of-fold refits below recompute weights on each fold's analysis rows,
-  # so no held-out class-prevalence information enters a fold's fit.
+  # when the engine supports them. Every fit recomputes them from its own
+  # analysis rows: the out-of-fold refits below, and each tuning resample
+  # (classif_folds_to_rset with `target`), so no held-out class-prevalence
+  # information enters a fit.
   weights_applied <- isTRUE(class_weights) && classif_supports_weights(method)
   weight_col <- if (weights_applied) ".case_wt" else NULL
   if (weights_applied) {
@@ -658,7 +773,8 @@ run_classification_cv <- function(pts_sf, target, predictors,
   }
 
   n_cls <- nlevels(train_df[[target]])
-  rec <- classif_build_recipe(train_df, target, predictors, weight_col = weight_col)
+  rec <- classif_build_recipe(train_df, target, predictors, weight_col = weight_col,
+                              vif_threshold = vif_threshold)
   tune_params <- .classif_effective_tune_params(method, depth, n_cls)
   spec <- classif_build_spec(method, tune_params = tune_params, n_classes = n_cls)
   wf <- workflows::workflow() |>
@@ -679,7 +795,7 @@ run_classification_cv <- function(pts_sf, target, predictors,
     keep_sf, train_df, predictors, fold_id, cancel_file = cancel_file,
     progress = function(f) report_cv(cov_share * f,
                                       "Interpolating held-out covariates..."))
-  rset <- classif_folds_to_rset(train_df, fold_id, assess_df)
+  rset <- classif_folds_to_rset(train_df, fold_id, assess_df, target = target)
 
   resample_metrics <- classif_resample_metric_set()
   fit_wf <- wf
@@ -691,7 +807,10 @@ run_classification_cv <- function(pts_sf, target, predictors,
     # (it only pins data-dependent hyperparameter ranges such as mtry <= p).
     tune_grid_df <- .classif_with_seed(seed, {
       pset <- hardhat::extract_parameter_set_dials(wf)
-      pset <- dials::finalize(pset, x = train_df[, predictors, drop = FALSE])
+      # Ranges such as mtry <= p count the covariates an Auto-Drop screen keeps
+      # on all rows (a range bound, carrying no label information).
+      pset <- dials::finalize(pset, x = train_df[, setdiff(predictors,
+        .classif_screen_all_rows(train_df, predictors, vif_threshold)), drop = FALSE])
       dials::grid_space_filling(pset, size = .classif_grid_size(depth))
     })
   }
@@ -721,6 +840,8 @@ run_classification_cv <- function(pts_sf, target, predictors,
   # baseline below (and McNemar pairing) can align with the model predictions.
   nested_params <- list()
   imp_parts <- list()
+  # (fold, covariate) pairs the fold's own VIF screen removed.
+  fold_screen <- list()
   # (fold, class) pairs whose class was absent from that fold's analysis rows.
   # Collected rather than warned about in-worker: the module surfaces them once,
   # naming the classes, because it is a property of the CV design (and of the
@@ -759,7 +880,7 @@ run_classification_cv <- function(pts_sf, target, predictors,
           progress = function(f) report_cv(
             cov_share + tune_share + fold_share * ((k - 1 + 0.25 * f) / n_fold),
             sprintf("Interpolating inner-fold covariates: fold %d of %d", k, n_fold)))
-        inner_rset <- classif_folds_to_rset(tr, inner_id, inner_assess)
+        inner_rset <- classif_folds_to_rset(tr, inner_id, inner_assess, target = target)
         tuned_i <- tune::tune_grid(wf, resamples = inner_rset, grid = tune_grid_df,
                                    metrics = resample_metrics,
                                    control = tune::control_grid(save_pred = FALSE, verbose = FALSE))
@@ -769,6 +890,10 @@ run_classification_cv <- function(pts_sf, target, predictors,
         fold_wf <- tune::finalize_workflow(wf, bp_i)
       }
       fit_i <- parsnip::fit(fold_wf, data = tr)
+      if (length(classif_screened_out(fit_i))) {
+        fold_screen[[length(fold_screen) + 1]] <<-
+          data.frame(fold = i, covariate = classif_screened_out(fit_i), stringsAsFactors = FALSE)
+      }
       # Out-of-fold permutation importance: score THIS fold's model on the rows
       # it never saw, before they are used for anything else. Done here because
       # the fold's fitted workflow only exists inside this iteration — the
@@ -854,6 +979,7 @@ run_classification_cv <- function(pts_sf, target, predictors,
     # NULL unless oof_importance was requested; the pipeline falls back to the
     # training-row design in that case.
     importance = .classif_pool_fold_importance(imp_parts, predictors),
+    fold_screen = if (length(fold_screen)) do.call(rbind, fold_screen) else NULL,
     weights_applied = weights_applied
   )
 }
@@ -1259,7 +1385,8 @@ fit_classification_model <- function(pts_sf, target, predictors,
                                      strategy = c("spatial", "standard"),
                                      v = 10L, seed = 12345L,
                                      class_weights = FALSE,
-                                     cv_assessment_df = NULL, cv_fold_id = NULL) {
+                                     cv_assessment_df = NULL, cv_fold_id = NULL,
+                                     vif_threshold = NULL) {
   strategy <- match.arg(strategy)
   full_df <- as.data.frame(sf::st_drop_geometry(pts_sf))
   cc <- stats::complete.cases(full_df[, c(target, predictors), drop = FALSE])
@@ -1277,7 +1404,9 @@ fit_classification_model <- function(pts_sf, target, predictors,
   }
 
   n_cls <- nlevels(train_df[[target]])
-  rec <- classif_build_recipe(train_df, target, predictors, weight_col = weight_col)
+  screened_out <- .classif_screen_all_rows(train_df, predictors, vif_threshold)
+  rec <- classif_build_recipe(train_df, target, predictors, weight_col = weight_col,
+                              vif_threshold = vif_threshold)
   tune_params <- .classif_effective_tune_params(method, depth, n_cls)
   spec <- classif_build_spec(method, tune_params = tune_params, n_classes = n_cls)
   wf <- workflows::workflow() |>
@@ -1295,10 +1424,11 @@ fit_classification_model <- function(pts_sf, target, predictors,
     } else {
       .classif_fold_assessment(keep_sf, train_df, predictors, fold_id)
     }
-    rset <- classif_folds_to_rset(train_df, fold_id, assess_df)
+    rset <- classif_folds_to_rset(train_df, fold_id, assess_df, target = target)
     tuned <- .classif_with_seed(seed, {
       pset <- hardhat::extract_parameter_set_dials(wf)
-      pset <- dials::finalize(pset, x = train_df[, predictors, drop = FALSE])
+      # Ranges such as mtry <= p count the covariates an Auto-Drop screen keeps.
+      pset <- dials::finalize(pset, x = train_df[, setdiff(predictors, screened_out), drop = FALSE])
       grid <- dials::grid_space_filling(pset, size = .classif_grid_size(depth))
       tune::tune_grid(wf, resamples = rset,
                       grid = grid, metrics = classif_resample_metric_set(),
@@ -1308,9 +1438,25 @@ fit_classification_model <- function(pts_sf, target, predictors,
     wf <- tune::finalize_workflow(wf, final_params)
   }
 
+  # Auto-Drop: the tuning resamples above screened inside each split; the
+  # model itself is fitted on the covariates the same screen keeps on all
+  # rows, WITHOUT the custom step. The exported bundle is loaded in sessions
+  # that do not define step_vif_screen's methods, and it should not ask for
+  # covariates the model never uses.
+  if (is.numeric(vif_threshold) && length(vif_threshold) == 1 && is.finite(vif_threshold)) {
+    predictors <- setdiff(predictors, screened_out)
+    wf <- workflows::workflow() |>
+      workflows::add_recipe(classif_build_recipe(train_df, target, predictors, weight_col = weight_col)) |>
+      workflows::add_model(spec)
+    if (weights_applied) wf <- workflows::add_case_weights(wf, .case_wt)
+    if (!is.null(final_params)) wf <- tune::finalize_workflow(wf, final_params)
+  }
+
   fitted <- .classif_with_seed(seed, parsnip::fit(wf, data = train_df))
   list(workflow = fitted, levels = levels(train_df[[target]]),
+       # The covariates the fitted model uses (after an Auto-Drop screen).
        target = target, predictors = predictors, method = method,
+       screened_out = screened_out,
        # The hyperparameters this exported/deployed model was actually built
        # with (its own full-data tuning pass) — not the CV loop's selection.
        best_params = final_params,
@@ -1597,7 +1743,8 @@ classif_build_grid <- function(pts_proj, res = NULL,
   strict_warning <- if (isTRUE(strict_scope)) {
     strict_buffer_message(buffer_dist, res)
   } else NULL
-  grid_r <- terra::rast(terra::ext(bbox), resolution = res, crs = sf::st_crs(pts_proj)$wkt)
+  # Square cells of exactly `res` (grid_template, spatial_pipeline.R).
+  grid_r <- grid_template(bbox, res, sf::st_crs(pts_proj)$wkt)
   # Cell centres as a plain MATRIX, tested against the boundary a block at a
   # time, with the sf built ONCE from the survivors - the same shape
   # run_regional_interpolation uses, and for the same reason: an sfc_POINT
@@ -2005,6 +2152,7 @@ run_classification_pipeline <- function(df, target, predictors,
                                         importance_reps = 5L,
                                         importance_mode = c("oof", "training"),
                                         nested = FALSE,
+                                        vif_threshold = NULL,
                                         progress_dir = NULL,
                                         session_id = "classif",
                                         cancel_file = NULL) {
@@ -2090,6 +2238,7 @@ run_classification_pipeline <- function(df, target, predictors,
                               nested = nested,
                               oof_importance = identical(importance_mode, "oof"),
                               importance_reps = importance_reps,
+                              vif_threshold = vif_threshold,
                               cancel_file = cancel_file,
                               progress_cb = function(frac, label = NULL) report("cv", frac, label))
 
@@ -2130,8 +2279,14 @@ run_classification_pipeline <- function(df, target, predictors,
                                     v = v, seed = seed,
                                     class_weights = class_weights,
                                     cv_assessment_df = cv$assessment_df,
-                                    cv_fold_id = cv$fold_id)
+                                    cv_fold_id = cv$fold_id,
+                                    vif_threshold = vif_threshold)
   report("fit", 1)
+  # Auto-Drop: what the final model's screen removed on all rows, and what
+  # each CV fold's own screen removed on its training rows.
+  out$screened_out <- model$screened_out
+  out$cv_fold_screen <- cv$fold_screen
+  out$vif_threshold <- vif_threshold
 
   .classif_check_cancel(cancel_file)
   # Out-of-fold importance was already scored inside the CV loop (each fold's
@@ -2163,7 +2318,7 @@ run_classification_pipeline <- function(df, target, predictors,
       method_label = unname(classif_methods()[method]),
       target     = target,
       levels     = levs,
-      predictors = predictors,
+      predictors = model$predictors,
       class_weights_applied = isTRUE(model$weights_applied),
       tuning_depth = depth,
       # The exported workflow's OWN tuned hyperparameters (full-data tuning in
@@ -2208,8 +2363,10 @@ run_classification_pipeline <- function(df, target, predictors,
     .classif_check_cancel(cancel_file)
     report("covariates", 0,
            sprintf("Interpolating covariates onto %s grid cells...", n_cell_lab))
+    # model$predictors: a covariate the final model's screen removed is never
+    # read by the model, so it is not kriged.
     grid_aux <- build_classification_grid_aux(
-      pts, gr$grid_p, predictors,
+      pts, gr$grid_p, model$predictors,
       cancel_file = cancel_file,
       progress = function(f) report("covariates", f))
 

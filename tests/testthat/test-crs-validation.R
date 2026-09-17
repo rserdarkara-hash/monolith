@@ -625,12 +625,37 @@ test_that("Tier 2 refuses to decide when the best candidate is not decisively be
                                        tol_m = 2000, ratio = 1e4))
 })
 
-test_that("Tier 1 recognises degrees without any other evidence", {
+test_that("Tier 1 identifies degrees only with evidence beyond the value ranges", {
   fx <- make_utm33_fixture()
-  deg <- data.frame(x = fx$lon, y = fx$lat)
-  hit <- identify_input_crs(deg, "x", "y")
+
+  # Columns named as longitude/latitude: identified.
+  named <- data.frame(Longitude = fx$lon, lat = fx$lat)
+  hit <- identify_input_crs(named, "Longitude", "lat")
   expect_equal(hit$crs, "EPSG:4326")
   expect_equal(hit$evidence, "degrees")
+
+  # Same numbers under X/Y names: only a suggestion, nothing is set.
+  deg <- data.frame(x = fx$lon, y = fx$lat)
+  sug <- identify_input_crs(deg, "x", "y")
+  expect_null(sug$crs)
+  expect_equal(sug$suggest, "EPSG:4326")
+  expect_equal(sug$evidence, "degree_range")
+
+  # A local metre grid (a field plot) fits the same ranges and must not be
+  # declared degrees either.
+  plot_grid <- data.frame(X = c(2, 10, 25, 48), Y = c(5, 30, 44, 60))
+  expect_null(identify_input_crs(plot_grid, "X", "Y")$crs)
+
+  # A boundary that contains the points read as degrees is evidence.
+  pts <- sf::st_as_sf(fx, coords = c("lon", "lat"), crs = 4326)
+  bnd <- sf::st_sf(geometry = sf::st_as_sfc(sf::st_bbox(pts)))
+  by_bnd <- identify_input_crs(deg, "x", "y", boundary = bnd)
+  expect_equal(by_bnd$crs, "EPSG:4326")
+  expect_equal(by_bnd$fraction, 1)
+
+  # A boundary somewhere else is not.
+  far <- sf::st_sf(geometry = sf::st_as_sfc(sf::st_bbox(c(xmin = 100, ymin = -40, xmax = 110, ymax = -30), crs = sf::st_crs(4326))))
+  expect_null(identify_input_crs(deg, "x", "y", boundary = far)$crs)
 })
 
 test_that("Tier 2B identifies the CRS from an uploaded boundary", {

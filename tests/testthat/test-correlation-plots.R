@@ -339,6 +339,22 @@ test_that("kendall partial correlation matches the first-order partial tau", {
   ref <- (tau["a", "b"] - tau["a", "d"] * tau["b", "d"]) /
     sqrt((1 - tau["a", "d"]^2) * (1 - tau["b", "d"]^2))
   expect_equal(unname(pc$cormat[1, 2]), unname(ref), tolerance = 1e-10)
+
+  # Adding a third target must not condition a-b on it: every pair is
+  # partialled on the explicit controls only, like pearson/spearman. c is
+  # built to depend on a and b, so conditioning on it would move a-b.
+  df$c <- df$a + 0.5 * df$b + df$e
+  pc3 <- compute_partial_correlation(df, c("a", "b", "c"), "d", method = "kendall")
+  inv_all <- solve(cor(df[, c("a", "b", "c", "d")], method = "kendall"))
+  whole_matrix <- -inv_all["a", "b"] / sqrt(inv_all["a", "a"] * inv_all["b", "b"])
+  expect_gt(abs(whole_matrix - ref), 0.05)
+  expect_equal(pc3$k, 1L)
+  expect_equal(unname(pc3$cormat["a", "b"]), unname(ref), tolerance = 1e-10)
+  tau_c <- cor(df[, c("a", "c", "d")], method = "kendall")
+  ref_ac <- (tau_c["a", "c"] - tau_c["a", "d"] * tau_c["c", "d"]) /
+    sqrt((1 - tau_c["a", "d"]^2) * (1 - tau_c["c", "d"]^2))
+  expect_equal(unname(pc3$cormat["a", "c"]), unname(ref_ac), tolerance = 1e-10)
+  expect_equal(pc3$cormat, t(pc3$cormat))
 })
 
 test_that("compute_partial_correlation excludes self-controls and survives odd names", {

@@ -126,15 +126,17 @@ strict_buffer_message <- function(buffer, res, label = NULL) {
     res_arm)
 }
 
-#' Pooled display-layer values of two rasters, so a comparison view can share
-#' one colour scale. NULL when scales are not matched or for uncertainty maps.
-get_joint_scale_values <- function(r1_packed, r2_packed, match_scales, is_uncertainty) {
-  if(match_scales && !is_uncertainty) {
-    res <- c(raster_value_layer(r1_packed), raster_value_layer(r2_packed))
-    if(length(res) == 0) return(NULL)
-    return(res)
-  }
-  return(NULL)
+#' Pooled values of two rasters, so a comparison view can share one colour
+#' scale. `layer` "value" pools the predictions, "var" the prediction
+#' variances and "se" their square roots (a raster without a variance band
+#' contributes nothing). NULL when scales are not matched.
+get_joint_scale_values <- function(r1_packed, r2_packed, match_scales, layer = "value") {
+  if (!isTRUE(match_scales)) return(NULL)
+  band <- if (layer %in% c("se", "var")) "var1.var" else "var1.pred"
+  res <- c(raster_value_layer(r1_packed, band), raster_value_layer(r2_packed, band))
+  if (length(res) == 0) return(NULL)
+  if (identical(layer, "se")) res <- sqrt(res)
+  res
 }
 
 
@@ -427,6 +429,216 @@ shared_boundary_features <- function(shp, items, current_crs) {
   which(vapply(hit, function(h) length(unique(pts$l[h])) > 1, logical(1)))
 }
 
+#' Auto grid resolution for one boundary area: ~100,000 cells, clamped to
+#' [5, 1000] m. Shared by Auto (Per Locality) and Auto (Global).
+auto_grid_resolution <- function(area_m2) {
+  max(5, min(1000, sqrt(area_m2 / 100000)))
+}
+
+#' Raster template with SQUARE cells of exactly `res`, covering `bbox`.
+#' terra::rast(ext, resolution = res) keeps the extent and stretches the cells
+#' to fit it (a 1000 x 800 m box at 45 m gives 45.45 x 44.44 m cells), so the
+#' extent grows to whole cells instead, anchored at the box's lower-left corner.
+#' `snap = TRUE` anchors at the lattice of multiples of `res` in the CRS, so
+#' every locality gridded at the same `res` in the same CRS shares one lattice.
+grid_template <- function(bbox, res, crs_wkt, snap = FALSE) {
+  xmin <- bbox[["xmin"]]
+  ymin <- bbox[["ymin"]]
+  if (isTRUE(snap)) {
+    xmin <- floor(xmin / res) * res
+    ymin <- floor(ymin / res) * res
+  }
+  nx <- max(1, ceiling((bbox[["xmax"]] - xmin) / res - 1e-9))
+  ny <- max(1, ceiling((bbox[["ymax"]] - ymin) / res - 1e-9))
+  terra::rast(nrows = ny, ncols = nx, xmin = xmin, xmax = xmin + nx * res,
+              ymin = ymin, ymax = ymin + ny * res, crs = crs_wkt)
+}
+
+#' A locality's projected point sets, as run_regional_interpolation builds
+#' them. `ok = FALSE` carries the log message that ends the locality.
+.locality_points <- function(l, pts_data, current_crs, current_method, aux_vars, m_params) {
+  if (!is.numeric(pts_data$x)) pts_data$x <- as.numeric(as.character(pts_data$x))
+  if (!is.numeric(pts_data$y)) pts_data$y <- as.numeric(as.character(pts_data$y))
+
+  # Namespaced calls throughout: shared_auto_resolution() also runs this in the
+  # promise worker, where dplyr is not necessarily attached.
+  pts_raw <- dplyr::filter(pts_data, !is.na(x), !is.na(y))
+  if (nrow(pts_raw) < 3) {
+    return(list(ok = FALSE, msg = paste0("Warning in ", l, ": Insufficient data points after cleaning (needed >= 3, got ", nrow(pts_raw), ").")))
+  }
+
+  pts_raw <- sf::st_as_sf(pts_raw, coords=c("x","y"), crs=current_crs)
+
+  # The locality is projected ONCE, from every row carrying coordinates,
+  # BEFORE any covariate filter. The working CRS - for a geographic upload,
+  # the UTM zone of the locality's centre - is a property of the locality,
+  # not of which covariates happen to be selected. Filtering first let OK and
+  # RK/RFK/CK land in different zones, so their coordinates, variogram lags
+  # and spatial folds described different grids. A no-op for metre-projected
+  # input, where validate_and_project_sf returns its argument.
+  pts_all <- validate_and_project_sf(pts_raw)
+
+  if(nrow(pts_all) < 3) {
+    return(list(ok = FALSE, msg = paste0("Warning in ", l, ": Insufficient data points after UTM conversion (needed >= 3, got ", nrow(pts_all), ").")))
+  }
+
+  # The rows complete for every selected covariate: what RK/RFK/CK map with,
+  # and the CV population OK scores under the Comparable switch. Computed only
+  # where it is used - IDW and TPS can carry a stale covariate selection that
+  # the dispatch never validated, and all_of() would stop on a name the
+  # uploaded table no longer has.
+  uses_covariates <- current_method %in% c("RK", "RFK", "CK") ||
+    (identical(current_method, "OK") && identical(m_params$cv_population, "comparable"))
+  covariate_complete <- if (uses_covariates && length(aux_vars) > 0) {
+    dplyr::filter(pts_all, dplyr::if_all(dplyr::all_of(aux_vars), ~!is.na(.)))
+  } else pts_all
+
+  pts_projected <- if (current_method %in% c("RK", "RFK", "CK")) covariate_complete else pts_all
+
+  if (nrow(pts_projected) < 3) {
+    return(list(ok = FALSE, msg = paste0("Warning in ", l, ": Insufficient data points after covariate filtering (needed >= 3, got ", nrow(pts_projected), ").")))
+  }
+
+  pts <- pts_projected
+
+  coords <- sf::st_coordinates(pts)
+  c_round <- data.frame(
+    x = round(coords[, "X"], 2),
+    y = round(coords[, "Y"], 2)
+  )
+  pts <- pts[!duplicated(c_round), ]
+  if(nrow(pts) < 3) {
+    return(list(ok = FALSE, msg = paste0("Warning in ", l, ": Insufficient unique points after duplicate coordinate removal (needed >= 3, got ", nrow(pts), ").")))
+  }
+
+  list(ok = TRUE, pts_all = pts_all, utm_crs = sf::st_crs(pts_all)$wkt,
+       covariate_complete = covariate_complete, pts_projected = pts_projected, pts = pts)
+}
+
+#' A locality's boundary, as run_regional_interpolation builds it: the matching
+#' uploaded feature when one applies, else the selected hull or buffer of the
+#' deduplicated points. `warn` holds the progress-panel warnings and `log` the
+#' run-log lines, in the order the run writes them.
+.locality_boundary <- function(l, pts, current_crs, current_method, shp_bound, b_type,
+                               buff_mode, b_dist, res_mode, grid_res, shp_shared = integer(0)) {
+  warn <- character(0)
+  log <- character(0)
+  b_mode_safe <- if (!is.null(buff_mode) && length(buff_mode) > 0) buff_mode else "dynamic"
+  b_dist_safe <- if (!is.null(b_dist) && length(b_dist) > 0) b_dist else 250
+  grid_res_safe <- if (!is.null(grid_res) && length(grid_res) > 0) grid_res else 50
+  current_method_safe <- if (!is.null(current_method) && length(current_method) > 0) current_method else "OK"
+
+  coords_local <- sf::st_coordinates(pts)
+  if (!is.null(res_mode) && res_mode == "fixed") {
+    local_res <- grid_res_safe
+  } else if (nrow(coords_local) > 1) {
+    knn_res <- FNN::get.knn(coords_local, k = 1)
+    local_res <- mean(knn_res$nn.dist) * 0.5
+  } else {
+    local_res <- grid_res_safe
+  }
+
+  b_dist_local <- if (b_mode_safe == "dynamic" && b_type == "wrapped") {
+    val <- get_buffer_multiplier(current_method_safe) * local_res
+    max(5, min(2000, val))
+  } else {
+    b_dist_safe
+  }
+
+  local_shp <- NULL
+  if (!is.null(shp_bound)) {
+    shp_bound <- shp_assume_crs(shp_bound, current_crs)
+    match_col <- NULL
+    for(col_name in setdiff(colnames(shp_bound), attr(shp_bound, "sf_column"))) {
+      # na.rm: an attribute column that is entirely NA made any() return NA
+      # and the if() abort the locality.
+      if (any(as.character(shp_bound[[col_name]]) == l, na.rm = TRUE)) {
+        match_col <- col_name
+        break
+      }
+    }
+
+    if (!is.null(match_col)) {
+      local_shp <- dplyr::filter(shp_bound, !!rlang::sym(match_col) == l)
+      local_shp <- shp_boundary_polygons(sf::st_transform(local_shp, sf::st_crs(pts)))
+      if (is.null(local_shp)) {
+        warn <- c(warn, "Uploaded shapefile features for this locality do not enclose an area (fewer than 3 non-collinear points); using point-derived boundary.")
+      } else {
+        local_shp <- sf::st_union(local_shp)
+        # A name match is not a location match: a feature labelled with this
+        # locality that encloses none of its samples would move the grid
+        # away from the data, so it is refused like an unnamed one.
+        if (!any(sf::st_intersects(local_shp, sf::st_union(pts), sparse = FALSE))) {
+          local_shp <- NULL
+          warn <- c(warn, "Uploaded shapefile feature named for this locality does not overlap its samples; using point-derived boundary.")
+        }
+      }
+    } else {
+      local_shp <- tryCatch({
+        shp_trans <- tryCatch(shp_boundary_polygons(sf::st_transform(shp_bound, sf::st_crs(pts))),
+                              error = function(e) NULL)
+        if (!is.null(shp_trans)) {
+          intersects <- sf::st_intersects(shp_trans, sf::st_union(pts), sparse = FALSE)
+          eligible <- setdiff(which(intersects), shp_shared)
+          if (length(eligible)) {
+            sf::st_union(shp_trans[eligible[1], ])
+          } else {
+            NULL
+          }
+        } else NULL
+      }, error = function(e) NULL)
+      if (is.null(local_shp)) {
+        # The user supplied a boundary shapefile but it cannot be applied to
+        # this locality (projection failure or no spatial overlap); say so
+        # instead of silently swapping in the point-derived boundary.
+        msg <- if (length(shp_shared)) {
+          "Uploaded boundary has features shared by several run localities, and no unshared feature could be applied here; using the selected sidebar boundary. Add an attribute column containing locality names to assign features explicitly."
+        } else "Uploaded shapefile boundary could not be applied (projection or overlap issue); using point-derived boundary."
+        warn <- c(warn, msg)
+        log <- c(log, paste0(l, ": ", msg))
+      }
+    }
+  }
+
+  bound <- NULL
+  if (!is.null(local_shp)) {
+    bound <- local_shp
+  } else {
+    bound <- tryCatch({
+      b <- switch(b_type,
+             "convex"  = sf::st_convex_hull(sf::st_union(pts)),
+             "concave" = concaveman::concaveman(pts),
+             "wrapped" = sf::st_buffer(concaveman::concaveman(pts), dist = b_dist_local),
+             "strict"  = sf::st_union(sf::st_buffer(pts, dist = b_dist_local)))
+      sf::st_as_sf(sf::st_sfc(sf::st_geometry(b), crs = sf::st_crs(pts)))
+    }, error = function(e) {
+      sf::st_as_sf(sf::st_sfc(sf::st_convex_hull(sf::st_union(pts)), crs = sf::st_crs(pts)))
+    })
+  }
+
+  list(bound = bound, local_shp = local_shp, local_res = local_res,
+       b_dist_local = b_dist_local, grid_res_safe = grid_res_safe, warn = warn, log = log)
+}
+
+#' The one cell size of an Auto (Global) run: the Auto resolution of the
+#' LARGEST locality boundary, so every locality keeps at most ~100,000 cells
+#' and all share that size. Boundaries are built exactly as the run builds
+#' them. NA when no locality yields a boundary.
+shared_auto_resolution <- function(items, run_params) {
+  areas <- vapply(items, function(item) tryCatch({
+    pp <- .locality_points(item$l, item$pts_data, run_params$current_crs,
+                           run_params$current_method, run_params$aux_vars, item$m_params)
+    if (!isTRUE(pp$ok)) return(NA_real_)
+    lb <- .locality_boundary(item$l, pp$pts, run_params$current_crs, run_params$current_method,
+                             run_params$shp_bound, run_params$b_type, run_params$buff_mode,
+                             run_params$b_dist, run_params$res_mode, run_params$grid_res,
+                             run_params$shp_shared %||% integer(0))
+    as.numeric(sf::st_area(lb$bound))
+  }, error = function(e) NA_real_), numeric(1))
+  if (!any(is.finite(areas))) return(NA_real_)
+  auto_grid_resolution(max(areas, na.rm = TRUE))
+}
+
 #' One locality's whole run: clean, project and deduplicate the points, build
 #' the boundary and the prediction grid, screen and krige covariates, run the
 #' selected engine on the actual (and, in comparison mode, the predicted)
@@ -434,7 +646,7 @@ shared_boundary_features <- function(shp, items, current_crs) {
 #' of Packed rasters, CV objects and metrics, fitted models, boundary and points
 #' in `crs_sel`, and `log_msg`. Errors are reported in `log_msg`; only a
 #' cancellation raises.
-run_regional_interpolation <- function(item, current_method, current_crs, aux_vars, shp_bound, b_type, buff_mode, b_dist, res_mode, grid_res, crs_sel, comp_mode, val_type, progress_dir_val = tempdir(), session_id_val = "default", cancel_file_val = NULL, vif_threshold = 10, shp_shared = integer(0)) {
+run_regional_interpolation <- function(item, current_method, current_crs, aux_vars, shp_bound, b_type, buff_mode, b_dist, res_mode, grid_res, crs_sel, comp_mode, val_type, progress_dir_val = tempdir(), session_id_val = "default", cancel_file_val = NULL, vif_threshold = 10, shp_shared = integer(0), shared_res = NA_real_) {
   options(monolith_progress_dir = progress_dir_val)
   options(monolith_session_id = session_id_val)
   
@@ -450,166 +662,65 @@ run_regional_interpolation <- function(item, current_method, current_crs, aux_va
   # (NULL otherwise); the main session turns them into the mean +/- SD report.
   res_out <- list(l = l, r_a = NULL, r_p = NULL, r_res = NULL, bound = NULL, pts = NULL,
                   v_emp_act = NULL, v_fit_act = NULL, cv_act = NULL, cv_obj_act = NULL, cv_reps_act = NULL, summ_act = NULL, rf_act = NULL, gstat_act = NULL,
-                  v_emp_pre = NULL, v_fit_pre = NULL, cv_pre = NULL, cv_obj_pre = NULL, cv_reps_pre = NULL, summ_pre = NULL, rf_pre = NULL, gstat_pre = NULL, log_msg = "", actual_res = NULL)
+                  v_emp_pre = NULL, v_fit_pre = NULL, cv_pre = NULL, cv_obj_pre = NULL, cv_reps_pre = NULL, summ_pre = NULL, rf_pre = NULL, gstat_pre = NULL, log_msg = "", actual_res = NULL,
+                  cv_info_act = NULL, cv_info_pre = NULL)
   
   res_out <- tryCatch({
-    if (!is.numeric(pts_data$x)) pts_data$x <- as.numeric(as.character(pts_data$x))
-    if (!is.numeric(pts_data$y)) pts_data$y <- as.numeric(as.character(pts_data$y))
-    
-    pts_raw <- pts_data %>% dplyr::filter(!is.na(x), !is.na(y))
-    if (nrow(pts_raw) < 3) {
-      res_out$log_msg <- paste0("Warning in ", l, ": Insufficient data points after cleaning (needed >= 3, got ", nrow(pts_raw), ").")
+    pp <- .locality_points(l, pts_data, current_crs, current_method, aux_vars, m_params)
+    if (!isTRUE(pp$ok)) {
+      res_out$log_msg <- pp$msg
       return(res_out)
     }
-    
-    pts_raw <- pts_raw %>% sf::st_as_sf(coords=c("x","y"), crs=current_crs)
-    if (current_method %in% c("RK", "RFK", "CK") && length(aux_vars) > 0) {
-       pts_raw <- pts_raw %>% dplyr::filter(dplyr::if_all(dplyr::all_of(aux_vars), ~!is.na(.)))
-    }
-    
-    if (nrow(pts_raw) < 3) {
-      res_out$log_msg <- paste0("Warning in ", l, ": Insufficient data points after covariate filtering (needed >= 3, got ", nrow(pts_raw), ").")
-      return(res_out)
-    }
-    
-    pts_projected <- validate_and_project_sf(pts_raw)
-    utm_crs <- sf::st_crs(pts_projected)$wkt
-    pts <- pts_projected
-    
-    if(nrow(pts) < 3) {
-      res_out$log_msg <- paste0("Warning in ", l, ": Insufficient data points after UTM conversion (needed >= 3, got ", nrow(pts), ").")
-      return(res_out)
-    }
-    
-    coords <- sf::st_coordinates(pts)
-    c_round <- data.frame(
-      x = round(coords[, "X"], 2),
-      y = round(coords[, "Y"], 2)
-    )
-    pts <- pts[!duplicated(c_round), ]
-    if(nrow(pts) < 3) {
-      res_out$log_msg <- paste0("Warning in ", l, ": Insufficient unique points after duplicate coordinate removal (needed >= 3, got ", nrow(pts), ").")
-      return(res_out)
-    }
-    
-    b_mode_safe <- if (!is.null(buff_mode) && length(buff_mode) > 0) buff_mode else "dynamic"
-    b_dist_safe <- if (!is.null(b_dist) && length(b_dist) > 0) b_dist else 250
-    grid_res_safe <- if (!is.null(grid_res) && length(grid_res) > 0) grid_res else 50
-    current_method_safe <- if (!is.null(current_method) && length(current_method) > 0) current_method else "OK"
+    pts_all <- pp$pts_all
+    utm_crs <- pp$utm_crs
+    covariate_complete <- pp$covariate_complete
+    pts_projected <- pp$pts_projected
+    pts <- pp$pts
 
-    coords_local <- sf::st_coordinates(pts)
-    if (!is.null(res_mode) && res_mode == "fixed") {
-      local_res <- grid_res_safe
-    } else if (nrow(coords_local) > 1) {
-      knn_res <- FNN::get.knn(coords_local, k = 1)
-      local_res <- mean(knn_res$nn.dist) * 0.5
-    } else {
-      local_res <- grid_res_safe
-    }
-    
-    b_dist_local <- if (b_mode_safe == "dynamic" && b_type == "wrapped") {
-      val <- get_buffer_multiplier(current_method_safe) * local_res
-      max(5, min(2000, val))
-    } else {
-      b_dist_safe
-    }
-    
-    local_shp <- NULL
-    if (!is.null(shp_bound)) {
-      shp_bound <- shp_assume_crs(shp_bound, current_crs)
-      match_col <- NULL
-      for(col_name in setdiff(colnames(shp_bound), attr(shp_bound, "sf_column"))) {
-        # na.rm: an attribute column that is entirely NA made any() return NA
-        # and the if() abort the locality.
-        if (any(as.character(shp_bound[[col_name]]) == l, na.rm = TRUE)) {
-          match_col <- col_name
-          break
-        }
-      }
-      
-      if (!is.null(match_col)) {
-        local_shp <- shp_bound %>% dplyr::filter(!!sym(match_col) == l)
-        local_shp <- shp_boundary_polygons(sf::st_transform(local_shp, sf::st_crs(pts)))
-        if (is.null(local_shp)) {
-          write_warning_file(l, "act", "Uploaded shapefile features for this locality do not enclose an area (fewer than 3 non-collinear points); using point-derived boundary.")
-        } else {
-          local_shp <- sf::st_union(local_shp)
-          # A name match is not a location match: a feature labelled with this
-          # locality that encloses none of its samples would move the grid
-          # away from the data, so it is refused like an unnamed one.
-          if (!any(sf::st_intersects(local_shp, sf::st_union(pts), sparse = FALSE))) {
-            local_shp <- NULL
-            write_warning_file(l, "act", "Uploaded shapefile feature named for this locality does not overlap its samples; using point-derived boundary.")
-          }
-        }
-      } else {
-        local_shp <- tryCatch({
-          shp_trans <- tryCatch(shp_boundary_polygons(sf::st_transform(shp_bound, sf::st_crs(pts))),
-                                error = function(e) NULL)
-          if (!is.null(shp_trans)) {
-            intersects <- sf::st_intersects(shp_trans, sf::st_union(pts), sparse = FALSE)
-            eligible <- setdiff(which(intersects), shp_shared)
-            if (length(eligible)) {
-              shp_trans[eligible[1], ] %>% sf::st_union()
-            } else {
-              NULL
-            }
-          } else NULL
-        }, error = function(e) NULL)
-        if (is.null(local_shp)) {
-          # The user supplied a boundary shapefile but it cannot be applied to
-          # this locality (projection failure or no spatial overlap); say so
-          # instead of silently swapping in the point-derived boundary.
-          msg <- if (length(shp_shared)) {
-            "Uploaded boundary has features shared by several run localities, and no unshared feature could be applied here; using the selected sidebar boundary. Add an attribute column containing locality names to assign features explicitly."
-          } else "Uploaded shapefile boundary could not be applied (projection or overlap issue); using point-derived boundary."
-          write_warning_file(l, "act", msg)
-          res_out$log_msg <- paste0(res_out$log_msg, "\n", l, ": ", msg)
-        }
-      }
-    }
-    
-    bound <- NULL
-    if (!is.null(local_shp)) {
-      bound <- local_shp
-    } else {
-      bound <- tryCatch({
-        b <- switch(b_type,
-               "convex"  = sf::st_convex_hull(sf::st_union(pts)),
-               "concave" = concaveman::concaveman(pts),
-               "wrapped" = sf::st_buffer(concaveman::concaveman(pts), dist = b_dist_local),
-               "strict"  = sf::st_union(sf::st_buffer(pts, dist = b_dist_local)))
-        sf::st_as_sf(sf::st_sfc(sf::st_geometry(b), crs = sf::st_crs(pts)))
-      }, error = function(e) {
-        sf::st_as_sf(sf::st_sfc(sf::st_convex_hull(sf::st_union(pts)), crs = sf::st_crs(pts)))
-      })
-    }
-    
+    lb <- .locality_boundary(l, pts, current_crs, current_method, shp_bound, b_type,
+                             buff_mode, b_dist, res_mode, grid_res, shp_shared)
+    for (w in lb$warn) write_warning_file(l, "act", w)
+    for (g in lb$log) res_out$log_msg <- paste0(res_out$log_msg, "\n", g)
+    bound <- lb$bound
+    local_shp <- lb$local_shp
+    b_dist_local <- lb$b_dist_local
+    grid_res_safe <- lb$grid_res_safe
+
     bbox <- sf::st_bbox(bound)
     area_m2 <- as.numeric(sf::st_area(bound))
-    cell_area_target <- area_m2 / 100000 
-    
-    if (!is.null(res_mode) && res_mode == "fixed") {
-      actual_res <- grid_res_safe
-      # The raster template below spans the whole bounding box before the
-      # boundary clip, so a fine fixed resolution over a large extent puts
-      # hundreds of millions of candidate cells through the clip. Cap the
-      # candidate grid at ~4M cells, matching the floor classif_build_grid
-      # applies to both of its resolution modes. Fires only in that
-      # pathological case; ordinary fixed resolutions are untouched.
+
+    # The raster template spans the whole bounding box before the boundary
+    # clip, so a fine resolution over a large extent puts hundreds of millions
+    # of candidate cells through the clip. Cap the candidate grid at ~4M cells,
+    # matching the floor classif_build_grid applies to both of its resolution
+    # modes. Fires only in that pathological case.
+    cap_res <- function(res, what) {
       dx <- as.numeric(bbox["xmax"] - bbox["xmin"])
       dy <- as.numeric(bbox["ymax"] - bbox["ymin"])
       min_res_cap <- sqrt(dx * dy / 4e6)
-      if (is.finite(min_res_cap) && actual_res < min_res_cap) {
+      if (is.finite(min_res_cap) && res < min_res_cap) {
         write_warning_file(l, "act", sprintf(
-          "Fixed grid resolution %.1f m over this extent exceeds ~4M cells; coarsened to %.1f m to avoid exhausting memory.",
-          actual_res, min_res_cap))
-        actual_res <- min_res_cap
+          "%s %.1f m over this extent exceeds ~4M cells; coarsened to %.1f m to avoid exhausting memory.",
+          what, res, min_res_cap))
+        res <- min_res_cap
       }
+      res
+    }
+    shared_grid <- identical(res_mode, "global") && is.numeric(shared_res) &&
+      length(shared_res) == 1 && is.finite(shared_res)
+
+    if (!is.null(res_mode) && res_mode == "fixed") {
+      actual_res <- cap_res(grid_res_safe, "Fixed grid resolution")
       # Absolute sanity floor only. The slider itself cannot go below 5 m, but a
       # restored run-config could carry any value, and a sub-decimetre grid over
       # any real extent is a memory accident rather than an intent.
       actual_res <- max(actual_res, 0.1)
+    } else if (shared_grid) {
+      # Auto (Global): one cell size for every locality of the run, the Auto
+      # resolution of the largest boundary (shared_auto_resolution), on one
+      # snapped lattice. A strict-buffer boundary can span a far larger box
+      # than its area suggests, hence the same cap as Fixed.
+      actual_res <- cap_res(shared_res, "Shared Auto (Global) resolution")
     } else {
       # Auto is SELF-CONTAINED: the resolution follows this locality's own
       # boundary area (~100k cells), clamped to [5, 1000] m. It must NOT be
@@ -619,8 +730,10 @@ run_regional_interpolation <- function(item, current_method, current_crs, aux_va
       # spread dataset pushed the floor to ~50 m and silently coarsened every
       # compact locality's density-derived grid via an input the user could
       # neither see nor set.
-      actual_res <- sqrt(cell_area_target)
-      actual_res <- max(5, min(1000, actual_res))
+      if (identical(res_mode, "global")) {
+        write_warning_file(l, "act", "The shared Auto (Global) resolution could not be computed; this locality uses its own Auto resolution.")
+      }
+      actual_res <- auto_grid_resolution(area_m2)
     }
 
     # Authoritative strict-boundary coherence check: only here is the effective
@@ -645,7 +758,7 @@ run_regional_interpolation <- function(item, current_method, current_crs, aux_va
       }
     }
 
-    grid_r <- terra::rast(terra::ext(bbox), resolution = actual_res, crs = sf::st_crs(pts)$wkt)
+    grid_r <- grid_template(bbox, actual_res, sf::st_crs(pts)$wkt, snap = shared_grid)
 
     # Cell centres as a plain MATRIX first. An sfc_POINT stores every node as its
     # own classed numeric(2), ~430 bytes per cell against 16 for a matrix row:
@@ -734,6 +847,49 @@ run_regional_interpolation <- function(item, current_method, current_crs, aux_va
     run_pre <- comp_mode || val_type != "actual"
     pts_p <- if (run_pre) dedup_valid_points(pts_projected, "pv") else NULL
 
+    # Which samples each surface is cross-validated on. RK/RFK/CK can only use
+    # the covariate-complete rows. OK maps every sample with a measured target
+    # and scores those by default (Native); under the Comparable switch it is
+    # TRAINED AND SCORED on the covariate-complete rows instead, deduplicated
+    # and folded exactly as the covariate engines fold them, so a comparison
+    # between engines rests on the same samples and the same partition. The OK
+    # map still uses every sample either way.
+    ok_comparable <- identical(current_method, "OK") &&
+      identical(m_params$cv_population, "comparable") && length(aux_vars) > 0
+    cv_pop_label <- if (current_method %in% c("RK", "RFK", "CK")) "common rows"
+      else if (!identical(current_method, "OK")) NA_character_
+      else if (ok_comparable) "common rows" else "native rows"
+    cv_population_of <- function(surface_pts, target) {
+      if (!ok_comparable) return(surface_pts)
+      dedup_valid_points(covariate_complete, target)
+    }
+    # A population too small to fold leaves the engine's own CV plan unset; the
+    # engine then stops its CV with a named message and still draws the map.
+    # Only the kriging engines read a plan: IDW and TPS fold their own point
+    # set, so nothing is built for them.
+    attach_cv_plan <- function(mp, pop, prefix) {
+      if (is.na(cv_pop_label)) return(mp)
+      mp$cv_data <- pop
+      if (nrow(pop) >= 3) {
+        mp$cv_plan <- build_cv_plan(pop, m_params$cv_strategy, m_params$cv_repeats)
+      } else {
+        res_out$log_msg <<- paste0(res_out$log_msg, "\n[CV] ", l, " (", prefix,
+          "): the cross-validation population (", cv_pop_label, ") holds ", nrow(pop),
+          " samples; cross-validation skipped. The map is unaffected.")
+      }
+      mp
+    }
+    # Everything the main session needs to label, hash and explain this
+    # surface's cross-validation. Plain data only - it crosses the future.
+    cv_info_of <- function(mp, res_list) {
+      list(population = cv_pop_label,
+           row_id = mp$cv_plan$row_id, folds1 = mp$cv_plan$folds[[1]],
+           n_expected = mp$cv_plan$n,
+           conditional = res_list$cv_conditional,
+           vgm_col = res_list$cv_vgm_col,
+           screen = res_list$cv_screen)
+    }
+
     # NULL = unresolved (gate failed); the engine then recomputes it itself.
     resolve_aux_kept <- function(p, prefix = "act") {
       if (is.null(p) || nrow(p) < 3) return(character(0))
@@ -754,10 +910,9 @@ run_regional_interpolation <- function(item, current_method, current_crs, aux_va
         }
         return(aux_vars)
       }
-      tryCatch(
-        check_vif(sf::st_drop_geometry(p)[, aux_vars, drop = FALSE], threshold = vif_threshold)$kept,
-        error = function(e) NULL
-      )
+      # The same screen every CV fold runs on its own training rows, so the map
+      # and the folds can never screen by different rules.
+      tryCatch(screen_covariates(p, aux_vars, vif_threshold)$kept, error = function(e) NULL)
     }
 
     grid_aux <- grid_p
@@ -815,8 +970,10 @@ run_regional_interpolation <- function(item, current_method, current_crs, aux_va
         }
         lags_a <- calc_scientific_lags(pts_a)
         mp_a <- list(idw_p = m_params$idw_p_act, idw_nmax = m_params$idw_nmax, cov_params = list(idw_p = m_params$idw_p_act, idw_nmax = m_params$idw_nmax), tps_lambda = m_params$tps_lambda_act, pre_fit = m_params$pre_fit_act, grid_aux = grid_aux, cv_strategy = m_params$cv_strategy, cv_repeats = m_params$cv_repeats, cancel_file = cancel_file_val, rfk_uncertainty = m_params$rfk_uncertainty, rf_ntree = m_params$rf_ntree, ck_nmax = m_params$ck_nmax, aux_kept = aux_kept_a)
+        mp_a <- attach_cv_plan(mp_a, cv_population_of(pts_a, "v"), "act")
         if (!is.null(cancel_file_val) && file.exists(cancel_file_val)) stop("Model generation cancelled by user.")
         res_a_list <- apply_interpolation(pts_a, "v", current_method, grid_p, aux_vars, lags_a, mp_a, l, "act", vif_threshold)
+        res_out$cv_info_act <- cv_info_of(mp_a, res_a_list)
         res_out$v_emp_act <- res_a_list$v_emp; res_out$v_fit_act <- res_a_list$fit; res_out$cv_act <- res_a_list$cv_metrics; res_out$cv_obj_act <- res_a_list$cv_obj
         res_out$cv_reps_act <- res_a_list$cv_obj_reps
         res_out$tps_fit_act <- res_a_list$tps_fit
@@ -875,8 +1032,19 @@ run_regional_interpolation <- function(item, current_method, current_crs, aux_va
             }
             lags_p <- calc_scientific_lags(pts_p)
             mp_p <- list(idw_p = m_params$idw_p_pre, idw_nmax = m_params$idw_nmax, cov_params = list(idw_p = m_params$idw_p_act, idw_nmax = m_params$idw_nmax), tps_lambda = m_params$tps_lambda_pre, pre_fit = m_params$pre_fit_pre, grid_aux = grid_aux, cv_strategy = m_params$cv_strategy, cv_repeats = m_params$cv_repeats, cancel_file = cancel_file_val, rfk_uncertainty = m_params$rfk_uncertainty, rf_ntree = m_params$rf_ntree, ck_nmax = m_params$ck_nmax, aux_kept = aux_kept_p)
+            mp_p <- attach_cv_plan(mp_p, cv_population_of(pts_p, "pv"), "pre")
             if (!is.null(cancel_file_val) && file.exists(cancel_file_val)) stop("Model generation cancelled by user.")
+            if (current_method == "OK" && isFALSE(m_params$sep_fit) && is.null(mp_p$pre_fit)) {
+              if (!is.null(res_out$v_fit_act)) {
+                mp_p$shared_fit <- res_out$v_fit_act
+                mp_p$vgm_col <- "v"
+              } else {
+                res_out$log_msg <- paste0(res_out$log_msg, "\n[Variogram] No Actual fit is available for ", l,
+                                           "; the Predicted surface fits its own variogram.")
+              }
+            }
             res_p_list <- apply_interpolation(pts_p, "pv", current_method, grid_p, aux_vars, lags_p, mp_p, l, "pre", vif_threshold)
+            res_out$cv_info_pre <- cv_info_of(mp_p, res_p_list)
             res_out$v_emp_pre <- res_p_list$v_emp; res_out$v_fit_pre <- res_p_list$fit; res_out$cv_pre <- res_p_list$cv_metrics; res_out$cv_obj_pre <- res_p_list$cv_obj
             res_out$cv_reps_pre <- res_p_list$cv_obj_reps
             res_out$tps_fit_pre <- res_p_list$tps_fit
@@ -937,37 +1105,34 @@ run_regional_interpolation <- function(item, current_method, current_crs, aux_va
         res_out$r_point_err <- terra::wrap(r_err)
     }
     
-    # Residuals belong to the dedup_valid_points() sets (pts_a / pts_p: NA-
-    # filtered THEN deduped), while pts is only coordinate-deduped. When co-
-    # located points differ in NA pattern the two sets keep different rows, so
-    # positional assignment via !is.na(pts$v) can silently recycle/shift
-    # residuals onto the wrong points. Join on the rounded-coordinate key (the
-    # same 2-dp key both dedup passes use) instead.
+    # The CV object is the only carrier of cross-validation residuals, and it
+    # names the samples it scored through its own geometry: a surface's CV
+    # population need not be its point set (OK Comparable scores the covariate-
+    # complete rows), so a positional vector would have to match a point set it
+    # does not name. Join on the rounded-coordinate key, the same 2-dp key both
+    # dedup passes use; `pts` is coordinate-deduped, so the key is unique there.
     coord_key <- function(s) {
       cc <- sf::st_coordinates(s)
       paste(round(cc[, 1], 2), round(cc[, 2], 2))
     }
-    pts$model_resid_act <- NA_real_
-    # inherits = FALSE: without it the lookup walks up to globalenv(), which the
-    # workers source() this file into, so a leftover object of that name from a
-    # previous item could satisfy the guard.
-    if (nrow(pts_a) >= 3 && exists("res_a_list", inherits = FALSE) && !is.null(res_a_list$residuals) &&
-        length(res_a_list$residuals) == nrow(pts_a)) {
-      idx_a <- match(coord_key(pts_a), coord_key(pts))
-      ok_a <- !is.na(idx_a)
-      pts$model_resid_act[idx_a[ok_a]] <- res_a_list$residuals[ok_a]
+    join_cv_residuals <- function(cv_obj) {
+      out <- rep(NA_real_, nrow(pts))
+      if (inherits(cv_obj, "Spatial")) cv_obj <- tryCatch(sf::st_as_sf(cv_obj), error = function(e) NULL)
+      if (!inherits(cv_obj, "sf") || nrow(cv_obj) == 0) return(out)
+      idx <- match(coord_key(cv_obj), coord_key(pts))
+      ok <- !is.na(idx)
+      out[idx[ok]] <- get_cv_residuals(cv_obj, nrow(cv_obj))[ok]
+      out
     }
-
-    pts$model_resid_pre <- NA_real_
-    if (run_pre && nrow(pts_p) >= 3 && exists("res_p_list", inherits = FALSE) && !is.null(res_p_list$residuals) &&
-        length(res_p_list$residuals) == nrow(pts_p)) {
-      idx_p <- match(coord_key(pts_p), coord_key(pts))
-      ok_p <- !is.na(idx_p)
-      pts$model_resid_pre[idx_p[ok_p]] <- res_p_list$residuals[ok_p]
-    }
+    pts$model_resid_act <- join_cv_residuals(res_out$cv_obj_act)
+    pts$model_resid_pre <- if (run_pre) join_cv_residuals(res_out$cv_obj_pre) else NA_real_
 
     res_out$bound <- sf::st_transform(bound, crs_sel)
     res_out$pts <- sf::st_transform(pts, crs_sel) %>% dplyr::mutate(loc = l, resid = v - pv)
+    # Row identity is internal plumbing for the CV plan. rv$sf IS res_out$pts,
+    # and the popup system, the point colour-by and the label field all offer
+    # its columns by name, so it must not survive the trip back.
+    res_out$pts[[CV_ROW_ID_COL]] <- NULL
     res_out$actual_res <- actual_res
     
     res_out
@@ -1058,11 +1223,15 @@ get_buffer_multiplier <- function(method) {
 # first layer), accepting both live and Packed SpatRasters. PackedSpatRaster
 # is NOT subsettable ([[/values error on it), so every consumer that can see
 # a raster that crossed a future boundary must go through this.
-raster_value_layer <- function(r) {
+# `band = "var1.var"` reads the prediction-variance band instead, and returns
+# NULL when the raster has none (never the prediction band in its place).
+raster_value_layer <- function(r, band = "var1.pred") {
   if (is.null(r)) return(NULL)
   if (inherits(r, "PackedSpatRaster")) r <- terra::unwrap(r)
   if (!inherits(r, "SpatRaster")) return(NULL)
-  layer <- if ("var1.pred" %in% names(r)) r[["var1.pred"]] else r[[1]]
+  layer <- if (band %in% names(r)) r[[band]]
+           else if (identical(band, "var1.pred")) r[[1]]
+           else return(NULL)
   as.vector(terra::values(layer, na.rm = TRUE))
 }
 
@@ -1190,7 +1359,8 @@ interp_run_item <- function(item, run_params) {
     session_id_val = run_params$session_id_val,
     cancel_file_val = run_params$cancel_file_val,
     vif_threshold = run_params$vif_threshold,
-    shp_shared = run_params$shp_shared %||% integer(0)
+    shp_shared = run_params$shp_shared %||% integer(0),
+    shared_res = run_params$shared_res %||% NA_real_
   )
 }
 

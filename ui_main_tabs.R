@@ -155,7 +155,7 @@ ui_main_tabs <- mainPanel(width = 9,
                                  )
                              ),
                                  uiOutput("locality_pan_ui"),
-                                 div(title = "Switch between the surfaces computed by the last interpolation run. Rerun to change variable or method.",
+                                 div(title = "Switch between the surfaces computed by the last interpolation run, and, for a kriging run (OK, RK, RFK, CK), their standard-error and variance maps. Rerun to change variable or method.",
                                      uiOutput("map_view_ui")),
                              div(class = "mn-tb-spacer"),
                              actionButton("refresh_map_area", "Refresh", icon = icon("sync"), class = "btn-default btn-sm"),
@@ -206,10 +206,12 @@ ui_main_tabs <- mainPanel(width = 9,
                          ),
                          uiOutput("map_crs_stale_note"),
                          uiOutput("run_config_display_map"),
-                         conditionalPanel(condition = "!input.map_view || ['view_act', 'view_pred'].includes(input.map_view)",
+                         # View ids: view_<act|pred|comp|resid>, the first three with an
+                         # optional _se/_var uncertainty suffix (parse_map_view).
+                         conditionalPanel(condition = "!input.map_view || /^view_(act|pred)(_se|_var)?$/.test(input.map_view)",
                                           h4(textOutput("main_map_title")),
                                           leafletOutput("main_map", height = "700px")),
-                         conditionalPanel(condition = "['view_comp', 'view_resid'].includes(input.map_view)",
+                         conditionalPanel(condition = "/^view_(comp(_se|_var)?|resid)$/.test(input.map_view || '')",
                                           fluidRow(column(6, h4(textOutput("comp_left_title")), leafletOutput("comp_map_left", height = "600px")),
                                                    column(6, h4(textOutput("comp_right_title")), leafletOutput("comp_map_right", height = "600px")))),
                          # Scale controls are moved here directly by the

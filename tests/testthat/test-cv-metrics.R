@@ -766,25 +766,196 @@ test_that("perform_cv agrees with yardstick on the metrics they share", {
   expect_equal(m$n, length(o))
 })
 
-test_that("krige.cv LOOCV equals a hand-written leave-one-out loop", {
+# ── Kriging CV plan, fold runner and coverage ─────────────────────────────
+
+test_that("build_cv_plan carries row identity and the existing fold realizations", {
+  pts <- golden_sf("core")
+  # Row ids above 1e5 must stay integers (as.character(1e5) is "1e+05").
+  pts$.mn_row_id <- seq_len(nrow(pts)) + 100000L
+  for (strategy in c("auto", "block", "loocv")) {
+    plan <- build_cv_plan(pts, strategy, 3L)
+    expect_identical(plan$row_id, pts$.mn_row_id)
+    expect_equal(plan$n, nrow(pts))
+    expect_identical(plan$label, resolve_cv_plan(strategy, nrow(pts))$label)
+    expect_length(plan$folds, cv_repeat_count(3L, strategy, nrow(pts)))
+    for (r in seq_along(plan$folds)) {
+      expect_identical(plan$folds[[r]], make_cv_folds(sf::st_coordinates(pts), strategy,
+        nrow(pts), CV_FOLD_SEED + r - 1L))
+    }
+  }
+  pts$.mn_row_id <- NULL
+  expect_identical(build_cv_plan(pts)$row_id, seq_len(nrow(pts)))
+})
+
+test_that("cv_population_id identifies the rows and the partition that were scored", {
+  ids <- c(1L, 2L, 100000L)
+  folds <- c(1L, 2L, 1L)
+  id <- cv_population_id("ph", ids, folds)
+
+  # The definition: md5 of "<key>|<row ids>|<fold ids>", ids written as
+  # integers (as.character(1e5) is "1e+05"), first 8 hex characters.
+  expect_identical(id, substr(unname(tools::md5sum(
+    bytes = charToRaw(enc2utf8("ph|1,2,100000|1,2,1")))), 1, 8))
+  expect_match(id, "^[0-9a-f]{8}$")
+  expect_identical(cv_population_id("ph", ids, folds), id)
+
+  # Every component is part of the identity.
+  expect_false(identical(cv_population_id("ph", c(1L, 2L, 100001L), folds), id))
+  expect_false(identical(cv_population_id("ph", ids, c(1L, 2L, 2L)), id))
+  expect_false(identical(cv_population_id("tn", ids, folds), id))
+  expect_true(is.na(cv_population_id("ph", integer(0), integer(0))))
+
+  # The pooled id is the same hash over the localities' own ids, sorted, so the
+  # order localities happen to complete in cannot change it.
+  a <- cv_population_id("ph", 1:3, c(1L, 1L, 2L))
+  b <- cv_population_id("ph", 4:6, c(1L, 2L, 2L))
+  expect_identical(cv_pooled_population_id(list(Kale = a, Tavas = b)),
+                   cv_pooled_population_id(list(Tavas = b, Kale = a)))
+  expect_identical(cv_pooled_population_id(list(Kale = a, Tavas = b)),
+                   substr(unname(tools::md5sum(bytes = charToRaw(enc2utf8(
+                     paste(sort(c(paste0("Kale:", a), paste0("Tavas:", b))), collapse = "|"))))), 1, 8))
+  expect_true(is.na(cv_pooled_population_id(list())))
+})
+
+test_that("kriging fold runner exposes coordinates only and preserves population order", {
+  pts <- make_test_points(6)
+  pts$v <- 1:6
+  folds <- c(2L, 2L, 5L, 5L, 9L, 9L)
+  cv <- run_kriging_folds(pts, "v", 101:106, folds, function(train, newdata, i) {
+    expect_identical(names(newdata), "geometry")
+    list(pred = rep(mean(train$v), nrow(newdata)), var = rep(i, nrow(newdata)),
+         meta = list(n_train = nrow(train)))
+  })
+  expect_identical(names(cv), c("row_id", "fold", "observed", "var1.pred", "var1.var", "residual", "geometry"))
+  expect_identical(cv$row_id, 101:106)
+  expect_identical(cv$fold, folds)
+  # Fold 2 trains on rows 3-6 (mean 4.5), fold 5 on 1, 2, 5, 6 (3.5), fold 9 on 1-4 (2.5).
+  expect_equal(cv$var1.pred, c(4.5, 4.5, 3.5, 3.5, 2.5, 2.5))
+  expect_equal(cv$var1.var, c(2, 2, 5, 5, 9, 9))
+  expect_equal(cv$residual, (1:6) - cv$var1.pred)
+  expect_equal(sf::st_geometry(cv), sf::st_geometry(pts))
+  expect_equal(sf::st_crs(cv), sf::st_crs(pts))
+  expect_identical(attr(cv, "cv_notes"), character(0))
+  expect_equal(attr(cv, "cv_fold_meta")[["5"]]$n_train, 4)
+})
+
+test_that("kriging fold runner keeps failed and undefined predictions as named NA rows", {
+  pts <- make_test_points(6)
+  cv <- run_kriging_folds(pts, "v", 1:6, rep(1:3, each = 2), function(train, newdata, i) {
+    if (i == 1L) stop("forced training failure")
+    if (i == 2L) return(list(pred = 1))
+    list(pred = c(Inf, 2))
+  })
+  expect_equal(nrow(cv), 6)
+  expect_equal(cv$var1.pred, c(rep(NA_real_, 5), 2))
+  expect_true(all(is.na(cv$var1.var)))
+  expect_equal(cv$observed, pts$v)
+  notes <- attr(cv, "cv_notes")
+  expect_true(any(grepl("fold 1: forced training failure", notes, fixed = TRUE)))
+  expect_true(any(grepl("fold 2:", notes, fixed = TRUE)))
+  expect_true(any(grepl("fold 3: 1 of 2 predictions undefined", notes, fixed = TRUE)))
+})
+
+test_that("kriging fold runner cancels before fitting and throttles progress", {
+  pts <- make_test_points(50)
+  cancel <- tempfile()
+  file.create(cancel)
+  withr::defer(unlink(cancel))
+  called <- FALSE
+  expect_error(run_kriging_folds(pts, "v", 1:50, 1:50, function(...) {
+    called <<- TRUE
+  }, cancel_file = cancel), "Model generation cancelled by user", fixed = TRUE)
+  expect_false(called)
+  writes <- numeric(0)
+  orig <- update_progress_file
+  withr::defer(assign("update_progress_file", orig, envir = globalenv()))
+  assign("update_progress_file", function(l, prefix, step, total) {
+    writes <<- c(writes, step)
+  }, envir = globalenv())
+  run_kriging_folds(pts, "v", 1:50, 1:50, function(train, newdata, i) list(pred = mean(train$v)),
+    progress = list(l = "test", prefix = "act", from = 50, to = 90))
+  expect_lte(length(writes), 21L)
+  expect_equal(tail(writes, 1), 90)
+  expect_true(all(diff(writes) >= 0))
+})
+
+test_that("CV coverage counts every observed row, including early returns", {
+  df <- data.frame(observed = c(1, NA, 3, 4, 5), var1.pred = c(2, 8, NA, 4, 6))
+  m <- perform_cv(df, moran = FALSE, round_values = FALSE)
+  expect_equal(m$n_expected, 4)
+  expect_equal(m$n, 3)
+  expect_equal(m$coverage, 3 / 4)
+  # residuals of the predicted rows: -1, 0, -1
+  expect_equal(m$rmse, sqrt(2 / 3))
+  one <- perform_cv(df[1, ], moran = FALSE)
+  expect_equal(one$n_expected, 1)
+  expect_equal(one$n, 1)
+  expect_equal(one$coverage, 1)
+  expect_true(is.na(one$rmse))
+  absent <- perform_cv(data.frame(observed = 1:3))
+  expect_equal(absent$n_expected, 3)
+  expect_equal(absent$n, 0)
+  expect_equal(absent$coverage, 0)
+  for (x in list(NULL, df[FALSE, ], data.frame(observed = NA_real_, var1.pred = 1))) {
+    empty <- perform_cv(x)
+    expect_equal(empty$n_expected, 0)
+    expect_equal(empty$n, 0)
+    expect_true(is.na(empty$coverage))
+  }
+})
+
+test_that("repeat summaries report the range of predicted sample counts", {
+  a <- data.frame(observed = 1:4, var1.pred = c(1, 3, 2, 4))
+  b <- a; b$var1.pred[1:2] <- NA
+  res <- summarise_cv_repeats(list(a, b))
+  expect_equal(res$n_expected, 4)
+  expect_equal(res$n_min, 2)
+  expect_equal(res$n_max, 4)
+  expect_equal(res$n, 4)
+})
+
+test_that("CV pooling normalizes mixed schemas and rejects malformed spatial entries", {
+  a <- golden_sf("tiny")[1:5, ]
+  a$observed <- a$ph; a$var1.pred <- a$ph + 1
+  # A TPS-style frame (x/y attribute columns, no variance), passed as Spatial.
+  b <- a[, c("observed", "var1.pred")]
+  b$x <- sf::st_coordinates(b)[, 1]; b$y <- sf::st_coordinates(b)[, 2]
+  b$extra <- 1
+  pooled <- pool_cv_sf(list(a = a, b = as(b, "Spatial")))
+  expect_s3_class(pooled, "sf")
+  expect_equal(nrow(pooled), 10)
+  expect_identical(names(pooled), c("observed", "var1.pred", "geometry"))
+  # A spatial entry with no CV columns makes the pool NULL, never a subset.
+  malformed <- a[, "ph", drop = FALSE]
+  expect_null(pool_cv_sf(list(a = a, malformed = malformed)))
+  expect_null(pool_cv_sf(list(malformed)))
+  # Nor does an entry whose CRS cannot reach the common frame drop out quietly.
+  eng <- sf::st_crs(paste0('ENGCRS["local grid",EDATUM["site"],CS[Cartesian,2],',
+    'AXIS["easting",east,ORDER[1],LENGTHUNIT["metre",1]],',
+    'AXIS["northing",north,ORDER[2],LENGTHUNIT["metre",1]]]'))
+  local <- sf::st_set_crs(sf::st_set_crs(a, NA), eng)
+  expect_null(suppressWarnings(pool_cv_sf(list(a = a, local = local))))
+})
+
+test_that("the pooled row counts the expected samples of a locality whose CV failed outright", {
   pts <- golden_sf("tiny")
-  lags <- calc_scientific_lags(pts)
-  fit <- suppressWarnings(
-    robust_vgm_fit(gstat::variogram(ph ~ 1, pts, width = lags$width,
-                                    cutoff = lags$cutoff), pts$ph))
-
-  cv <- gstat::krige.cv(ph ~ 1, pts, model = fit, nfold = nrow(pts),
-                        debug.level = 0)
-  # Refit the whole system n times, each without one point. LOOCV means exactly
-  # this and nothing else, so any short cut in the engine's fold handling shows
-  # up here.
-  hand <- vapply(seq_len(nrow(pts)), function(i) {
-    gstat::krige(ph ~ 1, pts[-i, ], pts[i, ], model = fit,
-                 debug.level = 0)$var1.pred
-  }, numeric(1))
-
-  expect_equal(cv$var1.pred, hand, tolerance = 1e-10)
-  expect_equal(cv$observed, pts$ph)
+  a <- pts[1:6, ];  a$observed <- a$ph; a$var1.pred <- a$ph + 0.1
+  b <- pts[7:10, ]; b$observed <- b$ph; b$var1.pred <- b$ph - 0.1
+  # Locality C produced no CV object: 0 of its 5 expected samples were scored,
+  # so it adds nothing to the pool but must still count as expected.
+  # (moran = FALSE: only the sample accounting is under test, and Moran's I on
+  # 4-6 points draws an spdep p-value warning.)
+  metrics <- list(A = perform_cv(a, moran = FALSE), B = perform_cv(b, moran = FALSE),
+                  C = list(n = 0, n_expected = 5, coverage = 0))
+  res <- perform_pooled_cv(list(A = a, B = b), metrics)
+  expect_equal(res$n, 10)
+  expect_equal(res$n_expected, 15)
+  expect_equal(res$coverage, 10 / 15)
+  expect_equal(res$rmse, perform_cv(pool_cv_sf(list(A = a, B = b)), moran = FALSE)$rmse)
+  complete <- perform_pooled_cv(list(A = a, B = b), metrics[c("A", "B")])
+  expect_equal(complete$n_expected, 10)
+  expect_equal(complete$coverage, 1)
+  expect_null(perform_pooled_cv(list()))
 })
 
 test_that("spatial block folds are spatially compact and random folds are not", {
@@ -821,21 +992,40 @@ test_that("cv_metrics_export_df reports every perform_cv metric, numerically", {
   set.seed(11)
   cv <- data.frame(var1.observed = rnorm(60, 10, 2))
   cv$var1.pred <- cv$var1.observed + rnorm(60, 0, 0.4)
+  # One fold produced no predictions, so the row is INCOMPLETE and the export
+  # has to say how many of the expected samples were actually scored.
+  cv$var1.pred[1:3] <- NA_real_
   res <- perform_cv(cv, moran = FALSE)
 
-  out <- cv_metrics_export_df(res, "Actual Model", "Standard LOOCV")
+  info <- list(population = "common rows", pop_id = "a1b2c3d4", refit = "per fold")
+  out <- cv_metrics_export_df(res, "Actual Model", "Standard LOOCV", info)
 
   expect_equal(nrow(out), 1)
-  expect_equal(names(out), c("Source", "CV Design", "n", unname(CV_METRIC_LABELS)))
+  expect_equal(names(out), c("Source", "CV Design", "CV Population", "CV Population ID",
+                             "CV Refit", "n expected", "n predicted", "Coverage (%)",
+                             unname(CV_METRIC_LABELS)))
   expect_equal(out$Source, "Actual Model")
   expect_equal(out$`CV Design`, "Standard LOOCV")
-  expect_equal(out$n, res$n)
+  expect_equal(out$`CV Population`, "common rows")
+  expect_equal(out$`CV Population ID`, "a1b2c3d4")
+  expect_equal(out$`CV Refit`, "per fold")
+  # Coverage is predicted / expected as a percentage, derived here rather than
+  # read off the builder.
+  expect_equal(out$`n expected`, 60L)
+  expect_equal(out$`n predicted`, 57L)
+  expect_equal(out$`Coverage (%)`, 100 * 57 / 60)
   # every value comes straight off perform_cv, and stays a number
   for (k in names(CV_METRIC_LABELS)) {
     col <- out[[unname(CV_METRIC_LABELS[[k]])]]
     expect_true(is.numeric(col), info = k)
     expect_equal(col, as.numeric(res[[k]] %||% NA_real_), info = k)
   }
+  # Without a cv_info the three population columns are NA, never absent: a
+  # workbook whose sheets carry different columns cannot be read as one table.
+  bare <- cv_metrics_export_df(res, "Actual Model")
+  expect_equal(names(bare), names(out))
+  expect_true(is.na(bare$`CV Population`) && is.na(bare$`CV Population ID`) &&
+                is.na(bare$`CV Refit`))
   expect_null(cv_metrics_export_df(NULL, "x"))
 })
 
@@ -864,7 +1054,12 @@ test_that("cv_repeats_export_df splits mean and SD into numeric columns", {
   out <- cv_repeats_export_df(summ, "Actual Model")
 
   expect_equal(nrow(out), length(CV_REPEAT_METRICS))
-  expect_equal(names(out), c("Source", "Fold realizations", "n", "Metric", "Mean", "SD"))
+  expect_equal(names(out), c("Source", "Fold realizations", "n expected",
+                             "min n predicted", "max n predicted", "n",
+                             "Metric", "Mean", "SD"))
+  expect_equal(out$`n expected`, rep(as.integer(summ$n_expected), nrow(out)))
+  expect_equal(out$`min n predicted`, rep(as.integer(summ$n_min), nrow(out)))
+  expect_equal(out$`max n predicted`, rep(as.integer(summ$n_max), nrow(out)))
   expect_equal(out$Metric, unname(CV_REPEAT_METRICS))
   expect_true(is.numeric(out$Mean) && is.numeric(out$SD))
   expect_equal(out$Mean, unname(vapply(names(CV_REPEAT_METRICS),

@@ -831,6 +831,8 @@ classif_server <- function(id, data_reactive, vars_metadata_reactive, spatial_re
           if (thr < 10) shiny::tags$p(
             "Random Forest note: predictions are barely affected by keeping them, but the permutation feature importance will be artificially split between the correlated covariates, so genuinely important variables can look weak. Dropping them yields a cleaner importance ranking."),
           shiny::tags$p(shiny::tags$b("Recommended to drop:"), paste(labs, collapse = ", ")),
+          shiny::tags$p(style = "font-size: 0.9em;",
+            "Auto-Drop reruns this screen on the training rows of every cross-validation fold and tuning resample, and on all rows for the final model, so the reported accuracy includes the screening step. A fold can therefore drop a slightly different set; the run summary lists how often each covariate was dropped."),
           # Constants travel in the same `dropped` vector; name them for what
           # they are rather than presenting them as a collinearity problem.
           if (length(intersect(flagged, chk$dropped_constant %||% character(0))) > 0) {
@@ -849,8 +851,14 @@ classif_server <- function(id, data_reactive, vars_metadata_reactive, spatial_re
         ))
         return()
       }
-      dropped <- if (identical(cl_rv$vif_decision, "drop")) flagged else character(0)
-      launch_run(setdiff(preds, dropped), dropped)
+      # Auto-Drop hands the pipeline the threshold, not a drop list: the screen
+      # reruns on the training rows of every fit (step_vif_screen), so the
+      # covariates held out of a fold never help choose its predictors. The
+      # flagged list only guards against a run with nothing left.
+      if (identical(cl_rv$vif_decision, "drop") && length(flagged) > 0) {
+        return(launch_run(preds, flagged, vif_threshold = chk$vif_threshold %||% 10))
+      }
+      launch_run(preds)
     }
 
     shiny::observeEvent(input$run_btn, try_run())
@@ -867,9 +875,9 @@ classif_server <- function(id, data_reactive, vars_metadata_reactive, spatial_re
       cl_rv$vif_decision <- NULL
     }, ignoreInit = TRUE)
 
-    launch_run <- function(preds, dropped = character(0)) {
+    launch_run <- function(preds, flagged = character(0), vif_threshold = NULL) {
       df <- data_reactive(); sp <- spatial_reactive()
-      if (length(preds) < 1 && length(dropped) > 0) {
+      if (length(preds) > 0 && length(setdiff(preds, flagged)) < 1) {
         shiny::showNotification("No covariates left after the collinearity drop.", type = "error"); return()
       }
 
@@ -1009,6 +1017,7 @@ classif_server <- function(id, data_reactive, vars_metadata_reactive, spatial_re
           group_col = ".scope_group", boundary_wkt = boundary_wkt_v,
           class_weights = weights_v, model_rds_path = model_path_ship,
           nested = nested_v, importance_mode = imp_mode_v,
+          vif_threshold = vif_threshold,
           progress_dir = progress_dir_ship, session_id = session_id_ship,
           cancel_file = cancel_file_ship
         )
@@ -1049,16 +1058,17 @@ classif_server <- function(id, data_reactive, vars_metadata_reactive, spatial_re
         res$run_id <- paste0(substr(session$token, 1, 8), "-",
                              format(Sys.time(), "%Y%m%d%H%M%OS3"))
         res$scope_label <- scope_label_v
-        res$dropped_covariates <- dropped
+        # What the final model's own screen removed, not the pre-run modal list.
+        res$dropped_covariates <- res$screened_out %||% character(0)
         res$train_xy <- train_xy_v
         res$target_mode <- target_mode_v
         shiny::updateRadioButtons(session, "map_source", selected = "model")
         cl_rv$res <- res
         cl_rv$ready <- "yes"
-        if (length(dropped) > 0) {
+        if (length(res$dropped_covariates) > 0) {
           shiny::showNotification(
-            sprintf("Classification completed. Dropped collinear covariates: %s.",
-                    paste(dropped, collapse = ", ")), type = "message")
+            sprintf("Classification completed. The final model dropped collinear covariates: %s.",
+                    paste(res$dropped_covariates, collapse = ", ")), type = "message")
         } else {
           shiny::showNotification("Classification completed.", type = "message")
         }
@@ -1373,8 +1383,16 @@ classif_server <- function(id, data_reactive, vars_metadata_reactive, spatial_re
       acc <- res$cv_metrics$.estimate[res$cv_metrics$.metric == "accuracy"]
       kap <- res$cv_metrics$.estimate[res$cv_metrics$.metric == "kap"]
       drop_part <- if (length(res$dropped_covariates) > 0) {
-        sprintf(" Collinear covariates dropped: %s.", paste(res$dropped_covariates, collapse = ", "))
+        sprintf(" Collinear covariates dropped by the final model: %s.", paste(res$dropped_covariates, collapse = ", "))
       } else ""
+      # Auto-Drop reruns the screen inside CV; say how often each covariate
+      # left a fold's model, since that can differ from the final model.
+      fs <- res$cv_fold_screen
+      if (!is.null(fs) && nrow(fs) > 0) {
+        cnt <- table(fs$covariate)
+        drop_part <- paste0(drop_part, sprintf(" Inside CV each fold's screen reran on its training rows: %s.",
+          paste(sprintf("%s dropped in %d of %d folds", names(cnt), as.integer(cnt), res$n_folds), collapse = "; ")))
+      }
       shiny::tagList(
         shiny::tags$small(style = "color: var(--mn-text-3);",
           sprintf("Last run: %s, %d classes, scope: %s. Accuracy %.3f, kappa %.3f.%s",

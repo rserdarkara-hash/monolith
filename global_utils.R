@@ -2,6 +2,101 @@
 # extracted from the top of monolith.R. Must stay free of reactive code:
 # validate_crs() in particular is called outside reactive blocks so a bad CRS
 # is caught before the st_transform pipeline.
+# Stored tuning values describe one column and effective subset.
+stamp_vgm <- function(obj, key, source) {
+  if (is.null(obj)) return(NULL)
+  if (identical(source, "run") && identical(attr(obj, "monolith_source"), "manual")) source <- "manual"
+  attr(obj, "monolith_key") <- key
+  attr(obj, "monolith_source") <- source
+  obj
+}
+
+vgm_key_matches <- function(obj, key) {
+  stored <- attr(obj, "monolith_key")
+  is_valid_col_ref(key) && is_valid_col_ref(stored) && identical(as.character(stored), as.character(key))
+}
+
+resolve_stored_vgm <- function(fit, vgm_mode, key) {
+  if (!identical(vgm_mode, "manual") || !vgm_key_matches(fit, key) ||
+      !identical(attr(fit, "monolith_source"), "manual")) return(NULL)
+  clean_gstat_env(fit)
+}
+
+# A stored IDW power or TPS lambda is list(value, key); it applies only to the
+# key it was tuned for, otherwise the caller's default is used.
+resolve_regional_param <- function(entry, key, default) {
+  if (is.list(entry) && is_valid_col_ref(key) && is_valid_col_ref(entry$key) &&
+      identical(as.character(entry$key), as.character(key))) entry$value else default
+}
+
+# The IDW/TPS manual slot to read or write: "pre" only when the view computes a
+# Predicted surface and the target switch selects it.
+manual_param_target <- function(comp_mode, value_type, switch_value) {
+  has_pred <- isTRUE(comp_mode) || isTRUE(value_type %in% c("pred", "pred_ss", "resid"))
+  if (has_pred && identical(switch_value, "pre")) "pre" else "act"
+}
+
+.cv_hash8 <- function(s) {
+  substr(unname(tools::md5sum(bytes = charToRaw(enc2utf8(s)))), 1, 8)
+}
+
+# The identity of one cross-validation experiment: the target column (with its
+# data subset), the rows that were scored, and the partition they were scored
+# under. Two runs on the same uploaded table whose ids agree cross-validated
+# exactly the same samples in exactly the same folds, so their metrics are
+# comparable; different ids say they are not. Row and fold ids are written as
+# integers because as.character(1e5) is "1e+05".
+cv_population_id <- function(key, row_id, folds) {
+  if (is.null(row_id) || !length(row_id)) return(NA_character_)
+  ints <- function(x) paste(as.character(as.integer(x)), collapse = ",")
+  .cv_hash8(paste(as.character(key %||% ""), ints(row_id), ints(folds), sep = "|"))
+}
+
+# The pooled ("Total (Combined)") row's identity: the same hash over the
+# localities' own ids, sorted, so the order the localities happened to finish
+# in cannot change it.
+cv_pooled_population_id <- function(ids) {
+  ids <- ids[!vapply(ids, function(x) is.null(x) || length(x) != 1 || is.na(x), logical(1))]
+  if (!length(ids)) return(NA_character_)
+  .cv_hash8(paste(sort(paste0(names(ids), ":", unlist(ids, use.names = FALSE))), collapse = "|"))
+}
+
+# The main-session record of one surface's cross-validation population: what
+# the worker reported, plus the experiment id and the one-phrase statement of
+# what the folds re-estimated. IDW and TPS score their own point set with their
+# own folds and carry no population name, so they get no id either.
+stamp_cv_population <- function(cv_info, key) {
+  if (is.null(cv_info)) return(NULL)
+  named <- !is.na(cv_info$population %||% NA_character_)
+  cv_info$pop_id <- if (named) cv_population_id(key, cv_info$row_id, cv_info$folds1) else NA_character_
+  cv_info$refit <- if (!named) NA_character_
+    else if (!is.null(cv_info$conditional)) paste0("conditional on ", cv_info$conditional)
+    else "per fold"
+  # The row and fold vectors exist to build the id; keeping them would park one
+  # integer vector per sample per locality in reactiveValues for no reader.
+  cv_info$row_id <- NULL
+  cv_info$folds1 <- NULL
+  cv_info
+}
+
+# The pooled ("Total (Combined)") row's population record. A field the
+# localities disagree on is reported as "mixed" rather than as one of them.
+pooled_cv_population <- function(infos) {
+  infos <- Filter(Negate(is.null), infos %||% list())
+  if (!length(infos)) return(NULL)
+  agreed <- function(field) {
+    v <- unique(vapply(infos, function(x) as.character(x[[field]] %||% NA_character_), character(1)))
+    if (length(v) == 1L) v else "mixed"
+  }
+  ids <- lapply(infos, function(x) x$pop_id)
+  names(ids) <- names(infos)
+  list(population = agreed("population"),
+       refit = agreed("refit"),
+       pop_id = cv_pooled_population_id(ids),
+       n_localities = length(infos),
+       n_conditional = sum(vapply(infos, function(x) !is.null(x$conditional), logical(1))))
+}
+
 #' Location of the run-duration history log. It used to be built RELATIVE to the
 #' process working directory, so the file landed wherever the app happened to be
 #' started from (silently unwritable on a read-only deployment, and shared
@@ -348,20 +443,10 @@ identify_crs_from_lonlat <- function(x, y, lon, lat, tol_m = 5, ratio = 100) {
 #'
 #' @return list(crs, epsg, fraction, evidence) or NULL.
 identify_crs_from_boundary <- function(x, y, boundary, min_frac = 0.5) {
-  if (is.null(boundary)) return(NULL)
-  geom <- suppressWarnings(tryCatch({
-    g <- sf::st_union(sf::st_geometry(boundary))
-    if (is.na(sf::st_crs(g))) return(NULL)
-    sf::st_transform(g, 4326)
-  }, error = function(e) NULL))
-  if (is.null(geom) || length(geom) == 0) return(NULL)
-
-  # Points legitimately sit slightly outside a study boundary, so allow a
-  # margin of 5% of the boundary's own diagonal before counting a miss.
-  bb <- sf::st_bbox(geom)
-  cen_lon <- mean(c(bb[["xmin"]], bb[["xmax"]]))
-  pad <- 0.05 * sqrt((bb[["xmax"]] - bb[["xmin"]])^2 + (bb[["ymax"]] - bb[["ymin"]])^2)
-  target <- suppressWarnings(tryCatch(sf::st_buffer(geom, pad), error = function(e) geom))
+  tg <- .crs_boundary_target(boundary)
+  if (is.null(tg)) return(NULL)
+  target <- tg$target
+  cen_lon <- tg$cen_lon
 
   x <- suppressWarnings(as.numeric(x)); y <- suppressWarnings(as.numeric(y))
   ok <- is.finite(x) & is.finite(y)
@@ -390,9 +475,45 @@ identify_crs_from_boundary <- function(x, y, boundary, min_frac = 0.5) {
        fraction = frac[o[1]], equivalent = equiv[[o[1]]], evidence = "boundary")
 }
 
+#' A boundary's union in EPSG:4326, buffered by 5% of its own diagonal
+#' (points legitimately sit slightly outside a study boundary), plus its centre
+#' longitude. NULL when the boundary is absent or carries no CRS.
+.crs_boundary_target <- function(boundary) {
+  if (is.null(boundary)) return(NULL)
+  geom <- suppressWarnings(tryCatch({
+    g <- sf::st_union(sf::st_geometry(boundary))
+    if (is.na(sf::st_crs(g))) return(NULL)
+    sf::st_transform(g, 4326)
+  }, error = function(e) NULL))
+  if (is.null(geom) || length(geom) == 0) return(NULL)
+  bb <- sf::st_bbox(geom)
+  pad <- 0.05 * sqrt((bb[["xmax"]] - bb[["xmin"]])^2 + (bb[["ymax"]] - bb[["ymin"]])^2)
+  # With s2 on, st_buffer() on longitude/latitude takes metres, so a pad in
+  # degrees would be a buffer of a fraction of a millimetre. Use the diagonal's
+  # geodesic length there.
+  if (isTRUE(sf::sf_use_s2())) {
+    corners <- sf::st_sfc(sf::st_point(c(bb[["xmin"]], bb[["ymin"]])),
+                          sf::st_point(c(bb[["xmax"]], bb[["ymax"]])), crs = 4326)
+    diag_m <- suppressWarnings(tryCatch(as.numeric(sf::st_distance(corners[1], corners[2])),
+                                        error = function(e) NA_real_))
+    pad <- if (is.finite(diag_m)) 0.05 * diag_m else 0
+  }
+  list(target = suppressWarnings(tryCatch(sf::st_buffer(geom, pad), error = function(e) geom)),
+       cen_lon = mean(c(bb[["xmin"]], bb[["xmax"]])))
+}
+
 #' Identify the input CRS of a mapped X/Y pair, with a message naming the
-#' evidence. Tier 1 (degrees) -> EPSG:4326; Tier 2A (companion lon/lat) and
-#' Tier 2B (boundary .prj) -> the proven code; otherwise NULL, i.e. no guess.
+#' evidence. Tier 1 (degree ranges) -> EPSG:4326 only with evidence that the
+#' numbers ARE degrees; Tier 2A (companion lon/lat) and Tier 2B (boundary .prj)
+#' -> the proven code; otherwise NULL, i.e. no guess.
+#'
+#' Degree ranges alone prove nothing: a local metre grid (a field plot with
+#' X = 2-48, Y = 5-60) fits |X| <= 180, |Y| <= 90 too, and read as degrees it
+#' becomes a domain thousands of kilometres wide. So a degree-range pair is
+#' identified only when the columns are NAMED as longitude/latitude or an
+#' uploaded boundary contains at least half the points read as degrees (the
+#' Tier 2B acceptance fraction). Otherwise the result
+#' carries `crs = NULL` and `suggest = "EPSG:4326"`, and the caller asks.
 identify_input_crs <- function(df, x_col, y_col, boundary = NULL) {
   if (is.null(df) || !all(c(x_col, y_col) %in% colnames(df))) return(NULL)
   x <- suppressWarnings(as.numeric(as.character(df[[x_col]])))
@@ -401,8 +522,30 @@ identify_input_crs <- function(df, x_col, y_col, boundary = NULL) {
   if (sum(ok) < 1) return(NULL)
 
   if (all(abs(x[ok]) <= 180) && all(abs(y[ok]) <= 90)) {
-    return(list(crs = "EPSG:4326", epsg = 4326, evidence = "degrees",
-                message = "Input CRS set to EPSG:4326 (WGS 84): the mapped coordinates are degrees."))
+    datum_note <- " If they were recorded on another geographic datum (for example ED50), set that CRS instead."
+    if (tolower(trimws(x_col)) %in% .crs_lon_names && tolower(trimws(y_col)) %in% .crs_lat_names) {
+      return(list(crs = "EPSG:4326", epsg = 4326, evidence = "degrees",
+                  message = paste0(sprintf(
+                    "Input CRS set to EPSG:4326 (WGS 84): the '%s'/'%s' columns are named as longitude/latitude and their values fit degree ranges.",
+                    x_col, y_col), datum_note)))
+    }
+    tg <- .crs_boundary_target(boundary)
+    if (!is.null(tg)) {
+      frac <- suppressWarnings(tryCatch({
+        p <- sf::st_as_sf(data.frame(.x = x[ok], .y = y[ok]), coords = c(".x", ".y"), crs = 4326)
+        mean(lengths(sf::st_intersects(p, tg$target)) > 0)
+      }, error = function(e) NA_real_))
+      if (is.finite(frac) && frac >= 0.5) {
+        return(list(crs = "EPSG:4326", epsg = 4326, evidence = "degrees", fraction = frac,
+                    message = paste0(sprintf(
+                      "Input CRS set to EPSG:4326 (WGS 84): read as degrees, %.0f%% of the points fall inside the uploaded boundary shapefile.",
+                      100 * frac), datum_note)))
+      }
+    }
+    return(list(crs = NULL, epsg = NULL, suggest = "EPSG:4326", evidence = "degree_range",
+                message = sprintf(
+                  "The '%s'/'%s' values fit longitude/latitude ranges, but nothing in the file confirms they are degrees: the columns are not named as longitude/latitude and no boundary shapefile confirms their position. A local metre grid fits these ranges too. Confirm below, or set the CRS the coordinates were recorded in.",
+                  x_col, y_col)))
   }
 
   pair <- find_geographic_pair(df, exclude = c(x_col, y_col))

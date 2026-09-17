@@ -41,13 +41,18 @@
     res_mode_val <- input$res_mode %||% "local"
     manual_res_val <- input$grid_res %||% 50
     
+    # In Auto modes the cell size follows the boundary area and is only known
+    # once the run has built the boundaries; the Map Viewer's resolution
+    # overlay lists the sizes a run used.
     df <- data.frame(
       Locality = names(res_list),
       Resolution = sapply(res_list, function(x) {
         if (res_mode_val == "fixed") {
           paste0(round(manual_res_val, 1), " m")
+        } else if (res_mode_val == "global") {
+          "Shared, set at run"
         } else {
-          if (is.numeric(x)) paste0(round(x, 1), " m") else x
+          "Own, set at run"
         }
       })
     )
@@ -80,9 +85,8 @@
   # Live advisory for a Strict Measured buffer that is narrower than half the
   # grid cell diagonal, which drops the cells of isolated samples (see
   # strict_buffer_gap, spatial_pipeline.R). Shown for Fixed resolution only:
-  # in Auto modes rv$loc_resolutions holds a density-based SUGGESTION, while
-  # the run derives the real cell size from each locality's boundary area, so
-  # a pre-run figure here would be a guess. Those modes are covered by the
+  # in Auto modes the run derives the cell size from the boundary areas, so a
+  # pre-run figure here would be a guess. Those modes are covered by the
   # authoritative run-time warning instead.
   output$strict_buffer_note <- renderUI({
     if (!identical(input$boundary_type, "strict")) return(NULL)
@@ -133,7 +137,7 @@
       rv$run_counter, lab,
       style_eff,
       input$palette_select %||% "",
-      isTRUE(input$show_uncertainty), input$uncertainty_type %||% "",
+      map_view_layer(),
       isTRUE(input$match_scales),
       if (!is.null(class_params)) paste(signif(class_params$brks, 10), collapse = ",") else "none",
       sep = "|"
@@ -165,11 +169,19 @@
                            layerId = raster_img_layer_id(n_img))
     }
     legend_id <- "rast_legend"
+    # The layer comes from the view menu, which offers SE/variance views only
+    # for a method with a prediction variance; the method test stays as a
+    # guard against a stale menu value from the previous run.
+    uncert_layer <- map_view_layer()
+    is_uncert_view <- uncert_layer %in% c("se", "var") && method_has_variance(meta$method)
+    # NULL when an uncertainty view meets a raster without a variance band:
+    # that locality is left undrawn rather than painted with its predictions
+    # under a variance legend.
     select_active_layer <- function(r_w) {
-      is_uncertainty <- isTruthy(input$show_uncertainty) && method_has_variance(meta$method) && "var1.var" %in% names(r_w)
-      if (is_uncertainty) {
+      if (is_uncert_view) {
+        if (!"var1.var" %in% names(r_w)) return(NULL)
         al <- r_w[["var1.var"]]
-        if (input$uncertainty_type == "se") sqrt(al) else al
+        if (uncert_layer == "se") sqrt(al) else al
       } else {
         if("var1.pred" %in% names(r_w)) r_w[["var1.pred"]] else r_w[[1]]
       }
@@ -179,19 +191,23 @@
     # domains), so classified styling ticks skip a per-locality values()
     # pass entirely.
     get_vv_scale <- function() {
-      jv <- joint_vv()
+      jv <- if (is_uncert_view) joint_uncert_vv() else joint_vv()
       if (!is.null(jv)) return(jv)
       unlist(lapply(seq_along(r_list), function(i) {
         r_proj <- get_projected_raster(r_list[[i]], layer_key(i))
         if (is.null(r_proj)) return(NULL)
-        as.vector(values(select_active_layer(r_proj), na.rm=TRUE))
+        al <- select_active_layer(r_proj)
+        if (is.null(al)) return(NULL)
+        as.vector(values(al, na.rm=TRUE))
       }))
     }
 
-    is_viridis <- meta$palette == "viridis"
-    is_uncert_view <- isTruthy(input$show_uncertainty) && method_has_variance(meta$method)
+    # Uncertainty is a non-negative magnitude with no midpoint, so a diverging
+    # palette choice is swapped for a sequential one on those layers only.
+    pal_name <- if (is_uncert_view) uncertainty_palette(meta$palette) else meta$palette
+    is_viridis <- pal_name == "viridis"
     legend_title <- if (is_uncert_view) {
-      if (input$uncertainty_type == "se") {
+      if (uncert_layer == "se") {
         paste0("SE: ", meta$label, if (nzchar(meta$unit)) paste0(" ", meta$unit) else "")
       } else {
         paste0("Variance: ", meta$label, if (nzchar(meta$unit)) paste0(" (", meta$unit, ")^2") else " (squared units)")
@@ -200,8 +216,7 @@
 
     if(lab == "resid_raster") {
       # The residual view always displays the var1.pred difference, so the
-      # palette domain must come from that layer too (vv would hold the
-      # var1.var difference when show_uncertainty is on)
+      # palette domain comes from that layer (the view has no SE/variance form)
       resid_layers <- list()
       for (i in seq_along(r_list)) {
         r_w <- get_projected_raster(r_list[[i]], layer_key(i))
@@ -236,18 +251,25 @@
         m <- m %>% leaflet::addLegend(colors = class_params$colors, labels = class_params$leg_labels, opacity = 0.8, title = legend_var_title(paste(meta$label, meta$unit)), layerId = legend_id)
       } else {
         vv_scale <- get_vv_scale()
-        pal <- if(is_viridis) colorNumeric(viridis::viridis(256, option = meta$palette), vv_scale, na.color = "transparent")
-               else colorNumeric(meta$palette, vv_scale, na.color = "transparent")
+        vv_scale <- vv_scale[is.finite(vv_scale)]
+        if (length(vv_scale) > 0) {
+          pal <- if(is_viridis) colorNumeric(viridis::viridis(256, option = pal_name), vv_scale, na.color = "transparent")
+                 else colorNumeric(pal_name, vv_scale, na.color = "transparent")
 
-        for (i in seq_along(r_list)) {
-          r_w <- get_projected_raster(r_list[[i]], layer_key(i))
-          if (is.null(r_w)) next
-          m <- add_img(m, select_active_layer(r_w), pal)
+          for (i in seq_along(r_list)) {
+            r_w <- get_projected_raster(r_list[[i]], layer_key(i))
+            if (is.null(r_w)) next
+            al <- select_active_layer(r_w)
+            if (is.null(al)) next
+            m <- add_img(m, al, pal)
+          }
+
+          v_range <- diff(range(vv_scale, na.rm=TRUE))
+          d_format <- if(is.na(v_range)) 2 else if(v_range < 0.01) 6 else if(v_range < 0.1) 4 else 2
+          m <- m %>% leaflet::addLegend(pal = pal, values = vv_scale, title = legend_var_title(legend_title), labFormat = labelFormat(digits = d_format), layerId = legend_id)
+        } else {
+          m <- m %>% leaflet::removeControl(legend_id)
         }
-
-        v_range <- diff(range(vv_scale, na.rm=TRUE))
-        d_format <- if(is.na(v_range)) 2 else if(v_range < 0.01) 6 else if(v_range < 0.1) 4 else 2
-        m <- m %>% leaflet::addLegend(pal = pal, values = vv_scale, title = legend_var_title(legend_title), labFormat = labelFormat(digits = d_format), layerId = legend_id)
       }
     }
 
@@ -351,19 +373,20 @@
 
   # ── Proxy restyler: styling ticks swap raster images + legend in place ──
   # Invalidated by the pure styling inputs (palette, styling mode, APPLIED
-  # class breaks, uncertainty toggles, match scales). Structural changes
-  # (new run, view switch) still go through the full renderLeaflet path,
-  # which stamps map_style_sig; priority = -10 runs this AFTER the outputs
-  # in the same flush, so a freshly rendered widget is never re-encoded.
+  # class breaks, the view menu's SE/variance layer, match scales). Structural
+  # changes (new run, a different surface in the view menu) still go through
+  # the full renderLeaflet path, which stamps map_style_sig; priority = -10
+  # runs this AFTER the outputs in the same flush, so a freshly rendered
+  # widget is never re-encoded.
   observe({
     # Styling dependencies, registered unconditionally so the observer is
     # armed even before the first run.
     style_now <- input$color_style %||% "cont"
-    input$palette_select; input$show_uncertainty; input$uncertainty_type; input$match_scales
+    input$palette_select; input$match_scales; map_view_layer()
     cp <- if (style_now %in% c("agro", "bin")) tryCatch(classification_params(), error = function(e) NULL) else NULL
 
     if (is.null(rv$disp)) return(invisible(NULL))
-    view <- input$map_view %||% "view_act"
+    view <- map_view_base()
 
     targets <- list()
     if (view %in% c("view_act", "view_pred") && isTRUE(session_state$main_map_rendered)) {
@@ -405,7 +428,7 @@
   observe({
     map_overlay_rev()
     show <- isTRUE(input$show_points_viewer)
-    is_resid <- identical(input$map_view, "view_resid")
+    is_resid <- identical(map_view_base(), "view_resid")
 
     pts_view <- NULL
     popup_fn <- NULL
@@ -462,12 +485,14 @@
     }
   })
 
-  # Per-locality resolution box
+  # Per-locality resolution box: the cell sizes the DISPLAYED run gridded at,
+  # not the sidebar's settings for the next run.
   observe({
     map_overlay_rev()
-    show <- isTRUE(input$show_res_overlay) && length(rv$loc_resolutions) > 0
+    used <- rv$disp$grid_res_used
+    show <- isTRUE(input$show_res_overlay) && length(used) > 0
     res_html <- if (show) {
-      paste0("<div style='background:var(--mn-surface); color:var(--mn-text); padding:5px; border-radius:4px; border:1px solid var(--mn-line); font-size:12px; font-family:var(--mn-sans);'><b>Resolutions:</b><br>", paste(names(rv$loc_resolutions), sapply(rv$loc_resolutions, function(x) round(x,2)), sep=": ", collapse="<br>"), "</div>")
+      paste0("<div style='background:var(--mn-surface); color:var(--mn-text); padding:5px; border-radius:4px; border:1px solid var(--mn-line); font-size:12px; font-family:var(--mn-sans);'><b>Resolutions:</b><br>", paste(htmltools::htmlEscape(names(used)), paste0(sapply(used, function(x) round(x, 2)), " m"), sep=": ", collapse="<br>"), "</div>")
     } else NULL
     for (map_id in overlay_map_ids) {
       proxy <- leafletProxy(map_id) %>% removeControl("res_overlay_ctrl")
@@ -570,28 +595,44 @@
   # context change in the sidebar can never blank the displayed map.
   # Re-renders only when a run is dispatched/completed, defaulting to the view
   # implied by the committed run configuration.
+  # The SE and variance views are offered for the displayed run's method, so
+  # they follow what is on screen, not the method picked for the next run.
   output$map_view_ui <- renderUI({
     req(rv$disp)
-    choices <- c("View: Actual" = "view_act")
-    if (length(rv$rast_list_pre) > 0) {
-      choices <- c(choices,
-                   "View: ML Predicted" = "view_pred",
-                   "View: Actual vs Predicted" = "view_comp")
-    }
-    if (length(rv$rast_list_res) > 0) choices <- c(choices, "View: ML Residuals" = "view_resid")
-
     d <- isolate(rv$disp)
+    choices <- map_view_choices(has_pred = length(rv$rast_list_pre) > 0,
+                                has_resid = length(rv$rast_list_res) > 0,
+                                has_variance = method_has_variance(d$method))
+    all_ids <- unlist(choices, use.names = FALSE)
+
     default_view <- if (identical(d$value_type, "resid")) "view_resid"
       else if (isTRUE(d$comp_mode) && d$value_type %in% c("pred", "pred_ss")) "view_comp"
       else if (d$value_type %in% c("pred", "pred_ss")) "view_pred"
       else "view_act"
-    if (!default_view %in% choices) default_view <- "view_act"
+    if (!default_view %in% all_ids) default_view <- "view_act"
+    # An SE or variance view stays on that layer across runs while the new
+    # run offers it, as a styling choice would.
+    prev_layer <- parse_map_view(isolate(input$map_view))$layer
+    carried <- paste0(default_view, "_", prev_layer)
+    if (prev_layer != "value" && carried %in% all_ids) default_view <- carried
 
-    selectInput("map_view", NULL, choices = choices, selected = default_view, width = "210px", selectize = FALSE)
+    selectInput("map_view", NULL, choices = choices, selected = default_view, width = "230px", selectize = FALSE)
   })
   # keep the view choices in sync even while the Map Viewer tab is hidden -
   # the layout conditionalPanels depend on input$map_view being current
   outputOptions(output, "map_view_ui", suspendWhenHidden = FALSE)
+
+  # Runs before the renderers in the same flush, so a map reads the new view.
+  observeEvent(input$map_view, {
+    pv <- parse_map_view(input$map_view)
+    map_view_base(pv$base)
+    map_view_layer(pv$layer)
+  }, priority = 100)
+
+  map_layer_title <- function() {
+    if (!method_has_variance(rv$disp$method)) return("")
+    switch(map_view_layer(), se = ": Standard Error", var = ": Variance", "")
+  }
 
   disp_method_label <- function(d) {
     if (is.null(d$method)) "" else paste0(" (", get_method_label(d$method), ")")
@@ -606,20 +647,20 @@
 
   output$main_map_title <- renderText({
     d <- rv$disp; req(d)
-    type_lab <- if (identical(input$map_view, "view_pred")) disp_pred_label(d, long = TRUE) else "Actual Data View"
-    paste0(d$label, " - ", type_lab, disp_method_label(d))
+    type_lab <- if (identical(map_view_base(), "view_pred")) disp_pred_label(d, long = TRUE) else "Actual Data View"
+    paste0(d$label, " - ", type_lab, map_layer_title(), disp_method_label(d))
   })
 
   output$comp_left_title <- renderText({
     d <- rv$disp; req(d)
-    if (identical(input$map_view, "view_resid")) return(paste0(d$label, " - Interpolated Residuals", disp_method_label(d)))
-    paste0(d$label, " - Actual Data", disp_method_label(d))
+    if (identical(map_view_base(), "view_resid")) return(paste0(d$label, " - Interpolated Residuals", disp_method_label(d)))
+    paste0(d$label, " - Actual Data", map_layer_title(), disp_method_label(d))
   })
 
   output$comp_right_title <- renderText({
     d <- rv$disp; req(d)
-    if (identical(input$map_view, "view_resid")) return(paste0(d$label, " - Point Residuals", disp_method_label(d)))
-    paste0(d$label, " - ", disp_pred_label(d), disp_method_label(d))
+    if (identical(map_view_base(), "view_resid")) return(paste0(d$label, " - Point Residuals", disp_method_label(d)))
+    paste0(d$label, " - ", disp_pred_label(d), map_layer_title(), disp_method_label(d))
   })
 
   observeEvent(list(input$base_map_layer, carto_api_key()), {
@@ -699,7 +740,7 @@
     bbox <- run_area_bbox()
     if (!is.null(bbox)) {
       leafletProxy("main_map") %>% fitBounds(as.numeric(bbox$xmin), as.numeric(bbox$ymin), as.numeric(bbox$xmax), as.numeric(bbox$ymax))
-      if (isTRUE(input$map_view %in% c("view_comp", "view_resid"))) {
+      if (map_view_base() %in% c("view_comp", "view_resid")) {
         leafletProxy("comp_map_left") %>% fitBounds(as.numeric(bbox$xmin), as.numeric(bbox$ymin), as.numeric(bbox$xmax), as.numeric(bbox$ymax))
         leafletProxy("comp_map_right") %>% fitBounds(as.numeric(bbox$xmin), as.numeric(bbox$ymin), as.numeric(bbox$xmax), as.numeric(bbox$ymax))
       }
@@ -782,7 +823,7 @@
     pump_widget_resize()
   }, ignoreInit = TRUE)
 
-  observeEvent(input$map_view, {
+  observeEvent(map_view_base(), {
     pump_map_resize()
   }, ignoreInit = TRUE)
 
@@ -805,7 +846,7 @@
 
   output$main_map <- renderLeaflet({
     d <- rv$disp; req(d)
-    view <- input$map_view %||% "view_act"
+    view <- map_view_base()
     req(view %in% c("view_act", "view_pred"))
     target <- if (view == "view_pred") rv$rast_list_pre else rv$rast_list_act
     view_lab <- if (view == "view_pred") {
@@ -818,8 +859,8 @@
   })
 
   output$comp_map_left <- renderLeaflet({
-    req(rv$disp, input$map_view %in% c("view_comp", "view_resid"))
-    m <- if(input$map_view == "view_resid") {
+    req(rv$disp, map_view_base() %in% c("view_comp", "view_resid"))
+    m <- if(map_view_base() == "view_resid") {
       draw_map(rv$rast_list_res, "resid_raster", map_id = "comp_map_left")
     } else {
       draw_map(rv$rast_list_act, "Actual", map_id = "comp_map_left")
@@ -830,8 +871,8 @@
   })
 
   output$comp_map_right <- renderLeaflet({
-    req(rv$disp, input$map_view %in% c("view_comp", "view_resid"))
-    m <- if(input$map_view == "view_resid") {
+    req(rv$disp, map_view_base() %in% c("view_comp", "view_resid"))
+    m <- if(map_view_base() == "view_resid") {
       draw_map(NULL, "resid_points", map_id = "comp_map_right")
     } else {
       draw_map(rv$rast_list_pre, "Predicted", map_id = "comp_map_right")
@@ -866,7 +907,7 @@
 
       leafletProxy("main_map") %>% fitBounds(as.numeric(bbox$xmin), as.numeric(bbox$ymin), as.numeric(bbox$xmax), as.numeric(bbox$ymax))
 
-      if (isTRUE(input$map_view %in% c("view_comp", "view_resid"))) {
+      if (map_view_base() %in% c("view_comp", "view_resid")) {
         leafletProxy("comp_map_left") %>% fitBounds(as.numeric(bbox$xmin), as.numeric(bbox$ymin), as.numeric(bbox$xmax), as.numeric(bbox$ymax))
         leafletProxy("comp_map_right") %>% fitBounds(as.numeric(bbox$xmin), as.numeric(bbox$ymin), as.numeric(bbox$xmax), as.numeric(bbox$ymax))
       }
@@ -927,6 +968,9 @@
      req(loc, meta)
      tgt_label <- if (target == "act") "Actual" else "Predicted"
      if (loc == "Total (Combined)") {
+       if (isTRUE(sci_vgm_tuning())) {
+         return(sci_placeholder("Select a locality to inspect its stored variogram for the current variable and data subset."))
+       }
        if (target == "act") {
          pts_sf <- if(!is.null(rv$sf)) {
            rv$sf
@@ -965,13 +1009,28 @@
                                      title = paste("Global Variogram (Predicted):", sci_disp_label(meta))))
      }
 
-     v_emp <- rv$v_emp_list[[paste0(loc, "_", target)]]
+     if (isTRUE(sci_vgm_tuning())) {
+       key <- current_tuning_keys()[[target]]
+       v_emp <- rv$v_emp_list[[paste0(loc, "_", target)]]
+       v_fit <- rv$v_fit_list[[paste0(loc, "_", target)]]
+       if (is.na(key)) {
+         return(sci_placeholder(paste0("The current variable has no ",
+           if (target == "act") "measured" else "uploaded prediction", " column to tune for this view.")))
+       }
+       if (!vgm_key_matches(v_emp, key)) {
+         return(sci_placeholder(paste0("No variogram of ", key, " is stored for ", loc,
+           ".\nSwitch to Auto-Fit and press OPTIMIZE ALL VARIOGRAMS,\nor run Ordinary Kriging, then return to Manual.")))
+       }
+       if (!vgm_key_matches(v_fit, key)) v_fit <- NULL
+     } else {
+       v_emp <- rv$disp$v_emps[[paste0(loc, "_", target)]]
+       v_fit <- rv$disp$v_fits[[paste0(loc, "_", target)]]
+     }
      if (is.null(v_emp)) {
        return(sci_placeholder(paste0("No fitted variogram for this locality yet (", tgt_label, ").\nPress OPTIMIZE ALL VARIOGRAMS in the sidebar (Fitting Mode: Auto-Fit)\nor run an interpolation first.")))
      }
-     v_fit <- rv$v_fit_list[[paste0(loc, "_", target)]]
      manual_model <- NULL; sub <- NULL
-     manual_applies <- input$vgm_mode == "manual" && loc == input$m_loc &&
+     manual_applies <- isTRUE(sci_vgm_tuning()) && input$vgm_mode == "manual" && loc == input$m_loc &&
        identical(manual_vgm_target(), target)
      if (isTRUE(manual_applies)) {
        manual_model <- manual_vgm(input$m_psill, input$k_mod, input$m_range, input$m_nugget)
@@ -995,7 +1054,9 @@
      # switching the sidebar variable must invalidate the pre-run panels
      list("vgm_main", loc, rv$results_rev, rv$disp$actual %||% input$var_id,
           sci_vgm_tuning(), input$var_id, input$sci_name_mode,
-          rv$v_emp_list[[paste0(loc, "_act")]], rv$v_fit_list[[paste0(loc, "_act")]],
+          current_tuning_keys(),
+          if (isTRUE(sci_vgm_tuning())) rv$v_emp_list[[paste0(loc, "_act")]] else rv$disp$v_emps[[paste0(loc, "_act")]],
+          if (isTRUE(sci_vgm_tuning())) rv$v_fit_list[[paste0(loc, "_act")]] else rv$disp$v_fits[[paste0(loc, "_act")]],
           vgm_manual_overlay_key("act"))
    }, cache = "session")
    output$vgm_plot_pred <- renderCachedPlot({
@@ -1005,6 +1066,8 @@
      list("vgm_pred", loc, rv$results_rev, rv$disp$actual %||% input$var_id,
           sci_vgm_tuning(), input$var_id,
           rv$disp$value_type %||% input$value_type, input$sci_name_mode,
-          rv$v_emp_list[[paste0(loc, "_pre")]], rv$v_fit_list[[paste0(loc, "_pre")]],
+          current_tuning_keys(),
+          if (isTRUE(sci_vgm_tuning())) rv$v_emp_list[[paste0(loc, "_pre")]] else rv$disp$v_emps[[paste0(loc, "_pre")]],
+          if (isTRUE(sci_vgm_tuning())) rv$v_fit_list[[paste0(loc, "_pre")]] else rv$disp$v_fits[[paste0(loc, "_pre")]],
           vgm_manual_overlay_key("pre"))
    }, cache = "session")

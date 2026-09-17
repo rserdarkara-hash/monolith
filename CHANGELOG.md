@@ -2,6 +2,40 @@
 
 All notable changes to Monolith are documented in this file.
 
+## [Unreleased] - Strict kriging cross-validation and tuning-value identity
+
+### Fixed
+- **Stored variograms belong to the variable and data subset they were tuned on**, carry that key and their source, and are used only for that combination. Uploading data, reassigning localities or changing the X, Y, locality or Input CRS mapping clears every tuning store.
+- **Stored IDW powers and TPS lambdas are keyed the same way** and no longer win over the sidebar value for another variable or subset.
+- **Manual IDW and TPS `Apply` reaches the Predicted surface** in every view that computes one, not only in Comparison Mode.
+- **The Single-split Data Subset reaches the whole run.** Variogram, IDW and TPS optimizers and their previews, the manual slider bounds, the collinearity check, the run-time estimate and Descriptive Statistics all use the rows the run uses.
+- **"Fit Actual/Predicted Separately", unticked, shares the measured-value variogram** under Auto-Fit as well as Manual.
+- **Applied manual models survive "Discard & Continue", a method change and later interpolation runs, Auto-Fit included.**
+- **Manual tuning draws the empirical variogram of the variable being tuned.**
+- **Run-result variogram panels, variogram exports and the TPS GCV curve read the run's own snapshot**, not the tuning store.
+- **Pooled "Total (Combined)" diagnostics survive an engine fallback**; every kriging CV object shares one column schema and pooling normalizes any engine's.
+- **The residual variogram and the observed-versus-predicted scatter tolerate missing CV predictions.**
+- **A locality is projected once, from every row with coordinates, before the covariate filter**, so the working CRS cannot depend on the covariate selection.
+- **Kendall partial correlations condition each pair on the chosen controls only.** Adding a target no longer changes the other pairs' coefficients, matching Pearson, Spearman and the p-values.
+- **Degree-range coordinates are set to EPSG:4326 only with evidence**: longitude/latitude column names, or a boundary shapefile containing at least half the points read as degrees. Otherwise the Data Setup tab asks for confirmation, since a local metre grid fits the same ranges.
+- **Auto (Global) resolution gives every locality one cell size**, the Auto size of the largest boundary, on a shared grid lattice.
+- **Grid cells are square and exactly the stated resolution** in interpolation and classification. The grid grows by whole cells from the bounding box corner; cells were stretched to fit the box before (45.45 × 44.44 m for 45 m).
+- **The Map Viewer resolution box, the Domain & Grid table and the run configuration report the cell size the run used**, not the pre-run suggestion.
+- **Quick export and the class-zone download follow the uncertainty view on screen.** Class breaks and class areas no longer change when an uncertainty map is shown under Match Scales.
+- **Uncertainty maps never use a diverging palette**; a diverging choice is shown as Viridis on SE and variance maps, in the Map Viewer and the Export Styler.
+- **Classification Auto-Drop reruns the VIF screen inside every CV fold, tuning resample and nested inner fold**, and class weights are recomputed from each tuning resample's own training rows. The final model is fitted on the covariates the screen keeps on all rows; the run summary lists them with per-fold drop counts. Classification CV metrics move when Auto-Drop or Balance classes is on.
+- **The boundary-based CRS identification margin is 5% of the boundary diagonal in metres**; it was a fraction of a millimetre with s2 on.
+- **Every equation and symbol in the Scientific Guide renders in the documentation drawer.** Sections 2.5, 3.2-3.7 and 9.2 are written in the HTML/entity notation the rest of the guide uses; the `lm`, `**absolute**` and `**NMAE (%)**` markers in sections 1.3 and 5.1, and the collinearity threshold in the Descriptive and Exploratory guide, render as formatting instead of literal characters.
+
+### Changed
+- **Uncertainty maps moved to the Map Viewer's View dropdown**: SE and variance views of the Actual, Predicted and comparison surfaces for kriging runs, restyled in place. The Map Styling panel keeps the Uncertainty Mapping note. Match Scales also applies to them.
+- **OK, CK and the OK fallback refit their variogram inside every cross-validation fold**, and RK, RFK and CK re-run the covariate screen on each fold's training samples. Only a variogram saved with **Apply manual model** is reused, and its row is labelled conditional. Kriging CV metrics move; no prediction surface does.
+- **Each RFK fold draws its forest from its own seed**, so a held-out sample cannot move its own prediction.
+- **Ordinary Kriging gets a CV Population switch** (Native / Comparable) and every cross-validation row carries a population ID, the expected and predicted sample counts, and an INCOMPLETE mark below full coverage.
+- **A failed fold leaves NA for its own samples** and is reported through coverage, never filled from another engine.
+- **Standard LOOCV is slower for OK and CK**: measured on 355 samples with two covariates, about 50 s (OK) and 100 s (CK).
+- **Manual fitting mode uses only applied models**; other localities fit their own variogram in the run.
+
 ## [1.1.2] - 2026-09-16 - TPS scaling in fitting and optimization/ UI redundancy removal / Manual Matérn fit fallback / Correlation check categorisation in RFK, RK and CK / Covariate interpolation in RK and RFK matching Classification Suite
 
 ### Fixed

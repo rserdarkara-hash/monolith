@@ -256,34 +256,41 @@ is_coord_col <- function(x) {
 #' not take an SD over values the display rounding has already quantized.
 perform_cv <- function(cv_obj, moran = TRUE, round_values = TRUE) {
   rnd <- if (isTRUE(round_values)) function(x, d) round(x, d) else function(x, d) x
+  # n = predicted pairs, n_expected = rows with an observed value; metrics use
+  # the predicted pairs only, and coverage says how many rows that is.
   res <- list(rmse = NA, r2 = NA, nse = NA, me = NA, mae = NA, ccc = NA,
               nrmse_mean = NA, rpd = NA, rpiq = NA, smape = NA,
-              moran_i = NA, moran_e = NA, moran_p = NA, n = 0)
-  
+              moran_i = NA, moran_e = NA, moran_p = NA, n = 0,
+              n_expected = 0, coverage = NA_real_)
+
   if (is.null(cv_obj)) return(res)
-  
+
   df <- .cv_to_df(cv_obj)
-        
+
   if (nrow(df) == 0) return(res)
   cnames <- colnames(df)
-  
+
   cols <- detect_cv_columns(cnames)
   pre_col <- cols$pred
   obs_col <- cols$observed
-  
+
+  if (!is.na(obs_col)) res$n_expected <- sum(!is.na(df[[obs_col]]))
+  if (res$n_expected > 0) res$coverage <- 0
   if (is.na(pre_col) || is.na(obs_col)) return(res)
-  
+
   observed <- df[[obs_col]]
   predicted <- df[[pre_col]]
-  
+
   valid <- !is.na(observed) & !is.na(predicted)
   obs <- observed[valid]
   pre <- predicted[valid]
-  
+  res$n <- length(obs)
+  if (res$n_expected > 0) res$coverage <- res$n / res$n_expected
+
   if (length(obs) < 2) return(res)
-  
+
   residuals <- obs - pre
-  
+
   res$rmse <- rnd(sqrt(mean(residuals^2, na.rm = TRUE)), 4)
   res$me <- rnd(mean(residuals, na.rm = TRUE), 4)
   res$mae <- rnd(mean(abs(residuals), na.rm = TRUE), 4)
@@ -295,7 +302,6 @@ perform_cv <- function(cv_obj, moran = TRUE, round_values = TRUE) {
     tryCatch(cor(obs, pre)^2, error = function(e) NA_real_)
   } else NA_real_
   res$r2 <- rnd(r2_val, 4)
-  res$n <- length(obs)
   
   res$ccc <- rnd(calc_ccc(obs, pre), 4)
   aug <- augment_metrics(obs, pre, round_values = round_values)
@@ -477,6 +483,87 @@ make_cv_folds <- function(coords, strategy = "auto", n = NULL, seed = CV_FOLD_SE
   })
 }
 
+# Row identity of a CV population: the row number in the uploaded table, added
+# at dispatch. Direct engine calls have none and number their rows 1..n.
+CV_ROW_ID_COL <- ".mn_row_id"
+
+#' The cross-validation plan of one population: its row ids and one fold vector
+#' per realization, from the same make_cv_folds() call (and seeds) the engines
+#' always used, so a population's folds do not depend on which engine scores it.
+build_cv_plan <- function(pts, strategy = "auto", repeats = 1L) {
+  n <- nrow(pts)
+  row_id <- if (CV_ROW_ID_COL %in% names(pts)) as.integer(pts[[CV_ROW_ID_COL]]) else seq_len(n)
+  coords <- sf::st_coordinates(pts)
+  folds <- lapply(seq_len(cv_repeat_count(repeats, strategy, n)), function(r) {
+    make_cv_folds(coords, strategy, n, CV_FOLD_SEED + r - 1L)
+  })
+  list(row_id = row_id, n = n, strategy = strategy,
+       label = resolve_cv_plan(strategy, n)$label, folds = folds)
+}
+
+#' Run one kriging cross-validation realization fold by fold.
+#'
+#' `fold_fun(train, newdata, i)` fits from the fold's training rows and returns
+#' `list(pred, var = NULL, meta = NULL)` for `newdata`, which carries the
+#' held-out rows' coordinates only. A fold that errors, or returns the wrong
+#' number of predictions, gives NA rows and a note; it is never filled from
+#' another engine. Folds run sequentially (the nested worker already holds the
+#' cores). Returns the common kriging CV schema, in population row order, with
+#' `attr(, "cv_notes")` and `attr(, "cv_fold_meta")` (per fold label).
+run_kriging_folds <- function(pop, target_var, row_id, folds, fold_fun,
+                              cancel_file = NULL, progress = NULL) {
+  n <- nrow(pop)
+  if (length(folds) != n || length(row_id) != n) {
+    stop("The CV plan (", length(folds), " fold ids, ", length(row_id),
+         " row ids) does not match the CV population (", n, " rows).")
+  }
+  pred <- rep(NA_real_, n)
+  pvar <- rep(NA_real_, n)
+  notes <- character(0)
+  fold_meta <- list()
+  geom <- sf::st_geometry(pop)
+  labels <- sort(unique(folds))
+  # At most ~20 progress writes, whatever the fold count.
+  write_every <- max(1L, ceiling(length(labels) / 20))
+  for (k in seq_along(labels)) {
+    i <- labels[k]
+    if (!is.null(cancel_file) && file.exists(cancel_file)) stop("Model generation cancelled by user.")
+    test_idx <- which(folds == i)
+    out <- tryCatch(fold_fun(pop[-test_idx, ], sf::st_sf(geometry = geom[test_idx]), i),
+                    error = function(e) e)
+    if (inherits(out, "error")) {
+      notes <- c(notes, paste0("fold ", i, ": ", conditionMessage(out)))
+    } else {
+      p <- suppressWarnings(as.numeric(out$pred))
+      if (length(p) != length(test_idx)) {
+        notes <- c(notes, sprintf("fold %s: %d predictions returned for %d held-out samples",
+                                  i, length(p), length(test_idx)))
+      } else {
+        undefined <- !is.finite(p)
+        if (any(undefined)) {
+          notes <- c(notes, sprintf("fold %s: %d of %d predictions undefined", i, sum(undefined), length(p)))
+          p[undefined] <- NA_real_
+        }
+        pred[test_idx] <- p
+        v <- suppressWarnings(as.numeric(out$var))
+        if (length(v) == length(test_idx)) pvar[test_idx] <- ifelse(is.finite(v), v, NA_real_)
+      }
+      if (!is.null(out$meta)) fold_meta[[as.character(i)]] <- out$meta
+    }
+    if (!is.null(progress) && (k %% write_every == 0L || k == length(labels))) {
+      update_progress_file(progress$l, progress$prefix,
+                           progress$from + (progress$to - progress$from) * k / length(labels), 100)
+    }
+  }
+  observed <- pop[[target_var]]
+  cv <- sf::st_sf(row_id = as.integer(row_id), fold = folds, observed = observed,
+                  var1.pred = pred, var1.var = pvar, residual = observed - pred,
+                  geometry = geom)
+  attr(cv, "cv_notes") <- notes
+  attr(cv, "cv_fold_meta") <- fold_meta
+  cv
+}
+
 # ── Repeated cross-validation (opt-in) ──────────────────────────────────────
 # A k-fold estimate is ONE realization of a random partition: at moderate n the
 # spread across alternative splits can rival the difference between two methods.
@@ -500,9 +587,9 @@ cv_repeat_count <- function(n_repeats, strategy = "auto", n = NULL) {
 
 # Reduce a CV object to the minimum every downstream consumer needs (observed,
 # prediction, geometry) under FIXED column names. Repeats are pooled across
-# localities with pool_cv_sf(), whose rbind fails on a column mismatch, and
-# engines emit different column sets (krige.cv vs gstat.cv vs the TPS frame) -
-# normalising here makes the pooled repeat set structurally safe by
+# localities with pool_cv_sf(), whose rbind fails on a column mismatch, and the
+# engines still emit different column sets (the kriging schema vs the TPS/IDW
+# frame) - normalising here makes the pooled repeat set structurally safe by
 # construction. Metrics are unaffected: perform_cv reads only these columns.
 cv_repeat_frame <- function(cv_obj) {
   if (is.null(cv_obj)) return(NULL)
@@ -554,8 +641,12 @@ summarise_cv_repeats <- function(reps) {
     c(mean = mean(v), sd = stats::sd(v))
   })
   names(agg) <- keys
+  n_pred <- vapply(mets, function(m) as.numeric(m$n), numeric(1))
   list(n_repeats = length(reps),
        n = mets[[1]]$n,
+       n_expected = mets[[1]]$n_expected,
+       n_min = min(n_pred),
+       n_max = max(n_pred),
        mean = vapply(agg, function(a) unname(a["mean"]), numeric(1)),
        sd = vapply(agg, function(a) unname(a["sd"]), numeric(1)))
 }
@@ -589,24 +680,34 @@ build_cv_repeat_summary <- function(reps_by_loc) {
 }
 
 #' Cross-validation for RK (`model_type = "lm"`) and RFK (`"rf"`). Every fold
-#' refits the covariate surfaces, trend and residual variogram on its training
-#' rows and predicts the held-out rows as trend + kriged residual; folds come from
-#' make_cv_folds(). Returns an sf with `observed`, `var1.pred` and `residual`,
-#' ordered like the complete-case input rows, or NULL below 3 such rows.
-perform_kriging_loocv <- function(pts, target_var, aux_vars, lags_func, vgm_fit_func, model_type = c("lm", "rf"), l = "region", prefix = "act", rf_ntree = 200, cv_strategy = "auto", fold_seed = CV_FOLD_SEED, cov_params = list()) {
+#' re-screens the covariates, refits the covariate surfaces, the trend and the
+#' residual variogram on its training rows, and predicts the held-out rows as
+#' trend + kriged residual, through run_kriging_folds(). `candidates` is the
+#' full selected covariate list the screen chooses from (defaults to
+#' `aux_vars`, the surface's own kept set). `folds` / `row_id` come from the
+#' run's CV plan and must align with the complete-case rows; with `folds =
+#' NULL` they are built from `cv_strategy` and `fold_seed`. Returns the common
+#' kriging CV schema (`var1.var` NA), or NULL below 3 complete-case rows.
+perform_kriging_loocv <- function(pts, target_var, aux_vars, lags_func, vgm_fit_func, model_type = c("lm", "rf"), l = "region", prefix = "act", rf_ntree = 200, cv_strategy = "auto", fold_seed = CV_FOLD_SEED, cov_params = list(),
+                                  folds = NULL, row_id = NULL, cancel_file = NULL, progress = NULL,
+                                  candidates = NULL, vif_threshold = 10) {
   model_type <- match.arg(model_type)
+  candidates <- candidates %||% aux_vars
   pts <- pts[complete.cases(sf::st_drop_geometry(pts)[, c(target_var, aux_vars), drop=FALSE]), ]
   n <- nrow(pts)
   if (n < 3) return(NULL)
-  form_reg <- as.formula(paste0("`", target_var, "` ~ ", paste(paste0("`", aux_vars, "`"), collapse = " + ")))
 
-  pts$orig_idx <- seq_len(n)
-
-  # Fold assignment (make_cv_folds seeds itself); computed here on the
-  # complete-case rows so the fold vector length always matches n. `fold_seed`
-  # moves only under repeated CV; the per-fold model draws below stay on
-  # CV_FOLD_SEED so a repeat varies the PARTITION and nothing else.
-  folds <- make_cv_folds(sf::st_coordinates(pts), cv_strategy, n, fold_seed)
+  # `fold_seed` moves only under repeated CV; each fold's model draws below are
+  # seeded from its own fold LABEL, so a repeat varies the PARTITION and
+  # nothing else.
+  if (is.null(folds)) {
+    folds <- make_cv_folds(sf::st_coordinates(pts), cv_strategy, n, fold_seed)
+  } else if (length(folds) != n) {
+    stop("The CV fold vector has ", length(folds), " entries for ", n, " complete-case samples.")
+  }
+  if (is.null(row_id)) {
+    row_id <- if (CV_ROW_ID_COL %in% names(pts)) as.integer(pts[[CV_ROW_ID_COL]]) else seq_len(n)
+  }
 
   # Rank guard. Every fold refits the trend on n - |fold| rows; below
   # (covariates + intercept) + 1 rows that fit is rank-deficient, predict()
@@ -628,56 +729,50 @@ perform_kriging_loocv <- function(pts, target_var, aux_vars, lags_func, vgm_fit_
     }
   }
 
-  # Sandbox the seed so the per-fold randomForest draws are reproducible
-  # without perturbing the caller's RNG stream. Fold assignment is already
-  # fixed upstream; this covers RFK's in-fold randomForest, so its LOOCV is
-  # seeded consistently across strategies and n.
-  with_seed(CV_FOLD_SEED, {
-    fold_fn <- function(i) {
-      test_idx <- which(folds == i)
-      train <- pts[-test_idx, ]; test <- pts[test_idx, ]
-      lags <- lags_func(train)
-      test_cov <- sf::st_drop_geometry(krige_covariates(
-        train, test[, "orig_idx", drop = FALSE], aux_vars, lags, cov_params)$grid_aux)
+  # `newdata` holds the held-out coordinates only: their covariates are kriged
+  # from the training rows, exactly as the map kriges its grid.
+  fold_fn <- function(train, newdata, i) {
+    # The covariate screen is a data-driven step like any other, so it runs on
+    # the fold's training rows: otherwise the held-out rows' own measured
+    # covariates help decide which covariates their prediction uses.
+    kept <- screen_covariates(train, candidates, vif_threshold)$kept
+    if (!length(kept)) stop("the covariate screen removed every covariate in this fold")
+    if (model_type == "lm" && nrow(train) < length(kept) + 2L) {
+      stop(sprintf("%d training rows cannot fit %d regression coefficients",
+                   nrow(train), length(kept) + 1L))
+    }
+    form_i <- as.formula(paste0("`", target_var, "` ~ ",
+                                paste(paste0("`", kept, "`"), collapse = " + ")))
+    lags <- lags_func(train)
+    test_cov <- sf::st_drop_geometry(krige_covariates(
+      train, newdata, kept, lags, cov_params)$grid_aux)
 
-      if (model_type == "lm") {
-        lm_mod <- lm(form_reg, data = train)
-        train$residuals <- residuals(lm_mod)
-        pred_trend <- predict(lm_mod, newdata = test_cov)
-      } else {
-        rf_mod <- randomForest::randomForest(form_reg, data = train, ntree = rf_ntree)
-        train$residuals <- train[[target_var]] - rf_mod$predicted
-        pred_trend <- predict(rf_mod, test_cov)
-      }
-
-      v_emp <- variogram(residuals ~ 1, train, width = lags$width, cutoff = lags$cutoff)
-      v_fit <- vgm_fit_func(v_emp, train$residuals)
-      tryCatch({
-        res_krig <- krige(residuals ~ 1, train, test, model = v_fit, debug.level = 0)
-        fold_sf <- test[, c("orig_idx", target_var), drop = FALSE]
-        names(fold_sf)[names(fold_sf) == target_var] <- "observed"
-        fold_sf$var1.pred <- as.numeric(pred_trend) + res_krig$var1.pred
-        fold_sf$residual <- fold_sf$observed - fold_sf$var1.pred
-        fold_sf
-      }, error = function(e) {
-        warning(paste("Kriging CV fold failed:", e$message))
-        fold_sf <- test[, c("orig_idx", target_var), drop = FALSE]
-        names(fold_sf)[names(fold_sf) == target_var] <- "observed"
-        fold_sf$var1.pred <- NA
-        fold_sf$residual <- NA
-        fold_sf
-      })
+    if (model_type == "lm") {
+      lm_mod <- lm(form_i, data = train)
+      train$residuals <- residuals(lm_mod)
+      pred_trend <- predict(lm_mod, newdata = test_cov)
+    } else {
+      # Each fold's forest is drawn from its OWN seed. A forest's number of RNG
+      # draws depends on the data it is grown on, so one stream over the whole
+      # loop let earlier folds — which train on fold i's rows — decide where
+      # fold i's forest started, and a held-out row moved its own prediction.
+      # The seed follows the fold LABEL, not the realization, so a repeated-CV
+      # repeat still varies the partition and nothing else.
+      rf_mod <- with_seed(CV_FOLD_SEED + as.integer(i),
+                          randomForest::randomForest(form_i, data = train, ntree = rf_ntree))
+      train$residuals <- train[[target_var]] - rf_mod$predicted
+      pred_trend <- predict(rf_mod, test_cov)
     }
 
-    results_list <- lapply(sort(unique(folds)), fold_fn)
+    v_emp <- variogram(residuals ~ 1, train, width = lags$width, cutoff = lags$cutoff)
+    v_fit <- vgm_fit_func(v_emp, train$residuals)
+    res_krig <- krige(residuals ~ 1, train, newdata, model = v_fit, debug.level = 0)
+    list(pred = as.numeric(pred_trend) + res_krig$var1.pred, meta = list(kept = kept))
+  }
 
-    res_combined <- do.call(rbind, results_list)
-
-    res_combined <- res_combined[order(res_combined$orig_idx), ]
-    res_combined$orig_idx <- NULL
-
-    res_combined
-  })
+  cv <- run_kriging_folds(pts, target_var, row_id, folds, fold_fn, cancel_file, progress)
+  attr(cv, "cv_screen") <- .fold_screen_summary(cv, aux_vars)
+  cv
 }
 
 #' Observed minus predicted from a CV object, or its `residual` column when the
@@ -707,18 +802,25 @@ get_cv_residuals <- function(cv_obj, n_rows) {
 # and the pooled Moran's I neighbour distances. Entries that are neither sf
 # nor Spatial are skipped: every current engine returns its CV object as sf in
 # the locality CRS, and a bare data.frame's x/y columns carry no knowable CRS.
+# Every spatial entry is reduced to cv_repeat_frame()'s fixed columns first, so
+# localities whose engines (or fallbacks) produced different CV schemas still
+# pool; a spatial entry that cannot be reduced or reprojected makes the pool
+# NULL, so a subset is never reported as the pool.
 pool_cv_sf <- function(df_list) {
   if (is.null(df_list) || length(df_list) == 0) return(NULL)
-  sf_list <- lapply(df_list, function(x) {
+  sf_list <- list()
+  for (x in df_list) {
     if (inherits(x, "Spatial")) x <- tryCatch(sf::st_as_sf(x), error = function(e) NULL)
-    if (inherits(x, "sf") && !is.na(sf::st_crs(x))) x else NULL
-  })
-  sf_list <- Filter(Negate(is.null), sf_list)
+    if (!inherits(x, "sf") || is.na(sf::st_crs(x))) next
+    frame <- cv_repeat_frame(x)
+    if (is.null(frame)) return(NULL)
+    sf_list[[length(sf_list) + 1L]] <- frame
+  }
   if (length(sf_list) == 0) return(NULL)
 
   ll_list <- lapply(sf_list, function(x) tryCatch(sf::st_transform(x, 4326), error = function(e) NULL))
-  ll_list <- Filter(Negate(is.null), ll_list)
-  if (length(ll_list) == 0) return(NULL)
+  # A locality whose CRS cannot reach the common frame fails the pool too.
+  if (any(vapply(ll_list, is.null, logical(1)))) return(NULL)
 
   coords <- do.call(rbind, lapply(ll_list, sf::st_coordinates))
   lon_c <- mean(coords[, 1], na.rm = TRUE)
@@ -733,4 +835,21 @@ pool_cv_sf <- function(df_list) {
   # return NULL so the UI shows its empty state — silently returning only the
   # first locality as "Total (Combined)" would be scientifically wrong.
   tryCatch(do.call(rbind, proj_list), error = function(e) NULL)
+}
+
+#' Metrics of the pooled "Total (Combined)" row: perform_cv() on the pool, with
+#' the expected count summed over every locality in `metrics_list`. A locality
+#' whose cross-validation failed outright adds no rows to the pool, so without
+#' that sum the pooled row would report full coverage. NULL when nothing pools.
+perform_pooled_cv <- function(data_list, metrics_list = NULL) {
+  pooled <- pool_cv_sf(data_list)
+  if (is.null(pooled) || nrow(pooled) == 0) return(NULL)
+  res <- perform_cv(pooled)
+  expected <- sum(vapply(metrics_list %||% list(),
+                         function(m) as.numeric(m$n_expected %||% 0), numeric(1)))
+  if (expected > res$n_expected) {
+    res$n_expected <- expected
+    res$coverage <- res$n / expected
+  }
+  res
 }

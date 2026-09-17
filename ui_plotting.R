@@ -325,6 +325,7 @@ generate_base_plot <- function(item, input, agro_params = NULL) {
       # units: only value surfaces may be classified (mirrors the in-app
       # viewer, which always draws residual/uncertainty layers continuously).
       is_class <- input$color_style %in% c("agro", "bin") && !is_resid && !is_uncert
+      if (is_uncert) pal_name <- uncertainty_palette(pal_name)
 
       if (isTruthy(input$styler_high_contrast)) {
           if (!is_class && !is_resid) pal_name <- "viridis"

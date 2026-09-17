@@ -188,9 +188,9 @@ test_that("classification tuning resamples score fold-kriged covariates", {
   # an rset with reconstructed assessment rows, never the measured rows.
   seen <- logical(0)
   original <- classif_folds_to_rset
-  assign("classif_folds_to_rset", function(train_df, fold_id, assess_df = NULL) {
+  assign("classif_folds_to_rset", function(train_df, fold_id, assess_df = NULL, ...) {
     seen <<- c(seen, !is.null(assess_df))
-    original(train_df, fold_id, assess_df)
+    original(train_df, fold_id, assess_df, ...)
   }, envir = globalenv())
   on.exit(assign("classif_folds_to_rset", original, envir = globalenv()), add = TRUE)
   suppressWarnings(run_classification_cv(
@@ -828,8 +828,7 @@ test_that("the classification prediction grid is invariant to the clip block siz
   bnd <- sf::st_as_sf(sf::st_sfc(
     sf::st_union(sf::st_geometry(.classif_scope_hulls(pts, group = NULL, style = "concave"))),
     crs = sf::st_crs(pts)))
-  grid_r <- terra::rast(terra::ext(sf::st_bbox(bnd)), resolution = 100,
-                        crs = sf::st_crs(pts)$wkt)
+  grid_r <- grid_template(sf::st_bbox(bnd), 100, sf::st_crs(pts)$wkt)
   ref <- sf::st_as_sf(terra::as.points(grid_r, values = FALSE))
   ref <- ref[sf::st_within(ref, bnd, sparse = FALSE)[, 1], ]
   expect_equal(unname(sf::st_coordinates(one_block$grid_p)),
@@ -880,6 +879,79 @@ test_that("class weights apply for supported engines and change the fit", {
   cv_mn <- run_classification_cv(pts, "soil", c("elev", "slope"), method = "multinom",
                                  strategy = "standard", v = 4, class_weights = TRUE)
   expect_false(isTRUE(cv_mn$weights_applied))
+})
+
+test_that("each tuning resample is weighted by its own analysis rows", {
+  d <- sf::st_drop_geometry(make_classif_points(n = 60))[, c("soil", "elev", "slope")]
+  d$.case_wt <- hardhat::importance_weights(.classif_class_weights(d$soil))
+  fold_id <- rep(1:3, length.out = nrow(d))
+  rs <- classif_folds_to_rset(d, fold_id, NULL, target = "soil")
+  for (k in 1:3) {
+    a <- rsample::analysis(rs$splits[[k]])
+    expect_equal(nrow(a), sum(fold_id != k))
+    expect_identical(as.character(a$soil), as.character(d$soil[fold_id != k]))
+    # From the definition w_c = n / (K n_c), on the analysis rows alone.
+    tab <- table(a$soil)
+    expect_equal(as.numeric(a$.case_wt),
+                 as.numeric(nrow(a) / (length(tab) * tab[as.character(a$soil)])))
+    expect_identical(rsample::assessment(rs$splits[[k]])$soil, d$soil[fold_id == k])
+  }
+})
+
+test_that("the Auto-Drop screen uses only the rows the recipe is prepped on", {
+  set.seed(11)
+  n <- 80
+  clay <- runif(n, 10, 40); silt <- runif(n, 20, 50)
+  # sand is the complement of clay and silt in the first half only.
+  sand <- c(100 - clay[1:40] - silt[1:40] + rnorm(40, 0, 0.05), runif(40, 10, 60))
+  d <- data.frame(soil = factor(rep(c("a", "b"), 40)), clay = clay, silt = silt,
+                  sand = sand, elev = rnorm(n))
+  preds <- c("clay", "silt", "sand", "elev")
+  removed_on <- function(rows) {
+    pr <- recipes::prep(classif_build_recipe(d[rows, ], "soil", preds, vif_threshold = 10))
+    st <- Filter(function(s) inherits(s, "step_vif_screen"), pr$steps)
+    expect_length(st, 1)
+    st[[1]]$removals
+  }
+  expect_true(length(removed_on(1:40)) == 1)
+  expect_length(removed_on(41:80), 0)
+  # No threshold (Keep All): no screen step at all.
+  steps <- classif_build_recipe(d, "soil", preds)$steps
+  expect_false(any(vapply(steps, inherits, logical(1), "step_vif_screen")))
+})
+
+test_that("Auto-Drop reruns inside CV and the final model carries no custom step", {
+  set.seed(5)
+  n <- 90
+  x <- runif(n, 450000, 452000); y <- runif(n, 5800000, 5802000)
+  score <- (x - 450000) / 2000 + rnorm(n, 0, 0.3)
+  clay <- runif(n, 10, 40); silt <- runif(n, 20, 50)
+  df <- data.frame(x = x, y = y,
+                   soil = factor(ifelse(score > stats::median(score), "hi", "lo")),
+                   clay = clay, silt = silt,
+                   sand = 100 - clay - silt + rnorm(n, 0, 0.05),
+                   elev = score * 10 + rnorm(n, 0, 1))
+  pts <- sf::st_as_sf(df, coords = c("x", "y"), crs = 32633)
+  preds <- c("clay", "silt", "sand", "elev")
+  full_drop <- .classif_screen_all_rows(sf::st_drop_geometry(pts), preds, 10)
+  expect_length(full_drop, 1)
+
+  cv <- suppressWarnings(run_classification_cv(pts, "soil", preds, method = "rf",
+                                               strategy = "standard", v = 3,
+                                               vif_threshold = 10))
+  expect_s3_class(cv$fold_screen, "data.frame")
+  expect_setequal(unique(cv$fold_screen$fold), unique(cv$fold_id))
+
+  m <- suppressWarnings(fit_classification_model(pts, "soil", preds, method = "rf",
+                                                 strategy = "standard", v = 3,
+                                                 vif_threshold = 10))
+  expect_identical(m$screened_out, full_drop)
+  expect_setequal(m$predictors, setdiff(preds, full_drop))
+  steps <- workflows::extract_recipe(m$workflow)$steps
+  expect_false(any(vapply(steps, inherits, logical(1), "step_vif_screen")))
+  # The fitted model predicts without the screened-out column.
+  nd <- sf::st_drop_geometry(pts)[1:3, m$predictors]
+  expect_equal(nrow(predict(m$workflow, nd, type = "prob")), 3)
 })
 
 test_that("binary multinom substitutes logistic regression with valid probabilities", {
