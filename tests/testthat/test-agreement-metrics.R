@@ -245,9 +245,10 @@ test_that("agreement_metrics_df reports all six statistics, numerically", {
   expect_equal(val("Kappa (Unweighted)"), ag$kappa)
   expect_equal(val("Weighted Kappa (Linear)"), ag$kappa_linear)
 
-  # the card rounds to 4 dp
-  shown <- agreement_metrics_df(ag, round_values = TRUE)
-  expect_equal(shown$Value, round(out$Value, 4))
+  # One flavour only: the card displays these very numbers at four significant
+  # digits (mnFormatSig / format_sig), so the sheet and the screen agree.
+  expect_equal(format_sig(out$Value[out$Metric == "Overall Accuracy"]),
+               format_sig(ag$accuracy))
 })
 
 test_that("agreement_metrics_df returns NULL for a refused comparison", {

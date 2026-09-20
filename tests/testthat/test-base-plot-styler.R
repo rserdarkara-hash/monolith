@@ -6,6 +6,11 @@
 # ── Mock input ─────────────────────────────────────────────────────────────
 
 mock_input_full <- list(
+  # An empty title box, spelled out: `$` on a plain list partial-matches, so
+  # without this entry input$styler_title returns styler_title_size and every
+  # styled plot is titled "16" instead of its item label. Shiny's real `input`
+  # does not partial-match, so the mock has to say what it means.
+  styler_title         = "",
   palette_select       = "YlOrRd",
   color_style          = "continuous",
   styler_high_contrast = FALSE,
@@ -90,6 +95,38 @@ fill_scale_of <- function(p) {
   expect_true(length(fills) >= 1)
   fills[[1]]
 }
+
+test_that("an exported map's legend names the variable, its unit and its layer", {
+  # The export used to leave the legend untitled while the Map Viewer names it.
+  expect_equal(map_legend_title("Soil pH", ""), "Soil pH")
+  expect_equal(map_legend_title("Total N", "%"), "Total N %")
+  expect_equal(map_legend_title("Total N", "%", "se"), "SE: Total N %")
+  expect_equal(map_legend_title("Total N", "%", "var"), "Variance: Total N (%)^2")
+  expect_equal(map_legend_title("Total N", "", "var"), "Variance: Total N (squared units)")
+  expect_equal(map_legend_title("Total N", "%", "resid"), "Resid: Total N")
+
+  for (style in c("cont", "agro")) {
+    inp <- mock_input_full; inp$color_style <- style
+    item <- list(type = "map", obj = make_test_wrapped_raster(), kind = "value",
+                 label = "Total N - Actual Map - Ordinary Kriging", legend = "Total N %")
+    p <- generate_base_plot(item, inp, agro_params = make_test_agro_params())
+    expect_equal(fill_scale_of(p)$name, "Total N %")
+  }
+  # The figure's title is the registry label, which names the method. The
+  # mock's empty styler_title (see the fixture) is the empty title box.
+  styled <- generate_styled_plot(list(type = "map", obj = make_test_wrapped_raster(), kind = "value",
+                                      label = "Total N - Actual Map - Ordinary Kriging",
+                                      legend = "Total N %"), mock_input_full)
+  expect_equal(styled$labels$title, "Total N - Actual Map - Ordinary Kriging")
+})
+
+test_that("an exported file's name carries the item, the method and the time", {
+  expect_equal(export_file_name("Export", "map_actual", "OK", "20260919_120000", "tif"),
+               "Export_map_actual_OK_20260919_120000.tif")
+  expect_equal(export_file_name("Batch_Statistics", NULL, "RK", "t", "xlsx"),
+               "Batch_Statistics_RK_t.xlsx")
+  expect_equal(export_file_name("Export", "x", NULL, "t", "png"), "Export_x_t.png")
+})
 
 test_that("value maps ARE classified under agro styling", {
   input_agro <- mock_input_full
@@ -221,95 +258,131 @@ test_that("point error map honors the selected diverging palette", {
 })
 
 # ── apply_styler_theme ─────────────────────────────────────────────────────
+#
+# apply_styler_theme's whole job is to put the styler's controls onto the
+# plot's theme. It returns `p + theme_minimal() + theme(...)`, so a class check
+# holds for any implementation that does not raise - including one that ignores
+# every control. These read the theme back instead.
+#
+# The high-contrast switch is NOT part of this function: styler_high_contrast
+# is read by generate_base_plot and resolve_resid_palette, which have their own
+# tests above.
 
-test_that("apply_styler_theme returns a ggplot with full input", {
-  p <- ggplot2::ggplot(mtcars, ggplot2::aes(wt, mpg)) +
-    ggplot2::geom_point() +
-    ggplot2::labs(title = "Test Plot")
-  result <- apply_styler_theme(p, mock_input_full,
-                                item_label = "Test Label", item_type = "plot")
-  expect_s3_class(result, "ggplot")
-})
-
-test_that("apply_styler_theme returns a ggplot with minimal input", {
-  p <- ggplot2::ggplot(mtcars, ggplot2::aes(wt, mpg)) +
-    ggplot2::geom_point()
-  result <- apply_styler_theme(p, mock_input_minimal,
-                                item_label = "", item_type = "plot")
-  expect_s3_class(result, "ggplot")
-})
+styler_plot <- function() {
+  ggplot2::ggplot(mtcars, ggplot2::aes(wt, mpg, color = factor(cyl))) +
+    ggplot2::geom_point() + ggplot2::labs(title = "Test Plot")
+}
 
 test_that("apply_styler_theme uses the slider point sizes verbatim", {
   # No export-time rescaling: a point in the styler is a point on the page, so
   # the theme must carry the slider values themselves (the former `calibration`
   # multiplier existed only to offset showtext's fixed-dpi text rendering).
-  p <- ggplot2::ggplot(mtcars, ggplot2::aes(wt, mpg)) +
-    ggplot2::geom_point()
-  result <- apply_styler_theme(p, mock_input_full,
-                                item_label = "", item_type = "plot")
-  expect_equal(result$theme$plot.title$size, mock_input_full$styler_title_size)
-  expect_equal(result$theme$axis.title.x$size, mock_input_full$styler_x_size)
-  expect_equal(result$theme$axis.text$size, mock_input_full$styler_label_size)
+  res <- apply_styler_theme(styler_plot(), mock_input_full,
+                            item_label = "Test Label", item_type = "plot")
+  th <- res$theme
+  expect_equal(th$plot.title$size, mock_input_full$styler_title_size)
+  expect_equal(th$plot.subtitle$size, mock_input_full$styler_title_size * 0.8)
+  expect_equal(th$axis.title.x$size, mock_input_full$styler_x_size)
+  expect_equal(th$axis.title.y$size, mock_input_full$styler_y_size)
+  expect_equal(th$axis.text$size, mock_input_full$styler_label_size)
+  expect_equal(th$legend.text$size, mock_input_full$styler_legend_size)
+  expect_equal(th$legend.title$size, mock_input_full$styler_legend_size)
+  expect_equal(th$text$size, mock_input_full$styler_base_size)
+  expect_equal(th$text$family, mock_input_full$styler_font_family)
+  expect_equal(as.numeric(th$legend.key.size), mock_input_full$styler_legend_key_size)
+  expect_equal(as.numeric(th$plot.margin), c(10, 10, 10, 15))
+
+  # The item label becomes the title; the axis-title overrides are verbatim.
+  expect_equal(res$labels$title, "Test Label")
+  expect_equal(res$labels$x, "X Axis")
+  expect_equal(res$labels$y, "Y Axis")
 })
 
-test_that("apply_styler_theme handles map_combined item_type", {
-  p1 <- ggplot2::ggplot(mtcars, ggplot2::aes(wt, mpg)) +
-    ggplot2::geom_point()
-  p2 <- ggplot2::ggplot(mtcars, ggplot2::aes(hp, qsec)) +
-    ggplot2::geom_point()
-  p_obj <- list(p1 = p1, p2 = p2)
-  result <- apply_styler_theme(p_obj, mock_input_full,
-                                item_label = "Combined", item_type = "map_combined")
-  # Patchwork-assembled result is a ggplot
-  expect_s3_class(result, "ggplot")
+test_that("an empty styler input falls back to the documented defaults", {
+  # The styler panel can be collapsed or not yet rendered, in which case every
+  # input reads NULL. mock_input_full has fonts and sizes, so it cannot
+  # exercise this path at all.
+  res <- apply_styler_theme(styler_plot(), mock_input_minimal,
+                            item_label = "", item_type = "plot")
+  th <- res$theme
+  expect_equal(th$plot.title$size, 16)
+  expect_equal(th$axis.title.x$size, 12)
+  expect_equal(th$axis.title.y$size, 12)
+  expect_equal(th$axis.text$size, 10)
+  expect_equal(th$legend.text$size, 10)
+  expect_equal(th$text$size, 12)
+  expect_equal(th$text$family, "sans")
+  expect_equal(th$legend.position, "right")
+  expect_equal(th$legend.direction, "vertical")
+  expect_equal(th$legend.text$angle, 0)
+  expect_equal(as.numeric(th$legend.key.size), 1)
+  # No axis-title override means the plot keeps its own mapping-derived labels.
+  expect_null(res$labels$x)
+  expect_null(res$labels$y)
 })
 
-test_that("apply_styler_theme handles legend position bottom", {
-  input_bottom <- mock_input_full
-  input_bottom$styler_legend_pos <- "bottom"
-  p <- ggplot2::ggplot(mtcars, ggplot2::aes(wt, mpg)) +
-    ggplot2::geom_point()
-  result <- apply_styler_theme(p, input_bottom,
-                                item_label = "", item_type = "plot")
-  expect_s3_class(result, "ggplot")
+test_that("legend placement, direction and text angle reach the theme", {
+  leg <- function(...) {
+    apply_styler_theme(styler_plot(), modifyList(mock_input_full, list(...)),
+                       item_label = "", item_type = "plot")$theme
+  }
+
+  # "auto" is resolved here, not left for ggplot: horizontal under a
+  # bottom/top legend, vertical beside one.
+  for (pos in c("bottom", "top")) {
+    th <- leg(styler_legend_pos = pos, styler_legend_dir = "auto")
+    expect_equal(th$legend.position, pos, info = pos)
+    expect_equal(th$legend.direction, "horizontal", info = pos)
+  }
+  for (pos in c("right", "left")) {
+    th <- leg(styler_legend_pos = pos, styler_legend_dir = "auto")
+    expect_equal(th$legend.position, pos, info = pos)
+    expect_equal(th$legend.direction, "vertical", info = pos)
+  }
+
+  # An explicit direction overrides the position's default.
+  expect_equal(leg(styler_legend_pos = "right",
+                   styler_legend_dir = "horizontal")$legend.direction, "horizontal")
+
+  # A rotated legend label needs both justifications centred, or it drifts off
+  # its key; at angle 0 they must stay unset so ggplot's own defaults apply.
+  th <- leg(styler_legend_text_angle = 90)
+  expect_equal(th$legend.text$angle, 90)
+  expect_equal(th$legend.text$hjust, 0.5)
+  expect_equal(th$legend.text$vjust, 0.5)
+  th0 <- leg(styler_legend_text_angle = 0)
+  expect_equal(th0$legend.text$angle, 0)
+  expect_null(th0$legend.text$hjust)
+  expect_null(th0$legend.text$vjust)
 })
 
-test_that("apply_styler_theme handles NULL font overrides", {
-  p <- ggplot2::ggplot(mtcars, ggplot2::aes(wt, mpg)) +
-    ggplot2::geom_point()
-  result <- apply_styler_theme(p, mock_input_full,
-                                item_label = "With Label", item_type = "plot")
-  expect_s3_class(result, "ggplot")
-})
+test_that("map_combined assembles two named panes on its own legend defaults", {
+  p_obj <- list(p1 = styler_plot(),
+                p2 = ggplot2::ggplot(mtcars, ggplot2::aes(hp, qsec)) + ggplot2::geom_point())
 
-test_that("apply_styler_theme handles legend direction horizontal", {
-  input_horiz <- mock_input_full
-  input_horiz$styler_legend_dir <- "horizontal"
-  p <- ggplot2::ggplot(mtcars, ggplot2::aes(wt, mpg, color = factor(cyl))) +
-    ggplot2::geom_point()
-  result <- apply_styler_theme(p, input_horiz,
-                                item_label = "", item_type = "plot")
-  expect_s3_class(result, "ggplot")
-})
+  # Two maps side by side default to a shared horizontal legend underneath
+  # with rotated labels, which is not what a single plot defaults to.
+  res <- apply_styler_theme(p_obj, mock_input_minimal,
+                            item_label = "Combined", item_type = "map_combined")
+  expect_s3_class(res, "patchwork")
+  expect_equal(res$theme$legend.position, "bottom")
+  expect_equal(res$theme$legend.direction, "horizontal")
+  expect_equal(res$theme$legend.text$angle, 90)
+  expect_equal(res[[1]]$labels$title, "Actual")
+  expect_equal(res[[2]]$labels$title, "Predicted")
 
-test_that("apply_styler_theme handles high_contrast input switch", {
-  input_hc <- mock_input_full
-  input_hc$styler_high_contrast <- TRUE
-  p <- ggplot2::ggplot(mtcars, ggplot2::aes(wt, mpg)) +
-    ggplot2::geom_point()
-  result <- apply_styler_theme(p, input_hc,
-                                item_label = "", item_type = "plot")
-  expect_s3_class(result, "ggplot")
-})
-
-test_that("apply_styler_theme sets legend text angle", {
-  input_angle <- mock_input_full
-  input_angle$styler_legend_text_angle <- 90
-  p <- ggplot2::ggplot(mtcars, ggplot2::aes(wt, mpg, color = factor(cyl))) +
-    ggplot2::geom_point()
-  result <- apply_styler_theme(p, input_angle,
-                                item_label = "", item_type = "plot")
-  expect_s3_class(result, "ggplot")
+  # An explicit choice still wins, and the panes shrink their keys and margins.
+  res_f <- apply_styler_theme(p_obj, mock_input_full,
+                              item_label = "Combined", item_type = "map_combined")
+  expect_equal(res_f$theme$legend.position, "right")
+  expect_equal(res_f$theme$legend.direction, "vertical")
+  expect_equal(res_f$theme$legend.text$angle, 0)
+  expect_equal(res_f[[1]]$theme$plot.title$size,
+               mock_input_full$styler_title_size * 0.85)
+  expect_equal(as.numeric(res_f[[1]]$theme$legend.key.size),
+               mock_input_full$styler_legend_key_size * 0.6)
+  expect_equal(as.numeric(res_f[[1]]$theme$plot.margin),
+               c(10, 10, 10, 15) * 0.3)
 })
 
 # ── GeoTIFF / GIS export routing ────────────────────────────────────────────
@@ -336,6 +409,77 @@ test_that("export_raster_payload rejects the two non-raster map payloads", {
   expect_null(export_raster_payload(point_err))
   expect_null(export_raster_payload(list(type = "table", obj = mtcars, label = "t")))
   expect_null(export_raster_payload(NULL))
+})
+
+# ── Derived (uncertainty) registry items ────────────────────────────────────
+# A variance/SE item stores a derivation of the surface registered beside it,
+# not a second copy of its values; export_item_obj() rebuilds it on demand.
+
+make_test_kriging_raster <- function() {
+  set.seed(11)
+  r <- terra::rast(nrows = 10, ncols = 10,
+                   xmin = 450000, xmax = 451000,
+                   ymin = 5800000, ymax = 5801000,
+                   crs = "EPSG:32633")
+  terra::values(r) <- rnorm(100, mean = 50, sd = 15)
+  v <- r
+  terra::values(v) <- runif(100, min = 1, max = 9)
+  out <- c(r, v)
+  names(out) <- c("var1.pred", "var1.var")
+  out
+}
+
+test_that("export_item_obj returns a stored payload unchanged", {
+  item <- list(type = "map", obj = make_test_wrapped_raster(), label = "pH - Actual Map")
+  expect_identical(export_item_obj(item), item$obj)
+  expect_null(export_item_obj(NULL))
+})
+
+test_that("export_item_obj rebuilds the variance and SE bands from the surface", {
+  src <- make_test_kriging_raster()
+  var_item <- list(type = "map", obj = NULL, kind = "uncertainty",
+                   label = "pH - Uncertainty Map (Variance - Actual)",
+                   derived = list(src = src, layer = "var1.var", name = "var1.var"))
+  se_item <- list(type = "map", obj = NULL, kind = "uncertainty",
+                  label = "pH - Uncertainty Map (SE - Actual)",
+                  derived = list(src = src, layer = "var1.var", fun = "sqrt",
+                                 name = "var1.se"))
+
+  v <- export_item_obj(var_item)
+  expect_s4_class(v, "SpatRaster")
+  expect_equal(terra::nlyr(v), 1L)
+  expect_equal(names(v), "var1.var")
+  expect_equal(terra::values(v)[, 1], terra::values(src[["var1.var"]])[, 1])
+
+  se <- export_item_obj(se_item)
+  # The layer name travels into the GeoTIFF as the band description, so the
+  # square root must not describe itself as a variance.
+  expect_equal(names(se), "var1.se")
+  expect_equal(terra::values(se)[, 1], sqrt(terra::values(src[["var1.var"]])[, 1]))
+
+  # The source must not be touched by either derivation.
+  expect_equal(names(src), c("var1.pred", "var1.var"))
+})
+
+test_that("a derived item routes through the raster and plot export paths", {
+  src <- make_test_kriging_raster()
+  item <- list(type = "map", obj = NULL, kind = "uncertainty",
+               label = "pH - Uncertainty Map (SE - Actual)",
+               derived = list(src = src, layer = "var1.var", fun = "sqrt",
+                              name = "var1.se"))
+  # GeoTIFF export is offered for it, and the styler preview builds.
+  r <- export_raster_payload(item)
+  expect_s4_class(r, "SpatRaster")
+  expect_equal(names(r), "var1.se")
+  expect_s3_class(generate_base_plot(item, mock_input_full), "ggplot")
+})
+
+test_that("a derived item whose source lacks the band yields no payload", {
+  src <- make_test_kriging_raster()[["var1.pred"]]
+  item <- list(type = "map", obj = NULL, kind = "uncertainty", label = "x",
+               derived = list(src = src, layer = "var1.var", name = "var1.var"))
+  expect_null(export_item_obj(item))
+  expect_null(export_raster_payload(item))
 })
 
 test_that("export_sheet_name drops exactly the variable-label prefix", {
@@ -417,6 +561,74 @@ test_that("write_geotiff keeps every layer of a kriging surface", {
 
 test_that("write_geotiff refuses a payload that is not a raster", {
   expect_error(write_geotiff(NULL, tempfile(fileext = ".tif")), "raster")
+})
+
+# gdalinfo's JSON report: per-band metadata and the dataset's own tags.
+geotiff_info <- function(f) {
+  jsonlite::fromJSON(sf::gdal_utils("info", f, options = "-json", quiet = TRUE),
+                     simplifyVector = FALSE)
+}
+
+test_that("write_geotiff writes real band statistics and the supplied tags", {
+  r <- terra::unwrap(make_test_wrapped_raster())
+  names(r) <- "var1.pred"
+  v <- r; names(v) <- "var1.var"; terra::values(v) <- abs(terra::values(r)) / 10
+  stacked <- c(r, v)
+  stacked[1:3] <- NA                     # a masked edge, as a boundary clip leaves
+  f <- tempfile(fileext = ".tif"); plain <- tempfile(fileext = ".tif")
+  on.exit(unlink(c(f, plain, paste0(c(f, plain), ".aux.xml"))), add = TRUE)
+
+  write_geotiff(stacked, f, tags = c(MONOLITH_VARIABLE = "Soil pH",
+                                     MONOLITH_UNIT = "",
+                                     MONOLITH_METHOD = "Ordinary Kriging",
+                                     MONOLITH_PRODUCT = "Actual Map\n(line two)"))
+  expect_false(file.exists(paste0(f, ".aux.xml")))
+
+  # The tagging pass moves no value: the cells equal what a plain writeRaster
+  # stores, bit for bit, in the same datatype and with the same band names.
+  terra::writeRaster(stacked, plain, gdal = "COMPRESS=LZW")
+  ref <- terra::values(terra::rast(plain))
+  back <- terra::rast(f)
+  expect_identical(terra::values(back), ref)
+  expect_equal(names(back), c("var1.pred", "var1.var"))
+  expect_equal(terra::datatype(back), terra::datatype(terra::rast(plain)))
+  expect_true(terra::crs(back) == terra::crs(stacked))
+
+  info <- geotiff_info(f)
+  for (b in 1:2) {
+    md <- info$bands[[b]]$metadata[[1]]
+    x <- ref[, b]; x <- x[!is.na(x)]
+    # Real statistics, not terra's -9999 placeholders. GDAL reports the
+    # population standard deviation (divisor n).
+    expect_equal(as.numeric(md$STATISTICS_MEAN), mean(x), tolerance = 1e-9)
+    expect_equal(as.numeric(md$STATISTICS_STDDEV), sqrt(mean((x - mean(x))^2)), tolerance = 1e-9)
+    expect_equal(as.numeric(md$STATISTICS_MINIMUM), min(x), tolerance = 1e-9)
+    expect_equal(as.numeric(md$STATISTICS_MAXIMUM), max(x), tolerance = 1e-9)
+  }
+  tags <- info$metadata[[1]]
+  expect_equal(tags$MONOLITH_VARIABLE, "Soil pH")
+  expect_equal(tags$MONOLITH_METHOD, "Ordinary Kriging")
+  # A newline would end the tag; an empty value is left out, not written blank.
+  expect_equal(tags$MONOLITH_PRODUCT, "Actual Map (line two)")
+  expect_null(tags$MONOLITH_UNIT)
+})
+
+test_that("write_geotiff still writes the raster when the tagging pass fails", {
+  # A GDAL build without the translate utility must cost the tags, never the file.
+  r <- terra::unwrap(make_test_wrapped_raster())
+  f <- tempfile(fileext = ".tif"); plain <- tempfile(fileext = ".tif")
+  on.exit(unlink(c(f, plain)), add = TRUE)
+  local_mocked_bindings(gdal_utils = function(...) stop("translate unavailable"), .package = "sf")
+
+  expect_warning(write_geotiff(r, f, tags = c(MONOLITH_VARIABLE = "x")), "statistics and tags")
+  terra::writeRaster(r, plain)
+  expect_identical(terra::values(terra::rast(f)), terra::values(terra::rast(plain)))
+})
+
+test_that("geotiff_tag_options cleans values and drops empty tags", {
+  expect_equal(geotiff_tag_options(NULL), character(0))
+  expect_equal(geotiff_tag_options(c(A = "x\r\ny", B = "", C = NA, D = "  z ")),
+               c("-mo", "A=x y", "-mo", "D=z"))
 })
 
 test_that("write_vector_export writes GeoPackage and GeoJSON layers", {

@@ -126,14 +126,21 @@ test_that("augment_metrics RMSE-based metrics degrade with noise", {
 })
 
 test_that("augment_metrics RPD and RPIQ are positive for valid input", {
+  # Seeded: on a fixed draw the interquartile range is a known quantity, so
+  # RPIQ is defined and the assertion can be unconditional. The former
+  # `if (!is.na(res$rpiq))` guard let this block report a pass on one
+  # expectation instead of two whenever the draw happened to give IQR = 0.
+  set.seed(17)
   obs <- rnorm(30, 50, 10)
   pre <- obs + rnorm(30, 0, 3)
   res <- augment_metrics(obs, pre)
-  expect_true(res$rpd > 0)
-  # RPIQ can only be computed when IQR > 0
-  if (!is.na(res$rpiq)) {
-    expect_true(res$rpiq > 0)
-  }
+
+  # Both are a spread over the error, so both are positive whenever the
+  # observations vary at all. Their definitions are pinned against the
+  # known-answer pair and against sd(obs)/RMSE elsewhere in this file.
+  expect_gt(stats::IQR(obs), 0)
+  expect_gt(res$rpd, 0)
+  expect_gt(res$rpiq, 0)
 })
 
 test_that("augment_metrics SMAPE is between 0 and 200", {
@@ -141,13 +148,6 @@ test_that("augment_metrics SMAPE is between 0 and 200", {
   pre <- c(12, 18, 33, 37, 55)
   res <- augment_metrics(obs, pre)
   expect_true(res$smape >= 0 && res$smape <= 200)
-})
-
-test_that("augment_metrics NRMSE_mean is percentage-scaled", {
-  obs <- c(10, 20, 30, 40, 50)
-  pre <- c(10, 20, 30, 40, 50)
-  res <- augment_metrics(obs, pre)
-  expect_equal(res$nrmse_mean, 0.0)
 })
 
 # Every metric here is a ratio and each has a zero-denominator configuration.
@@ -167,6 +167,12 @@ test_that("augment_metrics NRMSE_mean is NA for a zero-mean variable", {
   res <- augment_metrics(obs, pre)
   expect_true(is.na(res$nrmse_mean))
   expect_false(is.infinite(res$nrmse_mean))
+
+  # The zero-mean guard is a separate, numerical branch from the sign-crossing
+  # rule: this vector does not span zero, so only the guard can fire.
+  zeros <- augment_metrics(rep(0, 5), c(0, 0.1, -0.1, 0, 0))
+  expect_false(isTRUE(zeros$signed_target))
+  expect_true(is.na(zeros$nrmse_mean))
 })
 
 test_that("augment_metrics RPD and RPIQ are NA at zero RMSE", {
@@ -217,13 +223,22 @@ test_that(".cv_to_df handles NULL input", {
 
 test_that(".cv_to_df converts sf object to data.frame with coordinates", {
   pts <- make_test_points(10)
-  # Simulate a simple sf-based CV result
-  pts$var1.pred     <- pts$v + rnorm(10, 0, 1)
+  pts$var1.pred     <- pts$v + 1
   pts$var1.observed <- pts$v
   df <- .cv_to_df(pts)
   expect_s3_class(df, "data.frame")
-  expect_true("x" %in% colnames(df) || "X" %in% colnames(df) ||
-              "coords.x1" %in% colnames(df))
+
+  # The names are the contract, not a choice among three: perform_cv's Moran
+  # branch and pool_cv_sf both key on lower-case "x" and "y". Accepting "X" or
+  # "coords.x1" as well would let a rename through that those callers cannot
+  # follow.
+  expect_true(all(c("x", "y") %in% colnames(df)))
+  co <- sf::st_coordinates(pts)
+  expect_equal(df$x, unname(co[, 1]))
+  expect_equal(df$y, unname(co[, 2]))
+  # The geometry column is dropped, and every attribute survives it.
+  expect_false("geometry" %in% colnames(df))
+  expect_equal(df[names(sf::st_drop_geometry(pts))], sf::st_drop_geometry(pts))
 })
 
 test_that(".cv_to_df converts plain data.frame as-is", {
@@ -260,11 +275,10 @@ test_that("the metric dictionary reproduces its external known answers", {
   # A perfect-prediction fixture cannot distinguish a correct RMSE from one with
   # the wrong divisor, nor NSE from SSE/SST, so every metric perform_cv reports
   # is pinned here on a NON-degenerate pair whose answers were derived from the
-  # definitions (see make_metrics_known). round_values = FALSE because the
-  # display lattice (1e-4 / 0.01) is coarser than the tolerance below.
+  # definitions (see make_metrics_known).
   k <- make_metrics_known()
   m <- perform_cv(data.frame(var1.observed = k$observed, var1.pred = k$predicted),
-                  moran = FALSE, round_values = FALSE)
+                  moran = FALSE)
   expect_equal(m$rmse,       k$rmse,  tolerance = 1e-9)
   expect_equal(m$mae,        k$mae,   tolerance = 1e-9)
   expect_equal(m$me,         k$me,    tolerance = 1e-9)
@@ -354,7 +368,7 @@ test_that("perform_cv computes Moran's I when coordinates are present", {
   # read honestly without them (E[I] = -1/(n-1) is negative, not 0).
   expect_true(all(c("moran_i", "moran_e", "moran_p") %in% names(res)))
   if (!is.na(res$moran_i)) {
-    expect_equal(res$moran_e, round(-1 / (res$n - 1), 4))
+    expect_equal(res$moran_e, -1 / (res$n - 1))
     expect_true(is.na(res$moran_p) || (res$moran_p >= 0 && res$moran_p <= 1))
   }
 })
@@ -583,53 +597,68 @@ test_that("summarise_cv_repeats reports mean and SD across realizations", {
   expect_null(summarise_cv_repeats(list(mk(1), NULL, mk(2))))
 })
 
-# ── Display rounding must not reach the repeated-CV aggregation ────────────
-# 2026-08-23 audit, Tier 2: mean/SD across fold realizations were taken over
-# values perform_cv had already rounded for display, so the SD reported the
-# rounding lattice (RPD 0.01, RMSE 1e-4) instead of fold-assignment variance.
+# ── Metrics are computed at full precision; only the display rounds ────────
+# Rounding used to happen inside perform_cv() and augment_metrics(), so a
+# genuinely small value reached the Model Performance table, the exported CSV
+# and the repeated-CV aggregation already quantized - and printed as 0 beside
+# an NSE that said the fit was imperfect. Both are impossible statements about
+# the same residuals, which is what the invariant at the end of this block
+# pins.
 
-test_that("perform_cv(round_values = FALSE) returns full precision, TRUE is the default", {
+test_that("perform_cv and augment_metrics return full precision", {
   cv_df <- data.frame(
     var1.pred     = c(10.00013, 20.00027, 30.00041, 40.00019, 50.00033),
     var1.observed = c(10, 20, 30, 40, 50)
   )
-  rounded <- perform_cv(cv_df, moran = FALSE)
-  raw <- perform_cv(cv_df, moran = FALSE, round_values = FALSE)
+  m <- perform_cv(cv_df, moran = FALSE)
+  res <- cv_df$var1.observed - cv_df$var1.pred
 
-  # Default is unchanged: the reference Model Performance table still rounds.
-  expect_identical(rounded, perform_cv(cv_df, moran = FALSE, round_values = TRUE))
-  for (k in c("rmse", "me", "mae", "r2", "ccc")) {
-    expect_equal(rounded[[k]], round(raw[[k]], 4), info = k)
-  }
-  for (k in c("nrmse_mean", "rpd", "rpiq", "smape")) {
-    expect_equal(rounded[[k]], round(raw[[k]], 2), info = k)
-  }
-  # The raw RMSE here is well below the 1e-4 display lattice, so rounding it
-  # destroys the value entirely - the exact failure mode the flag exists for.
-  expect_gt(raw$rmse, 0)
-  expect_equal(rounded$rmse, 3e-4)
-  expect_false(isTRUE(all.equal(raw$rmse, rounded$rmse)))
+  # Every value is the definition, not a rounded one: the old display lattice
+  # (1e-4 for RMSE, 0.01 for the ratios) is coarser than these differences.
+  expect_equal(m$rmse, sqrt(mean(res^2)))
+  expect_equal(m$mae, mean(abs(res)))
+  expect_equal(m$me, mean(res))
+  expect_gt(m$rmse, 0)
+  expect_false(isTRUE(all.equal(m$rmse, round(m$rmse, 4))))
+
+  a <- augment_metrics(cv_df$var1.observed, cv_df$var1.pred)
+  expect_equal(a$rpd, stats::sd(cv_df$var1.observed) / m$rmse)
+  expect_false(isTRUE(all.equal(a$rpd, round(a$rpd, 2))))
 })
 
-test_that("augment_metrics(round_values = FALSE) leaves its ratios unrounded", {
-  obs <- c(1, 2, 3, 4, 5, 6, 7, 8)
-  pre <- obs + c(0.0031, -0.0027, 0.0044, -0.0019, 0.0038, -0.0022, 0.0029, -0.0035)
-  raw <- augment_metrics(obs, pre, round_values = FALSE)
-  rounded <- augment_metrics(obs, pre)
+test_that("a near-constant target reports a non-zero error, not 0", {
+  # 7 + N(0, 1e-7) under a near-perfect prediction: at the old 4-decimal
+  # rounding RMSE, MAE and bias all printed 0 beside a negative NSE.
+  set.seed(19)
+  obs <- 7 + rnorm(40, 0, 1e-7)
+  pre <- obs + rnorm(40, 0, 1.2e-7)
+  m <- perform_cv(data.frame(var1.observed = obs, var1.pred = pre), moran = FALSE)
 
-  expect_identical(rounded, augment_metrics(obs, pre, round_values = TRUE))
-  expect_equal(rounded$rpd, round(raw$rpd, 2))
-  expect_equal(rounded$nse, round(raw$nse, 4))
-  # RPD on a near-perfect fit is large, so the 0.01 display lattice discards
-  # real variation between realizations.
-  expect_false(isTRUE(all.equal(raw$rpd, rounded$rpd)))
+  expect_gt(m$rmse, 0)
+  expect_false(isTRUE(all.equal(m$rmse, 0, tolerance = 0)))
+  expect_gt(m$mae, 0)
+  # and the display says so rather than collapsing it
+  expect_match(format_sig(m$rmse), "e-0[0-9]$")
 })
 
-test_that("summarise_cv_repeats aggregates raw metrics, not the display lattice", {
+test_that("RMSE is zero if and only if NSE is one", {
+  # The internal consistency the rounding broke: RMSE 0 asserts a perfect fit,
+  # NSE below 1 asserts an imperfect one. Both cannot describe one residual set.
+  set.seed(23)
+  for (i in 1:20) {
+    obs <- rnorm(25, 10, 3)
+    pre <- if (i %% 5 == 0) obs else obs + rnorm(25, 0, 10^-(i %% 7))
+    m <- perform_cv(data.frame(var1.observed = obs, var1.pred = pre), moran = FALSE)
+    if (is.na(m$nse)) next          # degenerate: constant observations
+    expect_equal(isTRUE(m$rmse == 0), isTRUE(m$nse == 1), info = i)
+  }
+})
+
+test_that("summarise_cv_repeats aggregates raw metrics, not a display lattice", {
   pts <- make_test_points(15, seed = 4)
-  # Offsets separated by far less than the RPD/RMSE display rounding: on the
-  # rounded values the three realizations collapse onto one lattice point and
-  # the SD reads 0, which would claim perfect stability across folds.
+  # Offsets separated by far less than the old display rounding (1e-4 on RMSE):
+  # quantized, the three realizations collapse onto one lattice point and the
+  # SD reads 0, claiming perfect stability across folds.
   mk <- function(offset) {
     sf::st_as_sf(data.frame(observed = pts$v, var1.pred = pts$v + offset,
                             x = sf::st_coordinates(pts)[, 1],
@@ -644,9 +673,12 @@ test_that("summarise_cv_repeats aggregates raw metrics, not the display lattice"
   expect_equal(unname(summ$sd[["rmse"]]), sd(offsets))
   expect_gt(unname(summ$sd[["rmse"]]), 0)
   expect_gt(unname(summ$sd[["rpd"]]), 0)
-  # The old behaviour: aggregating the rounded values reports zero spread.
-  rounded_rmse <- vapply(reps, function(r) perform_cv(r, moran = FALSE)$rmse, numeric(1))
-  expect_equal(sd(rounded_rmse), 0)
+  # perform_cv is the same source the summary reads, and it rounds nothing, so
+  # the per-realization values carry the spread the summary reports.
+  raw_rmse <- vapply(reps, function(r) perform_cv(r, moran = FALSE)$rmse, numeric(1))
+  expect_equal(sd(raw_rmse), sd(offsets))
+  # Quantizing them at the old display lattice is what erased it.
+  expect_equal(sd(round(raw_rmse, 4)), 0)
 })
 
 test_that("build_cv_repeat_summary pools localities and recycles deterministic ones", {
@@ -677,6 +709,9 @@ test_that("build_cv_repeat_summary pools localities and recycles deterministic o
 })
 
 test_that("make_cv_folds preserves the caller's RNG stream", {
+  # The point cloud is seeded too, so the k-means the folds run on is the same
+  # one every time; only the two set.seed(123) lines below carry the contract.
+  set.seed(23)
   coords <- cbind(runif(60, 0, 1000), runif(60, 0, 1000))
   set.seed(123); expected <- runif(1)
   set.seed(123); invisible(make_cv_folds(coords, "block", 60)); actual <- runif(1)
@@ -735,7 +770,7 @@ test_that("NRMSE normalises by the absolute mean, so negative-mean variables rep
   neg <- augment_metrics(obs, pre)
   rmse <- sqrt(mean((obs - pre)^2))
   expect_gt(neg$nrmse_mean, 0)
-  expect_equal(neg$nrmse_mean, round(rmse / abs(mean(obs)) * 100, 2))
+  expect_equal(neg$nrmse_mean, rmse / abs(mean(obs)) * 100)
   # Sign-flip symmetry: negating both vectors changes neither the error nor
   # the scale, so the sign-flipped twin must report the identical NRMSE.
   pos <- augment_metrics(-obs, -pre)
@@ -753,7 +788,7 @@ test_that("perform_cv agrees with yardstick on the metrics they share", {
   cv <- gstat::krige.cv(ph ~ 1, pts, model = fit, nfold = nrow(pts),
                         debug.level = 0)
 
-  m <- perform_cv(cv, round_values = FALSE)
+  m <- perform_cv(cv)
   o <- cv$observed
   p <- cv$var1.pred
   # An independent implementation of the same three conventions: RMSE is the
@@ -881,7 +916,7 @@ test_that("kriging fold runner cancels before fitting and throttles progress", {
 
 test_that("CV coverage counts every observed row, including early returns", {
   df <- data.frame(observed = c(1, NA, 3, 4, 5), var1.pred = c(2, 8, NA, 4, 6))
-  m <- perform_cv(df, moran = FALSE, round_values = FALSE)
+  m <- perform_cv(df, moran = FALSE)
   expect_equal(m$n_expected, 4)
   expect_equal(m$n, 3)
   expect_equal(m$coverage, 3 / 4)
@@ -1003,7 +1038,8 @@ test_that("cv_metrics_export_df reports every perform_cv metric, numerically", {
   expect_equal(nrow(out), 1)
   expect_equal(names(out), c("Source", "CV Design", "CV Population", "CV Population ID",
                              "CV Refit", "n expected", "n predicted", "Coverage (%)",
-                             unname(CV_METRIC_LABELS)))
+                             "Target spans zero", unname(CV_METRIC_LABELS),
+                             "Moran Context"))
   expect_equal(out$Source, "Actual Model")
   expect_equal(out$`CV Design`, "Standard LOOCV")
   expect_equal(out$`CV Population`, "common rows")
@@ -1073,19 +1109,11 @@ test_that("pred_perf_df reports the uploaded-prediction dictionary off perform_c
   obs <- rnorm(50, 20, 3)
   pre <- obs + rnorm(50, 0.5, 1)
   cv_df <- data.frame(var1.observed = obs, var1.pred = pre)
-  m <- perform_cv(cv_df, moran = FALSE, round_values = FALSE)
+  m <- perform_cv(cv_df, moran = FALSE)
 
-  # the card: perform_cv's own display rounding
-  shown <- pred_perf_df(obs, pre, round_values = TRUE)
-  m_shown <- perform_cv(cv_df, moran = FALSE)
-  expect_equal(shown$Value[shown$Metric == "RMSE"], m_shown$rmse)
-  expect_equal(shown$Value[shown$Metric == "NMAE (%)"],
-               round(mean(abs(obs - pre)) / abs(mean(obs)) * 100, 2))
-
-  # the export: full precision
   out <- pred_perf_df(obs, pre)
 
-  expect_equal(nrow(out), 12)
+  expect_equal(nrow(out), 13)
   expect_true(is.numeric(out$Value))
   val <- function(nm) out$Value[out$Metric == nm]
   expect_equal(val("RMSE"), m$rmse)
@@ -1094,9 +1122,156 @@ test_that("pred_perf_df reports the uploaded-prediction dictionary off perform_c
   expect_equal(val("n"), as.numeric(m$n))
   # MBE is predicted-minus-observed, the documented sign flip against Bias (ME)
   expect_equal(val("MBE (ML pred - observed)"), -m$me)
-  # NMAE off the raw residuals, not the display-rounded MAE
-  expect_equal(val("NMAE (%)"), mean(abs(obs - pre)) / abs(mean(obs)) * 100)
+  # NMAE comes off the raw residuals; it has no CV counterpart to inherit.
+  expect_equal(val("NMAE (mean, %)"), mean(abs(obs - pre)) / abs(mean(obs)) * 100)
+  # The SD-normalised error is carried here too, under the same label the CV
+  # dictionary uses, so the two performance cards can be read side by side.
+  expect_equal(val("NRMSE (SD)"), m$rmse / stats::sd(obs))
+  # A positive ratio-scale target reports the normalised errors as before.
+  expect_true(all(!nzchar(out$Note)))
   expect_null(pred_perf_df(obs[1:2], pre[1:2]))
+})
+
+test_that("pred_perf_df suppresses the ratio-scale metrics for a signed target", {
+  # Uploaded predictions of an anomaly variable: the same sign-crossing rule
+  # the CV dictionary applies, plus NMAE, which is computed here and has the
+  # identical defect (mae / |mean| on an arbitrary origin).
+  obs <- c(-4.7, -3.1, -1.7, 0.6, 1.6, -2.2, 0.9, -0.4)
+  pre <- obs + c(0.2, -0.1, 0.15, -0.2, 0.05, 0.1, -0.15, 0.2)
+  out <- pred_perf_df(obs, pre)
+  val <- function(nm) out$Value[out$Metric == nm]
+  noted <- out$Metric[nzchar(out$Note)]
+
+  expect_setequal(noted, c("NRMSE (mean, %)", "NMAE (mean, %)", "SMAPE (%)"))
+  expect_true(all(is.na(val("NRMSE (mean, %)")), is.na(val("NMAE (mean, %)")),
+                  is.na(val("SMAPE (%)"))))
+  # and the metrics that remain defined are reported
+  expect_true(all(is.finite(c(val("RMSE"), val("MAE"), val("R² (Correlation)"),
+                              val("NRMSE (SD)")))))
+})
+
+# ── Display formatting: four significant digits, never a false zero ────────
+
+test_that("format_sig prints four significant digits and never a false zero", {
+  cases <- list(
+    list(0, "0"),                       # a true zero says so
+    list(1.2e-7, "1.200e-07"),          # below 1e-4: scientific, not 0
+    list(-1.2e-7, "-1.200e-07"),
+    list(0.1238, "0.1238"),
+    list(30.4204, "30.42"),
+    list(632, "632"),                   # a count keeps every digit
+    list(0.0025, "0.0025"),             # a 5 x 5 m class area in ha, not "0.00"
+    list(12345.6, "12346"),             # from 1000 up every integer digit, no exponent
+    list(123456.7, "123457"),
+    list(1234.567, "1235"),
+    list(NA_real_, NA_character_),
+    list(Inf, NA_character_)
+  )
+  for (cs in cases) {
+    expect_identical(format_sig(cs[[1]]), cs[[2]], info = format(cs[[1]]))
+  }
+  # vectorised, and each element decided on its own magnitude
+  expect_identical(format_sig(c(0, 1.2e-7, 30.4204)), c("0", "1.200e-07", "30.42"))
+})
+
+test_that("the browser formatter states the same rule as format_sig", {
+  js <- format_sig_js()
+  expect_match(js, "window.mnFormatSig", fixed = TRUE)
+  expect_match(js, "toPrecision(4)", fixed = TRUE)
+  expect_match(js, "toExponential(3)", fixed = TRUE)
+  expect_match(js, "1e-4", fixed = TRUE)
+  # an integer keeps its digits, and a non-numeric cell (a marker) is left alone
+  expect_match(js, "toFixed(0)", fixed = TRUE)
+  # from 1000 up every integer digit, so a large area keeps its whole hectares
+  expect_match(js, "Math.abs(x) >= 1000", fixed = TRUE)
+  # and it is mounted in the shipped UI
+  head_html <- paste(as.character(htmltools::renderTags(ui)$head), collapse = "")
+  expect_match(head_html, "window.mnFormatSig", fixed = TRUE)
+})
+
+test_that("sci_dt formats named numeric columns and can drop scrollX", {
+  df <- data.frame(Metric = c("a", "b"), Value = c(1.23456, 2e-7))
+  w <- sci_dt(df, signif_cols = "Value")
+  defs <- w$x$options$columnDefs
+  expect_equal(defs[[1]]$targets, 1)         # zero-based, rownames = FALSE
+  expect_match(as.character(defs[[1]]$render), "mnFormatSig", fixed = TRUE)
+  # the numbers themselves stay numeric, so DataTables still sorts on them
+  expect_true(is.numeric(w$x$data[[2]]))
+  expect_true(sci_dt(df)$x$options$scrollX)
+  expect_false(sci_dt(df, scroll_x = FALSE)$x$options$scrollX)
+})
+
+# ── NRMSE (mean) / SMAPE on a target whose values span zero ────────────────
+
+test_that("mean-normalised errors are suppressed for a signed target", {
+  # An anomaly variable: its zero is an arbitrary offset, so a percentage of
+  # its mean is not a quantity - and sMAPE's denominator collapses at the
+  # crossing, where one sign disagreement contributes the maximum term.
+  obs <- c(-4.768, -3.1, -1.7, 0.5, 1.644, -2.2, 0.9, -0.4)
+  pre <- obs + c(0.2, -0.1, 0.15, -0.2, 0.05, 0.1, -0.15, 0.2)
+  m <- perform_cv(data.frame(var1.observed = obs, var1.pred = pre), moran = FALSE)
+
+  expect_true(m$signed_target)
+  expect_true(is.na(m$nrmse_mean))
+  expect_true(is.na(m$smape))
+  # everything that does not need a ratio scale is still reported
+  for (k in c("rmse", "mae", "r2", "nse", "me", "ccc", "rpd", "rpiq", "nrmse_sd")) {
+    expect_true(is.finite(m[[k]]), info = k)
+  }
+})
+
+test_that("a strictly positive target keeps the definitions it always had", {
+  obs <- c(10, 20, 30, 40, 50)
+  pre <- c(12, 18, 33, 37, 55)
+  m <- perform_cv(data.frame(var1.observed = obs, var1.pred = pre), moran = FALSE)
+  rmse <- sqrt(mean((obs - pre)^2))
+  denom <- abs(obs) + abs(pre)
+
+  expect_false(m$signed_target)
+  # references recomputed from the definitions, not read off the output
+  expect_equal(m$nrmse_mean, rmse / abs(mean(obs)) * 100)
+  expect_equal(m$smape, mean(2 * abs(obs - pre) / denom) * 100)
+})
+
+test_that("NRMSE (SD) is RMSE over the observed spread, invariant to recentring", {
+  set.seed(31)
+  obs <- rnorm(40, 12, 4)
+  pre <- obs + rnorm(40, 0, 1.5)
+  m <- perform_cv(data.frame(var1.observed = obs, var1.pred = pre), moran = FALSE)
+
+  expect_equal(m$nrmse_sd, sqrt(mean((obs - pre)^2)) / stats::sd(obs))
+
+  # The whole argument for the metric, executable: shifting the variable's
+  # origin leaves it untouched, while the mean-normalised form moves.
+  shifted <- perform_cv(data.frame(var1.observed = obs + 100, var1.pred = pre + 100),
+                        moran = FALSE)
+  expect_equal(shifted$nrmse_sd, m$nrmse_sd)
+  expect_false(isTRUE(all.equal(shifted$nrmse_mean, m$nrmse_mean)))
+
+  # It is a function of NSE, not independent evidence: rmse has divisor n and
+  # sd divisor n - 1, so NRMSE(SD) = sqrt((1 - NSE)(n - 1)/n). It is also
+  # exactly 1/RPD. Both are pinned so nobody "improves" one definition alone.
+  n <- length(obs)
+  expect_equal(m$nrmse_sd, sqrt((1 - m$nse) * (n - 1) / n))
+  expect_equal(m$nrmse_sd, 1 / m$rpd)
+
+  # Undefined, not zero, where the observations carry no spread.
+  flat <- perform_cv(data.frame(var1.observed = rep(5, 6), var1.pred = c(5, 5.1, 4.9, 5, 5, 5.2)),
+                     moran = FALSE)
+  expect_true(is.na(flat$nrmse_sd))
+})
+
+test_that("the CV export explains an NA instead of leaving it bare", {
+  obs <- c(-3, -1, 0.5, 2, -2, 1)
+  pre <- obs + c(0.1, -0.2, 0.1, 0.2, -0.1, 0.05)
+  res <- perform_cv(data.frame(var1.observed = obs, var1.pred = pre), moran = FALSE)
+  out <- cv_metrics_export_df(res, "Actual Model", "Full LOOCV")
+
+  expect_true(out$`Target spans zero`)
+  expect_true(is.na(out$`NRMSE (mean, %)`))
+  expect_true(is.finite(out$`NRMSE (SD)`))
+  # the ordinary Moran reading names what the statistic measures
+  expect_equal(out$`Moran Context`, "model-error structure")
 })
 
 test_that("pred_perf_df drops incomplete pairs before scoring", {
@@ -1153,4 +1328,58 @@ test_that("rf_importance_df writes every importance measure the forest recorded"
   out2 <- rf_importance_df(without)
   expect_equal(names(out2), c("Variable", "IncNodePurity"))
   expect_equal(out2$Variable[1], "a")
+})
+
+# ── The two point sets an uploaded-prediction card can be read against ─────
+# The model's set drops rows with no measured target FIRST and deduplicates
+# co-located points after (dedup_valid_points). The DISPLAY set (rv$sf)
+# deduplicates first and is filtered to rows carrying both values afterwards.
+# Where a co-located pair carries the measurement on one member and the
+# prediction on the other, the two counts differ and neither is wrong.
+
+test_that("a co-located pair splits the model and display populations", {
+  # Two points share a coordinate: the first has a prediction but no measured
+  # value, the second has both. Four more ordinary points sit apart.
+  df <- data.frame(
+    id = c("S0001", "DUP_S0001", paste0("P", 1:4)),
+    x  = c(1000, 1000, 2000, 3000, 4000, 5000),
+    y  = c(1000, 1000, 2000, 3000, 4000, 5000),
+    v  = c(NA, 6.2, 6.4, 6.6, 6.8, 7.0),
+    pv = c(6.1, NA, 6.3, 6.5, 6.7, 6.9)
+  )
+  pts <- sf::st_as_sf(df, coords = c("x", "y"), crs = 32633)
+
+  # Model: NA-target filter, then dedup. DUP_S0001 survives its coordinate.
+  model_set <- dedup_valid_points(pts, "v")
+  expect_equal(nrow(model_set), 5)
+  expect_true("DUP_S0001" %in% model_set$id)
+  expect_false("S0001" %in% model_set$id)
+
+  # Display (rv$sf): dedup first, keeping S0001, then the card filters to rows
+  # carrying both values - which drops it again. Taken from the production
+  # path (.locality_points builds rv$sf's contents), not reconstructed here:
+  # a change to the display dedup rule has to move this test, or the note the
+  # test protects goes wrong while the test stays green.
+  loc <- .locality_points("L1", df, 32633, "IDW", character(0), list())
+  expect_true(loc$ok)
+  display_set <- loc$pts
+  expect_equal(nrow(display_set), 5)
+  expect_true("S0001" %in% display_set$id)
+  card_set <- display_set[!is.na(display_set$v) & !is.na(display_set$pv), ]
+  expect_equal(nrow(card_set), 4)
+  expect_false("S0001" %in% card_set$id)
+  expect_false("DUP_S0001" %in% card_set$id)
+
+  # The two are not nested, which is exactly why the note has to exist.
+  expect_false(all(model_set$id %in% card_set$id))
+  expect_match(pred_pop_note(nrow(card_set), nrow(model_set)),
+               "not the model's cross-validation population", fixed = TRUE)
+  expect_match(pred_pop_note(nrow(card_set), nrow(model_set)), "n = 5", fixed = TRUE)
+})
+
+test_that("the population note fires only when the two counts differ", {
+  expect_null(pred_pop_note(153, 153))
+  expect_null(pred_pop_note(NA, 153))
+  expect_null(pred_pop_note(152, NA))
+  expect_false(is.null(pred_pop_note(152, 153)))
 })

@@ -10,29 +10,32 @@
 
 # ── desc_summary_table ────────────────────────────────────────────────────
 
-test_that("the summary table reports per-group n/mean/sd/min/max and a TOTAL row", {
+test_that("the summary table reports per-group statistics and a TOTAL row", {
   d <- golden_soil("core")
   res <- desc_summary_table(d$ph, d$locality)
 
   # Independent reference: split the vector and summarise each piece.
   sp <- split(d$ph, d$locality)
   expect_equal(as.character(res$Group), c(names(sp), "TOTAL"))
+  expect_equal(names(res), c("Group", "Count", DESC_SUMMARY_STATS))
 
   g <- res[res$Group != "TOTAL", ]
   expect_equal(g$Count, unname(vapply(sp, length, integer(1))))
-  expect_equal(g$Mean, unname(round(vapply(sp, mean, numeric(1)), 3)))
-  expect_equal(g$SD, unname(round(vapply(sp, stats::sd, numeric(1)), 3)))
-  expect_equal(g$Min, unname(round(vapply(sp, min, numeric(1)), 3)))
-  expect_equal(g$Max, unname(round(vapply(sp, max, numeric(1)), 3)))
+  # Values are the statistics themselves: the display formats them, so a
+  # small-unit variable is not quantized before it reaches the reader.
+  expect_equal(g$Mean, unname(vapply(sp, mean, numeric(1))))
+  expect_equal(g$SD, unname(vapply(sp, stats::sd, numeric(1))))
+  expect_equal(g$Min, unname(vapply(sp, min, numeric(1))))
+  expect_equal(g$Max, unname(vapply(sp, max, numeric(1))))
 
   # The TOTAL row summarises the pooled vector, not the group summaries: its
   # SD carries the between-group spread that a mean of group SDs would lose.
   tot <- res[res$Group == "TOTAL", ]
   expect_equal(tot$Count, length(d$ph))
-  expect_equal(tot$Mean, round(mean(d$ph), 3))
-  expect_equal(tot$SD, round(stats::sd(d$ph), 3))
-  expect_equal(tot$Min, round(min(d$ph), 3))
-  expect_equal(tot$Max, round(max(d$ph), 3))
+  expect_equal(tot$Mean, mean(d$ph))
+  expect_equal(tot$SD, stats::sd(d$ph))
+  expect_equal(tot$Min, min(d$ph))
+  expect_equal(tot$Max, max(d$ph))
   expect_equal(sum(g$Count), tot$Count)
   expect_false(isTRUE(all.equal(tot$SD, mean(g$SD))))
 
@@ -43,7 +46,7 @@ test_that("the summary table reports per-group n/mean/sd/min/max and a TOTAL row
   res_na <- desc_summary_table(x, d$locality)
   expect_equal(res_na$Count[nrow(res_na)], sum(!is.na(x)))
   expect_equal(sum(res_na$Count[-nrow(res_na)]), sum(!is.na(x)))
-  expect_equal(res_na$Mean[nrow(res_na)], round(mean(x, na.rm = TRUE), 3))
+  expect_equal(res_na$Mean[nrow(res_na)], mean(x, na.rm = TRUE))
 
   # Row names must stay the default integer sequence. DT renders them, so a
   # name inherited from the statistics matrix would show up as a leading column
@@ -53,6 +56,55 @@ test_that("the summary table reports per-group n/mean/sd/min/max and a TOTAL row
   expect_equal(rownames(one), as.character(seq_len(nrow(one))))
   expect_equal(rownames(res), as.character(seq_len(nrow(res))))
   expect_equal(one$Count, c(nrow(d), nrow(d)))
+})
+
+test_that("the summary table carries the robust statistics beside the moments", {
+  # A vector whose median, quartiles and MAD can be written down by hand.
+  x <- c(1, 2, 3, 4, 5, 6, 7, 8, 9)
+  res <- desc_summary_table(x, rep("g", length(x)))
+  g <- res[res$Group == "g", ]
+
+  expect_equal(g$Median, 5)
+  expect_equal(g$Q1, 3)                       # quantile type 7, R's default
+  expect_equal(g$Q3, 7)
+  expect_equal(g$IQR, 4)
+  expect_equal(g$IQR, g$Q3 - g$Q1)            # exactly, by construction
+  # stats::mad is the median absolute deviation SCALED by 1.4826, so it reads
+  # on the same scale as the SD next to it: median|x - 5| = 2 here.
+  expect_equal(g$MAD, 2 * 1.4826)
+  expect_equal(g$MAD, stats::mad(x))
+
+  # Contamination: three planted outliers move the SD a long way and leave the
+  # median and the MAD where they were. That is the whole reason the robust
+  # columns are reported beside the moments.
+  y <- c(x, 40, 45, 50)
+  cont <- desc_summary_table(y, rep("g", length(y)))
+  cont <- cont[cont$Group == "g", ]
+  expect_gt(cont$SD, g$SD * 1.4)
+  expect_equal(cont$Median, stats::median(y))
+  expect_lt(abs(cont$MAD - g$MAD), g$MAD)     # MAD barely moves
+  expect_equal(cont$IQR, cont$Q3 - cont$Q1)
+})
+
+test_that("a near-constant column is not reported as a constant one", {
+  # 7 + N(0, 1e-7) against exactly 7: rounded to three decimals the two
+  # columns printed byte-identical rows (Mean 7, SD 0, Min 7, Max 7).
+  set.seed(5)
+  near <- 7 + rnorm(60, 0, 1e-7)
+  const <- rep(7, 60)
+  res <- desc_summary_table(c(near, const), rep(c("near", "const"), each = 60))
+  rn <- res[res$Group == "near", ]
+  rc <- res[res$Group == "const", ]
+
+  expect_gt(rn$SD, 0)
+  expect_equal(rc$SD, 0)
+  expect_gt(rn$MAD, 0)
+  expect_equal(rc$MAD, 0)
+  expect_false(isTRUE(all.equal(unlist(rn[, DESC_SUMMARY_STATS]),
+                                unlist(rc[, DESC_SUMMARY_STATS]))))
+  # and the display keeps them apart rather than collapsing the small one
+  expect_match(format_sig(rn$SD), "e-0[0-9]$")
+  expect_identical(format_sig(rc$SD), "0")
 })
 
 
@@ -188,6 +240,34 @@ test_that("PCA eigenvalues and variance shares match the correlation/covariance 
   expect_equal(unname(na_fit$data[, 1]), d$ph[na_fit$keep])
 })
 
+test_that("a zero-variance column is excluded and named, and scaling is kept", {
+  d <- golden_soil("core")
+  vars <- c("ph", "som", "caco3")
+  d$flat <- 7                                   # constant: cannot be standardised
+  fit <- desc_pca_fit(d, c(vars, "flat"), c(vars, "Flat (const)"), scale = TRUE)
+  expect_equal(fit$dropped_constant, "Flat (const)")
+  expect_null(fit$refusal)
+  # The PCA is the correlation PCA of the informative columns alone, unscaled
+  # PCA is not substituted.
+  ev <- eigen(stats::cor(as.matrix(d[, vars])), symmetric = TRUE)$values
+  expect_equal(fit$res$sdev^2, ev, tolerance = 1e-8)
+  expect_equal(rownames(fit$res$rotation), vars)
+  expect_equal(colnames(fit$data), vars)
+  expect_true(is.numeric(fit$res$scale))        # prcomp stores FALSE when unscaled
+  # `dropped` keeps its meaning: rows removed by the complete-case filter.
+  expect_equal(fit$dropped, 0L)
+})
+
+test_that("PCA is refused, not errored, below two informative variables", {
+  d <- data.frame(a = c(1.2, 3.4, 2.2, 5.1, 4.0), b = 7, c = 2)
+  fit <- desc_pca_fit(d, c("a", "b", "c"), scale = TRUE)
+  expect_null(fit$res)
+  expect_equal(fit$dropped_constant, c("b", "c"))
+  expect_match(fit$refusal, "at least two variables with variance")
+  expect_match(fit$refusal, "b, c", fixed = TRUE)
+  expect_match(fit$refusal, "only one usable variable remains", fixed = TRUE)
+})
+
 # ── summary_stats_df ──────────────────────────────────────────────────────
 # The descriptive-statistics card and its export. The fixed row set is the
 # point: summary() appends an "NA's" element only for a vector that has
@@ -211,12 +291,13 @@ test_that("summary_stats_df keeps small-unit statistics at full precision", {
   expect_equal(out$Value[out$Metric == "Min."], 0.0175)
   expect_equal(out$Value[out$Metric == "Mean"], mean(x))
 
-  # the card: four significant digits below 1, three decimals above
-  shown <- summary_stats_df(x, round_values = TRUE)
-  expect_equal(shown$Value[shown$Metric == "Min."], 0.0175)
-  expect_equal(shown$Value[shown$Metric == "Mean"], signif(mean(x), 4))
-  big <- summary_stats_df(c(2, 1234.5678), round_values = TRUE)
-  expect_equal(big$Value[big$Metric == "Max."], 1234.568)
+  # One flavour only: the frame carries the computed values and the card
+  # displays them at four significant digits.
+  expect_equal(format_sig(out$Value[out$Metric == "Mean"]),
+               format_sig(mean(x)))
+  big <- summary_stats_df(c(2, 1234.5678))
+  expect_equal(big$Value[big$Metric == "Max."], 1234.5678)
+  expect_equal(format_sig(1234.5678), "1235")
 })
 
 test_that("summary_stats_df pairs the columns when only the SECOND carries NAs", {
@@ -273,8 +354,9 @@ test_that("summary_stats_df pairs two columns even when only one carries NAs", {
   expect_equal(out$Actual[out$Metric == "NA's"], 1)
   expect_equal(out$Predicted[out$Metric == "NA's"], 0)
   # the statistics themselves are summary()'s, computed on the complete values
-  expect_equal(out$Actual[out$Metric == "Mean"], round(mean(a, na.rm = TRUE), 3))
-  expect_equal(out$Predicted[out$Metric == "Max."], round(max(b), 3))
+  # and at full precision - the table rounds for display, the frame does not.
+  expect_equal(out$Actual[out$Metric == "Mean"], mean(a, na.rm = TRUE))
+  expect_equal(out$Predicted[out$Metric == "Max."], max(b))
 })
 
 test_that("summary_stats_df hides the missing-value row when there is none", {

@@ -175,7 +175,18 @@ options(shiny.maxRequestSize = 200 * 1024^2)
 if (isTRUE(getOption("monolith_test_sequential", FALSE))) {
   future::plan(future::sequential)
 } else if (!inherits(future::plan(), "multisession")) {
-  future::plan(future::multisession)
+  # The outer pool holds one worker per CONCURRENT user-initiated async task
+  # (a run, an optimizer, a classification, governing factors, the CRS
+  # search), not one per core: the compute parallelism lives in the nested
+  # PSOCK clusters those tasks own. Sizing it to cores spawned a worker per
+  # core eagerly at load, and a worker that has served one interpolation sits
+  # at ~470 MB it does not give back: rm(ls()) + gc(full=TRUE) in it returns
+  # under a fifth, because the rest is package DLLs and the GDAL/GEOS/PROJ
+  # arenas rather than R heap. Measured on 16 cores, a fully exercised pool
+  # held 7.5 GB at one worker per core against 2.9 GB at six. A task beyond
+  # the sixth queues in future_promise, which is what that queue is for.
+  future::plan(future::multisession,
+               workers = min(6L, future::availableCores()))
 }
 
 source("ui_helpers.R")

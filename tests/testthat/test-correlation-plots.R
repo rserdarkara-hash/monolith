@@ -178,16 +178,85 @@ test_that("melt_cormat produces correct melted format", {
 
 # ── generate_correlation_heatmap ───────────────────────────────────────────
 
-test_that("generate_correlation_heatmap returns ggplot for valid data", {
+# ── The four correlation panels ────────────────────────────────────────────
+#
+# expect_s3_class(p, "ggplot") does not build the plot, and every one of these
+# builders returns a ggplot for any input including the degenerate ones - the
+# "Need >=2 variables" notice is a ggplot too. Build them, and assert the
+# quantity each panel exists to show.
+
+test_that("every correlation panel renders and carries its own correlations", {
   df <- make_test_df(20)
-  p <- generate_correlation_heatmap(df, c("a", "b", "c", "d"))
-  expect_s3_class(p, "ggplot")
+  vars <- c("a", "b", "c", "d")
+  cm <- cor(df[, vars])
+
+  for (p in list(generate_correlation_heatmap(df, vars),
+                 generate_correlation_network(df, vars, threshold = 0.1),
+                 generate_partial_correlation(df, c("a", "b", "c"),
+                                              control_vars = c("d", "e")),
+                 generate_correlogram(df, vars))) {
+    expect_s3_class(p, "ggplot")
+    expect_no_error(ggplot2::ggplot_build(p))
+  }
+
+  # Heatmap and correlogram plot cor() itself, one cell per ordered pair.
+  for (panel in list(generate_correlation_heatmap(df, vars),
+                     generate_correlogram(df, vars))) {
+    cells <- panel$data
+    expect_equal(nrow(cells), length(vars)^2)
+    key <- paste(cells$Var1, cells$Var2)
+    expect_equal(unname(cells$Corr[match(paste("a", "b"), key)]), cm["a", "b"])
+    expect_equal(sort(unique(as.character(cells$Var1))), sort(vars))
+  }
+
+  # Labelled names with spaces and parentheses must survive the partial
+  # correlation route, which builds model formulas from the column names.
+  named <- df
+  names(named)[1:3] <- c("Organic Matter (%)", "pH (1:2.5)", "Clay content")
+  expect_no_error(ggplot2::ggplot_build(generate_partial_correlation(
+    named, c("Organic Matter (%)", "pH (1:2.5)"),
+    control_vars = "Clay content", method = "spearman")))
 })
 
-test_that("generate_correlation_heatmap returns ggplot for single var", {
+test_that("the network threshold is what decides the edges", {
+  # The edge count is the quantity the threshold controls; building a plot at
+  # 0.99 and another at 0.0 and checking both are ggplots says nothing at all.
+  df <- make_test_df(20)
+  vars <- c("a", "b", "c")
+  cm <- cor(df[, vars])
+  off_diag <- abs(cm[upper.tri(cm)])
+
+  n_edges <- function(thr) {
+    segs <- Filter(function(l) inherits(l$geom, "GeomSegment"),
+                   generate_correlation_network(df, vars, threshold = thr)$layers)
+    if (length(segs) == 0) 0L else nrow(segs[[1]]$data)
+  }
+
+  # Above every pairwise correlation: no edges at all, and the node layer is
+  # still drawn so the panel is not blank.
+  expect_equal(n_edges(0.99), 0L)
+  expect_gt(length(generate_correlation_network(df, vars, threshold = 0.99)$layers), 0L)
+  # At zero, every pair is an edge.
+  expect_equal(n_edges(0), length(off_diag))
+  # And in between, exactly the pairs at or above the cut.
+  mid <- sort(off_diag)[2]
+  expect_equal(n_edges(mid), sum(off_diag >= mid))
+})
+
+test_that("a selection too small for a correlation says so", {
   df <- make_test_df(10)
-  p <- generate_correlation_heatmap(df, "a")
-  expect_s3_class(p, "ggplot")
+  label_of <- function(p) ggplot2::ggplot_build(p)$data[[1]]$label
+  for (p in list(generate_correlation_heatmap(df, "a"),
+                 generate_correlation_network(df, "a"),
+                 generate_correlogram(df, "a"))) {
+    expect_equal(label_of(p), "Need >=2 variables")
+  }
+  # The partial panel says the same thing in its own words.
+  expect_equal(label_of(generate_partial_correlation(df, "a")),
+               "Need >=2 variables to correlate")
+  # Fewer than three complete rows cannot support a correlation either.
+  expect_equal(label_of(generate_correlation_heatmap(df[1:2, ], c("a", "b"))),
+               "Insufficient data")
 })
 
 test_that("a supplied correlation matrix is aligned to the plotted variables", {
@@ -245,44 +314,19 @@ test_that("a constant variable is named instead of blanking the panel", {
   )
 })
 
-# ── generate_correlation_network ───────────────────────────────────────────
-
-test_that("generate_correlation_network returns ggplot for valid data", {
-  df <- make_test_df(20)
-  p <- generate_correlation_network(df, c("a", "b", "c", "d"), threshold = 0.1)
-  expect_s3_class(p, "ggplot")
-})
-
-test_that("generate_correlation_network respects threshold", {
-  df <- make_test_df(20)
-  p_high <- generate_correlation_network(df, c("a", "b", "c"), threshold = 0.99)
-  p_low <- generate_correlation_network(df, c("a", "b", "c"), threshold = 0.0)
-  expect_s3_class(p_high, "ggplot")
-  expect_s3_class(p_low, "ggplot")
-})
-
 # ── generate_partial_correlation ───────────────────────────────────────────
-
-test_that("generate_partial_correlation returns ggplot for valid data", {
-  df <- make_test_df(20)
-  p <- generate_partial_correlation(
-    df,
-    c("a", "b", "c"),
-    control_vars = c("d", "e")
-  )
-  expect_s3_class(p, "ggplot")
-})
 
 test_that("generate_partial_correlation works without control vars", {
   df <- make_test_df(20)
   p <- generate_partial_correlation(df, c("a", "b", "c"))
   expect_s3_class(p, "ggplot")
-})
-
-test_that("generate_partial_correlation returns ggplot for single var", {
-  df <- make_test_df(10)
-  p <- generate_partial_correlation(df, "a")
-  expect_s3_class(p, "ggplot")
+  # With nothing partialled out the figure is an ordinary correlation heatmap,
+  # and its legend must say so as its title does.
+  fill_name <- function(g) g$scales$get_scales("fill")$name
+  expect_equal(p$labels$title, "Standard Correlation Heatmap")
+  expect_equal(fill_name(p), "Correlation")
+  p_ctrl <- generate_partial_correlation(df, c("a", "b", "c"), control_vars = "d")
+  expect_equal(fill_name(p_ctrl), "Partial\nCorrelation")
 })
 
 # ── compute_partial_correlation ───────────────────────────────────────────
@@ -391,26 +435,6 @@ test_that("compute_partial_correlation reports missing columns instead of guessi
   pc <- compute_partial_correlation(df, c("a", "nope"), "d")
   expect_null(pc$cormat)
   expect_equal(pc$failed, "nope")
-})
-
-test_that("generate_partial_correlation renders with labelled (spaced) names", {
-  df <- make_test_df(30)
-  names(df)[1:3] <- c("Organic Matter (%)", "pH (1:2.5)", "Clay content")
-  p <- generate_partial_correlation(
-    df,
-    c("Organic Matter (%)", "pH (1:2.5)"),
-    control_vars = "Clay content",
-    method = "spearman"
-  )
-  expect_s3_class(p, "ggplot")
-})
-
-# ── generate_correlogram ──────────────────────────────────────────────────
-
-test_that("generate_correlogram returns ggplot for valid data", {
-  df <- make_test_df(20)
-  p <- generate_correlogram(df, c("a", "b", "c", "d"))
-  expect_s3_class(p, "ggplot")
 })
 
 # ── compute/generate_spatial_cross_correlogram ─────────────────────────────
@@ -547,6 +571,35 @@ test_that("check_collinearity returns no collinearity for independent vars", {
   df <- make_test_df(20)
   result <- check_collinearity(df, c("a", "b", "c"))
   expect_false(result$has_collinearity)
+})
+
+test_that("check_collinearity reports pairs, high VIF and constants apart", {
+  # One correlated pair (a, b), one variable that is a combination of two
+  # others without matching either (z = x + y), and a constant. They used to
+  # share one frame, with "High VIF (> 10)" or "Constant (no variance)" as a
+  # placeholder in var2 - which read as a variable name.
+  set.seed(8)
+  n <- 60
+  x <- rnorm(n); y <- rnorm(n); a <- rnorm(n)
+  df <- data.frame(a = a, b = a + rnorm(n, sd = 0.05), x = x, y = y,
+                   z = x + y + rnorm(n, sd = 0.05), k = 3)
+  res <- check_collinearity(df, names(df))
+
+  expect_equal(nrow(res$pairs), 1)
+  expect_setequal(c(res$pairs$var1, res$pairs$var2), c("a", "b"))
+  expect_true(all(c(res$pairs$var1, res$pairs$var2) %in% names(df)))
+  expect_true(all(res$high_vif$variable %in% names(df)))
+  expect_true(any(res$high_vif$variable %in% c("x", "y", "z")))
+  expect_true(all(res$high_vif$vif > 10))
+  expect_equal(res$constant, "k")
+  # A constant is not a collinearity finding: it appears in no other group.
+  expect_false("k" %in% c(res$pairs$var1, res$pairs$var2, res$high_vif$variable))
+  expect_true(res$has_collinearity)
+
+  # A constant alone is not an advisory finding (it is excluded, not debated).
+  only_k <- check_collinearity(data.frame(x = x, y = y, k = 3), c("x", "y", "k"))
+  expect_false(only_k$has_collinearity)
+  expect_equal(only_k$constant, "k")
 })
 
 test_that("desc_empty_dt returns a renderable placeholder, never NULL", {

@@ -888,14 +888,27 @@ input[type='checkbox'], input[type='radio'] { accent-color: var(--mn-accent); }
   overflow: hidden; clip: rect(0 0 0 0); white-space: nowrap; border: 0;
 }
 .table-container { width: 100%; overflow-x: auto; font-size: 12.5px; margin-bottom: 10px; }
+/* Footnotes under a result table: what its n/a1, NA* and † markers mean. */
+.mn-table-note { font-size: 0.78em; color: var(--mn-text-3); margin-top: 4px; }
+.mn-table-note > div + div { margin-top: 2px; }
 .table-container table,
 .table-container .dataTables_wrapper {
-  width: 100% !important;
   background-color: var(--mn-surface) !important;
   color: var(--mn-text) !important;
   margin-bottom: 0;
   border-radius: var(--mn-radius);
 }
+/* Width is deliberately NOT forced on every table in the container. Under
+   scrollX DataTables splits a table in two - a cloned header inside
+   .dataTables_scrollHead and the body inside .dataTables_scrollBody - and keeps
+   the columns aligned by writing PIXEL widths on both. A `width: 100%`
+   carrying !important beats those inline widths, and because every cell is
+   nowrap each table then resolves 100% against its own min-content: the header
+   against the column labels, the body against the data. Those differ, which is
+   what put a value under the wrong heading. A non-scrolling DataTable is a
+   direct child of its wrapper and still fills the card. */
+.table-container .dataTables_wrapper { width: 100% !important; }
+.table-container .dataTables_wrapper > table.dataTable { width: 100% !important; }
 .table-container th,
 .table-container table.dataTable th {
   background-color: var(--mn-surface-2) !important;

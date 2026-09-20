@@ -104,6 +104,13 @@
          } else {
            "Target: Pure Nugget (No structure)"
          }
+         # Residuals with no usable variance: every empirical point sits at the
+         # numerical noise floor and the "fitted" model describes that noise.
+         # Draw the points, suppress the curve, and say why.
+         if (vgm_target_degenerate(v_fit)) {
+           v_fit <- NULL
+           v_sub <- VGM_DEGENERATE_NOTE
+         }
          build_variogram_ggplot(v_res, v_fit,
                                 title = paste("Residual Variogram:", loc, title_suffix),
                                 subtitle = v_sub)
@@ -158,17 +165,22 @@
      # field names, with every value coerced to text.
      if(!is.null(rv$cv_metrics_act[[l]])) {
        n_obs_l <- if(!is.null(rv$cv_data_act[[l]])) nrow(rv$cv_data_act[[l]]) else NA
+       # The APPLIED fold plan, so a locality scored by LOOCV below
+       # CV_BLOCK_MIN_N is not exported as Spatial Block CV, and the Moran
+       # reading that goes with it decides whether a p-value is reported.
+       plan_l <- applied_cv_plan(n_obs_l, rv$cv_strategy_sel, rv$cv_metrics_act[[l]])
        cv_table <- cv_metrics_export_df(rv$cv_metrics_act[[l]], "Actual Model",
-                                        cv_type_label(n_obs_l, rv$cv_strategy_sel),
-                                        rv$cv_info_act[[l]])
+                                        plan_l$label, rv$cv_info_act[[l]],
+                                        moran_reading(plan_l$type))
        register_export_item(paste0("table_cv_loc_", l), paste(meta$label, "-", l, "- Model CV Metrics (Actual)"), "table", cv_table, meta$category)
      }
 
      if((comp_mode || val_type != "actual") && !is.null(rv$cv_metrics_pre[[l]])) {
        n_obs_l_p <- if(!is.null(rv$cv_data_pre[[l]])) nrow(rv$cv_data_pre[[l]]) else NA
+       plan_l_p <- applied_cv_plan(n_obs_l_p, rv$cv_strategy_sel, rv$cv_metrics_pre[[l]])
        cv_table_p <- cv_metrics_export_df(rv$cv_metrics_pre[[l]], "Predicted Model",
-                                          cv_type_label(n_obs_l_p, rv$cv_strategy_sel),
-                                          rv$cv_info_pre[[l]])
+                                          plan_l_p$label, rv$cv_info_pre[[l]],
+                                          moran_reading(plan_l_p$type))
        register_export_item(paste0("table_cv_pre_loc_", l), paste(meta$label, "-", l, "- Model CV Metrics (Predicted)"), "table", cv_table_p, meta$category)
      }
 
@@ -362,8 +374,11 @@
     
     # Only show the uploaded-prediction statistics when the DISPLAYED run's
     # variable actually has an uploaded prediction column (detect_pred_column
-    # stores NA - not NULL - when none exists, hence is_valid_col_ref).
-    has_upl_pred <- !is.null(d) && (is_valid_col_ref(d$pred) || is_valid_col_ref(d$pred_ss))
+    # stores NA - not NULL - when none exists, hence is_valid_col_ref) AND the
+    # run mapped a prediction side. An Actual-only run reads no prediction
+    # column, so these two tables would score an empty set.
+    has_upl_pred <- !is.null(d) && has_interp &&
+      (is_valid_col_ref(d$pred) || is_valid_col_ref(d$pred_ss))
     shinyjs::toggle(id = "prediction_performance_ui", condition = has_upl_pred)
   }, ignoreNULL = FALSE)
 
@@ -485,6 +500,9 @@
     rf_models = list(), # trained random forests
     gstat_objs = list(), # gstat objects for CK
     loc_names = NULL, log = "Ready.",
+    # Worker warnings of the last run, persisted out of the progress overlay
+    # (server_execution.R persist_run_warnings) so they outlive "Reveal maps".
+    run_warnings = character(0),
     results_rev = 0L, # Bumped when a run's results land (keys cached plots)
     drawn_feature = NULL, # Temporarily store drawn shape for grouping
     run_config_summary = NULL, # Plain text summary of latest run configuration
@@ -503,4 +521,49 @@
     opt_running = FALSE, # True while a sidebar optimizer promise is in flight
     run_token = 0L # Incremental run token for async cancellation
   )
-  
+
+  # ── The display state of one run ──────────────────────────────────────────
+  # Everything the Map Viewer and Scientific Analysis tabs render for a run,
+  # besides its configuration and export registry. Archive and restore move all
+  # of it together: moving only the configuration and the registry left the
+  # maps, metrics, fits and CV tables of the newer run under the archived run's
+  # configuration. The list is the dispatch reset (server_execution.R) plus
+  # what the completion handler assembles; a field reset at dispatch but
+  # missing here survives a restore from the wrong run. rv$disp carries the
+  # committed context with the run's own fits, grids and regional parameters.
+  # Rasters are referenced, not copied: R shares the objects the export
+  # registry already holds, so an archived surface is not stored twice.
+  DISPLAY_STATE_FIELDS <- c(
+    "disp", "has_predictions",
+    "rast", "rast_pred", "rast_res", "rast_point_res",
+    "rast_list_act", "rast_list_pre", "rast_list_res", "rast_list_point_res",
+    "sf", "bound", "bound_overlap_m2", "loc_names",
+    "log", "run_warnings", "model_summaries", "rf_models", "gstat_objs",
+    "cv_metrics_act", "cv_metrics_pre", "cv_data_act", "cv_data_pre",
+    "cv_repeats_act", "cv_repeats_pre", "cv_info_act", "cv_info_pre",
+    "cv_strategy_sel", "cv_repeats_sel"
+  )
+
+  # One archive entry: the configuration and registry under their historical
+  # names (the history panel reads them), the rest under `state`.
+  snapshot_display_state <- function() {
+    list(config = rv$run_config_summary,
+         registry = rv$export_registry,
+         state = lapply(stats::setNames(nm = DISPLAY_STATE_FIELDS), function(f) rv[[f]]))
+  }
+
+  # Put an archived run back on screen. The raster and area caches are keyed on
+  # rv$run_counter, which a restore does not change, so they are cleared or the
+  # maps would show the newer run's surfaces; rv$results_rev keys the cached
+  # Scientific Analysis plots. rv$run_token is deliberately untouched: it is
+  # the abort token of a run in flight, not a display key.
+  restore_display_state <- function(entry) {
+    clear_raster_caches()
+    for (f in names(entry$state)) rv[[f]] <- entry$state[[f]]
+    rv$run_config_summary <- entry$config
+    rv$export_registry <- entry$registry
+    # As when a run lands: the variogram curves on screen belong to a run again.
+    rv$vgm_preview <- FALSE
+    rv$results_rev <- rv$results_rev + 1L
+  }
+

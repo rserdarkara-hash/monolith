@@ -201,13 +201,8 @@
     # palette choice is swapped for a sequential one on those layers only.
     pal_name <- if (is_uncert_view) uncertainty_palette(meta$palette) else meta$palette
     is_viridis <- pal_name == "viridis"
-    legend_title <- if (is_uncert_view) {
-      if (uncert_layer == "se") {
-        paste0("SE: ", meta$label, if (nzchar(meta$unit)) paste0(" ", meta$unit) else "")
-      } else {
-        paste0("Variance: ", meta$label, if (nzchar(meta$unit)) paste0(" (", meta$unit, ")^2") else " (squared units)")
-      }
-    } else paste(meta$label, meta$unit)
+    # Same composition as the exported figure's legend (map_legend_title).
+    legend_title <- map_legend_title(meta$label, meta$unit, if (is_uncert_view) uncert_layer else "value")
 
     if(lab == "resid_raster") {
       # The residual view always displays the var1.pred difference, so the
@@ -226,7 +221,7 @@
       for (i in seq_along(resid_layers)) {
         m <- add_img(m, resid_layers[[i]], pal)
       }
-      m <- m %>% leaflet::addLegend(pal = pal, values = c(-abs_max, abs_max), title = legend_var_title(paste("Resid:", meta$label)), layerId = legend_id)
+      m <- m %>% leaflet::addLegend(pal = pal, values = c(-abs_max, abs_max), title = legend_var_title(map_legend_title(meta$label, layer = "resid")), layerId = legend_id)
     } else {
       # Classified styling when requested AND computable; any failure or
       # not-yet-applied class breaks fall back to the continuous palette so
@@ -243,7 +238,7 @@
           if (is.null(r_w)) next
           m <- add_img(m, select_active_layer(r_w), pal)
         }
-        m <- m %>% leaflet::addLegend(colors = class_params$colors, labels = class_params$leg_labels, opacity = 0.8, title = legend_var_title(paste(meta$label, meta$unit)), layerId = legend_id)
+        m <- m %>% leaflet::addLegend(colors = class_params$colors, labels = class_params$leg_labels, opacity = 0.8, title = legend_var_title(map_legend_title(meta$label, meta$unit)), layerId = legend_id)
       } else {
         vv_scale <- get_vv_scale()
         vv_scale <- vv_scale[is.finite(vv_scale)]
@@ -361,7 +356,7 @@
        m <- m %>% addCircleMarkers(data = pts_view, radius = 5, color = "black", weight = 1,
                                   fillColor = ~pal_pts(resid), fillOpacity = 0.9,
                                   popup = popups)
-       m <- m %>% leaflet::addLegend(pal = pal_pts, values = c(-abs_max_p, abs_max_p), title = legend_var_title(paste("Point Resid:", meta$label)))
+       m <- m %>% leaflet::addLegend(pal = pal_pts, values = c(-abs_max_p, abs_max_p), title = legend_var_title(map_legend_title(meta$label, layer = "point_resid")))
     }
     
     m
@@ -450,7 +445,12 @@
           label_size = input$pt_label_size %||% 11,
           marker_size = input$pt_marker_size %||% 3,
           popup_fn = popup_fn,
-          legend_layer_id = "styled_points_legend"
+          legend_layer_id = "styled_points_legend",
+          # rv$sf is the DISPLAY set: coordinate-deduplicated but never
+          # NA-target filtered, so it holds points the surface was not fitted
+          # from. Style them apart rather than letting them read as samples
+          # supporting the map.
+          value_col = "v"
         )
       }
     }
@@ -1039,6 +1039,13 @@
          sub <- paste0(sub, "\nUnstable in kriging: ", input$k_mod,
                        " with a nugget below 5% of the sill")
        }
+     }
+     # A target with no usable variance in this locality: the empirical points
+     # are all zero and the fitted curve climbs to a sill 60 orders of
+     # magnitude below the data. Show the points, not a model of the noise.
+     if (vgm_target_degenerate(v_fit)) {
+       v_fit <- NULL
+       sub <- paste(c(sub, VGM_DEGENERATE_NOTE), collapse = "\n")
      }
      build_variogram_ggplot(v_emp, v_fit,
                             title = paste0("Fitted (", tgt_label, "): ", loc),

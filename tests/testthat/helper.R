@@ -50,6 +50,28 @@ if (!exists(".monolith_sourced") || !isTRUE(.monolith_sourced)) {
   .monolith_sourced <- TRUE
 }
 
+# ── Third-party partial-match notices ──────────────────────────────────────
+#
+# setup.R sets warnPartialMatchArgs = TRUE so that a partial argument match in
+# Monolith's own code is an alarm. Two dependencies trip it from inside their
+# own source and cannot be fixed here: randomForest calls seq(along = ...) and
+# mgcv hands contrasts = to model.matrix. Left alone they are the large
+# majority of the suite's warning output, which buries a genuine new one.
+#
+# Muffle those notices BY MESSAGE at the call sites that raise them, rather
+# than wrapping the call in suppressWarnings(), so every other warning the
+# expression raises still reaches the reporter.
+without_partial_match_notices <- function(expr) {
+  withCallingHandlers(
+    expr,
+    warning = function(w) {
+      if (grepl("partial argument match", conditionMessage(w), fixed = TRUE)) {
+        invokeRestart("muffleWarning")
+      }
+    }
+  )
+}
+
 # The common cross-validation schema every kriging engine returns
 # (run_kriging_folds). IDW and TPS keep their own engines' column sets.
 KRIGING_CV_SCHEMA <- c("row_id", "fold", "observed", "var1.pred", "var1.var",
@@ -258,6 +280,76 @@ make_hostile_vgm_input <- function(n = 9, seed = 1) {
   lags <- calc_scientific_lags(pts)
   v_emp <- gstat::variogram(v ~ 1, pts, width = lags$width, cutoff = lags$cutoff)
   list(v_emp = v_emp, v_data = df$v)
+}
+
+#' A field carrying a strong linear trend: its empirical variogram keeps rising
+#' to the cutoff, so every converged candidate reaches its sill far beyond the
+#' observed lag window and every in-window candidate is non-converged. Seed 3
+#' verified 2026-09-19: 16 candidates, 0 converged and range-resolved, 4
+#' converged and range-unresolved, 12 non-converged - and NONE of the
+#' non-converged ones is range-resolved either, so the old eligibility rule
+#' found nothing eligible at all and returned the heuristic.
+make_trend_vgm_input <- function(n = 60, seed = 3) {
+  set.seed(seed)
+  df <- data.frame(x = runif(n, 0, 1000), y = runif(n, 0, 1000))
+  df$v <- 0.01 * df$x + 0.005 * df$y + rnorm(n, 0, 0.3)
+  pts <- sf::st_as_sf(df, coords = c("x", "y"), crs = 32633)
+  lags <- calc_scientific_lags(pts)
+  v_emp <- gstat::variogram(v ~ 1, pts, width = lags$width, cutoff = lags$cutoff)
+  list(v_emp = v_emp, v_data = df$v, pts = pts)
+}
+
+#' A periodic structure plus a weak trend, on which the screen yields BOTH a
+#' converged candidate whose range the lags resolve and a converged one whose
+#' range they do not - and the unresolved one fits better. Seed 4 verified
+#' 2026-09-19: best resolved Gau SSErr 1.064e-4, best unresolved Mat 6.53e-5
+#' (ratio 1.63). A hard resolved-first tier picks the poorer Gau here.
+make_mixed_vgm_input <- function(n = 60, seed = 4) {
+  set.seed(seed)
+  df <- data.frame(x = runif(n, 0, 1000), y = runif(n, 0, 1000))
+  df$v <- sin(df$x / 150) + 0.003 * df$y + rnorm(n, 0, 0.3)
+  pts <- sf::st_as_sf(df, coords = c("x", "y"), crs = 32633)
+  lags <- calc_scientific_lags(pts)
+  v_emp <- gstat::variogram(v ~ 1, pts, width = lags$width, cutoff = lags$cutoff)
+  list(v_emp = v_emp, v_data = df$v, pts = pts)
+}
+
+#' Every candidate robust_vgm_fit's screen produces for `h`, classified the way
+#' the screen classifies it, re-derived independently so a selection test does
+#' not read its expectation off the function under test.
+screen_vgm_candidates <- function(h) {
+  max_dist <- max(h$v_emp$dist, na.rm = TRUE)
+  init_sill <- var(h$v_data)
+  n0 <- min(h$v_emp$gamma)
+  if (n0 == 0) n0 <- max(init_sill * 1e-6, 1e-6)
+  if (n0 > init_sill) n0 <- init_sill * 0.9
+  ps0 <- max(init_sill - n0, init_sill * 0.1)
+  out <- list()
+  for (m in c("Sph", "Exp", "Gau", "Mat")) {
+    for (r in max_dist / c(10, 5, 4, 2)) {
+      flawed <- FALSE
+      f <- tryCatch(withCallingHandlers(
+        gstat::fit.variogram(h$v_emp, gstat::vgm(ps0, m, r, n0, kappa = if (m == "Mat") 1.5 else 0.5)),
+        warning = function(w) {
+          if (grepl("No convergence after|singular model|singular covariance", conditionMessage(w))) {
+            flawed <<- TRUE; invokeRestart("muffleWarning")
+          }
+        }), error = function(e) NULL)
+      if (is.null(f)) next
+      sse <- attr(f, "SSErr")
+      prange <- f$range[2] * .vgm_practical_range_factor(f$model[2], f$kappa[2])
+      out[[length(out) + 1]] <- list(
+        fit = f, sse = sse,
+        flawed = flawed || isTRUE(attr(f, "singular")),
+        valid = length(sse) == 1L && is.finite(sse) &&
+                is.finite(f$psill[2]) && f$psill[2] > 0 &&
+                is.finite(prange) && prange > 0 &&
+                is.finite(f$psill[1]) && f$psill[1] >= 0 &&
+                !isTRUE(vgm_smooth_nugget_share(f) <= 1e-8),
+        resolved = prange > (max_dist / 100) && prange < max_dist * 2)
+    }
+  }
+  out
 }
 
 # ── Golden fixture (real survey data, frozen) ───────────────────────────────
@@ -675,4 +767,3 @@ make_cm_pred_df <- function(cm = make_cm_known(), target = "soil") {
   out$.pred_class <- factor(out$.pred_class, levels = levs)
   out
 }
-

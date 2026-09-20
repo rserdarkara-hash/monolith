@@ -384,6 +384,32 @@ test_that("no UI file paints a colour outside the token set", {
   expect_equal(offenders, NULL)
 })
 
+test_that("every variogram banner band is painted with tokens", {
+  # The banner is drawn over the map in both variants; a literal colour here is
+  # what left the fallback warning unreadable once the dark variant was on.
+  # One fit per band, so no band can be added without a token.
+  fb <- gstat::vgm(0.5, "Sph", 200, 0.1); attr(fb, "is_fallback") <- TRUE
+  fw <- gstat::vgm(0.5, "Sph", 200, 0.1); attr(fw, "flawed_winner") <- TRUE
+  ru <- gstat::vgm(2, "Exp", 300, 0.5)
+  attr(ru, "vgm_diagnostics") <- list(status = "range_unresolved", practical_range = 900,
+                                      max_lag = 700, sill_resolved = FALSE,
+                                      range_side = "beyond", trend_suspected = TRUE,
+                                      target_degenerate = FALSE)
+  sm <- manual_vgm(1, "Gau", 300, 0.02)
+
+  html <- build_vgm_warning_html(list(A_act = fb, B_act = fw, C_act = ru, D_act = sm))
+  expect_match(html, "Variogram fit failed", fixed = TRUE)
+  expect_match(html, "non-converged or singular", fixed = TRUE)
+  expect_match(html, "Variogram range not resolved", fixed = TRUE)
+  expect_match(html, "Sill not observed", fixed = TRUE)
+  expect_match(html, "nugget below 5% of the sill", fixed = TRUE)
+
+  colours <- regmatches(html, gregexpr("color[[:space:]]*:[[:space:]]*[^;']+", html))[[1]]
+  expect_gt(length(colours), 0)
+  expect_true(all(grepl("var(--mn-", colours, fixed = TRUE)),
+              info = paste(colours[!grepl("var(--mn-", colours, fixed = TRUE)], collapse = " | "))
+})
+
 # ── variant switching ─────────────────────────────────────────────────────
 
 test_that("the boot script stamps a variant before first paint", {
@@ -409,8 +435,6 @@ test_that("theme_switcher_ui renders a namespaced client-side toggle", {
 # ── export writer (unchanged behaviour, kept covered) ──────────────────────
 
 test_that("export_plot_to_file writes at the requested size and format", {
-  skip_if_not_installed("ggplot2")
-
   p <- ggplot2::ggplot(data.frame(x = 1:3, y = 1:3), ggplot2::aes(x, y)) + ggplot2::geom_point()
   path <- file.path(tempdir(), "monolith-theme-test.png")
   on.exit(unlink(path), add = TRUE)
@@ -511,6 +535,63 @@ test_that("the clipboard payload carries no colour of its own", {
   # borders and the bold header come from the receiving application instead
   expect_match(js, 'border="1"', fixed = TRUE)
   expect_match(js, "<th style=", fixed = TRUE)
+})
+
+# ── DataTables column alignment (a metric must never sit under another's
+# heading) ─────────────────────────────────────────────────────────────────
+# Under scrollX DataTables splits a table in two and keeps the halves aligned
+# with the pixel widths it writes on both. A `width: 100% !important` beats
+# those inline widths, and with nowrap cells each half then resolves 100%
+# against its own min-content - the header against the labels, the body
+# against the data - which is what moved values under the wrong column.
+
+test_that("the stylesheet leaves a scrolling DataTable its computed widths", {
+  css <- monolith_theme_css()
+  # The rule that broke it: a forced width on any table inside the container.
+  expect_false(grepl("\\.table-container table,\\s*\\n\\s*\\.table-container \\.dataTables_wrapper \\{[^}]*width:\\s*100%\\s*!important",
+                     css, perl = TRUE))
+  # What replaces it: the wrapper, and a table that is its DIRECT child (which
+  # is the shape a NON-scrolling DataTable has). The two scroll containers
+  # match neither, so their tables keep the widths DataTables computed.
+  expect_match(css, ".table-container .dataTables_wrapper { width: 100% !important; }", fixed = TRUE)
+  expect_match(css, ".table-container .dataTables_wrapper > table.dataTable { width: 100% !important; }",
+               fixed = TRUE)
+  # No RULE may set a width on either scroll container (comments stripped
+  # first: the block above names them in prose, which is not a rule).
+  rules <- gsub("(?s)/\\*.*?\\*/", "", css, perl = TRUE)
+  expect_false(grepl("dataTables_scroll[^{}]*\\{[^}]*width", rules, perl = TRUE))
+  # The colour and radius keep their !important - they fight DT's own sheet.
+  expect_match(css, "background-color: var(--mn-surface) !important", fixed = TRUE)
+})
+
+test_that("the shipped head script realigns columns on every reveal and redraw", {
+  head_html <- paste(as.character(htmltools::renderTags(ui)$head), collapse = "")
+
+  # A tab reveal, an output Shiny makes visible, and the table's own redraw.
+  expect_match(head_html, "shown.bs.tab", fixed = TRUE)
+  expect_match(head_html, "shiny:visualchange", fixed = TRUE)
+  expect_match(head_html, "draw.dt", fixed = TRUE)
+  # shiny:visualchange fires on the OUTPUT element, so the handler is
+  # delegated from the output container and resolves the table inside.
+  expect_match(head_html, ".shiny-datatable-output", fixed = TRUE)
+  # After the layout settles, not on a fixed timer, and once per frame.
+  expect_match(head_html, "requestAnimationFrame", fixed = TRUE)
+  expect_match(head_html, "columns.adjust()", fixed = TRUE)
+  expect_match(head_html, "_mnAdjustPending", fixed = TRUE)
+  # NEVER .draw() from a draw handler: that is a redraw loop.
+  expect_false(grepl("\\.draw\\(\\)", head_html))
+  expect_false(grepl("setTimeout(function () { if ($.fn.dataTable)", head_html, fixed = TRUE))
+})
+
+test_that("a non-scrolling table still copies one header row", {
+  # The copy script special-cases scrollX's cloned header; without scrollX
+  # there is no clone, so it must fall through to the single table.
+  js <- copy_table_js()
+  expect_match(js, "if (!thead || !tbody) {", fixed = TRUE)
+  expect_match(js, "var t = root.querySelector('table');", fixed = TRUE)
+
+  df <- data.frame(Param = c("Model", "Nugget"), Actual = c("Sph", "0.035"))
+  expect_false(sci_dt(df, scroll_x = FALSE)$x$options$scrollX)
 })
 
 test_that("the copy script is mounted in the shipped UI", {

@@ -48,14 +48,30 @@ vgm_weighted_sse <- function(v_emp, model) {
 # on.exit() and return() inside the block behave exactly as they would without
 # the wrapper, and the block's value is the wrapper's value.
 with_rng_sandbox <- function(expr) {
+  # Reported without touching .Random.seed (a bare RNGkind() has no side
+  # effect), so capturing it cannot create the state the next line checks for.
+  old_kind <- RNGkind()
   old_seed <- if (exists(".Random.seed", envir = .GlobalEnv, inherits = FALSE)) {
     get(".Random.seed", envir = .GlobalEnv, inherits = FALSE)
   } else {
     NULL
   }
   on.exit({
-    if (!is.null(old_seed)) assign(".Random.seed", old_seed, envir = .GlobalEnv)
-    else if (exists(".Random.seed", envir = .GlobalEnv, inherits = FALSE)) rm(".Random.seed", envir = .GlobalEnv)
+    if (!is.null(old_seed)) {
+      # .Random.seed's first element carries the generator, so this restores
+      # the kind along with the stream.
+      assign(".Random.seed", old_seed, envir = .GlobalEnv)
+    } else {
+      # Nothing to restore the kind FROM, and with_seed() names it, so without
+      # this the caller is left on Mersenne-Twister. RNGkind(<value>) writes
+      # .Random.seed, so set the kind first and remove the variable after, in
+      # that order. Numerically inert: this branch runs only where the caller
+      # had no random state at all.
+      do.call(RNGkind, as.list(old_kind))
+      if (exists(".Random.seed", envir = .GlobalEnv, inherits = FALSE)) {
+        rm(".Random.seed", envir = .GlobalEnv)
+      }
+    }
   }, add = TRUE)
   force(expr)
 }
@@ -63,9 +79,23 @@ with_rng_sandbox <- function(expr) {
 # Sandboxed AND seeded - the common case (reproducible draws that leave the
 # caller's stream untouched). Sites that seed CONDITIONALLY use
 # with_rng_sandbox directly and keep their own set.seed inside the block.
+#
+# The generator is NAMED here, not inherited. set.seed() keeps whatever RNG
+# kind is in force, and a future/furrr worker runs under the L'Ecuyer-CMRG
+# stream that `seed = TRUE` installs, so a bare set.seed(12345) drew one stream
+# inside a worker and a different one in-process: the app's RFK fold forests,
+# spatial CV blocks, Jenks subsample, Moran jitter, classification tuning and
+# governing-factors draws did not reproduce what the same seed produces in a
+# script or in the test suite. Naming R's defaults makes one seed mean one
+# stream everywhere. The parallel streams are untouched: .Random.seed carries
+# the kind in its first element, so restoring it on exit returns the worker to
+# its own L'Ecuyer stream, and furrr's per-element streams keep their
+# independence. Changing any of these three values moves every seeded result
+# in the application.
 with_seed <- function(seed, expr) {
   with_rng_sandbox({
-    set.seed(seed)
+    set.seed(seed, kind = "Mersenne-Twister", normal.kind = "Inversion",
+             sample.kind = "Rejection")
     expr
   })
 }
@@ -129,6 +159,77 @@ vgm_smooth_nugget_share <- function(model) {
 # 5% bounded the overshoot beyond the observed range to 0.02 of its span in
 # every locality, while 1% allowed up to 0.5.
 VGM_SMOOTH_NUGGET_WARN_SHARE <- 0.05
+
+# Two candidates whose weighted least-squares criteria differ by less than
+# this relative amount are numerically tied; only then does range resolution
+# choose between them. It is a tie rule, not a penalty: a candidate that fits
+# the empirical variogram measurably better always wins.
+VGM_SSE_TIE_REL <- 1e-8
+
+# ── Fit state ────────────────────────────────────────────────────────────────
+# One categorical state per fitted variogram, worst first. It replaces the two
+# booleans (`is_fallback`, `flawed_winner`) as the primary signal; both are kept
+# as attributes because the CK seed guard and the map banner read them.
+#
+#   fit_failed         no candidate could be fitted at all, or the empirical
+#                      variogram had fewer than 5 bins
+#   heuristic_fallback candidates were tried, none was eligible for auto-fit
+#   singular_selected  the winner is a singular or non-converged fit
+#   range_unresolved   the winner converged, but its practical range lies
+#                      outside the span the empirical variogram supports
+#   ok                 converged, and its range is inside that span
+VGM_FIT_STATUSES <- c("fit_failed", "heuristic_fallback", "singular_selected",
+                      "range_unresolved", "ok")
+
+#' The status of a fitted variogram. A model carrying no diagnostics did not
+#' come from the candidate screen - it is a model the user applied - and is
+#' reported as `ok`: nothing about it is degraded, and its CV is labelled
+#' conditional elsewhere.
+vgm_fit_status <- function(fit) {
+  if (is.null(fit) || NROW(fit) == 0) return("fit_failed")
+  s <- attr(fit, "vgm_diagnostics")$status
+  if (!is.null(s) && s %in% VGM_FIT_STATUSES) return(s)
+  if (isTRUE(attr(fit, "is_fallback"))) return("heuristic_fallback")
+  if (isTRUE(attr(fit, "flawed_winner"))) return("singular_selected")
+  "ok"
+}
+
+#' Plain-language state, for a run-log line or a table cell.
+vgm_status_label <- function(status) {
+  switch(as.character(status)[1],
+         fit_failed = "variogram fit failed",
+         heuristic_fallback = "heuristic fallback",
+         singular_selected = "singular/non-converged fit selected",
+         range_unresolved = "converged fit, range unresolved by lag support",
+         "converged fit")
+}
+
+#' TRUE when the target this variogram was fitted to carries no usable variance,
+#' so its sill and structural dependency are numerical noise rather than
+#' estimates. NA (unknown) reads as FALSE, which is the safe default for a
+#' supplied model.
+vgm_target_degenerate <- function(fit) {
+  isTRUE(attr(fit, "vgm_diagnostics")$target_degenerate)
+}
+
+# Is the empirical variogram still climbing at the cutoff? Compares the mean of
+# the last third of the bins against the third before it, so one noisy bin
+# cannot decide it, and calls a rise of more than 5% of the observed gamma span
+# a rise. NA when there are too few bins to split, in which case the
+# non-stationarity advisory does not fire.
+.vgm_still_rising <- function(v_emp) {
+  if (is.null(v_emp) || !"gamma" %in% names(v_emp)) return(NA)
+  g <- as.numeric(v_emp$gamma)
+  n <- length(g)
+  k <- max(2L, floor(n / 3))
+  if (n < 2L * k) return(NA)
+  tail_mean <- mean(utils::tail(g, k), na.rm = TRUE)
+  prev_mean <- mean(g[seq(n - 2L * k + 1L, n - k)], na.rm = TRUE)
+  span <- suppressWarnings(diff(range(g, na.rm = TRUE)))
+  if (!isTRUE(is.finite(span)) || span <= 0 ||
+      !is.finite(tail_mean) || !is.finite(prev_mean)) return(NA)
+  (tail_mean - prev_mean) > 0.05 * span
+}
 
 #' Default empirical-variogram lags: cutoff = half the bounding-box diagonal of
 #' the points, split into 15 bins. Returns `list(width, cutoff)` in CRS units.
@@ -196,14 +297,68 @@ clean_gstat_env <- function(vgm_obj) {
   return(vgm_obj)
 }
 
+#' The winner of one candidate pool (`list(fit, sse, range_resolved, ...)`
+#' entries). The fitting criterion decides; range resolution only breaks a tie:
+#' when the lowest-SSErr candidate is unresolved and a resolved candidate's
+#' SSErr is numerically equal to it (relative difference within
+#' VGM_SSE_TIE_REL), the resolved one is taken. Never a penalty on a better fit.
+.vgm_pick_best <- function(pool) {
+  sse <- vapply(pool, function(x) x$sse, numeric(1))
+  i <- which.min(sse)
+  if (!isTRUE(pool[[i]]$range_resolved)) {
+    resolved <- vapply(pool, function(x) isTRUE(x$range_resolved), logical(1))
+    tie <- which(resolved & sse <= sse[i] * (1 + VGM_SSE_TIE_REL))
+    if (length(tie)) i <- tie[which.min(sse[tie])]
+  }
+  pool[[i]]
+}
+
+#' Whether a fitted candidate is eligible for automated selection. The first
+#' four rules require a finite comparison criterion and a mathematically valid,
+#' finite two-component variogram. The final rule is Monolith's numerical-
+#' safety policy for smooth-origin families; a zero-nugget Gaussian or Matern
+#' model is mathematically valid, but is not auto-selected in this workflow.
+.vgm_autofit_eligible <- function(fit, sse, practical_range) {
+  smooth_share <- vgm_smooth_nugget_share(fit)
+  length(sse) == 1L && is.finite(sse) &&
+    is.finite(fit$psill[2]) && fit$psill[2] > 0 &&
+    is.finite(practical_range) && practical_range > 0 &&
+    is.finite(fit$psill[1]) && fit$psill[1] >= 0 &&
+    !isTRUE(smooth_share <= 1e-8)
+}
+
 #' Automated variogram fit. Screens 4 families (Sph, Exp, Gau, Mat with
-#' nu = 1.5) x 4 starting ranges with gstat::fit.variogram. A candidate is
-#' eligible when its practical range lies between max lag / 100 and 2 x max
-#' lag, its partial sill is positive, its nugget non-negative, and, for a
-#' Gaussian or Matern structure, its nugget positive; the lowest
-#' SSErr wins, converged candidates before flawed ones. Returns a vgm carrying
-#' attr "vgm_diagnostics", plus "flawed_winner", or "is_fallback" for the
-#' heuristic Spherical model used when nothing is eligible or the empirical
+#' nu = 1.5) x 4 starting ranges with gstat::fit.variogram.
+#'
+#' Two separate questions are asked of every candidate, and they must not be
+#' merged again:
+#'
+#'  * AUTO-FIT ELIGIBILITY (five rules) requires a finite fitting criterion, a
+#'    finite positive partial sill, a finite positive practical range, a finite
+#'    non-negative nugget, and a nugget above zero for a parabolic-origin
+#'    family. The parameter rules enforce mathematical validity; the last rule
+#'    is Monolith's numerical-safety policy. An ineligible candidate is not
+#'    comparable on SSErr in the automated search.
+#'  * IDENTIFIABILITY (`range_resolved`) is a DIAGNOSTIC: whether the practical
+#'    range falls between max lag / 100 and 2 x max lag, i.e. inside the span
+#'    the empirical variogram can speak to. It never ranks candidates: a
+#'    converged fit that describes the empirical variogram better is not
+#'    beaten by a poorer one merely because the poorer one's range lies inside
+#'    that span. What an unresolved winner CLAIMS is qualified downstream
+#'    (status, sill_resolved) instead.
+#'
+#' Selection, in order:
+#'   1. converged eligible candidates: the lowest SSErr wins; range resolution
+#'      only breaks a tie (a resolved candidate whose SSErr is numerically
+#'      equal to the winner's is preferred);
+#'   2. only if no eligible candidate converged: singular / non-converged
+#'      eligible
+#'      candidates, lowest SSErr, same tie rule;
+#'   3. only if no eligible candidate exists at all: the heuristic.
+#'
+#' Returns a vgm carrying attr "vgm_diagnostics" (see vgm_diag below), plus
+#' "flawed_winner" for a singular/non-converged winner, or "is_fallback" for
+#' the heuristic Spherical model used when nothing is eligible or the empirical
 #' variogram has fewer than 5 bins.
 robust_vgm_fit <- function(v_emp, v_data) {
   initial_sill <- var(v_data, na.rm=TRUE)
@@ -213,16 +368,45 @@ robust_vgm_fit <- function(v_emp, v_data) {
   if (is.na(max_dist) || is.infinite(max_dist) || max_dist <= 0) {
     max_dist <- 1.0 # Safe default positive distance fallback
   }
+  # The span the empirical variogram actually covers. NA when there is no
+  # empirical variogram to speak to, so nothing downstream claims support the
+  # data never provided.
+  max_lag <- if (!is.null(v_emp) && nrow(v_emp) > 0) suppressWarnings(max(v_emp$dist, na.rm = TRUE)) else NA_real_
+  if (!isTRUE(is.finite(max_lag))) max_lag <- NA_real_
+  still_rising <- .vgm_still_rising(v_emp)
+  target_degenerate <- .is_degenerate_covariate(v_data)
 
-  vgm_diag <- function(n_tried, n_flawed, flawed_winner) {
-    list(n_tried = n_tried, n_flawed = n_flawed, flawed_winner = flawed_winner)
+  # Everything the UI needs to say what this fit is and what may be claimed
+  # about it, computed here because this is where the empirical variogram is in
+  # hand. `sill_resolved` is a STRICTER test than `range_resolved` (which
+  # admits up to 2 x max lag) and a different question: the status says how
+  # well the winner's range is supported, `sill_resolved` what may be CLAIMED
+  # about its sill.
+  vgm_diag <- function(n_tried, n_flawed, flawed_winner, status, fit = NULL) {
+    prange <- if (is.null(fit) || NROW(fit) < 2) NA_real_ else
+      fit$range[2] * .vgm_practical_range_factor(fit$model[2], fit$kappa[2])
+    sill_resolved <- if (is.na(prange) || is.na(max_lag)) NA else isTRUE(prange <= max_lag)
+    list(n_tried = n_tried, n_flawed = n_flawed, flawed_winner = flawed_winner,
+         status = status,
+         practical_range = prange,
+         max_lag = max_lag,
+         sill_resolved = sill_resolved,
+         # Which end of the window the range fell outside, for the banner.
+         range_side = if (!identical(status, "range_unresolved") || is.na(prange)) NA_character_
+                      else if (prange <= max_dist / 100) "below" else "beyond",
+         # A sill the lags never reached AND an empirical variogram still
+         # climbing at the cutoff. Both, because either alone is weak.
+         trend_suspected = identical(sill_resolved, FALSE) && isTRUE(still_rising),
+         target_degenerate = target_degenerate)
   }
 
   if (is.null(v_emp) || nrow(v_emp) < 5) {
     # Skip fitting to prevent gstat::fit.variogram from crashing R on very small empirical variograms
     fallback <- gstat::vgm(psill = initial_sill * 0.8, "Sph", range = max_dist/2, nugget = initial_sill * 0.2)
     attr(fallback, "is_fallback") <- TRUE
-    attr(fallback, "vgm_diagnostics") <- vgm_diag(0L, 0L, FALSE)
+    # No fit to interpret: practical_range and sill_resolved stay NA rather
+    # than describing the heuristic's own invented range as data-supported.
+    attr(fallback, "vgm_diagnostics") <- vgm_diag(0L, 0L, FALSE, "fit_failed")
     return(fallback)
   }
 
@@ -278,50 +462,63 @@ robust_vgm_fit <- function(v_emp, v_data) {
       # attr(, "direct") - which gstat::variogram() sets and every call site
       # here supplies. Keep this test so eligibility does not depend on that
       # attribute surviving, or on the clamp staying in a future gstat.
-      # A Gaussian or Matern fit whose nugget sits at its lower bound of zero
-      # is ineligible: the least-squares fit wanted a negative nugget, i.e. the
-      # parabolic origin of the family cannot follow the short-lag rise of the
-      # empirical variogram, and without a nugget that origin gives a
-      # near-singular kriging system and predictions far outside the data
-      # range (vgm_smooth_nugget_share). On the reference data such winners
-      # overshot the observed range by up to 1990 times its span.
-      smooth_share <- vgm_smooth_nugget_share(f)
-      in_window <- !is.null(sse) && !is.na(sse) &&
-                   prange > (max_dist/100) && prange < max_dist * 2 &&
-                   f$psill[2] > 0 &&
-                   is.finite(f$psill[1]) && f$psill[1] >= 0 &&
-                   !isTRUE(smooth_share <= 1e-8)
-      candidates[[length(candidates) + 1]] <- list(fit = f, sse = sse, flawed = flawed, in_window = in_window)
+      # A zero-nugget Gaussian or Matern is mathematically valid, but Monolith
+      # does not auto-select it: in this workflow such smooth-origin fits have
+      # produced near-singular systems and predictions far outside the data
+      # range. On the reference data the worst overshoot was 1990 times the
+      # observed span. Manual models remain available and are warned, not
+      # rejected.
+      # A non-positive or non-finite range is not a variogram either: gamma(h)
+      # is undefined or decreasing. The old window excluded these implicitly
+      # (its lower bound is positive), so moving the window out of eligibility
+      # would have let a fit with a negative range win the selection - gstat
+      # returns them on non-converged fits.
+      valid <- .vgm_autofit_eligible(f, sse, prange)
+      # Identifiability, a diagnostic, never a ranking - see the header. Fails
+      # at BOTH ends:
+      # above 2 x max lag the sill is extrapolated beyond the observed support;
+      # below max lag / 100 the range is under the application's effective
+      # short-range resolution threshold and behaves as near-pure nugget.
+      range_resolved <- prange > (max_dist/100) && prange < max_dist * 2
+      candidates[[length(candidates) + 1]] <- list(fit = f, sse = sse, flawed = flawed,
+                                                   valid = valid, range_resolved = range_resolved)
     }
   }
 
   n_tried <- length(candidates)
   n_flawed <- sum(vapply(candidates, function(x) x$flawed, logical(1)))
-  eligible <- Filter(function(x) x$in_window, candidates)
-  clean_pool <- Filter(function(x) !x$flawed, eligible)
-  flawed_pool <- Filter(function(x) x$flawed, eligible)
-
-  pick_best <- function(pool) pool[[which.min(vapply(pool, function(x) x$sse, numeric(1)))]]$fit
+  valid_pool <- Filter(function(x) x$valid, candidates)
+  converged <- Filter(function(x) !x$flawed, valid_pool)
+  not_converged <- Filter(function(x) x$flawed, valid_pool)
 
   best_fit <- NULL
-  flawed_winner <- FALSE
-  if (length(clean_pool) > 0) {
-    best_fit <- pick_best(clean_pool)
-  } else if (length(flawed_pool) > 0) {
-    # No clean candidate anywhere: still better than the heuristic fallback, but flagged.
-    best_fit <- pick_best(flawed_pool)
-    flawed_winner <- TRUE
+  status <- NULL
+  if (length(converged) > 0) {
+    win <- .vgm_pick_best(converged)
+    best_fit <- win$fit
+    # Converged either way; an unresolved range is used, and what it claims
+    # about the sill is qualified downstream (sill_resolved), not discarded.
+    status <- if (win$range_resolved) "ok" else "range_unresolved"
+  } else if (length(not_converged) > 0) {
+    # No eligible candidate converged: still better than a guess, but flagged.
+    best_fit <- .vgm_pick_best(not_converged)$fit
+    status <- "singular_selected"
     attr(best_fit, "flawed_winner") <- TRUE
   }
 
   if (is.null(best_fit)) {
+    status <- if (n_tried == 0L) "fit_failed" else "heuristic_fallback"
     if (initial_nugget > initial_sill * 0.8) {
       best_fit <- gstat::vgm(psill = initial_sill * 0.05, "Sph", range = max_dist/10, nugget = initial_sill * 0.95)
     } else {
       best_fit <- gstat::vgm(psill = initial_sill * 0.8, "Sph", range = max_dist/2, nugget = initial_sill * 0.2)
     }
     attr(best_fit, "is_fallback") <- TRUE
+    attr(best_fit, "vgm_diagnostics") <- vgm_diag(n_tried, n_flawed, FALSE, status)
+    return(best_fit)
   }
-  attr(best_fit, "vgm_diagnostics") <- vgm_diag(n_tried, n_flawed, flawed_winner)
+  attr(best_fit, "vgm_diagnostics") <- vgm_diag(n_tried, n_flawed,
+                                                identical(status, "singular_selected"),
+                                                status, best_fit)
   return(best_fit)
 }

@@ -506,19 +506,79 @@ classif_folds_to_rset <- function(train_df, fold_id, assess_df = NULL, target = 
 }
 
 # ── Metrics ─────────────────────────────────────────────────────────────────
-#' Class-label metric set (works for binary and multiclass; multiclass
-#' precision/recall/F use macro averaging so minority soil classes are not
-#' masked by overall accuracy). Used on POOLED out-of-fold predictions, where
-#' every class is present.
+#' Class-label metric set for the statistics yardstick owns here: overall
+#' accuracy, Cohen's kappa and balanced accuracy. Precision, recall and F1 are
+#' NOT in it - they come from classif_macro_metrics() below, which scores an
+#' unpredicted class rather than dropping it. Used on POOLED out-of-fold
+#' predictions.
 classif_class_metric_set <- function() {
   yardstick::metric_set(
     yardstick::accuracy,
     yardstick::kap,
-    yardstick::bal_accuracy,
-    yardstick::precision,
-    yardstick::recall,
-    yardstick::f_meas
+    yardstick::bal_accuracy
   )
+}
+
+#' Precision, recall and F1 over a FIXED class universe.
+#'
+#' Every class in `universe` contributes exactly once to each of the three
+#' averages. A class the model never predicts has an undefined 0/0 precision;
+#' yardstick removes it from the multiclass average (with a warning raised
+#' inside the worker, where nothing sees it), which puts the three figures on
+#' different denominators - a macro F1 could then exceed both its own
+#' components, and a model that ignores a class outscored one that found a
+#' little of it. Scikit-learn's zero_division = 0 convention is used instead:
+#' the class scores 0 and stays in the average, which is the only choice that
+#' keeps one denominator and the only one consistent with reporting macro
+#' metrics so minority classes are not masked.
+#'
+#' `n_true == 0` is a different situation and stays different: that class has
+#' no reference sample in this evaluation population, so its recall is not
+#' evaluable and comes back NA (which makes the macro recall NA - a loud
+#' failure, never a silent zero). Unused target levels are dropped before CV,
+#' so it cannot arise for a pooled run; it does arise per area, where
+#' `universe` is restricted to the classes that area actually holds.
+#'
+#' Two classes are reported with the BINARY estimator (the first level is the
+#' event), which is what the guides state and what every two-class run has
+#' always reported - with the same zero-division rule, so only the degenerate
+#' "no predicted events" case moves.
+classif_macro_metrics <- function(truth, pred, classes = levels(as.factor(truth)),
+                                  universe = classes) {
+  truth <- factor(as.character(truth), levels = classes)
+  pred <- factor(as.character(pred), levels = classes)
+  # Counts over the FULL class set: a prediction of a class outside `universe`
+  # is still a miss for the true class it displaced.
+  tab <- table(pred, truth)
+  tp <- diag(tab)
+  n_pred <- rowSums(tab)
+  n_true <- colSums(tab)
+
+  precision <- ifelse(n_pred == 0, 0, tp / n_pred)
+  recall <- ifelse(n_true == 0, NA_real_, tp / n_true)
+  f1 <- ifelse(is.na(recall), NA_real_,
+               ifelse(precision + recall == 0, 0,
+                      2 * precision * recall / (precision + recall)))
+
+  binary <- length(classes) == 2
+  keep <- if (binary) classes[1] else intersect(classes, universe)
+  est <- if (binary) "binary" else "macro"
+  out <- data.frame(
+    .metric = c("precision", "recall", "f_meas"),
+    .estimator = est,
+    .estimate = c(mean(precision[keep]), mean(recall[keep]), mean(f1[keep])),
+    # The denominator the three averages share, so a reader can see it; a
+    # binary run names its event class instead.
+    .n_classes = if (binary) NA_integer_ else length(keep),
+    .event = if (binary) classes[1] else NA_character_,
+    stringsAsFactors = FALSE
+  )
+  attr(out, "per_class") <- data.frame(
+    class = classes, n_true = as.integer(n_true), n_pred = as.integer(n_pred),
+    precision = as.numeric(precision), recall = as.numeric(recall),
+    f1 = as.numeric(f1), in_universe = classes %in% keep,
+    stringsAsFactors = FALSE)
+  out
 }
 
 #' Human-readable labels for the yardstick metric ids emitted by
@@ -548,11 +608,18 @@ classif_estimator_labels <- function() {
 }
 
 #' Attach display labels to a yardstick metrics data.frame
-#' (.metric/.estimator/.estimate), preserving the raw ids.
+#' (.metric/.estimator/.estimate), preserving the raw ids. A macro average
+#' carries the number of classes it was taken over and a binary one its event
+#' class: both are part of what the estimator IS, and without them two rows
+#' averaged over different class sets read as comparable numbers.
 classif_label_metrics <- function(m) {
   ml <- classif_metric_labels(); el <- classif_estimator_labels()
   lab <- unname(ml[m$.metric]); lab[is.na(lab)] <- m$.metric[is.na(lab)]
   est <- unname(el[m$.estimator]); est[is.na(est)] <- m$.estimator[is.na(est)]
+  k <- if (".n_classes" %in% names(m)) m$.n_classes else rep(NA_integer_, nrow(m))
+  ev <- if (".event" %in% names(m)) m$.event else rep(NA_character_, nrow(m))
+  est <- ifelse(!is.na(k), sprintf("%s (K = %d)", est, as.integer(k)),
+                ifelse(!is.na(ev), sprintf("%s (event: %s)", est, ev), est))
   m$.metric_label <- lab
   m$.estimator_label <- est
   m
@@ -581,6 +648,9 @@ classif_compute_metrics <- function(pred_df, target) {
   cls_metrics <- classif_class_metric_set()
   out <- cls_metrics(pred_df, truth = !!rlang::sym(target),
                      estimate = !!rlang::sym(".pred_class"))
+  # Precision / recall / F1 over the fixed class universe, not yardstick's
+  # drop-the-undefined-class default (see classif_macro_metrics).
+  out <- dplyr::bind_rows(out, classif_macro_metrics(truth, pred_df$.pred_class, levs))
 
   prob_out <- tryCatch({
     if (length(prob_cols) == length(levs) && length(levs) >= 2) {
@@ -605,7 +675,10 @@ classif_compute_metrics <- function(pred_df, target) {
 }
 
 #' Per-class producer (recall) and user (precision) accuracy from a confusion
-#' matrix, the standard DSM per-class report. Returns a tidy data.frame.
+#' matrix, the standard DSM per-class report. `n` counts the class's reference
+#' samples and `n_pred` the predictions of it: a class with `n_pred == 0` is
+#' one the model never assigned, which is why its user accuracy is undefined
+#' (the displays say "no predictions" rather than leaving the cell blank).
 classif_per_class_accuracy <- function(pred_df, target) {
   cm <- yardstick::conf_mat(pred_df, truth = !!rlang::sym(target),
                             estimate = !!rlang::sym(".pred_class"))
@@ -617,6 +690,7 @@ classif_per_class_accuracy <- function(pred_df, target) {
   data.frame(
     class = classes,
     n = as.integer(col_tot),
+    n_pred = as.integer(row_tot),
     producer_accuracy = ifelse(col_tot > 0, diagv / col_tot, NA_real_),
     user_accuracy = ifelse(row_tot > 0, diagv / row_tot, NA_real_),
     stringsAsFactors = FALSE
@@ -2114,8 +2188,15 @@ classif_resolve_scope <- function(df, x_col, y_col, src_crs, proj_crs,
 #' metrics only — probability metrics are unstable on small per-area subsets.
 #' Metrics undefined for an area (e.g. a class never observed there) come back
 #' NA rather than erroring.
+#'
+#' The macro F1 of an AREA is taken over the classes with reference support in
+#' that area: a class the pooled target has but this area does not is not
+#' evaluable here, while a class the area holds and the model never predicts
+#' there still scores 0 (the F13 rule). `K` reports that denominator per row,
+#' because two areas' macro figures need not be over the same class set.
 classif_group_metrics <- function(pred_df, target, group_col = ".scope_group") {
   ms <- classif_class_metric_set()
+  classes <- levels(as.factor(pred_df[[target]]))
   core <- function(sub) {
     m <- tryCatch(suppressWarnings(
       ms(sub, truth = !!rlang::sym(target), estimate = !!rlang::sym(".pred_class"))),
@@ -2124,8 +2205,16 @@ classif_group_metrics <- function(pred_df, target, group_col = ".scope_group") {
       v <- if (is.null(m)) numeric(0) else m$.estimate[m$.metric == id]
       if (length(v)) v[1] else NA_real_
     }
+    supported <- classes[table(factor(as.character(sub[[target]]), levels = classes)) > 0]
+    mm <- tryCatch(classif_macro_metrics(sub[[target]], sub$.pred_class, classes,
+                                         universe = supported),
+                   error = function(e) NULL)
     data.frame(n = nrow(sub), accuracy = grab("accuracy"), kap = grab("kap"),
-               bal_accuracy = grab("bal_accuracy"), f_meas = grab("f_meas"))
+               bal_accuracy = grab("bal_accuracy"),
+               f_meas = if (is.null(mm)) NA_real_ else mm$.estimate[mm$.metric == "f_meas"],
+               # NA for a two-class run, which reports the event class's own F1
+               # rather than an average over a class set.
+               K = if (is.null(mm)) NA_integer_ else as.integer(mm$.n_classes[1]))
   }
   rows <- list()
   if (group_col %in% names(pred_df)) {
@@ -2141,6 +2230,147 @@ classif_group_metrics <- function(pred_df, target, group_col = ".scope_group") {
   out <- do.call(rbind, rows)
   rownames(out) <- NULL
   out
+}
+
+#' Write the predicted-class download into `dir`: the class GeoTIFF (INT1U, so
+#' the colour table is embedded), the `.tif.aux.xml` sidecar in which GDAL
+#' stores the category names, and a legend CSV (`ID,class`) that names the codes
+#' without depending on the sidecar surviving the reader's unzip tool. Returns
+#' the paths written; when GDAL wrote no sidecar the bundle is the tif and the
+#' CSV, with a warning.
+classif_class_download_files <- function(class_r, dir, base = "predicted_class") {
+  tif <- file.path(dir, paste0(base, ".tif"))
+  terra::writeRaster(class_r, tif, overwrite = TRUE, datatype = "INT1U")
+  cats <- terra::cats(class_r)[[1]]
+  legend <- file.path(dir, paste0(base, "_legend.csv"))
+  utils::write.csv(data.frame(ID = cats[[1]], class = as.character(cats[[2]])),
+                   legend, row.names = FALSE)
+  aux <- paste0(tif, ".aux.xml")
+  if (!file.exists(aux)) {
+    warning("The class names could not be written beside the GeoTIFF; ",
+            "the legend CSV in the download names the class codes.", call. = FALSE)
+    return(c(tif, legend))
+  }
+  c(tif, aux, legend)
+}
+
+#' The classification metrics CSV: every result table of the run in one tidy
+#' frame of five columns (scope, metric, yardstick_id, estimator, value).
+#'
+#' Pure, so the exported file is testable; the download handler only writes it.
+#' The per-class block and the confusion matrix are in it because they are what
+#' lets a reader recompute the macro averages - for an imbalanced problem they
+#' are the rows that matter most, and a file that reports only the averages
+#' cannot be checked at all. `area` is the rasteriser's area table (it honours
+#' the live confidence threshold, so it cannot be recomputed from `res`).
+classif_metrics_csv_df <- function(res, area = NULL, area_note = NULL) {
+  if (is.null(res)) return(NULL)
+  blk <- function(scope, metric, id, estimator, value) {
+    if (!length(metric)) return(NULL)
+    data.frame(scope = scope, metric = metric, yardstick_id = id,
+               estimator = estimator, value = as.numeric(value),
+               stringsAsFactors = FALSE)
+  }
+  m <- classif_label_metrics(res$cv_metrics)
+  out <- list(blk(if (isTRUE(res$nn_only)) "Total (spatial 1-NN, no covariates)" else "Total",
+                  m$.metric_label, m$.metric, m$.estimator_label, m$.estimate))
+
+  # Per-area rows (class metrics only), matching the Performance by Area table;
+  # the Total row above already carries the full pooled metric set.
+  gm <- res$group_metrics
+  if (!is.null(gm)) {
+    gm <- gm[gm$scope != "Total", , drop = FALSE]
+    if (nrow(gm) > 0) {
+      ml <- classif_metric_labels()
+      ids <- c("accuracy", "kap", "bal_accuracy", "f_meas")
+      for (i in seq_len(nrow(gm))) {
+        est <- c("Multiclass", "Multiclass", "Macro average",
+                 if (is.na(gm$K[i])) "Binary" else sprintf("Macro average (K = %d)", gm$K[i]))
+        out[[length(out) + 1]] <- blk(gm$scope[i], unname(ml[ids]), ids, est,
+                                      as.numeric(gm[i, ids]))
+      }
+    }
+  }
+
+  # Covariate-free run: the rows above ARE the spatial 1-NN model's.
+  if (isTRUE(res$nn_only)) {
+    out[[length(out) + 1]] <- blk(
+      "Baseline comparison", "Majority-class accuracy (no-information rate)",
+      "majority_acc", "Pooled out-of-fold", res$majority_acc)
+  }
+  # Baseline comparison rows (same CV folds as the model metrics above).
+  if (!is.null(res$lift)) {
+    lf <- res$lift
+    out[[length(out) + 1]] <- blk(
+      "Baseline comparison",
+      c("Spatial 1-NN baseline accuracy", "Spatial 1-NN baseline kappa",
+        "Majority-class accuracy (no-information rate)",
+        "Covariate lift (accuracy points vs spatial baseline)",
+        "McNemar p (model vs spatial baseline)"),
+      c("baseline_acc", "baseline_kap", "majority_acc", "lift_abs", "mcnemar_p"),
+      "Paired out-of-fold",
+      c(lf$baseline_acc, lf$baseline_kap, lf$majority_acc, lf$lift_abs, lf$mcnemar_p))
+  }
+  # Permutation feature importance. The scope names the evaluation design (each
+  # fold's model on its held-out rows, or the final model on its own training
+  # rows) so a reader of the CSV alone cannot mistake one for the other - they
+  # are not comparable numbers.
+  if (!is.null(res$importance)) {
+    imp <- res$importance
+    out[[length(out) + 1]] <- blk(
+      sprintf("Feature importance (%s)", imp$evaluated_on[1]),
+      imp$predictor, "perm_delta_logloss",
+      sprintf("share %.1f%%", imp$share_pct), imp$importance)
+  }
+
+  # Per class: the reference and predicted counts beside producer and user
+  # accuracy. A class with no predictions carries that in its estimator, so the
+  # NA is not read as a failed computation.
+  pc <- res$per_class
+  if (!is.null(pc) && nrow(pc) > 0) {
+    none <- !is.na(pc$n_pred) & pc$n_pred == 0
+    out[[length(out) + 1]] <- blk(
+      "Per class",
+      c(paste0(pc$class, ": producer accuracy (recall)"),
+        paste0(pc$class, ": user accuracy (precision)"),
+        paste0(pc$class, ": n (reference)"),
+        paste0(pc$class, ": n (predicted)")),
+      rep(c("producer_accuracy", "user_accuracy", "n_reference", "n_predicted"),
+          each = nrow(pc)),
+      c(ifelse(none, "no predictions", "Pooled out-of-fold"),
+        ifelse(none, "no predictions", "Pooled out-of-fold"),
+        rep("Pooled out-of-fold", 2 * nrow(pc))),
+      c(pc$producer_accuracy, pc$user_accuracy, pc$n, pc$n_pred))
+  }
+
+  # Confusion matrix, one row per cell. The orientation is IN the metric string:
+  # a reader of the file cannot see which margin is which otherwise.
+  cm <- res$conf_mat
+  tab <- if (is.null(cm)) NULL else tryCatch(as.table(cm$table), error = function(e) NULL)
+  if (!is.null(tab)) {
+    idx <- expand.grid(pred = rownames(tab), truth = colnames(tab),
+                       stringsAsFactors = FALSE)
+    out[[length(out) + 1]] <- blk(
+      "Confusion matrix",
+      sprintf("truth %s / predicted %s", idx$truth, idx$pred),
+      "n", "Pooled out-of-fold",
+      as.numeric(tab[cbind(idx$pred, idx$truth)]))
+  }
+
+  # Class areas of the mapped surface, keyed by class, as the Area panel shows
+  # them (the confidence threshold applies, which is why they are passed in).
+  if (!is.null(area) && nrow(area) > 0) {
+    est <- area_note %||% "Mapped surface"
+    out[[length(out) + 1]] <- blk(
+      "Class area",
+      c(paste0(area$class, ": area (ha)"), paste0(area$class, ": cells")),
+      rep(c("area_ha", "n_cells"), each = nrow(area)),
+      est, c(area$area_ha, area$n_cells))
+  }
+
+  out <- Filter(Negate(is.null), out)
+  if (!length(out)) return(NULL)
+  do.call(rbind, out)
 }
 
 # ── Orchestrator (worker-safe) ──────────────────────────────────────────────

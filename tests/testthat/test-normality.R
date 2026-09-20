@@ -30,31 +30,20 @@ test_that("returns 'insufficient' for NULL input", {
 
 # ── Method dispatch ────────────────────────────────────────────────────────
 
-test_that("uses Shapiro-Wilk for n < 5000", {
-  x <- rnorm(30)
-  res <- compute_normality(x)
-  expect_match(res$method, "Shapiro-Wilk")
-  expect_true(res$statistic > 0 && res$statistic <= 1)
-  expect_equal(res$n, 30)
-})
-
 test_that("uses Lilliefors test for n >= 5000", {
-  x <- rnorm(5000)
+  # The n >= 5000 branch, reported as what nortest actually returned.
+  x <- with_seed(11, runif(5000, 0, 100))
   res <- compute_normality(x)
+  ref <- nortest::lillie.test(x)
   expect_match(res$method, "Lilliefors")
   expect_equal(res$n, 5000)
+  expect_equal(res$statistic, unname(ref$statistic), tolerance = 1e-12)
+  expect_equal(res$p_value, ref$p.value, tolerance = 1e-12)
+  expect_null(names(res$statistic))
+  expect_equal(res$status, if (ref$p.value >= 0.05) "normal" else "not_normal")
 })
 
 # ── Classification ─────────────────────────────────────────────────────────
-
-test_that("classifies normal data as normal most of the time", {
-  set.seed(42)
-  x <- rnorm(40, mean = 100, sd = 15)
-  res <- compute_normality(x)
-  # Normal data usually passes; we just verify output is well-formed
-  expect_true(res$status %in% c("normal", "not_normal"))
-  expect_true(!is.na(res$p_value))
-})
 
 test_that("detects a two-point distribution as non-normal (Shapiro-Wilk)", {
   # 22 zeros and 23 ones: two point masses at n=45 (SW path)
@@ -66,32 +55,15 @@ test_that("detects a two-point distribution as non-normal (Shapiro-Wilk)", {
   expect_match(res$method, "Shapiro-Wilk")
 })
 
-test_that("Lilliefors path returns valid classification for uniform data", {
-  set.seed(1)
-  x <- runif(5000, 0, 100)
-  res <- compute_normality(x)
-  # Lilliefors has lower power; we only assert the output is well-formed.
-  # The classification itself is probabilistic — don't assert a specific value.
-  expect_match(res$method, "Lilliefors")
-  expect_equal(res$n, 5000)
-  expect_true(res$status %in% c("normal", "not_normal"))
-  expect_true(!is.na(res$statistic))
-  expect_true(!is.na(res$p_value))
-})
-
 # ── Robustness ─────────────────────────────────────────────────────────────
 
 test_that("handles NA values by removing them", {
-  x <- c(rnorm(30), NA, NA, NA)
+  x <- c(qnorm(ppoints(30)), NA, NA, NA)
   res <- compute_normality(x)
+  # n is the count AFTER removal, and the test ran on the 30 finite values.
   expect_equal(res$n, 30)
-  expect_true(res$status %in% c("normal", "not_normal"))
-})
-
-test_that("handles extreme outliers without error", {
-  x <- c(rnorm(25), 1e6, -1e6)
-  res <- compute_normality(x)
-  expect_true(res$status %in% c("normal", "not_normal", "insufficient"))
+  expect_equal(res$statistic, unname(shapiro.test(qnorm(ppoints(30)))$statistic),
+               tolerance = 1e-12)
 })
 
 # ── Output structure ───────────────────────────────────────────────────────
@@ -102,24 +74,9 @@ test_that("output list has all expected fields", {
   expect_setequal(names(res), c("status", "method", "statistic", "p_value", "n"))
 })
 
-test_that("method field contains 'Normality Test'", {
-  x <- rnorm(20)
-  res <- compute_normality(x)
-  expect_match(res$method, "Normality Test")
-})
-
-test_that("statistic is a single numeric value", {
-  x <- rnorm(35)
-  res <- compute_normality(x)
-  expect_type(res$statistic, "double")
-  expect_length(res$statistic, 1)
-})
-
 # ── Normality tooltip on residuals vs raw values ───────────────────────────
 
 test_that("normality tooltip shows (on residuals) only when groups are present", {
-  skip_if_not_installed("shiny")
-  
   df_single <- data.frame(
     x_val = rnorm(30),
     group_id = factor(rep("All", 30))
@@ -184,4 +141,44 @@ test_that("compute_normality reports the test's own statistic and p-value", {
   expect_equal(res$status, if (ref$p.value >= 0.05) "normal" else "not_normal")
   expect_equal(compute_normality(qnorm(ppoints(60)))$status, "normal")
   expect_equal(compute_normality(exp(qnorm(ppoints(60)) * 2))$status, "not_normal")
+})
+
+
+# ── The verdict a reader sees and copies ───────────────────────────────────
+# The verdict used to exist only inside an icon's `title` attribute, so it
+# could not be copied into a report or read without hovering. It is text on
+# the page now, and it has to be a complete, self-describing sentence.
+
+test_that("the normality verdict is a complete sentence naming test, statistic, p and n", {
+  x <- qnorm(ppoints(60))
+  res <- compute_normality(x)
+  txt <- normality_verdict_text(res, on_residuals = TRUE)
+
+  expect_match(txt, "Shapiro-Wilk", fixed = TRUE)
+  expect_match(txt, "within-group residuals", fixed = TRUE)
+  expect_match(txt, "W = ", fixed = TRUE)          # the symbol this test reports
+  expect_match(txt, "n = 60", fixed = TRUE)
+  expect_match(txt, "No significant departure from normality", fixed = TRUE)
+  # p comes through the app's own formatter, so it reads like every other p
+  expect_match(txt, format_p_value(res$p_value), fixed = TRUE)
+  expect_true(endsWith(txt, "."))
+
+  # A clear departure states the opposite conclusion and carries the stars.
+  bad <- compute_normality(exp(qnorm(ppoints(60)) * 2))
+  txt_bad <- normality_verdict_text(bad, on_residuals = FALSE)
+  expect_match(txt_bad, "Significant departure from normality", fixed = TRUE)
+  expect_match(txt_bad, "raw values", fixed = TRUE)
+  expect_match(txt_bad, signif_stars(bad$p_value), fixed = TRUE)
+})
+
+test_that("an untested column says WHY, not 'insufficient data'", {
+  # A constant column is not a small sample: blaming n told the reader to
+  # collect more of a variable that does not vary.
+  const <- compute_normality(rep(3, 40))
+  expect_equal(const$reason, "the values are constant")
+  expect_match(normality_verdict_text(const), "the values are constant", fixed = TRUE)
+  expect_match(normality_verdict_text(const), "n = 40", fixed = TRUE)
+
+  small <- compute_normality(c(1, 2))
+  expect_match(normality_verdict_text(small), "fewer than 3", fixed = TRUE)
 })

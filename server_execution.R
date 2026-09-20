@@ -3,6 +3,60 @@
 # run_params is built from reactives BEFORE the future_promise block; no rv$*/
 # input$* may be referenced inside the future, and the nested
 # parallelly::makeClusterPSOCK topology must be preserved as-is.
+
+  # ── Run warnings ──────────────────────────────────────────────────────────
+  # Workers report per-locality warnings as `warn_` files. They used to be read
+  # only by the live progress poller and deleted by the completion handler, so
+  # a message explaining why five metric cells are blank was on screen for a
+  # few seconds and then gone - absent from rv$log and therefore from the
+  # exported run log too. These two closures are the one path: everything the
+  # poller shows is what the completion handler persists.
+  read_run_warnings <- function() {
+    files <- list.files(path = session_progress_dir,
+                        pattern = paste0("^warn_", session_id, "_.*_.*\\.txt$"),
+                        full.names = TRUE)
+    out <- lapply(files, function(wf) {
+      msg <- tryCatch(readLines(wf, warn = FALSE), error = function(e) character(0))
+      msg <- paste(msg[nzchar(msg)], collapse = " ")
+      if (!nzchar(msg)) return(NULL)
+      c(status_file_parts(wf, session_id, kind = "warn"), list(message = msg))
+    })
+    Filter(Negate(is.null), out)
+  }
+
+  # Append this run's warnings to the run log, then clear the run's status
+  # files. Called from every completion path, including the two failure
+  # handlers - a run that failed is exactly when its warnings matter most.
+  persist_run_warnings <- function() {
+    warns <- tryCatch(read_run_warnings(), error = function(e) list())
+    if (length(warns) > 0) {
+      # A warning the worker also wrote to its own log (the grid-coarsening and
+      # constant-target notes use both channels) is already in rv$log; adding
+      # it again would print the same sentence twice.
+      # Matched per LINE on message AND locality, so the same sentence logged
+      # for one locality does not swallow another locality's warning. The file
+      # name carries the sanitised locality, hence the underscore/space twin.
+      log_lines <- strsplit(rv$log %||% "", "\n", fixed = TRUE)[[1]]
+      already <- function(w) {
+        hit <- grepl(w$message, log_lines, fixed = TRUE)
+        any(hit & (grepl(w$locality, log_lines, fixed = TRUE) |
+                   grepl(gsub("_", " ", w$locality), log_lines, fixed = TRUE)))
+      }
+      fresh <- Filter(Negate(already), warns)
+      if (length(fresh) > 0) {
+        lines <- vapply(fresh, function(w) paste0("\n[Warning] ", w$label, ": ", w$message), character(1))
+        rv$log <- paste0(rv$log, paste(lines, collapse = ""))
+      }
+      rv$run_warnings <- vapply(warns, function(w) paste0(w$label, ": ", w$message), character(1))
+    } else {
+      rv$run_warnings <- character(0)
+    }
+    stale <- list.files(path = session_progress_dir,
+                        pattern = paste0("^(progress|warn)_", session_id, "_.*_.*\\.txt$"),
+                        full.names = TRUE)
+    if (length(stale) > 0) tryCatch(file.remove(stale), error = function(e) NULL)
+  }
+
   calculate_run_estimates <- function() {
     meta <- get_current_meta()
     req(meta)
@@ -65,10 +119,21 @@
     )
   })
 
-  # Archived registries hold wrapped rasters, so an unbounded archive
-  # grows RAM run after run; keep only the most recent few.
-  MAX_RUN_HISTORY <- 5L
+  # Archived entries hold a run's rasters, CV objects and fitted models, so an
+  # unbounded archive grows RAM run after run; keep only the most recent few.
+  # An entry is snapshot_display_state() (server_setup.R). Measured on the
+  # 7-locality golden set (OK, comparison mode, Auto grid): the registry's
+  # merged Actual and Predicted surfaces dominate an entry, beside 78 MB of
+  # per-locality rasters and CV state, which is why the cap is 3, not 5. The
+  # uncertainty maps add nothing to that: they are registered as derivations
+  # of those surfaces (export_item_obj, global_utils.R), not as copies.
+  MAX_RUN_HISTORY <- 3L
   push_run_history <- function(entry, base = NULL) {
+    # A cancelled run produced nothing, so it is never archived as a result.
+    if (identical(entry$config$status, "cancelled")) {
+      if (!is.null(base)) rv$run_history <- base
+      return(invisible(FALSE))
+    }
     hist <- c(list(entry), if (is.null(base)) rv$run_history else base)
     if (length(hist) > MAX_RUN_HISTORY) {
       n_drop <- length(hist) - MAX_RUN_HISTORY
@@ -82,10 +147,9 @@
 
   archive_and_proceed <- function(action, meta, n_locs, estimate_text, is_long_run) {
     if (action == "archive") {
-      current_cfg <- rv$run_config_summary
-      current_reg <- rv$export_registry
-      if (!is.null(current_cfg) && length(current_reg) > 0) {
-        push_run_history(list(config = current_cfg, registry = current_reg))
+      current <- snapshot_display_state()
+      if (!is.null(current$config) && length(current$registry) > 0) {
+        push_run_history(current)
       }
     }
     
@@ -594,7 +658,10 @@
       localities = paste(locs, collapse = ", "),
       subset = eff_subset,
       value_type = input$value_type,
-      crs = rv$mapping$crs,
+      # The CRS the coordinates were read in, and the one the finished surface,
+      # its exports and the Map Viewer's projected measures are produced in.
+      input_crs = rv$mapping$crs,
+      target_crs = input$crs_selection,
       boundary_type = input$boundary_type,
       buffer_mode = input$buff_mode,
       buffer_dist = input$buff_dist,
@@ -606,9 +673,10 @@
       resolution = if (identical(input$res_mode, "fixed")) input$grid_res else "set at run",
       res_mode = input$res_mode,
       comp_mode = input$comp_mode,
-      # Actual/Predicted variogram sharing is an Ordinary Kriging control.
-      # Meaningful only when the run kriges a Predicted surface.
-      sep_fit = if (identical(input$method, "OK") &&
+      # Whether the Predicted surface got its own model (variogram, IDW power,
+      # TPS lambda) or reused the measured values' one. Meaningful only when
+      # the run maps a Predicted surface; RK/RFK/CK always fit their own.
+      sep_fit = if (input$method %in% c("OK", "IDW", "TPS") &&
                     (isTRUE(input$comp_mode) || !identical(input$value_type, "actual"))) isTRUE(input$sep_fit) else NA,
       cv_strategy = input$cv_strategy %||% "auto",
       cv_repeats = cv_repeats_val,
@@ -623,7 +691,10 @@
       cv_covariate_screen = if (input$method %in% c("RK", "RFK", "CK")) "per fold" else NA_character_,
       # Manual variogram models are consumed by Ordinary Kriging only.
       vgm_mode = if (identical(input$method, "OK")) (input$vgm_mode %||% "auto") else NA_character_,
-      covariates = if (run_uses_covariates()) paste(input$aux_vars, collapse = ", ") else NA,
+      # What the user selected. What each locality's model used, and what the
+      # collinearity screen removed, is only known once the workers return:
+      # covariates_retained / covariates_dropped are filled at completion.
+      covariates_selected = if (run_uses_covariates()) paste(input$aux_vars, collapse = ", ") else NA,
       # The RESOLVED gate the dispatch passes into run_params: Inf records the
       # user's "Keep All (Not Recommended)" choice in the collinearity modal.
       vif_threshold = if (input$method %in% c("RK", "RFK", "CK")) (rv$active_vif_thresh %||% 10) else NA,
@@ -666,6 +737,7 @@
       rv$rast_list_act <- list(); rv$rast_list_pre <- list(); sf_list <- list(); b_list <- list()
       rv$rast <- NULL; rv$rast_pred <- NULL; rv$rast_res <- NULL; rv$has_predictions <- FALSE
     rv$log <- paste0("[Run #", rv$run_counter, "] Starting spatial interpolation using method: ", input$method, "...")
+    rv$run_warnings <- character(0)
     rv$model_summaries <- list(); rv$rf_models <- list(); rv$gstat_objs <- list()
     rv$cv_metrics_act <- list(); rv$cv_metrics_pre <- list() # Reset CV metrics
     rv$cv_data_act <- list(); rv$cv_data_pre <- list()
@@ -723,15 +795,28 @@
       pts_data$x <- sub_df[[current_x_col]]
       pts_data$y <- sub_df[[current_y_col]]
       pts_data$v <- sub_df[[actual_col]]
-      pts_data$pv <- if (!is.null(pred_col) && pred_col %in% colnames(sub_df)) sub_df[[pred_col]] else NA
+      # Only a run that maps a prediction side carries the uploaded prediction
+      # column. pred_col is resolved from the variable's _cve/_ss column
+      # whatever the view is, so an Actual-only run used to fill pv anyway and
+      # then registered ML-prediction products (point-error surface, residual
+      # map, uploaded-prediction card) for a run that predicted nothing.
+      run_uses_pred <- isTRUE(comp_mode) || !identical(val_type, "actual")
+      pts_data$pv <- if (run_uses_pred && !is.null(pred_col) &&
+                         pred_col %in% colnames(sub_df)) sub_df[[pred_col]] else NA
       
       pre_fit_act <- resolve_stored_vgm(rv$v_fit_list[[paste0(l, "_act")]], vgm_mode, tuning_keys[["act"]])
+      idw_p_act <- get_regional_param("IDW", l, "act", default = idw_p_val %||% 2, key = tuning_keys[["act"]])
+      tps_lambda_act <- get_regional_param("TPS", l, "act", default = tps_lambda_val, key = tuning_keys[["act"]])
+      # "Fit Actual/Predicted separately" unticked: the Predicted surface reuses
+      # the measured values' model - their variogram, IDW power and TPS lambda.
+      # (A TPS lambda on Auto is shared in the worker: the Predicted surface
+      # takes the one GCV selects for the measured values.)
       m_params <- list(
-        idw_p_act = get_regional_param("IDW", l, "act", default = idw_p_val %||% 2, key = tuning_keys[["act"]]),
-        idw_p_pre = get_regional_param("IDW", l, "pre", default = idw_p_val %||% 2, key = tuning_keys[["pre"]]),
+        idw_p_act = idw_p_act,
+        idw_p_pre = if (sep_fit) get_regional_param("IDW", l, "pre", default = idw_p_val %||% 2, key = tuning_keys[["pre"]]) else idw_p_act,
         idw_nmax = idw_nmax_val %||% 12,
-        tps_lambda_act = get_regional_param("TPS", l, "act", default = tps_lambda_val, key = tuning_keys[["act"]]),
-        tps_lambda_pre = get_regional_param("TPS", l, "pre", default = tps_lambda_val, key = tuning_keys[["pre"]]),
+        tps_lambda_act = tps_lambda_act,
+        tps_lambda_pre = if (sep_fit) get_regional_param("TPS", l, "pre", default = tps_lambda_val, key = tuning_keys[["pre"]]) else tps_lambda_act,
         pre_fit_act = pre_fit_act,
         pre_fit_pre = if (sep_fit) resolve_stored_vgm(rv$v_fit_list[[paste0(l, "_pre")]], vgm_mode, tuning_keys[["pre"]]) else pre_fit_act,
         sep_fit = sep_fit,
@@ -755,12 +840,14 @@
     )
 
     # A stored IDW power / TPS lambda tuned for another variable or subset is
-    # not used; say which value replaced it.
+    # not used; say which value replaced it. Unseparated, the Predicted surface
+    # reads the Actual slot, so only that slot is consulted.
     run_targets <- if (comp_mode || val_type != "actual") c("act", "pre") else "act"
+    param_targets <- if (sep_fit) run_targets else "act"
     if (current_method %in% c("IDW", "TPS")) {
       store <- if (current_method == "IDW") rv$idw_factors else rv$tps_lambdas
       field <- if (current_method == "IDW") "idw_p_" else "tps_lambda_"
-      for (item in df_list) for (target in run_targets) {
+      for (item in df_list) for (target in param_targets) {
         entry <- store[[item$l]][[target]]
         if (!is.null(entry) && !identical(entry$key, tuning_keys[[target]])) {
           rv$log <- paste0(rv$log, "\n[Tuning] ", item$l, " (", target, "): the stored ", current_method,
@@ -771,8 +858,9 @@
       }
     }
 
-    # GCV curves shown for this run: only those tuned for its keys.
-    gcv_names <- intersect(names(rv$tps_gcv_data), as.vector(outer(locs, run_targets, paste, sep = "_")))
+    # GCV curves shown for this run: only those tuned for its keys, and for the
+    # slots its surfaces consumed.
+    gcv_names <- intersect(names(rv$tps_gcv_data), as.vector(outer(locs, param_targets, paste, sep = "_")))
     rv$disp$tps_gcv_data <- rv$tps_gcv_data[Filter(function(nm) {
       vgm_key_matches(rv$tps_gcv_data[[nm]], tuning_keys[[if (endsWith(nm, "_act")) "act" else "pre"]])
     }, gcv_names)]
@@ -841,10 +929,14 @@
     # functions from spatial_helpers.R. The promise worker and each nested
     # worker source() that file themselves, so no function values have to be
     # shipped as globals at all (shipping monolith-defined closures used to
-    # drag their source environments to every worker). interp_run_item is
-    # referenced by name below: a plain named reference is shipped reliably
-    # by automatic globals detection (future_promise does NOT honor future's
-    # structure(TRUE, add=) globals idiom).
+    # drag their source environments to every worker). The dispatch below
+    # therefore PINS `globals =` to the four plain-data objects the body
+    # reads. Automatic discovery would otherwise walk the whole 106-object
+    # helper call graph recursively on every single run - 6 s of frozen main
+    # session, measured, uncached - only to ship function values the worker's
+    # own source() defines anyway. `packages =` replaces the attachment that
+    # walk used to infer: the helper graph calls sf, gstat and dplyr
+    # unqualified (the same set the nested furrr_options below declares).
     run_params <- list(
       main_wd = main_wd,
       current_method = current_method, current_crs = current_crs, aux_vars = aux_vars,
@@ -874,6 +966,10 @@
       # worker's GLOBAL env; nested workers repeat this themselves inside
       # interp_run_item because they are fresh processes.
       source("spatial_helpers.R", local = FALSE)
+      # This pool worker is reused across features and may carry a plan its
+      # previous task failed to tear down; nbrOfWorkers() would then report a
+      # dead cluster's size and the guard below would skip building a live one.
+      future::plan(future::sequential)
       # Auto (Global) needs every locality's boundary before any locality runs:
       # the shared cell size is the Auto resolution of the largest one. Built
       # here, in the worker, so the interface stays responsive.
@@ -884,7 +980,10 @@
       nested_cl <- NULL
       old_mc_cores <- getOption("mc.cores")
       tryCatch({
-        if (nested_workers >= 2L && future::nbrOfWorkers() == 1L) {
+        # No `nbrOfWorkers() == 1L` clause: the plan reset above makes it
+        # true by construction, and a tautology in a guard reads as if it
+        # still protected something.
+        if (nested_workers >= 2L) {
           # PSOCK workers report mc.cores = 1; the main session allocated
           # nested_workers cores to this batch, so tell parallelly before
           # spawning or its worker-count guard misfires. Owning the cluster
@@ -908,14 +1007,19 @@
       }, finally = {
         # tear the nested cluster down and restore mc.cores so the (reused)
         # promise worker returns to the plain single-threaded state other
-        # future_promise tasks expect
+        # future_promise tasks expect. Stop the cluster FIRST and swallow both
+        # errors: switching the plan away from an unhealthy cluster can throw,
+        # which would otherwise leave this worker on a dead cluster.
         options(mc.cores = old_mc_cores)
         if (!is.null(nested_cl)) {
-          tryCatch(future::plan(future::sequential),
-                   finally = parallel::stopCluster(nested_cl))
+          tryCatch(parallel::stopCluster(nested_cl), error = function(e) NULL)
         }
+        tryCatch(future::plan(future::sequential), error = function(e) NULL)
       })
-    }, seed = 12345) %...>% (function(res_all) {
+    }, globals = list(main_wd = main_wd, run_params = run_params,
+                      df_list = df_list, nested_workers = nested_workers),
+       packages = c("sf", "gstat", "dplyr"),
+       seed = 12345) %...>% (function(res_all) {
       if (this_token != rv$run_token) return()
 
       # Everything below runs in the MAIN session on results the workers already
@@ -1043,6 +1147,13 @@
       }
       rv$disp$v_fits <- run_fits
       rv$disp$v_emps <- run_emps
+      # What each locality's model used after the collinearity screen, and
+      # what the screen removed: the record the selected list cannot give.
+      if (current_method %in% c("RK", "RFK", "CK")) {
+        cov_rec <- covariate_screen_record(res_all)
+        rv$run_config_summary$covariates_retained <- cov_rec$retained
+        rv$run_config_summary$covariates_dropped <- cov_rec$dropped
+      }
       # The cell size each locality was gridded at. In Auto modes the sidebar
       # cannot know it before the run (it follows the boundary area), so the
       # Map Viewer's resolution overlay and the run record read it from here.
@@ -1087,6 +1198,9 @@
         ))
       }
 
+    # Map labels double as the exported figure's title, which names the method
+    # as the Map Viewer's title does.
+    m_lab <- get_method_label(current_method)
     valid_a <- Filter(Negate(is.null), rv$rast_list_act)
     valid_p <- Filter(Negate(is.null), rv$rast_list_pre)
     valid_r <- Filter(Negate(is.null), rv$rast_list_res)
@@ -1094,7 +1208,8 @@
     
     if(length(valid_a) > 0) {
       rv$rast <- merge_wrapped_rasters(valid_a)
-      register_export_item("map_actual", paste(meta$label, "- Actual Map"), "map", rv$rast, meta$category)
+      register_export_item("map_actual", paste(meta$label, "- Actual Map -", m_lab), "map", rv$rast, meta$category,
+                           legend = map_legend_title(meta$label, meta$unit))
       
       # Uncertainty products exist for the kriging engines only. IDW's var1.var
       # is all NA and TPS has none at all, so registering these for those
@@ -1102,45 +1217,55 @@
       # viewer's SE/variance views already carried this guard).
       temp_rast_a <- terra::unwrap(rv$rast)
       if (method_has_variance(current_method) && "var1.var" %in% names(temp_rast_a)) {
-        uncert_var_a <- temp_rast_a[["var1.var"]]
-        # The layer name travels into the GeoTIFF as the band description, so
-        # the square root must not be shipped describing itself as a variance.
-        uncert_se_a <- sqrt(uncert_var_a)
-        names(uncert_se_a) <- "var1.se"
         # The Map Viewer offers its SE/variance views on this flag, so the menu
         # and the export registry agree about whether the run has a variance
         # band at all - not just about whether its method normally would.
         rv$disp$has_variance <- TRUE
-        register_export_item("map_uncert_var_act", paste(meta$label, "- Uncertainty Map (Variance - Actual)"), "map", terra::wrap(uncert_var_a), meta$category, kind = "uncertainty")
-        register_export_item("map_uncert_se_act", paste(meta$label, "- Uncertainty Map (SE - Actual)"), "map", terra::wrap(uncert_se_a), meta$category, kind = "uncertainty")
+        # Registered as derivations of the surface above, not as copies of it:
+        # the variance band is already in `rv$rast` and the SE is its square
+        # root, so two more packed layers per surface would hold the same
+        # values a third and a fourth time, here and in every archived run.
+        # `name` is the layer name the GeoTIFF records as its band description,
+        # so the square root must not ship describing itself as a variance.
+        register_export_item("map_uncert_var_act", paste(meta$label, "- Uncertainty Map (Variance - Actual) -", m_lab), "map", NULL, meta$category, kind = "uncertainty",
+                             legend = map_legend_title(meta$label, meta$unit, "var"),
+                             derived = list(src = temp_rast_a, layer = "var1.var", name = "var1.var"))
+        register_export_item("map_uncert_se_act", paste(meta$label, "- Uncertainty Map (SE - Actual) -", m_lab), "map", NULL, meta$category, kind = "uncertainty",
+                             legend = map_legend_title(meta$label, meta$unit, "se"),
+                             derived = list(src = temp_rast_a, layer = "var1.var", fun = "sqrt", name = "var1.se"))
       }
     }
     if(length(valid_p) > 0) {
       rv$rast_pred <- merge_wrapped_rasters(valid_p)
       rv$has_predictions <- TRUE
-      register_export_item("map_predicted", paste(meta$label, "- Predicted Map"), "map", rv$rast_pred, meta$category)
+      register_export_item("map_predicted", paste(meta$label, "- Predicted Map -", m_lab), "map", rv$rast_pred, meta$category,
+                           legend = map_legend_title(meta$label, meta$unit))
       
       temp_rast_p <- terra::unwrap(rv$rast_pred)
       if (method_has_variance(current_method) && "var1.var" %in% names(temp_rast_p)) {
-        uncert_var_p <- temp_rast_p[["var1.var"]]
-        uncert_se_p <- sqrt(uncert_var_p)
-        names(uncert_se_p) <- "var1.se"
         rv$disp$has_variance <- TRUE
-        register_export_item("map_uncert_var_pre", paste(meta$label, "- Uncertainty Map (Variance - Predicted)"), "map", terra::wrap(uncert_var_p), meta$category, kind = "uncertainty")
-        register_export_item("map_uncert_se_pre", paste(meta$label, "- Uncertainty Map (SE - Predicted)"), "map", terra::wrap(uncert_se_p), meta$category, kind = "uncertainty")
+        register_export_item("map_uncert_var_pre", paste(meta$label, "- Uncertainty Map (Variance - Predicted) -", m_lab), "map", NULL, meta$category, kind = "uncertainty",
+                             legend = map_legend_title(meta$label, meta$unit, "var"),
+                             derived = list(src = temp_rast_p, layer = "var1.var", name = "var1.var"))
+        register_export_item("map_uncert_se_pre", paste(meta$label, "- Uncertainty Map (SE - Predicted) -", m_lab), "map", NULL, meta$category, kind = "uncertainty",
+                             legend = map_legend_title(meta$label, meta$unit, "se"),
+                             derived = list(src = temp_rast_p, layer = "var1.var", fun = "sqrt", name = "var1.se"))
       }
     }
     if(length(valid_r) > 0) {
       rv$rast_res <- merge_wrapped_rasters(valid_r)
-      register_export_item("map_residuals", paste(meta$label, "- ML Predictions Residual Map (Delta)"), "map", rv$rast_res, meta$category, kind = "residual")
+      register_export_item("map_residuals", paste(meta$label, "- ML Predictions Residual Map (Delta) -", m_lab), "map", rv$rast_res, meta$category, kind = "residual",
+                           legend = map_legend_title(meta$label, layer = "resid"))
     }
     if(length(valid_pr) > 0) {
       rv$rast_point_res <- merge_wrapped_rasters(valid_pr)
-      register_export_item("map_interp_point_errors", paste(meta$label, "- ML Predictions Interpolated Point Errors Map"), "map", rv$rast_point_res, meta$category, kind = "residual")
+      register_export_item("map_interp_point_errors", paste(meta$label, "- ML Predictions Interpolated Point Errors Map"), "map", rv$rast_point_res, meta$category, kind = "residual",
+                           legend = map_legend_title(meta$label, layer = "resid"))
     }
     
     if(!is.null(rv$rast) && !is.null(rv$rast_pred)) {
-       register_export_item("map_comparison", paste(meta$label, "- Actual vs Predicted Comparison"), "map_combined", list(act = rv$rast, pre = rv$rast_pred), meta$category)
+       register_export_item("map_comparison", paste(meta$label, "- Actual vs Predicted Comparison -", m_lab), "map_combined", list(act = rv$rast, pre = rv$rast_pred), meta$category,
+                            legend = map_legend_title(meta$label, meta$unit))
     }
     
     if(length(sf_list) > 0) {
@@ -1183,7 +1308,8 @@
     if (!is.null(rv$sf) && "resid" %in% colnames(rv$sf) && any(!is.na(rv$sf$resid))) {
       pts_err <- rv$sf[!is.na(rv$sf$resid), c("resid", "loc")]
       register_export_item("map_point_residuals", paste(meta$label, "- ML Predictions Point Error Map"),
-                           "map", list(pts = pts_err, bound = rv$bound), meta$category, kind = "residual")
+                           "map", list(pts = pts_err, bound = rv$bound), meta$category, kind = "residual",
+                           legend = map_legend_title(meta$label, layer = "point_resid"))
     }
     
     if (!is.null(rv$bound)) {
@@ -1209,10 +1335,18 @@
     pooled_cv <- function(data_list, metrics_list, label, infos) {
       res <- perform_pooled_cv(data_list, metrics_list)
       if(is.null(res)) return(NULL)
+      # The pooled row's Moran reading follows the localities it pooled: the
+      # block reading only where every one of them was scored under blocks.
+      types <- vapply(names(data_list), function(l) {
+        applied_cv_plan(nrow(data_list[[l]]), rv$cv_strategy_sel, metrics_list[[l]])$type
+      }, character(1))
+      mor <- moran_reading(types)
       # The population record is taken over the localities that actually
       # pooled, so the exported id names the rows behind the exported numbers.
-      cv_metrics_export_df(res, label, "pooled per-locality CV",
-                           pooled_cv_population(infos[names(data_list)]))
+      cv_metrics_export_df(res, label,
+                           paste0("pooled per-locality CV",
+                                  if (mor$mixed) ", mixed fold designs" else ""),
+                           pooled_cv_population(infos[names(data_list)]), mor)
     }
     cv_tot_a <- pooled_cv(rv$cv_data_act, rv$cv_metrics_act, "Actual Model", rv$cv_info_act)
     if(!is.null(cv_tot_a)) {
@@ -1284,6 +1418,10 @@
        register_locality_assets(l, meta, comp_mode, val_type, current_method)
     }
     
+    # Before the completion marker, so the warnings read as part of the run
+    # rather than as a footnote after it. This also clears the status files.
+    persist_run_warnings()
+
     rv$log <- paste0(rv$log, "\n\n--- Run #", rv$run_counter, " Complete ---",
       "\nConfig: ", rv$run_config_summary$method, " | ", rv$run_config_summary$variable,
       " | ", rv$run_config_summary$localities,
@@ -1301,8 +1439,6 @@
     updateActionButton(session, "run", label = "Interpolated", icon = icon("check"))
 
     rv$model_running <- FALSE
-    old_files <- list.files(path = session_progress_dir, pattern = paste0("^(progress|warn)_", session_id, "_.*_.*\\.txt$"), full.names = TRUE)
-    if(length(old_files) > 0) tryCatch(file.remove(old_files), error = function(e) NULL)
 
       }, error = function(e) {
         # The interpolation itself completed; assembling/registering its results
@@ -1319,8 +1455,7 @@
         updateActionButton(session, "run", label = "Run Interpolation", icon = character(0))
         shinyjs::runjs("$('#run i').remove();")
         rv$model_running <- FALSE
-        stale <- list.files(path = session_progress_dir, pattern = paste0("^(progress|warn)_", session_id, "_.*_.*\\.txt$"), full.names = TRUE)
-        if (length(stale) > 0) tryCatch(file.remove(stale), error = function(e2) NULL)
+        persist_run_warnings()
         showModal(modalDialog(
           title = tags$div(style = "color: var(--mn-danger); font-weight: 600;", icon("exclamation-triangle"), "Results Assembly Failed"),
           tags$p("The parallel interpolation finished, but an error occurred while assembling the results (merging rasters, building tables, or registering exports) in the main session:"),
@@ -1342,6 +1477,7 @@
       shinyjs::runjs("$('#run i').remove();")
       
       if (grepl("cancelled", tolower(err$message))) {
+        mark_run_cancelled()
         shinyjs::html("map_processing_title", "Interpolation Cancelled")
         shinyjs::html("map_progress_text", HTML("Please configure parameters in the left panel and click <b>'Run Interpolation'</b> to generate geostatistical maps and review diagnostic results."))
       } else {
@@ -1363,8 +1499,7 @@
       }
       
       rv$model_running <- FALSE
-      old_files <- list.files(path = session_progress_dir, pattern = paste0("^(progress|warn)_", session_id, "_.*_.*\\.txt$"), full.names = TRUE)
-      if(length(old_files) > 0) tryCatch(file.remove(old_files), error = function(e) NULL)
+      persist_run_warnings()
     })
     
     }, error = function(e) {
@@ -1433,47 +1568,20 @@
       
       progress_msgs <- c()
       for (f in files) {
-        f_base <- basename(f)
-        if (grepl("_act\\.txt$", f_base)) {
-          loc_name <- gsub(paste0("^progress_", session_id, "_(.*)_act\\.txt$"), "\\1", f_base)
-          type_suffix <- " (Actual)"
-        } else if (grepl("_pre\\.txt$", f_base)) {
-          loc_name <- gsub(paste0("^progress_", session_id, "_(.*)_pre\\.txt$"), "\\1", f_base)
-          type_suffix <- " (Predicted)"
-        } else {
-          loc_name <- gsub(paste0("^progress_", session_id, "_(.*)_(act|pre)\\.txt$"), "\\1", f_base)
-          type_suffix <- ""
-        }
-        
-        loc_display <- gsub("_", " ", loc_name)
+        # One parser for both readers of these file names (status_file_parts,
+        # global_utils.R); the display keeps its underscores-as-spaces reading.
+        parts <- status_file_parts(f, session_id, kind = "progress")
         val <- tryCatch(as.numeric(readLines(f, warn = FALSE)), error = function(e) NA_real_)
         if(length(val) > 0 && !is.na(val)) {
-          progress_msgs <- c(progress_msgs, paste0("<b>", loc_display, type_suffix, "</b>: ", val, "%"))
+          progress_msgs <- c(progress_msgs, paste0("<b>", gsub("_", " ", parts$locality),
+                                                   parts$suffix, "</b>: ", val, "%"))
         }
       }
-      
-      warn_files <- list.files(path = session_progress_dir, pattern = paste0("^warn_", session_id, "_.*_.*\\.txt$"), full.names = TRUE)
-      warn_msgs <- c()
-      if(length(warn_files) > 0) {
-        for (wf in warn_files) {
-          wf_base <- basename(wf)
-          if (grepl("_act\\.txt$", wf_base)) {
-            loc_name <- gsub(paste0("^warn_", session_id, "_(.*)_act\\.txt$"), "\\1", wf_base)
-            type_suffix <- " (Actual)"
-          } else if (grepl("_pre\\.txt$", wf_base)) {
-            loc_name <- gsub(paste0("^warn_", session_id, "_(.*)_pre\\.txt$"), "\\1", wf_base)
-            type_suffix <- " (Predicted)"
-          } else {
-            loc_name <- gsub(paste0("^warn_", session_id, "_(.*)_(act|pre)\\.txt$"), "\\1", wf_base)
-            type_suffix <- ""
-          }
-          loc_display <- gsub("_", " ", loc_name)
-          msg <- tryCatch(readLines(wf, warn = FALSE), error = function(e) "")
-          if (length(msg) > 0 && msg != "") {
-            warn_msgs <- c(warn_msgs, paste0("⚠️ <b>", loc_display, type_suffix, "</b>: ", msg))
-          }
-        }
-      }
+
+      warn_msgs <- vapply(read_run_warnings(), function(w) {
+        paste0("⚠️ <b>", gsub("_", " ", w$locality),
+               w$suffix, "</b>: ", w$message)
+      }, character(1))
       
       warn_block <- ""
       if (length(warn_msgs) > 0) {
@@ -1486,6 +1594,19 @@
     }
   })
 
+  # The record of a run cancelled before it produced results. The previous
+  # results were archived or discarded at dispatch, so there is nothing to fall
+  # back to: the panels say what was requested and that it never finished, and
+  # push_run_history() refuses to archive the record as a result.
+  mark_run_cancelled <- function() {
+    cfg <- rv$run_config_summary
+    if (is.null(cfg) || identical(cfg$status, "cancelled")) return(invisible(NULL))
+    rv$run_config_summary$status <- "cancelled"
+    rv$run_config_summary$cancelled_at <- Sys.time()
+    rv$log <- paste0(rv$log, "\n--- Run #", cfg$run_id, " Cancelled ---")
+    invisible(NULL)
+  }
+
   observeEvent(input$cancel_model_btn, {
     # Flags the run actually in flight; the next run gets its own file, so this
     # cancellation cannot be revoked by starting another run.
@@ -1494,6 +1615,7 @@
     file.create(cancel_file)
     rv$model_running <- FALSE
     rv$run_token <- rv$run_token + 1L
+    mark_run_cancelled()
     
     shinyjs::hide("map_progress_bar_container")
     shinyjs::hide("map_run_steps")

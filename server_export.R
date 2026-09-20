@@ -1,8 +1,10 @@
 # server_export.R (sourced with local = TRUE inside server) - export registry,
 # run-config/run-history panels, WYSIWYG styler and export download handlers.
   register_export_item <- function(id, label, type, obj, category = "General", kind = "value",
-                                   var_label = NULL) {
-    req(obj)
+                                   var_label = NULL, legend = NULL, derived = NULL) {
+    # `derived` items carry no payload of their own: export_item_obj()
+    # (global_utils.R) rebuilds them from a raster the registry already holds.
+    req(!is.null(obj) || !is.null(derived))
     clean_id <- gsub("[^a-zA-Z0-9_]", "_", id)
     # The variable label every registry label opens with ("<label> - ..."),
     # kept so a batch workbook can drop exactly that prefix from sheet names
@@ -24,6 +26,11 @@
       # defined on the variable's units, so classifying errors or variances
       # with them is scientifically meaningless.
       kind = kind,
+      # A map's legend title (map_legend_title): the variable and its unit,
+      # as the Map Viewer's legend reads.
+      legend = legend,
+      # NULL, or the spec export_item_obj() rebuilds `obj` from.
+      derived = derived,
       timestamp = Sys.time()
     )
     
@@ -62,12 +69,21 @@
   output$run_config_display <- renderUI({
     cfg <- rv$run_config_summary
     if (is.null(cfg)) return(NULL)
+    cancelled <- identical(cfg$status, "cancelled")
     div(class = "mn-notice mn-notice-mono",
-      tags$strong(icon("info-circle"), paste0(" Run #", cfg$run_id, " Configuration (", format(cfg$timestamp, "%Y-%m-%d %H:%M:%S"), ")")),
+      tags$strong(icon("info-circle"), if (cancelled) {
+        paste0(" Run #", cfg$run_id, " - CANCELLED (requested ", format(cfg$timestamp, "%Y-%m-%d %H:%M:%S"),
+               ", cancelled ", format(cfg$cancelled_at, "%H:%M:%S"), ")")
+      } else {
+        paste0(" Run #", cfg$run_id, " Configuration (", format(cfg$timestamp, "%Y-%m-%d %H:%M:%S"), ")")
+      }),
+      if (cancelled) tagList(tags$br(), tags$span(RUN_CANCELLED_NOTE)),
       tags$br(),
       tags$span(paste0("Variable: ", cfg$variable, " | Method: ", cfg$method, " | Localities: ", cfg$localities)),
       tags$br(),
-      tags$span(paste0("Subset: ", cfg$subset, " | View: ", cfg$value_type, " | CRS: ", cfg$crs)),
+      tags$span(paste0("Subset: ", cfg$subset, " | View: ", cfg$value_type,
+                       " | Input CRS: ", cfg$input_crs, " | Target CRS: ", cfg$target_crs)),
+      if (!is.null(covariate_record_text(cfg))) tagList(tags$br(), tags$span(covariate_record_text(cfg))),
       tags$br(),
       tags$span(paste0("Boundary: ", cfg$boundary_type, " | Buffer: ", if (is.null(cfg$buffer_mode) || cfg$buffer_mode == "fixed") paste0(cfg$buffer_dist, "m") else "Dynamic", " | Resolution: ", cfg$resolution, " (", res_mode_label(cfg$res_mode), ")")),
       # Method-agnostic settings that used to be invisible here even though they
@@ -123,17 +139,7 @@
                                           error = function(e) NA_character_)),
         pkgs
       )
-      payload <- list(
-        config = cfg,
-        regional_params = rv$disp$regional_params,
-        provenance = list(
-          app_version = cfg$app_version %||% app_version,
-          r_version = R.version.string,
-          platform = R.version$platform,
-          exported_at = format(Sys.time(), "%Y-%m-%d %H:%M:%S %Z"),
-          packages = pkg_versions
-        )
-      )
+      payload <- run_record_payload(cfg, rv$disp$regional_params, app_version, pkg_versions)
       writeLines(
         jsonlite::toJSON(payload, pretty = TRUE, auto_unbox = TRUE,
                          null = "null", force = TRUE, POSIXt = "ISO8601"),
@@ -145,9 +151,11 @@
   output$run_config_display_map <- renderUI({
     cfg <- rv$run_config_summary
     if (is.null(cfg)) return(NULL)
+    cancelled <- identical(cfg$status, "cancelled")
     div(class = "mn-notice mn-notice-mono",
-      tags$strong(paste0("Run #", cfg$run_id, ": ")),
-      tags$span(paste0(cfg$variable, " | ", cfg$method, " | ", cfg$localities, " | ", format(cfg$timestamp, "%H:%M:%S")))
+      tags$strong(paste0("Run #", cfg$run_id, if (cancelled) " - CANCELLED" else "", ": ")),
+      tags$span(paste0(cfg$variable, " | ", cfg$method, " | ", cfg$localities, " | ", format(cfg$timestamp, "%H:%M:%S"))),
+      if (cancelled) tagList(tags$br(), tags$span(RUN_CANCELLED_NOTE))
     )
   })
 
@@ -194,25 +202,39 @@
       run_id <- run$config$run_id
       
       obs_restore <- observeEvent(input[[paste0("restore_run_", run_id)]], {
+        # The run in flight is about to fill every panel a restore replaces.
+        if (isTRUE(rv$model_running)) {
+          showNotification("A run is in progress. Restore an archived run once it has finished or been cancelled.",
+                           type = "warning")
+          return()
+        }
         history_list <- isolate(rv$run_history)
         idx <- which(sapply(history_list, function(x) x$config$run_id) == run_id)[1]
         if (is.na(idx)) return()
-        
+
         run_to_restore <- history_list[[idx]]
-        
-        current_cfg <- isolate(rv$run_config_summary)
-        current_reg <- isolate(rv$export_registry)
-        if (!is.null(current_cfg) && length(current_reg) > 0) {
-          push_run_history(list(config = current_cfg, registry = current_reg),
-                           base = history_list[-idx])
+
+        # The run on screen goes into the archive through the same snapshot
+        # the archive takes, or a second restore would bring back half a run.
+        current <- snapshot_display_state()
+        if (!is.null(current$config) && length(current$registry) > 0) {
+          push_run_history(current, base = history_list[-idx])
         } else {
           rv$run_history <- history_list[-idx]
         }
-        
-        rv$export_registry <- run_to_restore$registry
-        rv$run_config_summary <- run_to_restore$config
-        
-        showNotification(paste0("Restored Run #", run_to_restore$config$run_id, " to active session."), type = "message")
+
+        restore_display_state(run_to_restore)
+        # Its warnings were announced when it ran; the log line-watcher would
+        # otherwise announce them again.
+        mark_log_warnings_announced()
+        fit_maps_to_data()
+
+        cfg <- run_to_restore$config
+        n_loc <- length(run_to_restore$state$disp$localities)
+        showNotification(sprintf("Restored Run #%s (%s, %d %s). Maps, metrics and the export registry now describe that run.",
+                                 cfg$run_id, get_method_label(cfg$method), n_loc,
+                                 if (n_loc == 1) "locality" else "localities"),
+                         type = "message")
       }, ignoreInit = TRUE)
 
       obs_delete <- observeEvent(input[[paste0("delete_run_", run_id)]], {
@@ -395,9 +417,11 @@
     if (layer != "value") view_lab <- paste0(if (layer == "se") "SE" else "Variance", " - ", view_lab)
 
     id <- paste0("quick_", view, if (layer != "value") paste0("_", layer), "_", meta$actual)
-    label <- paste("Quick Export:", meta$label, "(", view_lab, ")")
+    label <- paste0("Quick Export: ", meta$label, " (", view_lab, ") - ", get_method_label(meta$method))
+    legend <- map_legend_title(meta$label, meta$unit,
+                               if (view == "view_resid") "resid" else layer)
 
-    register_export_item(id, label, type, target, meta$category, kind = kind)
+    register_export_item(id, label, type, target, meta$category, kind = kind, legend = legend)
     active_styler_item(id)
 
     shinyjs::click("open_styler")
@@ -432,10 +456,14 @@
     # switches off while it is selected.
     styler_item <- tryCatch(rv$export_registry[[active_styler_item()]], error = function(e) NULL)
     fmt_choices <- c("PNG" = "png", "TIFF (image)" = "tiff", "PDF" = "pdf", "JPEG" = "jpg")
-    if (!is.null(export_raster_payload(styler_item))) {
+    # Resolved ONCE: a derived uncertainty item has no stored payload, so each
+    # call rebuilds the band from its source surface rather than reading a
+    # field (export_item_obj, global_utils.R).
+    styler_raster <- export_raster_payload(styler_item)
+    if (!is.null(styler_raster)) {
       fmt_choices <- c(fmt_choices, "GeoTIFF (data)" = "gtiff")
     }
-    image_only_map <- is.null(export_raster_payload(styler_item)) &&
+    image_only_map <- is.null(styler_raster) &&
       !is.null(styler_item) && styler_item$type %in% c("map", "map_combined")
     legend_defaults <- item_legend_defaults(styler_item)
 
@@ -678,13 +706,46 @@
     styler_format_ext(fmt)
   }
 
+  # What a GeoTIFF export carries in its metadata to identify its run. The
+  # registry and rv$disp / rv$run_config_summary always describe the same run
+  # (a restore swaps them together), so the displayed run is the item's run.
+  geotiff_tags <- function(item) {
+    d <- rv$disp
+    cfg <- rv$run_config_summary
+    lab <- item$var_label %||% d$label %||% ""
+    product <- if (nzchar(lab) && startsWith(item$label, paste0(lab, " - "))) {
+      substring(item$label, nchar(lab) + 4L)
+    } else item$label
+    c(MONOLITH_VARIABLE = lab,
+      MONOLITH_UNIT = d$unit %||% "",
+      MONOLITH_PRODUCT = product,
+      MONOLITH_METHOD = get_method_label(d$method %||% ""),
+      MONOLITH_LOCALITY = paste(d$localities, collapse = ", "),
+      MONOLITH_RUN_ID = as.character(cfg$run_id %||% ""),
+      MONOLITH_APP_VERSION = cfg$app_version %||% app_version,
+      MONOLITH_TARGET_CRS = d$crs_sel %||% "",
+      MONOLITH_CREATED = format(Sys.time(), "%Y-%m-%dT%H:%M:%S%z"))
+  }
+
+  # A missing tag must never cost the file: write_geotiff keeps the raster and
+  # warns, and the warning is put where the user can see it.
+  write_tagged_geotiff <- function(item, path) {
+    withCallingHandlers(
+      write_geotiff(export_raster_payload(item), path, tags = geotiff_tags(item)),
+      warning = function(w) {
+        rv$log <- paste0(rv$log, "\n[Export] ", item$label, ": ", conditionMessage(w))
+        showNotification(conditionMessage(w), type = "warning", duration = 10)
+        invokeRestart("muffleWarning")
+      })
+  }
+
   output$confirm_export <- downloadHandler(
     filename = function() {
       req(active_styler_item())
       item <- rv$export_registry[[active_styler_item()]]
       timestamp <- format(Sys.time(), "%Y%m%d_%H%M%S")
       ext <- export_ext_for(item, input$styler_format)
-      sprintf("Export_%s_%s.%s", item$id, timestamp, ext)
+      export_file_name("Export", item$id, rv$disp$method, timestamp, ext)
     },
     content = function(file) {
       req(active_styler_item())
@@ -694,7 +755,7 @@
       withProgress(message = paste("Exporting", item$type, "..."), {
         tryCatch({
           if (identical(ext, "tif")) {
-            write_geotiff(export_raster_payload(item), file)
+            write_tagged_geotiff(item, file)
           } else if (item$type %in% c("plot", "map", "map_combined")) {
             p_obj <- generate_styled_plot(
               item, input,
@@ -722,7 +783,7 @@
   )
   
   output$batch_export <- downloadHandler(
-    filename = function() { paste0("Batch_Export_", format(Sys.time(), "%Y%m%d_%H%M%S"), ".zip") },
+    filename = function() export_file_name("Batch_Export", NULL, rv$disp$method, format(Sys.time(), "%Y%m%d_%H%M%S"), "zip"),
     contentType = "application/zip",
     content = function(file) {
       req(input$selected_assets, length(input$selected_assets) > 0)
@@ -747,7 +808,7 @@
           incProgress(1/total_steps, detail = "Compiling statistical tables into Excel...")
           
           timestamp <- format(Sys.time(), "%Y%m%d_%H%M%S")
-          excel_name <- sprintf("Batch_Statistics_%s.xlsx", timestamp)
+          excel_name <- export_file_name("Batch_Statistics", NULL, rv$disp$method, timestamp, "xlsx")
           excel_path <- file.path(temp_dir, excel_name)
           
           wb <- createWorkbook()
@@ -790,12 +851,12 @@
                              " is not a single raster surface; exported as PNG instead of GeoTIFF.")
           }
 
-          filename <- sprintf("Batch_%s_%s.%s", item$id, timestamp, ext)
+          filename <- export_file_name("Batch", item$id, rv$disp$method, timestamp, ext)
           filepath <- file.path(temp_dir, filename)
 
           tryCatch({
             if (identical(ext, "tif")) {
-              write_geotiff(export_raster_payload(item), filepath)
+              write_tagged_geotiff(item, filepath)
             } else {
               p <- generate_styled_plot(
                 item, input,

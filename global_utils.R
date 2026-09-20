@@ -30,10 +30,11 @@ resolve_regional_param <- function(entry, key, default) {
 }
 
 # The IDW/TPS manual slot to read or write: "pre" only when the view computes a
-# Predicted surface and the target switch selects it.
-manual_param_target <- function(comp_mode, value_type, switch_value) {
+# Predicted surface, that surface gets its own parameter (sep_fit, "Fit
+# Actual/Predicted separately") and the target switch selects it.
+manual_param_target <- function(comp_mode, value_type, switch_value, sep_fit = TRUE) {
   has_pred <- isTRUE(comp_mode) || isTRUE(value_type %in% c("pred", "pred_ss", "resid"))
-  if (has_pred && identical(switch_value, "pre")) "pre" else "act"
+  if (has_pred && isTRUE(sep_fit) && identical(switch_value, "pre")) "pre" else "act"
 }
 
 .cv_hash8 <- function(s) {
@@ -95,6 +96,29 @@ pooled_cv_population <- function(infos) {
        pop_id = cv_pooled_population_id(ids),
        n_localities = length(infos),
        n_conditional = sum(vapply(infos, function(x) !is.null(x$conditional), logical(1))))
+}
+
+#' Which locality and surface a progress/warning status file belongs to.
+#'
+#' `.write_status_file()` (spatial_pipeline.R) names its files
+#' `<kind>_<session>_<locality>_<act|pre>.txt`, with the locality sanitised to
+#' `[A-Za-z0-9_]`, so the name itself can contain underscores and the trailing
+#' `_act` / `_pre` is what separates the two fields. ONE parser, used by both
+#' the live progress poller and the completion handler that persists the
+#' warnings into the run log - a warning must not be readable in one place and
+#' lost in the other.
+#'
+#' Returns `list(locality, target, suffix, label)`; `target` is NA and `suffix`
+#' empty for a file with no recognised surface suffix.
+status_file_parts <- function(path, session_id, kind = "warn") {
+  base <- basename(as.character(path)[1])
+  stem <- sub(paste0("^", kind, "_", session_id, "_"), "", sub("\\.txt$", "", base))
+  target <- if (grepl("_act$", stem)) "act" else if (grepl("_pre$", stem)) "pre" else NA_character_
+  locality <- if (is.na(target)) stem else sub("_(act|pre)$", "", stem)
+  suffix <- if (identical(target, "act")) " (Actual)"
+            else if (identical(target, "pre")) " (Predicted)" else ""
+  list(locality = locality, target = target, suffix = suffix,
+       label = paste0(locality, suffix))
 }
 
 #' Location of the run-duration history log. It used to be built RELATIVE to the
@@ -289,6 +313,17 @@ normalize_crs_input <- function(x) {
   if (!is.character(x) || is.na(x)) return(x)
   s <- trimws(x)
   if (grepl("^[0-9]{4,6}$", s)) paste0("EPSG:", s) else x
+}
+
+#' Whether a CRS selector's value was put there by the user: it is set, it is
+#' not a value still waiting for its clear to reach the browser (`stale`), and
+#' it is not one the app wrote itself (`auto`, every value the app has set in
+#' that selector).
+crs_chosen_by_user <- function(value, auto = character(0), stale = NULL) {
+  v <- as.character(value %||% "")
+  if (length(v) != 1 || is.na(v) || !nzchar(v)) return(FALSE)
+  if (identical(v, stale %||% "")) return(FALSE)
+  !(v %in% auto)
 }
 
 #' Format a WGS84 position for a human: "12.958°E, 52.466°N".
@@ -1356,6 +1391,38 @@ sync_styler_config <- function(cfg, session) {
   }
 }
 
+#' The payload an export-registry item draws, materialised on demand.
+#'
+#' Most items store their payload directly. An uncertainty item does not: its
+#' variance band already sits in the surface item registered beside it, and its
+#' standard error is that band's square root, so storing either as a raster of
+#' its own is a second copy of values the registry holds. At the ~4e6-cell grid
+#' cap one packed layer is ~30 MB of R memory, and a comparison run on a
+#' kriging engine registered four of them (variance and SE for both surfaces) -
+#' in the live registry and again in each of the three archived runs. They are
+#' stored as a `derived` spec instead and rebuilt here: 0.06 s at the cap,
+#' against the ggplot render that follows it.
+#'
+#' `derived$src` is the source SpatRaster itself, the same object the surface
+#' item holds, so the reference costs nothing and an archived entry carries its
+#' own source. `layer` names the band, `fun` an optional transform, and `name`
+#' the layer name the GeoTIFF records as its band description.
+export_item_obj <- function(item) {
+  if (is.null(item) || !is.list(item)) return(NULL)
+  if (!is.null(item$obj)) return(item$obj)
+  d <- item$derived
+  if (is.null(d) || is.null(d$src)) return(NULL)
+  r <- tryCatch(terra::unwrap(d$src), error = function(e) NULL)
+  if (!inherits(r, "SpatRaster")) return(NULL)
+  if (!is.null(d$layer)) {
+    if (!d$layer %in% names(r)) return(NULL)
+    r <- r[[d$layer]]
+  }
+  if (identical(d$fun, "sqrt")) r <- sqrt(r)
+  if (!is.null(d$name)) names(r) <- d$name
+  r
+}
+
 #' The raster behind an export-registry item, or NULL when it has none.
 #'
 #' GeoTIFF export is offered only for registry items whose payload IS one
@@ -1367,7 +1434,7 @@ sync_styler_config <- function(cfg, session) {
 export_raster_payload <- function(item) {
   if (is.null(item) || !is.list(item)) return(NULL)
   if (!identical(item$type, "map")) return(NULL)
-  obj <- item$obj
+  obj <- export_item_obj(item)
   if (inherits(obj, "PackedSpatRaster")) return(terra::unwrap(obj))
   if (inherits(obj, "SpatRaster")) return(obj)
   NULL
@@ -1408,11 +1475,62 @@ export_sheet_name <- function(label, id = "", used = character(0), var_label = N
   name
 }
 
+#' File name of an exported registry item: prefix, item id (which names the
+#' locality for a per-locality item), the run's method and a timestamp, so a
+#' file that leaves the app still says which run it came from.
+export_file_name <- function(prefix, id, method, timestamp, ext) {
+  parts <- c(prefix, id, if (length(method) == 1 && !is.na(method) && nzchar(method)) method, timestamp)
+  paste0(paste(parts, collapse = "_"), ".", ext)
+}
+
 #' File extension for a styler format token ("gtiff" writes a .tif).
 styler_format_ext <- function(fmt) {
   switch(fmt %||% "png",
          gtiff = "tif", tiff = "tiff", pdf = "pdf", jpg = "jpg", png = "png",
          "png")
+}
+
+#' The Download Run Configuration record: the run configuration, the
+#' per-locality tuning the run's method consumed, and provenance. An IDW run
+#' lists its powers and a TPS run its lambdas (with each fitted lambda and
+#' effective df); the kriging engines consume neither, so none is written.
+run_record_payload <- function(cfg, regional_params, app_version, pkg_versions) {
+  keep <- switch(cfg$method %||% "", IDW = "^idw_p_", TPS = "^tps_", NULL)
+  out <- list(config = cfg)
+  if (!is.null(keep)) {
+    out$regional_params <- lapply(regional_params, function(p) p[grepl(keep, names(p))])
+  }
+  out$provenance <- list(
+    app_version = cfg$app_version %||% app_version,
+    r_version = R.version.string,
+    platform = R.version$platform,
+    exported_at = format(Sys.time(), "%Y-%m-%d %H:%M:%S %Z"),
+    packages = pkg_versions
+  )
+  out
+}
+
+#' Why a JSON file handed to Load Config cannot be loaded, or NULL when it is a
+#' session configuration. The record Download Run Configuration writes (config
+#' + provenance) documents a finished run and carries none of the session
+#' fields (map_x, map_crs, crs_selection, ...), so loading it would set
+#' nothing - whether it is recent or an older one with a single `crs` field.
+session_config_refusal <- function(cfg) {
+  if (!is.list(cfg) || is.null(cfg$config) || is.null(cfg$provenance)) return(NULL)
+  ver <- cfg$provenance$app_version %||% cfg$config$app_version %||% "unknown"
+  sprintf(paste0("This file is a run record (Download Run Configuration, Monolith %s), not a ",
+                 "session configuration: it documents a finished run and cannot be loaded. ",
+                 "Load a file saved with DOWNLOAD CONFIGURATION FILE instead."), ver)
+}
+
+#' `-mo` options for gdal_translate from a named character vector of tags. A
+#' newline would end the tag, so line breaks become spaces; a tag with no value
+#' is left out rather than written as `NAME=`.
+geotiff_tag_options <- function(tags) {
+  if (!length(tags)) return(character(0))
+  vals <- trimws(gsub("[\r\n]+", " ", as.character(tags)))
+  keep <- !is.na(vals) & nzchar(vals)
+  as.vector(rbind("-mo", paste0(names(tags)[keep], "=", enc2utf8(vals[keep]))))
 }
 
 #' Write a SpatRaster as a compressed GeoTIFF at `file`.
@@ -1426,10 +1544,32 @@ styler_format_ext <- function(fmt) {
 #' data, so no styling, palette or DPI applies to it. Multi-layer surfaces
 #' (kriging returns prediction and variance) are written as multi-band files
 #' with the layer names kept as band descriptions.
-write_geotiff <- function(r, file) {
+#'
+#' terra writes STATISTICS_MEAN and STATISTICS_STDDEV as -9999 placeholders,
+#' which GIS software reads as real and stretches the display with. So the file
+#' is written to a temporary path first and copied into place by
+#' gdal_translate with -stats, which stores the exact band statistics and the
+#' `tags` (named character vector, dataset-level metadata) inside the TIFF, with
+#' no .aux.xml sidecar. That pass copies the cells unchanged. If it fails, the
+#' plain file is kept and a warning says what is missing.
+write_geotiff <- function(r, file, tags = NULL) {
   if (is.null(r) || !inherits(r, "SpatRaster")) stop("No raster surface to export.")
   target <- if (tolower(tools::file_ext(file)) %in% c("tif", "tiff")) file else paste0(file, ".tif")
-  terra::writeRaster(r, target, overwrite = TRUE, gdal = c("COMPRESS=LZW"))
+  tmp <- tempfile(fileext = ".tif")
+  on.exit(unlink(c(tmp, paste0(tmp, ".aux.xml"))), add = TRUE)
+  terra::writeRaster(r, tmp, overwrite = TRUE, gdal = c("COMPRESS=LZW"))
+  if (file.exists(target)) unlink(target)
+  tagged <- tryCatch({
+    sf::gdal_utils("translate", tmp, target, quiet = TRUE,
+                   options = c("-of", "GTiff", "-stats", "-co", "COMPRESS=LZW",
+                               geotiff_tag_options(tags)))
+    file.exists(target)
+  }, error = function(e) FALSE)
+  if (!tagged) {
+    if (!file.copy(tmp, target, overwrite = TRUE)) stop("Could not write the GeoTIFF.")
+    warning("GeoTIFF statistics and tags could not be written; the file holds the raster values only.",
+            call. = FALSE)
+  }
   if (!identical(target, file)) {
     on.exit(unlink(target), add = TRUE)
     if (!file.copy(target, file, overwrite = TRUE)) {

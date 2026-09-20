@@ -131,3 +131,58 @@ test_that("step 5 is passed through as the whole-strip-finished sentinel", {
   expect_match(strip, "})(5);", fixed = TRUE)
   expect_match(strip, "for(var i=1;i<=4;i++)", fixed = TRUE)
 })
+
+# ── status_file_parts: one parser for both readers ─────────────────────────
+# The live progress poller and the completion handler that persists warnings
+# into the run log read the same file names. Two copies of this regex is how a
+# warning ends up visible in one place and lost in the other.
+
+test_that("status_file_parts maps a file name to its locality and surface", {
+  a <- status_file_parts("warn_sess1_Kale_act.txt", "sess1")
+  expect_identical(a$locality, "Kale")
+  expect_identical(a$target, "act")
+  expect_identical(a$label, "Kale (Actual)")
+
+  p <- status_file_parts("/tmp/warn_sess1_Kale_pre.txt", "sess1")
+  expect_identical(p$target, "pre")
+  expect_identical(p$label, "Kale (Predicted)")
+
+  # The locality is sanitised to [A-Za-z0-9_], so the name itself can contain
+  # underscores: only the trailing _act / _pre separates the two fields.
+  u <- status_file_parts("warn_sess1_West_Field_act.txt", "sess1")
+  expect_identical(u$locality, "West_Field")
+  expect_identical(u$target, "act")
+
+  # Progress files share the naming scheme.
+  g <- status_file_parts("progress_sess1_West_Field_pre.txt", "sess1", kind = "progress")
+  expect_identical(g$locality, "West_Field")
+  expect_identical(g$target, "pre")
+
+  # No recognised surface suffix: locality only, no invented label.
+  n <- status_file_parts("warn_sess1_Kale.txt", "sess1")
+  expect_true(is.na(n$target))
+  expect_identical(n$suffix, "")
+  expect_identical(n$label, "Kale")
+})
+
+test_that("status_file_parts round-trips the names write_warning_file writes", {
+  tmp <- tempfile("warn_parts_")
+  dir.create(tmp)
+  old_dir <- getOption("monolith_progress_dir")
+  old_sid <- getOption("monolith_session_id")
+  options(monolith_progress_dir = tmp, monolith_session_id = "sid42")
+  on.exit({
+    options(monolith_progress_dir = old_dir, monolith_session_id = old_sid)
+    unlink(tmp, recursive = TRUE)
+  }, add = TRUE)
+
+  write_warning_file("West Field", "act", "constant target")
+  f <- list.files(tmp, pattern = "^warn_", full.names = TRUE)
+  expect_length(f, 1L)
+  parts <- status_file_parts(f, "sid42")
+  # The writer sanitises, so a space arrives as an underscore; what matters is
+  # that the surface suffix is still separated correctly.
+  expect_identical(parts$locality, "West_Field")
+  expect_identical(parts$target, "act")
+  expect_identical(readLines(f, warn = FALSE), "constant target")
+})

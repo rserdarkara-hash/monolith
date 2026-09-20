@@ -12,7 +12,8 @@
 # Build the categorical target used for modelling. `cat` mode uses an existing
 # categorical column verbatim; `bin` mode discretises a numeric column into
 # ordered classes using classInt break styles (right = FALSE, matching the
-# app's agronomic-class convention so intervals read as [low, high)).
+# app's agronomic-class convention so intervals read as [low, high); the top
+# interval also holds the maximum and reads [low, high]).
 classif_build_target <- function(df, mode, cat_col, num_col, n_classes = 4,
                                  style = "quantile") {
   if (identical(mode, "bin")) {
@@ -28,9 +29,12 @@ classif_build_target <- function(df, mode, cat_col, num_col, n_classes = 4,
     # the legend look broken even though the underlying interval is real.
     lo <- utils::head(brks, -1)
     hi <- brks[-1]
+    # include.lowest with right = FALSE closes the TOP interval, so its label
+    # closes with "]" and every other with ")".
+    close_br <- c(rep(")", length(hi) - 1L), "]")
     lab_digits <- 2
     repeat {
-      labs <- paste0("[", round(lo, lab_digits), ", ", round(hi, lab_digits), ")")
+      labs <- paste0("[", round(lo, lab_digits), ", ", round(hi, lab_digits), close_br)
       ok <- anyDuplicated(labs) == 0 && !any(round(lo, lab_digits) == round(hi, lab_digits))
       if (ok || lab_digits >= 10) break
       lab_digits <- lab_digits + 1
@@ -407,7 +411,12 @@ classif_ui <- function(id) {
               shiny::conditionalPanel(
                 condition = sprintf("output['%s'] == 'yes'", ns("has_surface")),
                 style = "display: inline;",
-                shiny::downloadButton(ns("dl_class"), "Class GeoTIFF", class = "btn-sm"),
+                shiny::downloadButton(ns("dl_class"),
+                  shiny::tags$span("Class GeoTIFF + legend (.zip)",
+                    shiny::tags$i(class = "fa fa-info-circle",
+                      title = "The class GeoTIFF, its .tif.aux.xml (the class names GIS software reads beside the file) and a legend CSV (ID, class). Keep the .tif and .aux.xml together when you move them.",
+                      style = "cursor: help; margin-left: 5px;")),
+                  class = "btn-sm"),
                 # 1-NN has no probabilities, so these two layers do not exist there.
                 shiny::conditionalPanel(
                   condition = sprintf("output['%s'] != 'yes'", ns("maps_nn")),
@@ -1035,6 +1044,14 @@ classif_server <- function(id, data_reactive, vars_metadata_reactive, spatial_re
         # Source helpers in-worker so the full internal closure is present,
         # matching the interpolation pipeline's worker convention (T12).
         source("spatial_helpers.R"); source("classif_helpers.R")
+        # A pool worker is reused across features, and a task whose cluster
+        # teardown did not complete leaves it on a plan pointing at a cluster
+        # nobody owns any more. tune decides whether to tune in parallel by
+        # reading future::nbrOfWorkers() (tune:::get_future_workers), which
+        # answers with that dead cluster's size, so the grid would be
+        # dispatched to its sockets. Start from a known state, as the run,
+        # optimizer and governing-factors bodies do.
+        future::plan(future::sequential)
         do.call(run_classification_pipeline, run_args$pipeline)
       }, globals = list(run_args = run_args),
          # seed = TRUE gives the worker a proper parallel-safe L'Ecuyer stream.
@@ -1331,14 +1348,19 @@ classif_server <- function(id, data_reactive, vars_metadata_reactive, spatial_re
     output$group_metrics_table <- DT::renderDataTable({
       res <- cl_rv$res; shiny::req(res, res$group_metrics)
       gm <- res$group_metrics
-      for (cn in c("accuracy", "kap", "bal_accuracy", "f_meas")) gm[[cn]] <- round(gm[[cn]], 3)
+      # K travels with the F1: an area's macro average is taken over the classes
+      # that area holds, so two rows' F1 scores need not share a denominator.
       colnames(gm) <- c("Area", "n", "Overall accuracy", "Cohen's kappa",
-                        "Balanced accuracy", "F1 score (macro)")
+                        "Balanced accuracy", "F1 score (macro)", "Classes (K)")
       # paging = FALSE on every table here: dom = 't' shows no paging
       # controls, so rows past the first page were unreachable on screen and
-      # missing from a copy.
-      DT::datatable(gm, options = list(dom = 't', paging = FALSE, scrollX = TRUE),
-                    rownames = FALSE)
+      # missing from a copy. Values stay numeric and are formatted for display
+      # at four significant digits, so a small one never reads as zero.
+      DT::datatable(gm, options = list(
+        dom = 't', paging = FALSE, scrollX = TRUE,
+        columnDefs = sig_render_defs(gm, c("Overall accuracy", "Cohen's kappa",
+                                           "Balanced accuracy", "F1 score (macro)"))),
+        rownames = FALSE)
     })
 
     output$metrics_table <- DT::renderDataTable({
@@ -1346,9 +1368,11 @@ classif_server <- function(id, data_reactive, vars_metadata_reactive, spatial_re
       m <- classif_label_metrics(res$cv_metrics)
       out <- data.frame(Metric = m$.metric_label,
                         Estimator = m$.estimator_label,
-                        Value = round(m$.estimate, 4),
+                        Value = as.numeric(m$.estimate),
                         check.names = FALSE)
-      DT::datatable(out, options = list(dom = 't', paging = FALSE, scrollX = TRUE), rownames = FALSE)
+      DT::datatable(out, options = list(dom = 't', paging = FALSE, scrollX = TRUE,
+                                        columnDefs = sig_render_defs(out, "Value")),
+                    rownames = FALSE)
     })
 
     output$confmat_table <- DT::renderDataTable({
@@ -1361,19 +1385,31 @@ classif_server <- function(id, data_reactive, vars_metadata_reactive, spatial_re
     output$perclass_table <- DT::renderDataTable({
       res <- cl_rv$res; shiny::req(res)
       pc <- res$per_class
-      pc$producer_accuracy <- round(pc$producer_accuracy, 3)
-      pc$user_accuracy <- round(pc$user_accuracy, 3)
-      colnames(pc) <- c("Class", "n", "Producer acc. (recall)", "User acc. (precision)")
-      DT::datatable(pc, options = list(dom = 't', paging = FALSE, scrollX = TRUE), rownames = FALSE)
+      # A class the model never assigned has an undefined user accuracy. Saying
+      # so is the finding; a blank cell reads as a failed computation, and the
+      # macro averages score that class 0 rather than dropping it.
+      user_acc <- ifelse(pc$n_pred == 0, "no predictions", format_sig(pc$user_accuracy))
+      out <- data.frame(Class = pc$class, n = pc$n, `n predicted` = pc$n_pred,
+                        `Producer acc. (recall)` = as.numeric(pc$producer_accuracy),
+                        `User acc. (precision)` = user_acc,
+                        check.names = FALSE, stringsAsFactors = FALSE)
+      DT::datatable(out, options = list(
+        dom = 't', paging = FALSE, scrollX = TRUE,
+        columnDefs = sig_render_defs(out, "Producer acc. (recall)")),
+        rownames = FALSE)
     })
 
     # Area accounting follows the rasteriser (not the worker's res$area) so the
     # table honours the live confidence threshold, including the Unclassified row.
     output$area_table <- DT::renderDataTable({
       rl <- get_rasters()
-      a <- rl$area; a$area_ha <- round(a$area_ha, 2)
+      # Unrounded and formatted for display: two fixed decimals printed a class
+      # smaller than 0.005 ha - a few cells on a fine grid - as 0.
+      a <- rl$area
       colnames(a) <- c("Class", "Cells", "Area (ha)")
-      DT::datatable(a, options = list(dom = 't', paging = FALSE, scrollX = TRUE), rownames = FALSE,
+      DT::datatable(a, options = list(dom = 't', paging = FALSE, scrollX = TRUE,
+                                      columnDefs = sig_render_defs(a, "Area (ha)")),
+                    rownames = FALSE,
                     caption = if (identical(rl$source, "nn")) "Surface: Spatial 1-NN (no covariates)" else "Surface: covariate model")
     })
 
@@ -1392,6 +1428,16 @@ classif_server <- function(id, data_reactive, vars_metadata_reactive, spatial_re
         cnt <- table(fs$covariate)
         drop_part <- paste0(drop_part, sprintf(" Inside CV each fold's screen reran on its training rows: %s.",
           paste(sprintf("%s dropped in %d of %d folds", names(cnt), as.integer(cnt), res$n_folds), collapse = "; ")))
+      }
+      # A class the model never assigns is the one thing a headline accuracy
+      # hides completely, and it is exactly the case the macro averages now
+      # score 0 instead of dropping. Name it here, once.
+      pc <- res$per_class
+      if (!is.null(pc) && any(pc$n_pred == 0)) {
+        gone <- pc$class[pc$n_pred == 0]
+        drop_part <- paste0(drop_part, sprintf(
+          " The model produced no predictions for %s: %s. Their precision and F1 are scored 0 and are included in the macro averages.",
+          if (length(gone) == 1) "class" else "classes", paste(gone, collapse = ", ")))
       }
       shiny::tagList(
         shiny::tags$small(style = "color: var(--mn-text-3);",
@@ -1637,27 +1683,59 @@ classif_server <- function(id, data_reactive, vars_metadata_reactive, spatial_re
     })
 
     # ── Downloads ────────────────────────────────────────────────────────────
-    # The class GeoTIFF is written as INT1U so GDAL embeds its colour table
-    # (viridis, matching the on-screen map) in the file itself; float rasters
-    # (probability, entropy) are data layers and stay full-precision FLT4S —
-    # GIS software styles those on load.
-    dl_raster <- function(which_r, fname, datatype = NULL) {
+    # Float rasters (probability, entropy) are data layers and stay
+    # full-precision FLT4S - GIS software styles those on load. The class
+    # raster ships as a zip (below), because its class names live in a sidecar.
+    # Through write_geotiff, like the interpolation exports: real band
+    # statistics (a GIS stretches on them) and tags naming the run, stored in
+    # the file; a failed tagging pass keeps the raster and says so.
+    dl_raster <- function(which_r, fname, product) {
       shiny::downloadHandler(
         filename = function() if (show_nn()) sub("\\.tif$", "_nn.tif", fname) else fname,
         content = function(file) {
           rl <- get_rasters()
           shiny::req(rl[[which_r]])
-          if (is.null(datatype)) {
-            terra::writeRaster(rl[[which_r]], file, overwrite = TRUE)
-          } else {
-            terra::writeRaster(rl[[which_r]], file, overwrite = TRUE, datatype = datatype)
-          }
+          res <- cl_rv$res
+          withCallingHandlers(
+            write_geotiff(rl[[which_r]], file, tags = c(
+              MONOLITH_VARIABLE = res$target_col %||% "",
+              MONOLITH_PRODUCT = product,
+              MONOLITH_METHOD = res$method %||% "",
+              MONOLITH_RUN_ID = res$run_id %||% "",
+              MONOLITH_APP_VERSION = app_version,
+              MONOLITH_CREATED = format(Sys.time(), "%Y-%m-%dT%H:%M:%S%z"))),
+            warning = function(w) {
+              shiny::showNotification(conditionMessage(w), type = "warning", duration = 10)
+              invokeRestart("muffleWarning")
+            })
         }
       )
     }
-    output$dl_class <- dl_raster("class", "predicted_class.tif", datatype = "INT1U")
-    output$dl_prob <- dl_raster("prob", "class_probabilities.tif")
-    output$dl_entropy <- dl_raster("entropy", "class_entropy.tif")
+    # The class GeoTIFF is INT1U, so GDAL embeds its colour table (viridis,
+    # matching the on-screen map) in the file, but the category NAMES go into a
+    # .tif.aux.xml sidecar: a bare .tif opens as unlabelled integer codes.
+    # classif_class_download_files() writes the tif, the sidecar and a legend
+    # CSV; the zip keeps them together.
+    output$dl_class <- shiny::downloadHandler(
+      filename = function() if (show_nn()) "predicted_class_nn.zip" else "predicted_class.zip",
+      content = function(file) {
+        rl <- get_rasters()
+        shiny::req(rl$class)
+        tmp <- file.path(tempdir(), paste0("classif_cls_", format(Sys.time(), "%H%M%OS3")))
+        dir.create(tmp, showWarnings = FALSE, recursive = TRUE)
+        on.exit(unlink(tmp, recursive = TRUE), add = TRUE)
+        base <- if (identical(rl$source, "nn")) "predicted_class_nn" else "predicted_class"
+        paths <- withCallingHandlers(
+          classif_class_download_files(rl$class, tmp, base),
+          warning = function(w) {
+            shiny::showNotification(conditionMessage(w), type = "warning", duration = 10)
+            invokeRestart("muffleWarning")
+          })
+        zip::zip(zipfile = file, files = basename(paths), root = tmp, mode = "cherry-pick")
+      }
+    )
+    output$dl_prob <- dl_raster("prob", "class_probabilities.tif", "Class probabilities")
+    output$dl_entropy <- dl_raster("entropy", "class_entropy.tif", "Normalised Shannon entropy")
 
     # Publication-style renders of the three maps: export styling (larger
     # text, projected coordinate axes) on a larger canvas than the screen
@@ -1703,69 +1781,21 @@ classif_server <- function(id, data_reactive, vars_metadata_reactive, spatial_re
       }
     )
 
+    # The whole file is assembled by classif_metrics_csv_df() (classif_helpers.R)
+    # so its contents are testable; this handler only supplies the two things
+    # that live in the session - the rasterised area table (which honours the
+    # live confidence threshold) and its surface label - and writes the result.
     output$dl_report <- shiny::downloadHandler(
       filename = function() "classification_metrics.csv",
       content = function(file) {
         res <- cl_rv$res
-        m <- classif_label_metrics(res$cv_metrics)
-        out <- data.frame(scope = "Total", metric = m$.metric_label,
-                          yardstick_id = m$.metric,
-                          estimator = m$.estimator_label, value = m$.estimate)
-        # Per-area rows (class metrics only), matching the Performance by Area
-        # table; the Total row above already carries the full pooled metric set.
-        gm <- res$group_metrics
-        if (!is.null(gm)) {
-          gm <- gm[gm$scope != "Total", , drop = FALSE]
-          if (nrow(gm) > 0) {
-            ml <- classif_metric_labels()
-            ids <- c("accuracy", "kap", "bal_accuracy", "f_meas")
-            ests <- c("Multiclass", "Multiclass", "Macro average", "Macro average")
-            per_area <- do.call(rbind, lapply(seq_len(nrow(gm)), function(i) {
-              data.frame(scope = gm$scope[i], metric = unname(ml[ids]),
-                         yardstick_id = ids, estimator = ests,
-                         value = as.numeric(gm[i, ids]))
-            }))
-            out <- rbind(out, per_area)
-          }
-        }
-        # Covariate-free run: the rows above ARE the spatial 1-NN model's.
-        if (isTRUE(res$nn_only)) {
-          out$scope[out$scope == "Total"] <- "Total (spatial 1-NN, no covariates)"
-          out <- rbind(out, data.frame(
-            scope = "Baseline comparison",
-            metric = "Majority-class accuracy (no-information rate)",
-            yardstick_id = "majority_acc", estimator = "Pooled out-of-fold",
-            value = res$majority_acc))
-        }
-        # Baseline comparison rows (same CV folds as the model metrics above).
-        if (!is.null(res$lift)) {
-          lf <- res$lift
-          out <- rbind(out, data.frame(
-            scope = "Baseline comparison",
-            metric = c("Spatial 1-NN baseline accuracy", "Spatial 1-NN baseline kappa",
-                       "Majority-class accuracy (no-information rate)",
-                       "Covariate lift (accuracy points vs spatial baseline)",
-                       "McNemar p (model vs spatial baseline)"),
-            yardstick_id = c("baseline_acc", "baseline_kap", "majority_acc",
-                             "lift_abs", "mcnemar_p"),
-            estimator = "Paired out-of-fold",
-            value = c(lf$baseline_acc, lf$baseline_kap, lf$majority_acc,
-                      lf$lift_abs, lf$mcnemar_p)))
-        }
-        # Permutation feature importance. The scope names the evaluation design
-        # (each fold's model on its held-out rows, or the final model on its own
-        # training rows) so a reader of the CSV alone cannot mistake one for the
-        # other — they are not comparable numbers.
-        if (!is.null(res$importance)) {
-          imp <- res$importance
-          out <- rbind(out, data.frame(
-            scope = sprintf("Feature importance (%s)", imp$evaluated_on[1]),
-            metric = imp$predictor,
-            yardstick_id = "perm_delta_logloss",
-            estimator = sprintf("share %.1f%%", imp$share_pct),
-            value = imp$importance))
-        }
-        utils::write.csv(out, file, row.names = FALSE)
+        rl <- tryCatch(get_rasters(), error = function(e) NULL)
+        note <- if (is.null(rl)) NULL else sprintf(
+          "%s, confidence threshold %.2f",
+          if (identical(rl$source, "nn")) "Spatial 1-NN surface" else "Covariate model surface",
+          as.numeric(rl$conf_threshold %||% 0))
+        utils::write.csv(classif_metrics_csv_df(res, area = rl$area, area_note = note),
+                         file, row.names = FALSE)
       }
     )
   })

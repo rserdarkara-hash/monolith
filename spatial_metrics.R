@@ -69,13 +69,12 @@ calc_ccc <- function(observed, predicted) {
 # straight into the Model Performance table, the metrics CSV and the pooled
 # Total (Combined) diagnostics; NA states "undefined here", which is what these
 # quantities actually are. Same convention as calc_ccc's constant-vector branch.
-# `round_values = FALSE` returns the metrics at full precision. Repeated CV
-# uses it: a mean/SD taken across fold realizations must be computed on raw
-# values, or the SD is quantized by the display rounding and reports rounding
-# noise instead of fold-assignment variance. The display layer formats.
-augment_metrics <- function(obs, pre, round_values = TRUE) {
-  rnd <- if (isTRUE(round_values)) function(x, d) round(x, d) else function(x, d) x
-  res <- list(nse = NA, nrmse_mean = NA, rpd = NA, rpiq = NA, smape = NA)
+# Values are returned at full precision; the display layer formats them
+# (format_sig() / mnFormatSig), so a small value never becomes 0 before it
+# reaches a table or an exported file.
+augment_metrics <- function(obs, pre) {
+  res <- list(nse = NA, nrmse_mean = NA, nrmse_sd = NA, rpd = NA, rpiq = NA,
+              smape = NA, signed_target = NA)
   if (length(obs) < 2) return(res)
 
   residuals <- obs - pre
@@ -83,30 +82,52 @@ augment_metrics <- function(obs, pre, round_values = TRUE) {
   mean_obs <- mean(obs, na.rm = TRUE)
   sd_obs <- sd(obs, na.rm = TRUE)
   iqr_obs <- IQR(obs, na.rm = TRUE)
+  rng_obs <- suppressWarnings(range(obs, na.rm = TRUE))
 
   sst <- sum((obs - mean_obs)^2, na.rm = TRUE)
   sse <- sum(residuals^2, na.rm = TRUE)
   # NSE is undefined when the observations carry no variance (0/0).
-  res$nse <- if (is.finite(sst) && sst > 0) rnd(1 - (sse / sst), 4) else NA
+  res$nse <- if (is.finite(sst) && sst > 0) 1 - (sse / sst) else NA
 
-  # Relative RMSE is undefined for a zero-mean variable (centred/anomaly data).
-  # Normalised by |mean|, not the signed mean: RMSE is non-negative, so a
-  # negative-mean variable (anomalies, sub-zero temperatures, redox potential)
-  # would otherwise report a negative NRMSE%, a nonsensical sign for a
-  # normalised error. Identical for every positive-mean variable.
-  res$nrmse_mean <- if (is.finite(mean_obs) && abs(mean_obs) > 0) rnd((rmse / abs(mean_obs)) * 100, 2) else NA
+  # Mean-normalised and percentage errors need a ratio scale. A target whose
+  # observed values span zero has an arbitrary origin: the same fit reported
+  # against a differently centred version of the variable gives a different
+  # NRMSE, and sMAPE's |obs| + |pred| denominator collapses at the crossing,
+  # so a single sign disagreement contributes its maximum term however small
+  # both values are. Report NA rather than a number with no interpretation.
+  # The observed sign crossing is the rule because the variable list carries
+  # no scale metadata. |mean| < sd is NOT used: a positive ratio-scale variable
+  # can have sd > mean and still normalise correctly.
+  res$signed_target <- all(is.finite(rng_obs)) && rng_obs[1] < 0 && rng_obs[2] > 0
+
+  # NRMSE (mean) = CV(RMSE). Normalised by |mean|, not the signed mean: RMSE is
+  # non-negative, so a negative-mean variable would otherwise report a
+  # negative percentage. The zero-mean guard is a numerical-stability branch,
+  # separate from the sign-crossing rule above.
+  res$nrmse_mean <- if (!res$signed_target && is.finite(mean_obs) && abs(mean_obs) > 0) {
+    (rmse / abs(mean_obs)) * 100
+  } else NA
+
+  # NRMSE (SD): RMSE in units of the observed spread. Invariant to recentring
+  # (SD(y + c) = SD(y)), so it stays defined for anomaly and interval scales.
+  # With rmse on divisor n and sd on n - 1 it equals sqrt((1 - NSE)(n - 1)/n)
+  # and 1/RPD exactly: it adds no evidence beyond NSE, it restates the error on
+  # a scale-free axis.
+  res$nrmse_sd <- if (is.finite(sd_obs) && sd_obs > 0) rmse / sd_obs else NA
 
   # RPD / RPIQ are spread-to-error ratios (Chang et al. 2001): undefined at
   # zero error, so both guard on rmse > 0, not just RPIQ's spread term.
-  res$rpd <- if (is.finite(rmse) && rmse > 0) rnd(sd_obs / rmse, 2) else NA
-  res$rpiq <- if (is.finite(rmse) && rmse > 0 && iqr_obs > 0) rnd(iqr_obs / rmse, 2) else NA
+  res$rpd <- if (is.finite(rmse) && rmse > 0) sd_obs / rmse else NA
+  res$rpiq <- if (is.finite(rmse) && rmse > 0 && iqr_obs > 0) iqr_obs / rmse else NA
 
   # sMAPE's summand is 0/0 where obs == pre == 0. Dropping those rows via
   # na.rm would average sMAPE over a different n than every other metric;
   # define the term as 0 instead (the usual convention) so n stays consistent.
-  denom <- abs(obs) + abs(pre)
-  term <- ifelse(denom == 0, 0, 2 * abs(residuals) / denom)
-  res$smape <- rnd(mean(term, na.rm = TRUE) * 100, 2)
+  if (!res$signed_target) {
+    denom <- abs(obs) + abs(pre)
+    term <- ifelse(denom == 0, 0, 2 * abs(residuals) / denom)
+    res$smape <- mean(term, na.rm = TRUE) * 100
+  }
 
   return(res)
 }
@@ -251,17 +272,18 @@ is_coord_col <- function(x) {
 #' of the deterministic error metrics only: Moran's I is a spatial diagnostic of
 #' ONE residual field, is the most expensive term here (an spdep neighbour
 #' search), and is reported for the reference realization in the main table.
-#' `round_values = FALSE` returns every metric at full precision (see
-#' augment_metrics): repeated CV aggregates across fold realizations and must
-#' not take an SD over values the display rounding has already quantized.
-perform_cv <- function(cv_obj, moran = TRUE, round_values = TRUE) {
-  rnd <- if (isTRUE(round_values)) function(x, d) round(x, d) else function(x, d) x
+#' Every value is returned at full precision (see augment_metrics).
+#' `signed_target` is TRUE when the scored observations span zero (NRMSE (mean)
+#' and SMAPE are then NA by definition, not by failure); `block_fallback` is
+#' TRUE when a Spatial Block request fell back to random folds (make_cv_folds).
+perform_cv <- function(cv_obj, moran = TRUE) {
   # n = predicted pairs, n_expected = rows with an observed value; metrics use
   # the predicted pairs only, and coverage says how many rows that is.
   res <- list(rmse = NA, r2 = NA, nse = NA, me = NA, mae = NA, ccc = NA,
-              nrmse_mean = NA, rpd = NA, rpiq = NA, smape = NA,
+              nrmse_mean = NA, nrmse_sd = NA, rpd = NA, rpiq = NA, smape = NA,
               moran_i = NA, moran_e = NA, moran_p = NA, n = 0,
-              n_expected = 0, coverage = NA_real_)
+              n_expected = 0, coverage = NA_real_, signed_target = NA,
+              block_fallback = isTRUE(attr(cv_obj, "block_fallback")))
 
   if (is.null(cv_obj)) return(res)
 
@@ -291,25 +313,26 @@ perform_cv <- function(cv_obj, moran = TRUE, round_values = TRUE) {
 
   residuals <- obs - pre
 
-  res$rmse <- rnd(sqrt(mean(residuals^2, na.rm = TRUE)), 4)
-  res$me <- rnd(mean(residuals, na.rm = TRUE), 4)
-  res$mae <- rnd(mean(abs(residuals), na.rm = TRUE), 4)
+  res$rmse <- sqrt(mean(residuals^2, na.rm = TRUE))
+  res$me <- mean(residuals, na.rm = TRUE)
+  res$mae <- mean(abs(residuals), na.rm = TRUE)
   # cor() on a constant vector already returns NA, but it emits "the standard
   # deviation is zero" on the way — and inside a PSOCK worker that warning
   # surfaces in the run log as an unexplained condition. Guard explicitly, the
   # way augment_metrics() and calc_ccc() do for the same degenerate case.
-  r2_val <- if (isTRUE(stats::sd(obs) > 0) && isTRUE(stats::sd(pre) > 0)) {
+  res$r2 <- if (isTRUE(stats::sd(obs) > 0) && isTRUE(stats::sd(pre) > 0)) {
     tryCatch(cor(obs, pre)^2, error = function(e) NA_real_)
   } else NA_real_
-  res$r2 <- rnd(r2_val, 4)
-  
-  res$ccc <- rnd(calc_ccc(obs, pre), 4)
-  aug <- augment_metrics(obs, pre, round_values = round_values)
+
+  res$ccc <- calc_ccc(obs, pre)
+  aug <- augment_metrics(obs, pre)
   res$nse <- aug$nse
   res$nrmse_mean <- aug$nrmse_mean
+  res$nrmse_sd <- aug$nrmse_sd
   res$rpd <- aug$rpd
   res$rpiq <- aug$rpiq
   res$smape <- aug$smape
+  res$signed_target <- aug$signed_target
   
   # Exact-name matching first, on the SAME token lists is_coord_col() uses:
   # prefix matching let a covariate named e.g. "Longitude_deg" win over the
@@ -328,14 +351,9 @@ perform_cv <- function(cv_obj, moran = TRUE, round_values = TRUE) {
       # I on its own cannot be read without its null expectation; carry E[I] and
       # the two-sided p alongside it (p is NA on the all-pairs fallback path).
       mor <- calc_moran(residuals, coords)
-      # rnd(), not round(): `moran` and `round_values` are independent arguments,
-      # so a caller asking for full precision must get it on these three fields
-      # too, the way every other metric in `res` already does.
-      res$moran_i <- rnd(mor$i, 4)
-      res$moran_e <- rnd(mor$e_i, 4)
-      # The p-value is never rounded: at 4 dp a p below 5e-5 becomes exactly
-      # 0, an impossible value that then sits in an exported numeric column.
-      # Every display formats it through format_p_value() anyway.
+      res$moran_i <- mor$i
+      res$moran_e <- mor$e_i
+      # Every display formats the p-value through format_p_value().
       res$moran_p <- mor$p
   }
   
@@ -471,9 +489,11 @@ make_cv_folds <- function(coords, strategy = "auto", n = NULL, seed = CV_FOLD_SE
       }, error = function(e) NULL)
       # Degenerate geometry (e.g. many duplicate coordinates) can make k-means
       # fail or collapse; fall back to a seeded random k-fold rather than
-      # losing CV entirely.
+      # losing CV entirely. The folds say so: they are not spatial blocks, and
+      # no metric scored on them may be reported as Spatial Block CV.
       if (is.null(folds) || length(unique(folds)) < 2) {
         folds <- sample(rep(seq_len(plan$k), length.out = n))
+        attr(folds, "block_fallback") <- TRUE
       }
       folds
     } else {
@@ -561,6 +581,7 @@ run_kriging_folds <- function(pop, target_var, row_id, folds, fold_fun,
                   geometry = geom)
   attr(cv, "cv_notes") <- notes
   attr(cv, "cv_fold_meta") <- fold_meta
+  attr(cv, "block_fallback") <- attr(folds, "block_fallback")
   cv
 }
 
@@ -604,8 +625,11 @@ cv_repeat_frame <- function(cv_obj) {
 }
 
 # Metrics that carry a meaningful spread across fold realizations. Moran's I is
-# deliberately absent (see perform_cv's `moran` argument).
-CV_REPEAT_METRICS <- c(rmse = "RMSE", nrmse_mean = "NRMSE (%)", mae = "MAE",
+# deliberately absent (see perform_cv's `moran` argument). NRMSE (mean) is the
+# mean-normalised RMSE, CV(RMSE); NRMSE (SD) sits beside it because it is the
+# form that stays defined for a target whose values span zero.
+CV_REPEAT_METRICS <- c(rmse = "RMSE", nrmse_mean = "NRMSE (mean, %)",
+                       nrmse_sd = "NRMSE (SD)", mae = "MAE",
                        r2 = "R² (Corr)", nse = "R² (NSE/Trad)", me = "Bias (ME)",
                        ccc = "Lin's CCC (Agree)", rpd = "RPD (Prec)",
                        rpiq = "RPIQ", smape = "SMAPE (%)")
@@ -627,10 +651,7 @@ CV_METRIC_LABELS <- c(CV_REPEAT_METRICS,
 summarise_cv_repeats <- function(reps) {
   if (is.null(reps) || length(reps) < 2) return(NULL)
   if (any(vapply(reps, is.null, logical(1)))) return(NULL)
-  # Raw precision: a mean/SD across realizations must not be taken over values
-  # the display rounding has already quantized (RPD to 0.01, RMSE to 1e-4), or
-  # the SD reports the rounding lattice rather than fold-assignment variance.
-  mets <- lapply(reps, function(x) perform_cv(x, moran = FALSE, round_values = FALSE))
+  mets <- lapply(reps, function(x) perform_cv(x, moran = FALSE))
   keys <- names(CV_REPEAT_METRICS)
   agg <- lapply(keys, function(k) {
     v <- vapply(mets, function(m) {
@@ -647,6 +668,9 @@ summarise_cv_repeats <- function(reps) {
        n_expected = mets[[1]]$n_expected,
        n_min = min(n_pred),
        n_max = max(n_pred),
+       # NRMSE (mean) and SMAPE are NA across the repeats when any realization
+       # scored observations that span zero; the display says why.
+       signed_target = any(vapply(mets, function(m) isTRUE(m$signed_target), logical(1))),
        mean = vapply(agg, function(a) unname(a["mean"]), numeric(1)),
        sd = vapply(agg, function(a) unname(a["sd"]), numeric(1)))
 }
@@ -767,7 +791,10 @@ perform_kriging_loocv <- function(pts, target_var, aux_vars, lags_func, vgm_fit_
     v_emp <- variogram(residuals ~ 1, train, width = lags$width, cutoff = lags$cutoff)
     v_fit <- vgm_fit_func(v_emp, train$residuals)
     res_krig <- krige(residuals ~ 1, train, newdata, model = v_fit, debug.level = 0)
-    list(pred = as.numeric(pred_trend) + res_krig$var1.pred, meta = list(kept = kept))
+    # The residual variogram is refitted per fold like OK's, so it reports the
+    # same fit state and the run log can name a fold that took a degraded one.
+    list(pred = as.numeric(pred_trend) + res_krig$var1.pred,
+         meta = list(kept = kept, vgm_status = vgm_fit_status(v_fit)))
   }
 
   cv <- run_kriging_folds(pts, target_var, row_id, folds, fold_fn, cancel_file, progress)

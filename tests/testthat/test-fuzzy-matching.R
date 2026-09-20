@@ -129,9 +129,16 @@ test_that("handles empty candidates gracefully", {
 
 test_that("fuzzy_match_column handles Unicode characters", {
   cols <- c("pH_µ", "Ca_mg_kg⁻¹", "Fe_μg")
-  # Unicode in act_name — should not crash
-  result <- fuzzy_match_column("pH µ", cols)
-  expect_true(is.null(result) || is.character(result))
+  # The cleaning step is gsub("[^a-zA-Z0-9]", ""), which strips EVERY non-ASCII
+  # character, not just the separators: "pH µ" and "pH_µ" both reduce to "ph",
+  # so the match succeeds. That is the decision - assert it, rather than that
+  # the call returned something.
+  expect_equal(fuzzy_match_column("pH µ", cols), "pH_µ")
+
+  # Its consequence, which is the part worth knowing: a unit written only in
+  # non-ASCII is discarded, so two columns differing only there collide and the
+  # first one wins.
+  expect_equal(fuzzy_match_column("pH", c("pH_µ", "pH_μ")), "pH_µ")
 })
 
 test_that("fuzzy_match_column handles very long column names", {
@@ -146,12 +153,6 @@ test_that("fuzzy_match_column handles duplicate cleaned names", {
   cols <- c("pH_H2O", "pH-H2O", "Clay")
   result <- fuzzy_match_column("pH H2O", cols)
   expect_equal(result, "pH_H2O")
-})
-
-test_that("detect_pred_column handles missing type gracefully", {
-  candidates <- c("pH", "pH_cve", "pH_pred")
-  result <- detect_pred_column("pH", candidates, type = "cve")
-  expect_equal(result, "pH_cve")
 })
 
 # ── is_valid_col_ref ──────────────────────────────────────────────────────

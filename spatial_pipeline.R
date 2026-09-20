@@ -50,6 +50,13 @@ write_warning_file <- function(l, prefix, message) {
   .write_status_file(l, prefix, "warn", message)
 }
 
+# One wording for the constant-target condition, raised on both channels
+# (warning file and run log) by both surfaces.
+.degenerate_target_msg <- paste0(
+  "Target has no usable variance in this locality (all values equal or ",
+  "differing only in noise digits); the surface will be constant and ",
+  "R² / NSE / CCC / RPD / RPIQ are undefined.")
+
 # ── Strict-boundary vs grid-resolution coherence ────────────────────────────
 # Every surface here is a raster of `res` metre cells, and a cell survives the
 # boundary clip only when its CENTRE falls inside the boundary (st_intersects
@@ -512,6 +519,15 @@ grid_template <- function(bbox, res, crs_wkt, snap = FALSE) {
 
   pts <- pts_projected
 
+  # The DISPLAY set: deduplicated by coordinate, NOT filtered on the target.
+  # That order is the reverse of the fitted set's (dedup_valid_points drops
+  # target-NA rows FIRST, then deduplicates), so the two are not nested - where
+  # a co-located pair carries the measurement on one member only, this keeps
+  # the first member and the fit keeps the measured one. Deliberate: rv$sf is
+  # what the popup system, the point colour-by and the locality tables read,
+  # and changing the order here would move which member is displayed without
+  # changing the fit. Points with no measured value are styled apart on the map
+  # (add_styled_points, value_col) so the display says so.
   coords <- sf::st_coordinates(pts)
   c_round <- data.frame(
     x = round(coords[, "X"], 2),
@@ -916,7 +932,8 @@ run_regional_interpolation <- function(item, current_method, current_crs, aux_va
            n_expected = mp$cv_plan$n,
            conditional = res_list$cv_conditional,
            vgm_col = res_list$cv_vgm_col,
-           screen = res_list$cv_screen)
+           screen = res_list$cv_screen,
+           vgm_status = res_list$cv_vgm_status)
     }
 
     # NULL = unresolved (gate failed); the engine then recomputes it itself.
@@ -991,11 +1008,14 @@ run_regional_interpolation <- function(item, current_method, current_crs, aux_va
         # ratios against the observed variance, i.e. UNDEFINED here, not zero).
         # Without this the user only sees the amber "fallback model" banner,
         # which names the symptom rather than the cause. Message only.
+        # BOTH channels, like the grid-coarsening warning: the progress panel
+        # holds one warning per locality and surface and is gone the moment the
+        # maps are revealed, so the run log is what makes this survive.
         if (.is_degenerate_covariate(pts_a$v)) {
-          write_warning_file(l, "act", paste0(
-            "Target has no usable variance in this locality (all values equal or ",
-            "differing only in noise digits); the surface will be constant and ",
-            "R² / NSE / CCC / RPD / RPIQ are undefined."))
+          write_warning_file(l, "act", .degenerate_target_msg)
+          res_out$log_msg <- paste0(res_out$log_msg, "
+[WARN] ", l, " (Actual): ",
+                                    .degenerate_target_msg)
         }
         lags_a <- calc_scientific_lags(pts_a)
         mp_a <- list(idw_p = m_params$idw_p_act, idw_nmax = m_params$idw_nmax, cov_params = list(idw_p = m_params$idw_p_act, idw_nmax = m_params$idw_nmax), tps_lambda = m_params$tps_lambda_act, pre_fit = m_params$pre_fit_act, grid_aux = grid_aux, cv_strategy = m_params$cv_strategy, cv_repeats = m_params$cv_repeats, cancel_file = cancel_file_val, rfk_uncertainty = m_params$rfk_uncertainty, rf_ntree = m_params$rf_ntree, ck_nmax = m_params$ck_nmax, aux_kept = aux_kept_a)
@@ -1006,7 +1026,13 @@ run_regional_interpolation <- function(item, current_method, current_crs, aux_va
         res_out$v_emp_act <- res_a_list$v_emp; res_out$v_fit_act <- res_a_list$fit; res_out$cv_act <- res_a_list$cv_metrics; res_out$cv_obj_act <- res_a_list$cv_obj
         res_out$cv_reps_act <- res_a_list$cv_obj_reps
         res_out$tps_fit_act <- res_a_list$tps_fit
-        res_out$summ_act <- res_a_list$model_summary; res_out$rf_act <- res_a_list$rf_model; res_out$gstat_act <- res_a_list$gstat_obj
+        # detach_model_frame: the fitted model's terms otherwise carry this
+        # locality's whole pipeline frame (point set, grids, kriging output)
+        # back to the main session and into every archived copy of the run.
+        res_out$summ_act <- detach_model_frame(res_a_list$model_summary); res_out$rf_act <- detach_model_frame(res_a_list$rf_model); res_out$gstat_act <- res_a_list$gstat_obj
+        # Covariates the mapped model used and the ones the screen removed
+        # (RK/RFK/CK only), for the run configuration.
+        res_out$aux_used_act <- res_a_list$aux_used; res_out$aux_dropped_act <- res_a_list$aux_dropped
         res_out$log_msg <- paste0(res_out$log_msg, "\n", res_a_list$log_msg)
         if (cov_log_msg != "") res_out$log_msg <- paste0(res_out$log_msg, "\n", cov_log_msg)
         
@@ -1054,10 +1080,10 @@ run_regional_interpolation <- function(item, current_method, current_crs, aux_va
         if(nrow(pts_p) >= 3) {
             # Same constant-target check for the predicted surface.
             if (.is_degenerate_covariate(pts_p$pv)) {
-              write_warning_file(l, "pre", paste0(
-                "Target has no usable variance in this locality (all values equal or ",
-                "differing only in noise digits); the surface will be constant and ",
-                "R² / NSE / CCC / RPD / RPIQ are undefined."))
+              write_warning_file(l, "pre", .degenerate_target_msg)
+              res_out$log_msg <- paste0(res_out$log_msg, "
+[WARN] ", l, " (Predicted): ",
+                                        .degenerate_target_msg)
             }
             lags_p <- calc_scientific_lags(pts_p)
             mp_p <- list(idw_p = m_params$idw_p_pre, idw_nmax = m_params$idw_nmax, cov_params = list(idw_p = m_params$idw_p_act, idw_nmax = m_params$idw_nmax), tps_lambda = m_params$tps_lambda_pre, pre_fit = m_params$pre_fit_pre, grid_aux = grid_aux, cv_strategy = m_params$cv_strategy, cv_repeats = m_params$cv_repeats, cancel_file = cancel_file_val, rfk_uncertainty = m_params$rfk_uncertainty, rf_ntree = m_params$rf_ntree, ck_nmax = m_params$ck_nmax, aux_kept = aux_kept_p)
@@ -1072,12 +1098,18 @@ run_regional_interpolation <- function(item, current_method, current_crs, aux_va
                                            "; the Predicted surface fits its own variogram.")
               }
             }
+            # The TPS counterpart: unseparated, a lambda on Auto (GCV) is the one
+            # GCV selects for the MEASURED values of the same rows, reselected in
+            # every CV fold from that fold's training rows. A fixed lambda is
+            # shared at dispatch already.
+            if (current_method == "TPS" && isFALSE(m_params$sep_fit)) mp_p$tps_gcv_col <- "v"
             res_p_list <- apply_interpolation(pts_p, "pv", current_method, grid_p, aux_vars, lags_p, mp_p, l, "pre", vif_threshold)
             res_out$cv_info_pre <- cv_info_of(mp_p, res_p_list)
             res_out$v_emp_pre <- res_p_list$v_emp; res_out$v_fit_pre <- res_p_list$fit; res_out$cv_pre <- res_p_list$cv_metrics; res_out$cv_obj_pre <- res_p_list$cv_obj
             res_out$cv_reps_pre <- res_p_list$cv_obj_reps
             res_out$tps_fit_pre <- res_p_list$tps_fit
-            res_out$summ_pre <- res_p_list$model_summary; res_out$rf_pre <- res_p_list$rf_model; res_out$gstat_pre <- res_p_list$gstat_obj
+            res_out$summ_pre <- detach_model_frame(res_p_list$model_summary); res_out$rf_pre <- detach_model_frame(res_p_list$rf_model); res_out$gstat_pre <- res_p_list$gstat_obj
+            res_out$aux_used_pre <- res_p_list$aux_used; res_out$aux_dropped_pre <- res_p_list$aux_dropped
             res_out$log_msg <- paste0(res_out$log_msg, "\n", res_p_list$log_msg)
             
             # Same all-NA guard as the actual surface above.
@@ -1129,7 +1161,7 @@ run_regional_interpolation <- function(item, current_method, current_crs, aux_va
         # surface keeps co-located twins (gstat's idw tolerates them; each row
         # is a real ML error) and uses a FIXED idp = 2 rather than the run's
         # optimized power, so error surfaces stay comparable across methods.
-        err_mod <- gstat::idw(err ~ 1, pts_err, grid_p, nmax = m_params$idw_nmax, idp = 2, debug.level = 0)
+        err_mod <- gstat::idw(err ~ 1, pts_err, grid_p, nmax = m_params$idw_nmax %||% 12, idp = 2, debug.level = 0)
         r_err <- terra::rasterize(err_mod, grid_r, field="var1.pred") %>% terra::mask(terra::vect(bound)) %>% terra::project(crs_sel)
         res_out$r_point_err <- terra::wrap(r_err)
     }

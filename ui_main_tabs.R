@@ -254,6 +254,11 @@ ui_main_tabs <- mainPanel(width = 9,
                             tags$b("Variogram tuning. "),
                             "The panels below describe the variograms you are fitting. The last interpolation run used an engine with no variogram of its own, so its result cards are held back until you run the analysis again; the maps from that run are untouched.")
                    ),
+                   # Warnings the workers raised during the run. They used to
+                   # live only in the progress overlay, which is gone the
+                   # moment the maps are revealed, so the explanation for a
+                   # blank metric cell had to be hunted for in the run log.
+                   uiOutput("run_warnings_card"),
                             sci_card("Spatial Interpolation Statistics",
                               "Model-specific diagnostics and performance metrics (RMSE, R²).",
                               conditionalPanel(condition = "output.disp_method == 'OK'",
@@ -264,19 +269,33 @@ ui_main_tabs <- mainPanel(width = 9,
                                 sci_table("regional_params_table", "Regional Parameters (per locality)"),
                                 hr()
                               ),
-                              sci_table("metrics_table", "Model Performance", uiOutput("cv_strategy_badge")),
+                              # The footnote travels with the table: it names
+                              # what the n/a¹, † and NA* cells mean.
+                              sci_table("metrics_table", "Model Performance", uiOutput("cv_strategy_badge"),
+                                content = tagList(
+                                  div(class = "table-container", DT::dataTableOutput("metrics_table")),
+                                  uiOutput("metrics_table_notes")
+                                )),
                               # Only present when the run was launched with
                               # repeated CV switched on (Spatial Engine panel).
                               conditionalPanel(condition = "output.has_cv_repeats === true",
                                 hr(),
                                 sci_table("cv_repeats_table", label = "Fold-Realization Stability",
-                                  title = HTML(paste0("Fold-Realization Stability", info_tooltip("cv_repeats_info", "Repeated cross-validation: the same model re-scored under alternative fold assignments (the partition is the only thing that changes). Cells are mean ± SD across realizations. Treat the SD as the resolution of the comparison: two methods whose metrics differ by less than this are separated by fold luck, not skill. Leave-one-out folds are deterministic and never repeat. Moran's I is reported for realization 1 only, in the table above."))))
+                                  title = HTML(paste0("Fold-Realization Stability", info_tooltip("cv_repeats_info", "Repeated cross-validation: the same model re-scored under alternative fold assignments (the partition is the only thing that changes). Cells are mean ± SD across realizations. Treat the SD as the resolution of the comparison: two methods whose metrics differ by less than this are separated by fold luck, not skill. Leave-one-out folds are deterministic and never repeat. Moran's I is reported for realization 1 only, in the table above."))),
+                                  content = tagList(
+                                    div(class = "table-container", DT::dataTableOutput("cv_repeats_table")),
+                                    uiOutput("cv_repeats_notes")
+                                  ))
                               )
                             ),
                             div(id = "prediction_performance_ui",
                               sci_card("Variable Prediction Statistics",
                                 "Prediction accuracy and classification agreement metrics for uploaded data.",
-                                sci_table("uploaded_metrics_table", "Prediction Performance (Uploaded Data)"),
+                                sci_table("uploaded_metrics_table", "Prediction Performance (Uploaded Data)",
+                                  content = tagList(
+                                    div(class = "table-container", DT::dataTableOutput("uploaded_metrics_table")),
+                                    uiOutput("uploaded_metrics_notes")
+                                  )),
                                 hr(),
                                 sci_table("kappa_table", "Classification Performance (Uploaded Predictions)",
                                   selectInput("kappa_bin_method", "Binning Method:", choices = c("Agronomical Classes" = "agro", "Quartiles" = "quartile")))

@@ -191,7 +191,16 @@
     meta_actuals <- cache$meta_actuals
     
     html_content <- "<div style='max-height: 300px; overflow-y: auto; font-family: sans-serif; min-width: 200px;'>"
-    html_content <- paste0(html_content, "<h4>Point Details</h4><table style='width: 100%; border-collapse: collapse;'>")
+    html_content <- paste0(html_content, "<h4>Point Details</h4>")
+    # The mapped variable's own column. A point with no value there is drawn
+    # hollow (add_styled_points); say so here rather than showing an empty row
+    # the reader has to interpret.
+    if ("v" %in% names_in_row && all(is.na(data_row[["v"]]))) {
+      html_content <- paste0(html_content,
+        "<p style='margin: 0 0 6px 0; color: var(--mn-text-3); font-style: italic;'>",
+        "No measured value for the mapped variable: this point was not used in the fit.</p>")
+    }
+    html_content <- paste0(html_content, "<table style='width: 100%; border-collapse: collapse;'>")
     
     for(cat in names(grouped_vars)) {
       cat_vars <- grouped_vars[[cat]]
@@ -362,12 +371,16 @@
 
   # Compact run-status chip in the header, visible from any tab: amber while a
   # run executes (per-locality progress-file average), green once the
-  # displayed run's results exist, grey before the first run.
+  # displayed run's results exist, grey before the first run and after a
+  # cancelled one.
   output$run_status_chip <- renderUI({
     if (isTRUE(rv$model_running)) {
       pct <- rv$run_pct
       span(class = "run-status-chip", span(class = "dot running"),
            if (!is.null(pct)) paste0("Running · ", pct, "%") else "Running…")
+    } else if (identical(rv$run_config_summary$status, "cancelled")) {
+      span(class = "run-status-chip", span(class = "dot idle"),
+           paste0("Cancelled · Run #", rv$run_config_summary$run_id))
     } else if (!is.null(rv$rast) || length(rv$v_emp_list) > 0) {
       span(class = "run-status-chip", span(class = "dot done"),
            paste0("Run ready · ", rv$disp$method %||% ""))

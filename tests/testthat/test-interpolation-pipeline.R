@@ -150,7 +150,16 @@ test_that("class areas of disjoint localities sum to the merged surface's", {
     ha
   }
 
+  # One raster comes back unwrapped and untouched - there is nothing to merge,
+  # so neither the geometry nor a single value may move.
+  one <- merge_wrapped_rasters(list(terra::wrap(a)))
+  expect_s4_class(one, "SpatRaster")
+  expect_equal(terra::ext(one), terra::ext(a))
+  expect_identical(names(one), names(a))
+  expect_equal(terra::values(one), terra::values(a))
+
   merged <- merge_wrapped_rasters(list(terra::wrap(a), terra::wrap(b)))
+  expect_s4_class(merged, "SpatRaster")
   expect_gt(terra::ncell(merged), 4 * (terra::ncell(a) + terra::ncell(b)))
 
   # 1e-6 relative, not exact: terra computes each cell's geodesic area from its
@@ -168,37 +177,6 @@ test_that("merge_wrapped_rasters returns NULL for empty or NULL input", {
   expect_null(merge_wrapped_rasters(NULL))
   expect_null(merge_wrapped_rasters(list()))
   expect_null(merge_wrapped_rasters(list(NULL, NULL)))
-})
-
-test_that("merge_wrapped_rasters returns single unwrapped raster", {
-  pts <- make_test_points(10)
-  bbox <- sf::st_bbox(pts)
-  r <- terra::rast(terra::ext(bbox), resolution = 50,
-                   crs = sf::st_crs(pts)$wkt)
-  values(r) <- 1:terra::ncell(r)
-  wrapped <- terra::wrap(r)
-  result <- merge_wrapped_rasters(list(wrapped))
-  expect_s4_class(result, "SpatRaster")
-})
-
-test_that("merge_wrapped_rasters merges multiple rasters", {
-  pts <- make_test_points(10)
-  bbox <- sf::st_bbox(pts)
-  r1 <- terra::rast(terra::ext(bbox), resolution = 80,
-                    crs = sf::st_crs(pts)$wkt)
-  values(r1) <- 1:terra::ncell(r1)
-
-  # Second raster shifted slightly
-  bbox2 <- c(xmin = as.numeric(bbox[["xmin"]]) + 500,
-             xmax = as.numeric(bbox[["xmax"]]) + 500,
-             ymin = as.numeric(bbox[["ymin"]]),
-             ymax = as.numeric(bbox[["ymax"]]))
-  r2 <- terra::rast(terra::ext(bbox2), resolution = 80,
-                    crs = sf::st_crs(pts)$wkt)
-  values(r2) <- 100:(99 + terra::ncell(r2))
-
-  result <- merge_wrapped_rasters(list(terra::wrap(r1), terra::wrap(r2)))
-  expect_s4_class(result, "SpatRaster")
 })
 
 # ── get_joint_scale_values ────────────────────────────────────────────────
@@ -723,6 +701,40 @@ test_that("OK worker shares the measured variogram only when separate fitting is
   expect_identical(fixed$v_fit_pre, applied)
 })
 
+test_that("TPS shares the measured values' smoothing only when separate fitting is off", {
+  # The TPS counterpart of the variogram sharing above: unticked, a lambda on
+  # Auto is the one GCV selects for the MEASURED values of the same rows, so
+  # the Predicted surface reuses the model fitted to the measured values.
+  set.seed(21)
+  pts <- make_test_points(20)
+  xy <- sf::st_coordinates(pts)
+  df <- data.frame(x = xy[, 1], y = xy[, 2], v = pts$v,
+                   pv = 100 + 20 * pts$v + rnorm(20, 0, 40), Locality = "LocA")
+  run <- function(separate) suppressWarnings(run_regional_interpolation(
+    list(l = "LocA", pts_data = df,
+         m_params = list(sep_fit = separate, tps_lambda_act = -1, tps_lambda_pre = -1,
+                         idw_p_act = 2, idw_p_pre = 2, idw_nmax = 12, cv_strategy = "loocv")),
+    "TPS", 32633, character(0), NULL, "convex", "dynamic", 250,
+    "fixed", 200, "EPSG:32633", FALSE, "pred"))
+  shared <- run(FALSE)
+  expect_equal(shared$tps_fit_pre$lambda, shared$tps_fit_act$lambda)
+
+  # Engine level: the shared lambda depends on the measured values only, so
+  # changing only the predicted values leaves it where they put it.
+  grid <- make_test_grid_safe(pts, res = 200)
+  mp <- list(cv_strategy = "loocv", tps_lambda = -1, tps_gcv_col = "v")
+  a <- suppressWarnings(apply_TPS(pts, "pv", grid, mp))
+  pts2 <- pts; pts2$pv <- pts2$pv * 3 + rnorm(nrow(pts2))
+  b <- suppressWarnings(apply_TPS(pts2, "pv", grid, mp))
+  own_v <- suppressWarnings(apply_TPS(pts, "v", grid, list(cv_strategy = "loocv", tps_lambda = -1)))
+  expect_equal(a$tps_fit$lambda, own_v$tps_fit$lambda)
+  expect_equal(b$tps_fit$lambda, a$tps_fit$lambda)
+  # A fixed lambda is shared at dispatch; the column does not touch it.
+  fixed <- suppressWarnings(apply_TPS(pts, "pv", grid, list(cv_strategy = "loocv", tps_lambda = 0.01,
+                                                            tps_gcv_col = "v")))
+  expect_equal(fixed$tps_fit$lambda, 0.01)
+})
+
 test_that("the Comparable CV population scores exactly the rows RK scores", {
   # OK maps every sample with a measured target, but a comparison with RK is
   # only a comparison when both are scored on the same information. The
@@ -756,6 +768,11 @@ test_that("the Comparable CV population scores exactly the rows RK scores", {
   idw    <- run("IDW", "native")
   expect_true(is.na(idw$cv_info_act$population))
   expect_null(idw$cv_info_act$row_id)
+  # The worker carries each surface's covariate record back to the run
+  # configuration; an engine that models no covariate carries none.
+  expect_equal(rk$aux_used_act, "aux1")
+  expect_equal(rk$aux_dropped_act, character(0))
+  expect_null(ok_cmp$aux_used_act)
 
   # Same rows, same partition, therefore the same experiment id.
   expect_identical(ok_cmp$cv_info_act$row_id, rk$cv_info_act$row_id)
@@ -873,6 +890,62 @@ test_that("stored regional values belong only to their tuning key", {
   expect_equal(resolve_regional_param(list(value = 4, key = NA_character_), NA_character_, -1), -1)
 })
 
+test_that("the run record separates the two CRS and selected from used covariates", {
+  # Two runs that fitted different models (a covariate dropped in one
+  # locality) used to export identical records, and the record named only the
+  # Input Data CRS.
+  res_all <- list(
+    list(l = "Kale", aux_used_act = c("elev", "ndvi"), aux_dropped_act = "clay",
+         aux_used_pre = c("elev", "clay", "ndvi"), aux_dropped_pre = character(0)),
+    list(l = "Tavas", aux_used_act = character(0), aux_dropped_act = c("elev", "clay")),
+    list(l = "Yorga"))                       # a locality with no modelled surface
+  rec <- covariate_screen_record(res_all)
+  expect_equal(rec$retained$Kale, list(actual = "elev, ndvi", predicted = "elev, clay, ndvi"))
+  expect_equal(rec$dropped$Kale$actual, "clay")
+  expect_equal(rec$retained$Tavas, list(actual = ""))
+  expect_null(rec$retained$Yorga)
+
+  cfg <- list(run_id = 7L, method = "RK", app_version = "9.9.9",
+              input_crs = "EPSG:4326", target_crs = "EPSG:32633",
+              covariates_selected = "elev, clay, ndvi",
+              covariates_retained = rec$retained, covariates_dropped = rec$dropped)
+  txt <- covariate_record_text(cfg)
+  expect_match(txt, "Covariates selected: elev, clay, ndvi", fixed = TRUE)
+  expect_match(txt, "Kale (actual): elev, ndvi (removed: clay)", fixed = TRUE)
+  expect_match(txt, "Tavas: none (Ordinary Kriging fallback) (removed: elev, clay)", fixed = TRUE)
+  same <- covariate_screen_record(list(list(l = "A", aux_used_act = "elev", aux_dropped_act = "clay"),
+                                       list(l = "B", aux_used_act = "elev", aux_dropped_act = "clay")))
+  cfg_same <- cfg
+  cfg_same$covariates_retained <- same$retained
+  cfg_same$covariates_dropped <- same$dropped
+  expect_match(covariate_record_text(cfg_same), "used: elev | removed by the screen: clay", fixed = TRUE)
+
+  # Written and read back, the record keeps both CRS fields and the per-
+  # locality covariate lists; the kriging engines consume no IDW power or TPS
+  # lambda, so none is written for them.
+  params <- list(Kale = list(idw_p_act = 2, idw_p_pre = 2.5, tps_lambda_act = -1, tps_lambda_pre = -1))
+  back <- jsonlite::fromJSON(jsonlite::toJSON(run_record_payload(cfg, params, "9.9.9", list(sf = "1")),
+                                              auto_unbox = TRUE, null = "null", force = TRUE),
+                             simplifyVector = FALSE)
+  expect_equal(back$config$input_crs, "EPSG:4326")
+  expect_equal(back$config$target_crs, "EPSG:32633")
+  expect_null(back$config$crs)
+  expect_equal(back$config$covariates_dropped$Kale$actual, "clay")
+  expect_null(back$regional_params)
+  idw <- run_record_payload(modifyList(cfg, list(method = "IDW")), params, "9.9.9", list())
+  expect_equal(names(idw$regional_params$Kale), c("idw_p_act", "idw_p_pre"))
+  tps <- run_record_payload(modifyList(cfg, list(method = "TPS")), params, "9.9.9", list())
+  expect_equal(names(tps$regional_params$Kale), c("tps_lambda_act", "tps_lambda_pre"))
+
+  # Load Config reads session configurations. A run record - recent, or an
+  # older one with a single `crs` field - is refused by name, never "loaded"
+  # as nothing.
+  expect_null(session_config_refusal(list(map_x = "x", map_crs = "EPSG:32633")))
+  expect_match(session_config_refusal(back), "run record .*Monolith 9\\.9\\.9")
+  legacy <- list(config = list(crs = "EPSG:32633", app_version = "1.1.0"), provenance = list())
+  expect_match(session_config_refusal(legacy), "Monolith 1.1.0", fixed = TRUE)
+})
+
 test_that("manual parameter targets follow the switch in every prediction view", {
   for (view in c("pred", "pred_ss", "resid")) {
     expect_identical(manual_param_target(FALSE, view, "pre"), "pre")
@@ -881,6 +954,9 @@ test_that("manual parameter targets follow the switch in every prediction view",
   expect_identical(manual_param_target(TRUE, "actual", "pre"), "pre")
   expect_identical(manual_param_target(FALSE, "actual", "pre"), "act")
   expect_identical(manual_param_target(FALSE, "pred", NULL), "act")
+  # "Fit Actual/Predicted separately" unticked: the Predicted surface reuses
+  # the Actual parameter, so tuning writes the Actual slot only.
+  expect_identical(manual_param_target(TRUE, "pred", "pre", sep_fit = FALSE), "act")
 })
 
 test_that("supplied OK CV retains gstat predictions and variances in the common schema", {
@@ -1119,6 +1195,42 @@ test_that("apply_RFK returns rf model with requested ntree and predictions", {
   expect_true(all(c("var1.pred", "var1.var") %in% colnames(res$res_sf)))
 })
 
+test_that("apply_RFK grows one forest per LOOCV fold, all at the requested ntree", {
+  # The rf_ntree the user set has to reach every forest the run fits, not just
+  # the main one: a fold loop that quietly dropped the argument, or stopped
+  # calling randomForest at all and fell back to OK, would leave the map and
+  # its cross-validation describing different models.
+  captured <- list()
+  orig_rf <- randomForest::randomForest
+  mock_rf <- function(...) {
+    args <- list(...)
+    captured <<- c(captured, list(args))
+    do.call(orig_rf, args)
+  }
+
+  pts <- make_test_points(n = 12)          # 3 <= n <= 50, so auto CV is LOOCV
+  grid <- make_test_grid_safe(pts, res = 200)
+  lags <- calc_scientific_lags(pts)
+  target_ntree <- 37                       # distinct from every default
+
+  testthat::with_mocked_bindings(
+    suppressWarnings(apply_RFK(
+      data = pts, target_var = "v", grid_p = grid, lags = lags,
+      method_params = list(rf_ntree = target_ntree),
+      aux_vars = c("aux1", "aux2"))),
+    randomForest = mock_rf,
+    .package = "randomForest"
+  )
+
+  # One main model plus one per held-out row. Asserted exactly: a fold loop
+  # that stopped fitting forests leaves two calls, which `> 1` accepts.
+  expect_equal(length(captured), nrow(pts) + 1L)
+  for (i in seq_along(captured)) {
+    expect_true("ntree" %in% names(captured[[i]]), info = paste("call", i))
+    expect_equal(captured[[i]]$ntree, target_ntree, info = paste("call", i))
+  }
+})
+
 test_that("rf_infinitesimal_jackknife_var matches the brute-force Wager formula", {
   set.seed(1)
   n_train <- 20L; B <- 40L; n_pred <- 7L
@@ -1336,6 +1448,12 @@ test_that("pre-resolved VIF set (aux_kept) reproduces the engine's own gate exac
   # both paths report the same dropped covariates
   expect_match(res_pre$log_msg, "\\[VIF\\] Dropped")
   expect_match(res_self$log_msg, "\\[VIF\\] Dropped")
+  # ... and record them for the run configuration: what the trend model used
+  # and what the screen removed, never the selected list.
+  for (r in list(res_self, res_pre)) {
+    expect_equal(r$aux_used, gate$kept)
+    expect_equal(r$aux_dropped, gate$dropped)
+  }
 })
 
 test_that("covariate engines without aux vars report the real cause, not 'unknown method'", {
@@ -1377,7 +1495,11 @@ test_that("raster_value_layer reads packed and live rasters identically", {
 test_that("with_rng_sandbox is two-sided and with_seed is reproducible", {
   had <- exists(".Random.seed", envir = globalenv(), inherits = FALSE)
   keep <- if (had) get(".Random.seed", envir = globalenv(), inherits = FALSE) else NULL
+  keep_kind <- RNGkind()
   on.exit({
+    # kind first: RNGkind(<value>) writes .Random.seed, so the seed handling
+    # has to come after it or a failed expectation leaves one behind.
+    do.call(RNGkind, as.list(keep_kind))
     if (!is.null(keep)) assign(".Random.seed", keep, envir = globalenv())
     else if (exists(".Random.seed", envir = globalenv(), inherits = FALSE)) rm(".Random.seed", envir = globalenv())
   }, add = TRUE)
@@ -1395,6 +1517,22 @@ test_that("with_rng_sandbox is two-sided and with_seed is reproducible", {
   x2 <- with_seed(99, runif(3))
   expect_false(exists(".Random.seed", envir = globalenv(), inherits = FALSE))
   expect_equal(x2, x1)
+
+  # The GENERATOR is restored on both branches. with_seed() names the kind, so
+  # a caller is left on Mersenne-Twister unless the sandbox puts its own back.
+  # The restore branch gets it free (.Random.seed's first element carries the
+  # kind); the remove branch has to set it explicitly.
+  RNGkind("L'Ecuyer-CMRG")
+  invisible(with_seed(99, runif(3)))
+  expect_identical(RNGkind()[1], "L'Ecuyer-CMRG")
+
+  if (exists(".Random.seed", envir = globalenv(), inherits = FALSE)) rm(".Random.seed", envir = globalenv())
+  expect_identical(RNGkind()[1], "L'Ecuyer-CMRG")
+  x3 <- with_seed(99, runif(3))
+  expect_identical(RNGkind()[1], "L'Ecuyer-CMRG")
+  expect_false(exists(".Random.seed", envir = globalenv(), inherits = FALSE))
+  # and the block's own numbers are the named generator's, not the caller's
+  expect_equal(x3, x1)
 
   # The block is a promise evaluated in the CALLER's frame: assignments land
   # here, and the block's value is the wrapper's value.
@@ -1942,6 +2080,56 @@ test_that("a constant target names itself in the run warnings", {
   warn_txt <- paste(readLines(wf), collapse = " ")
   expect_match(warn_txt, "no usable variance")
   expect_match(warn_txt, "undefined")
+
+  # And in the RETURNED LOG, not only in the file. The warning file holds one
+  # message per locality and surface and the completion handler deletes it, so
+  # a message that lives only there is on screen for a few seconds and then
+  # gone - it never reaches the exported run log.
+  expect_match(res$log_msg, "no usable variance")
+  expect_match(res$log_msg, "[WARN] LocA (Actual)", fixed = TRUE)
+})
+
+test_that("a degenerate target is flagged on its fitted variogram", {
+  # The variogram of a constant target fits a sill 60 orders of magnitude
+  # below the data and reports "Structural Dependence 100%". The fit carries
+  # the cause so the panels can suppress the parameters instead of printing a
+  # strong claim manufactured from numerical noise.
+  pts <- make_test_points(20)
+  lags <- calc_scientific_lags(pts)
+  flat <- pts
+  flat$v <- 7.5
+  v_emp <- gstat::variogram(v ~ 1, flat, width = lags$width, cutoff = lags$cutoff)
+  fit <- suppressWarnings(robust_vgm_fit(v_emp, flat$v))
+  expect_true(vgm_target_degenerate(fit))
+  expect_identical(names(vgm_params_table_df(list(LocA_act = fit), "LocA")), "Status")
+})
+
+test_that("an Actual-only run carries no ML-prediction products", {
+  # pred_col is resolved from the variable's _cve/_ss column whatever the view
+  # is, so an Actual-only run used to fill pv and then register a point-error
+  # surface and a residual map for a run that predicted nothing. The pipeline
+  # half of that contract: with pv absent, no prediction product is built.
+  pts <- make_test_points(20)
+  coords <- sf::st_coordinates(pts)
+  pts_data <- data.frame(x = coords[, 1], y = coords[, 2],
+                         v = pts$v, pv = NA_real_, Locality = "LocA")
+  item <- list(l = "LocA", pts_data = pts_data,
+               m_params = list(idw_p_act = 2, idw_p_pre = 2, idw_nmax = 12,
+                               tps_lambda_act = -1, tps_lambda_pre = -1,
+                               pre_fit_act = NULL, pre_fit_pre = NULL,
+                               cv_strategy = "auto", rfk_uncertainty = "jackknife"))
+
+  res <- suppressWarnings(run_regional_interpolation(
+    item, "IDW", 32633, character(0), NULL, "wrapped", "dynamic", 250,
+    "fixed", 200, "EPSG:4326", FALSE, "actual"))
+
+  expect_false(is.null(res$r_a))
+  expect_null(res$r_p)             # no predicted surface
+  expect_null(res$r_res)           # no residual (delta) raster
+  expect_null(res$r_point_err)     # no interpolated point-error surface
+  expect_true(all(is.na(res$pts$pv)))
+  expect_true(all(is.na(res$pts$resid)))
+  expect_true(all(is.na(res$pts$model_resid_pre)))
 })
 
 test_that("an emptied covariate screen names the cause instead of failing as RK", {
@@ -1963,6 +2151,10 @@ test_that("an emptied covariate screen names the cause instead of failing as RK"
   expect_false(is.null(res$res_sf))          # OK fallback produced a surface
   expect_match(res$log_msg, "covariate screen")
   expect_false(grepl("zero-length variable name", res$log_msg))
+  # The run record says what happened: the screen removed both, and the
+  # surface that was mapped (the OK fallback) used no covariate.
+  expect_equal(res$aux_used, character(0))
+  expect_setequal(res$aux_dropped, c("covA", "covB"))
 
   # Co-Kriging does not die on an empty set (gstat fits a single-variable LMC
   # happily) -- it silently returns ordinary kriging labelled as Co-Kriging, so
@@ -2663,4 +2855,205 @@ test_that("calc_metric_spacing is the mean nearest-neighbour distance in metres"
   sp_ll <- calc_metric_spacing(golden_sf("tiny", crs = 4326))
   expect_equal(sp_ll$mean_nn / sp$mean_nn, 1, tolerance = 0.05)
   expect_equal(sp_ll$max_dim / sp$max_dim, 1, tolerance = 0.05)
+})
+
+# -- the parallel dispatch contract -----------------------------------------
+
+test_that("every pinned dispatch ships the globals its body reads", {
+  # The promise bodies pin `globals =` rather than paying future's recursive
+  # discovery walk, which cost 6 s of frozen main session on every run and, at
+  # the governing-factors site, shipped masked base generics whose package
+  # references made the worker attach spam, terra, fields and sf. The price of
+  # pinning is that a name added to a body and forgotten in its list fails
+  # only inside the worker, as "object not found", where no sequential test
+  # can see it. So: every free name in a pinned body must be pinned, defined
+  # at the top level of a spatial_helpers.R fragment (the worker sources those
+  # itself), or come from a package.
+  root <- normalizePath(file.path(testthat::test_path(), "..", ".."), mustWork = TRUE)
+
+  # The fragment list is READ from the master, never restated here: a fragment
+  # this test still trusted after the master stopped sourcing it would account
+  # for names no worker defines, which is the failure the test exists to catch.
+  master <- readLines(file.path(root, "spatial_helpers.R"), warn = FALSE)
+  frags <- sub('.*source\\(file\\.path\\(src_dir, "([^"]+)"\\)\\).*', "\\1",
+               grep('source\\(file\\.path\\(src_dir, "', master, value = TRUE))
+  expect_gte(length(frags), 4L)
+  top_level_names <- function(files) {
+    src <- unlist(lapply(files,
+                         function(f) readLines(file.path(root, f), warn = FALSE)))
+    sub(" <- .*$", "", grep("^[^ #]+ <- ", src, value = TRUE))
+  }
+  # Each worker is trusted with exactly what its own body source()s.
+  from_spatial <- top_level_names(frags)
+  from_classif <- top_level_names(c(frags, "classif_helpers.R"))
+
+  check_dispatch <- function(file, tail_line, expected_pinned,
+                             from_helpers = from_spatial) {
+    src <- readLines(file.path(root, file), warn = FALSE)
+    i0 <- grep("promises::future_promise({", src, fixed = TRUE)
+    i1 <- grep(tail_line, src, fixed = TRUE)
+    expect_length(i0, 1L)
+    expect_length(i1, 1L)
+
+    txt <- src[i0:i1]
+    txt[length(txt)] <- sub(" %...>%.*$", "", txt[length(txt)])
+    dispatch <- parse(text = paste(txt, collapse = "\n"))[[1]]
+
+    pinned <- names(as.list(dispatch$globals))[-1]
+    expect_setequal(pinned, expected_pinned)
+
+    body_fn <- eval(call("function", NULL, dispatch[[2]]))
+    free <- globals::findGlobals(body_fn)
+    called <- codetools::findGlobals(body_fn, merge = FALSE)$functions
+
+    # A name read as DATA has to be shipped even when it happens to collide
+    # with a package function: `df` resolves to stats::df, so a forgotten
+    # `df` would hand the worker the F density instead of the user's table.
+    read_as_data <- setdiff(free, called)
+    expect_identical(setdiff(read_as_data, c(pinned, from_helpers)), character(0),
+                     info = paste(file, "- read as data in the worker but never shipped:",
+                                  paste(setdiff(read_as_data, c(pinned, from_helpers)),
+                                        collapse = ", ")))
+
+    # A name CALLED as a function may also come from a package.
+    from_package <- vapply(called, function(nm) {
+      fn <- tryCatch(get(nm), error = function(e) NULL)
+      !is.null(fn) && !identical(environment(fn), globalenv())
+    }, logical(1))
+    unaccounted <- setdiff(called[!from_package], c(pinned, from_helpers))
+    expect_identical(unaccounted, character(0),
+                     info = paste(file, "- called in the worker but never shipped to it:",
+                                  paste(unaccounted, collapse = ", ")))
+    dispatch
+  }
+
+  interp <- check_dispatch("server_execution.R",
+                           "seed = 12345) %...>% (function(res_all) {",
+                           c("main_wd", "run_params", "df_list", "nested_workers"))
+  # Pinning also switches off the package detection that walk used to do, so
+  # the unqualified calls in the helper graph need the same declaration the
+  # nested furrr_options makes.
+  expect_identical(eval(interp$packages), c("sf", "gstat", "dplyr"))
+
+  check_dispatch("gov_module.R",
+                 "seed = TRUE) %...>% (function(res) {",
+                 c("proj_root_ship", "df", "target_col", "preds", "n_perms",
+                   "ntree_val", "shap_size_val", "cores_hint_val",
+                   "cancel_file_ship"))
+
+  # The classification worker sources classif_helpers.R as well, and ships one
+  # object: everything the pipeline reads travels inside run_args.
+  check_dispatch("classif_module.R",
+                 "seed = TRUE) %...>% (function(res) {",
+                 "run_args", from_helpers = from_classif)
+})
+
+test_that("every pinned dispatch establishes its own parallel plan", {
+  # A pool worker is reused across features. If a task's teardown does not
+  # complete, it leaves that worker on a plan pointing at a cluster nobody owns
+  # any more, and nbrOfWorkers() then reports the dead cluster's size - which is
+  # what every escalation guard reads (the run and optimizer bodies directly,
+  # compute_governing_factors() for SHAP, tune:::get_future_workers() for the
+  # classification grid). Each body therefore resets the plan after its
+  # source(), rather than trusting what it inherited.
+  root <- normalizePath(file.path(testthat::test_path(), "..", ".."), mustWork = TRUE)
+  for (f in c("server_execution.R", "server_model_tuning.R", "gov_module.R",
+              "classif_module.R")) {
+    src <- readLines(file.path(root, f), warn = FALSE)
+    i_src <- grep("source(\"spatial_helpers.R\"", src, fixed = TRUE)
+    # A bare statement, not the tryCatch()-wrapped reset in the teardown: the
+    # teardown tidies up after this task, the reset protects this task from the
+    # last one.
+    i_plan <- grep("^\\s*future::plan\\(future::sequential\\)\\s*$", src)
+    expect_gte(length(i_src), 1L)
+    expect_true(any(i_plan > i_src[1]), info = paste(f, "- no plan reset after the source()"))
+  }
+})
+
+# ── Models handed back to the main session ─────────────────────────────────
+# A formula built inside a function carries that function's whole frame as its
+# environment, and `terms` inherits it. A fitted model returned from a worker
+# therefore dragged the locality's point set, prediction grid, covariate grid
+# and kriging output back with it, and the main session held that frame for
+# the displayed run and for every archived copy of it.
+
+test_that("detach_model_frame drops the fitting frame and keeps the model", {
+  fit_in_a_frame <- function() {
+    stand_in_for_the_grid <- runif(2e5)
+    d <- data.frame(y = rnorm(50), x = rnorm(50))
+    # The environment of a formula built here IS this frame.
+    lm(as.formula("y ~ x"), data = d)
+  }
+  m <- fit_in_a_frame()
+  # A fitted lm holds the frame TWICE: $terms, and the terms attribute of the
+  # model frame it kept in $model. Detaching only the first frees nothing.
+  expect_true("stand_in_for_the_grid" %in% ls(attr(m$terms, ".Environment")))
+  expect_true("stand_in_for_the_grid" %in% ls(attr(attr(m$model, "terms"), ".Environment")))
+
+  d <- detach_model_frame(m)
+  expect_identical(environmentName(attr(d$terms, ".Environment")), "R_GlobalEnv")
+  expect_identical(environmentName(attr(attr(d$model, "terms"), ".Environment")), "R_GlobalEnv")
+  # The model itself is untouched; only the environment reference is gone.
+  expect_equal(coef(d), coef(m))
+  expect_equal(summary(d)$r.squared, summary(m)$r.squared)
+  # 2e5 doubles is 1.6 MB, so the frame is unmistakable in the payload.
+  expect_gt(length(serialize(m, NULL)), 1e6)
+  expect_lt(length(serialize(d, NULL)), length(serialize(m, NULL)) / 10)
+})
+
+test_that("the pipeline's RK summary and RFK forest carry no pipeline frame", {
+  set.seed(4)
+  n <- 40
+  pts_data <- data.frame(x = 500000 + runif(n, 0, 1200), y = 4400000 + runif(n, 0, 1200),
+                         Locality = "L", aux1 = rnorm(n))
+  pts_data$v <- 10 + 1.5 * pts_data$aux1 + rnorm(n, 0, 0.5)
+  pts_data$pv <- NA_real_
+  item <- list(l = "L", pts_data = pts_data,
+               m_params = list(idw_p_act = 2, idw_p_pre = 2, idw_nmax = 12,
+                               tps_lambda_act = -1, tps_lambda_pre = -1,
+                               pre_fit_act = NULL, pre_fit_pre = NULL,
+                               cv_strategy = "auto", rfk_uncertainty = "jackknife",
+                               rf_ntree = 50, vif_threshold = 10))
+
+  rk <- suppressWarnings(run_regional_interpolation(
+    item, "RK", 32635, "aux1", NULL, "convex", "fixed", 200,
+    "fixed", 60, "EPSG:32635", FALSE, "actual"))
+  expect_s3_class(rk$summ_act, "summary.lm")
+  expect_identical(environmentName(attr(rk$summ_act$terms, ".Environment")), "R_GlobalEnv")
+  # The reporting path reads these and nothing else.
+  expect_equal(nrow(rk$summ_act$coefficients), 2L)
+  expect_true(is.finite(rk$summ_act$r.squared))
+  # The summary's own content is a few kB; the frame it used to carry is not.
+  expect_lt(length(serialize(rk$summ_act, NULL)), 1e5)
+
+  rfk <- suppressWarnings(run_regional_interpolation(
+    item, "RFK", 32635, "aux1", NULL, "convex", "fixed", 200,
+    "fixed", 60, "EPSG:32635", FALSE, "actual"))
+  expect_s3_class(rfk$rf_act, "randomForest")
+  expect_identical(environmentName(attr(rfk$rf_act$terms, ".Environment")), "R_GlobalEnv")
+  imp <- randomForest::importance(rfk$rf_act)
+  expect_equal(rownames(imp), "aux1")
+  # A detached model still predicts when it is handed complete newdata.
+  expect_true(all(is.finite(predict(rfk$rf_act, data.frame(aux1 = c(-1, 0, 1))))))
+})
+
+test_that("the point-error surface resolves an absent IDW neighbour count", {
+  # gstat::idw(nmax = NULL) ends the call with "argument is of length zero".
+  # The run path resolves idw_nmax before building m_params, so this only bites
+  # a caller that builds m_params itself (tests, a restored configuration).
+  set.seed(5)
+  n <- 30
+  pts_data <- data.frame(x = 500000 + runif(n, 0, 1000), y = 4400000 + runif(n, 0, 1000),
+                         Locality = "L", v = rnorm(n, 10, 2))
+  pts_data$pv <- pts_data$v + rnorm(n, 0, 0.3)
+  item <- list(l = "L", pts_data = pts_data,
+               m_params = list(idw_p_act = 2, idw_p_pre = 2,
+                               tps_lambda_act = -1, tps_lambda_pre = -1,
+                               pre_fit_act = NULL, pre_fit_pre = NULL,
+                               cv_strategy = "auto", rfk_uncertainty = "jackknife"))
+  res <- suppressWarnings(run_regional_interpolation(
+    item, "OK", 32635, character(0), NULL, "convex", "fixed", 200,
+    "fixed", 60, "EPSG:32635", TRUE, "actual"))
+  expect_false(is.null(res$r_point_err))
+  expect_s4_class(terra::unwrap(res$r_point_err), "SpatRaster")
 })

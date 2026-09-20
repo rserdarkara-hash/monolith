@@ -87,15 +87,31 @@
     # the freshly guessed column instead of the stale input.
     new_choices <- c("ALL", unique(df[[loc_guess]]))
     selected_locs <- intersect(curr_locs, new_choices)
-    # A new dataset is a new CRS question, so both selectors go back to empty on
-    # EVERY upload and identification runs from scratch. That includes a CRS the
-    # user typed for the previous file: it was established for that file, never
-    # for this one, and leaving it standing over different coordinates is how a
-    # survey ends up silently in the wrong country. Within a dataset the rule is
-    # unchanged - once a CRS is set here, a boundary shapefile or a column remap
-    # never overrides it (crs_user_chose, in the identification observer).
+    # A new dataset is a new CRS question, so the Input Data CRS goes back to
+    # empty on EVERY upload and identification runs from scratch. That includes
+    # a CRS the user typed for the previous file: it was established for that
+    # file, never for this one, and leaving it standing over different
+    # coordinates is how a survey ends up silently in the wrong country. Within
+    # a dataset the rule is unchanged - once a CRS is set here, a boundary
+    # shapefile or a column remap never overrides it (crs_user_chose, in the
+    # identification observer).
+    # The Target Mapping CRS is not a property of the file: it names the system
+    # the outputs are produced in. A value the USER chose therefore stays, and
+    # the suitability readout under the selector judges it against the new data
+    # at once; a value the app filled is cleared and re-identified. The shipped
+    # sample's preset below still sets both.
+    keep_target <- crs_user_chose("crs_selection") && !is_sample_upload()
     clear_input_crs()
-    clear_target_crs()
+    if (keep_target) {
+      # The kept value is the user's; the app's record of what it wrote for the
+      # previous file does not carry over to this one.
+      session_state$crs_auto$crs_selection <- character(0)
+      showNotification(paste0("Target Mapping CRS kept as ", crs_effective("crs_selection"),
+                              " from your previous selection. Maps, grid resolution, buffer distances and exports for this dataset will be produced in that system. The note under the selector says whether it suits the new data."),
+                       type = "message", duration = 15)
+    } else {
+      clear_target_crs()
+    }
 
     # The one exception, and the only preset in the app: the dataset shipped in
     # sample_data/ opens ready to run - the two localities the accompanying
@@ -263,8 +279,7 @@
   # .prj's CRS, and the identification observer that rv$shp_bound invalidates
   # runs before either reaches the browser.
   crs_user_chose <- function(id) {
-    v <- crs_effective(id)
-    nzchar(v) && !(v %in% session_state$crs_auto[[id]])
+    crs_chosen_by_user(input[[id]], session_state$crs_auto[[id]], session_state$crs_stale[[id]])
   }
   crs_has_value <- function(id) {
     nzchar(crs_effective(id)) || length(session_state$crs_auto[[id]]) > 0

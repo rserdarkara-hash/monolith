@@ -95,9 +95,13 @@ test_that("get_stat_letters uses ANOVA for 2 groups even when tukey requested", 
     value = c(rnorm(10, 10, 2), rnorm(10, 12, 2)),
     group = factor(rep(c("A", "B"), each = 10))
   )
-  # With only 2 groups, tukey falls back to ANOVA-like label
+  # With only 2 groups there is nothing for a post-hoc to compare, so the
+  # tukey request must fall through to the ANOVA banner - which is what the
+  # label says, so assert the label rather than mere non-NULL.
   result <- get_stat_letters(df, "value", "group", "tukey")
-  expect_true(!is.null(result))
+  expect_s3_class(result, "data.frame")
+  expect_match(result$letter[1], "ANOVA: F")
+  expect_identical(result, get_stat_letters(df, "value", "group", "anova"))
 })
 
 test_that("post-hoc letters separate genuinely different groups and join equal ones", {
@@ -105,7 +109,6 @@ test_that("post-hoc letters separate genuinely different groups and join equal o
   # from a broken one: agricolae's `groups` column, its descending-mean row
   # order and its test choice are all things a version bump can move, and these
   # letters are drawn onto figures the user exports into papers.
-  skip_if_not_installed("agricolae")
   set.seed(42)
   sep <- data.frame(
     value = c(rnorm(10, 10, 1), rnorm(10, 15, 1), rnorm(10, 20, 1)),
@@ -132,7 +135,6 @@ test_that("post-hoc letters separate genuinely different groups and join equal o
 test_that("each post-hoc choice routes to its own test, not a neighbour's", {
   # A Duncan result silently produced by HSD.test, or a rank test that quietly
   # ran the parametric one, passes every structural assertion in this file.
-  skip_if_not_installed("agricolae")
   letters_of <- function(df, tt) {
     l <- get_stat_letters(df, "value", "group", tt)
     paste(l$group, l$letter, sep = "=", collapse = " ")
@@ -161,17 +163,6 @@ test_that("each post-hoc choice routes to its own test, not a neighbour's", {
   kw <- get_stat_letters(ranked, "value", "group", "kruskal")
   expect_equal(length(unique(kw$letter)), 3L)
   expect_identical(kw$group[kw$letter == "a"], "C")
-})
-
-test_that("get_stat_letters handles errors gracefully", {
-  df <- data.frame(
-    value = c(1, 2, 3),
-    group = factor(c("A", "B", "C"))
-  )
-  result <- get_stat_letters(df, "value", "group", "tukey")
-  # With n < required for tests, it may return NULL or error
-  # The function should not throw uncaught errors
-  expect_true(is.null(result) || is.data.frame(result))
 })
 
 test_that("get_stat_letters handles NA values in variable", {
@@ -205,7 +196,6 @@ test_that("get_stat_letters returns NULL when N <= k (zero error df)", {
 # ── Numeric contract: the post-hoc letters ─────────────────────────────────
 
 test_that("Tukey letters reproduce agricolae's own grouping", {
-  skip_if_not_installed("agricolae")
   df <- with_seed(3, data.frame(
     v = c(rnorm(10, 10, 1), rnorm(10, 10.2, 1), rnorm(10, 20, 1)),
     g = rep(c("a", "b", "c"), each = 10)))
@@ -229,7 +219,6 @@ test_that("Tukey letters reproduce agricolae's own grouping", {
 })
 
 test_that("the Kruskal path uses BH-adjusted comparisons on ranks", {
-  skip_if_not_installed("agricolae")
   df <- with_seed(3, data.frame(
     v = c(rnorm(10, 10, 1), rnorm(10, 10.2, 1), rnorm(10, 20, 1)),
     g = rep(c("a", "b", "c"), each = 10)))

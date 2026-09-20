@@ -1,25 +1,53 @@
 # test-governing-factors.R — tests for compute_governing_factors.
 
+# Every compute_governing_factors call below is routed through
+# without_partial_match_notices() (helper.R): the function fits a randomForest,
+# whose own seq(along = ) call trips setup.R's warnPartialMatchArgs from inside
+# the dependency. Unmuffled it is most of the suite's warning output, which
+# buries a genuine new one. Only that one message is filtered; every other
+# warning these calls raise still reaches the reporter.
+
 test_that("compute_governing_factors returns NULL for fewer than 10 rows", {
   df <- make_test_df(9)
-  result <- compute_governing_factors(df, "a", c("b", "c", "d"))
+  result <- without_partial_match_notices(
+    compute_governing_factors(df, "a", c("b", "c", "d")))
   expect_null(result)
 })
 
-test_that("compute_governing_factors returns expected list structure", {
+test_that("the returned list is the shape the Governing Factors panel reads", {
+  # One fit, read seven ways. Each component used to have a block of its own
+  # making the same call, which paid for eight forests plus eight DALEX passes
+  # to assert eight classes.
   df <- make_test_df(30)
-  result <- compute_governing_factors(df, "a", c("b", "c", "d", "e"))
+  predictors <- c("b", "c", "d")
+  result <- without_partial_match_notices(
+    compute_governing_factors(df, "a", predictors))
+
   expect_type(result, "list")
-  expected_names <- c("model", "explainer", "importance", "top_var",
-                      "ale", "pdp", "shap", "n_used", "n_total")
-  expect_setequal(names(result), expected_names)
+  expect_setequal(names(result),
+                  c("model", "explainer", "importance", "top_var",
+                    "ale", "pdp", "shap", "n_used", "n_total"))
+  expect_s3_class(result$model, "randomForest")
+  expect_s3_class(result$explainer, "explainer")
+
+  expect_s3_class(result$importance, "data.frame")
+  expect_gte(nrow(result$importance), 1L)
+  expect_true(all(c("variable", "dropout_loss") %in% colnames(result$importance)))
+  expect_setequal(as.character(result$importance$variable), predictors)
+
+  expect_true(result$top_var %in% predictors)
+  expect_s3_class(result$ale, "data.frame")
+  expect_s3_class(result$pdp, "data.frame")
+  expect_s3_class(result$shap, "data.frame")
+  expect_true(all(c("feature_value", "contribution") %in% colnames(result$shap)))
 })
 
 test_that("compute_governing_factors reports the complete-case sample it fitted", {
   df <- make_test_df(40)
   df$b[1:6] <- NA         # missing in a predictor
   df$a[7:9] <- NA         # missing in the target
-  result <- compute_governing_factors(df, "a", c("b", "c", "d"))
+  result <- without_partial_match_notices(
+    compute_governing_factors(df, "a", c("b", "c", "d")))
   expect_equal(result$n_total, 40)
   # The forest is fitted on complete cases across target + predictors, and the
   # panel prints that sample, so the two must agree by construction.
@@ -27,29 +55,16 @@ test_that("compute_governing_factors reports the complete-case sample it fitted"
   expect_lt(result$n_used, result$n_total)
 })
 
-test_that("compute_governing_factors model is class randomForest", {
-  df <- make_test_df(30)
-  result <- compute_governing_factors(df, "a", c("b", "c", "d"))
-  expect_s3_class(result$model, "randomForest")
-})
-
-test_that("compute_governing_factors importance is a non-empty data.frame", {
-  df <- make_test_df(30)
-  result <- compute_governing_factors(df, "a", c("b", "c", "d"))
-  expect_s3_class(result$importance, "data.frame")
-  expect_true(nrow(result$importance) >= 1)
-  expect_true("variable" %in% colnames(result$importance))
-  expect_true("dropout_loss" %in% colnames(result$importance))
-})
-
 test_that("governing-factors importance is the RMSE increase over the fitted model", {
   df <- make_test_df(30)
-  result <- compute_governing_factors(df, "a", c("b", "c"),
-                                      n_permutations = 2, rf_ntree = 30)
+  result <- without_partial_match_notices(
+    compute_governing_factors(df, "a", c("b", "c"),
+                              n_permutations = 2, rf_ntree = 30))
 
   raw <- with_seed(12345, {
-    fit <- randomForest::randomForest(a ~ ., data = df[, c("a", "b", "c")],
-                                      ntree = 30, importance = TRUE)
+    fit <- without_partial_match_notices(
+      randomForest::randomForest(a ~ ., data = df[, c("a", "b", "c")],
+                                 ntree = 30, importance = TRUE))
     explainer <- DALEX::explain(fit, data = df[, c("b", "c")], y = df$a,
                                 label = "Random Forest", verbose = FALSE)
     as.data.frame(DALEX::model_parts(explainer, B = 2, type = "raw"))
@@ -63,72 +78,40 @@ test_that("governing-factors importance is the RMSE increase over the fitted mod
                expected[order(expected$variable), ], tolerance = 1e-8)
 })
 
-test_that("compute_governing_factors top_var is among the predictors", {
-  df <- make_test_df(30)
-  predictors <- c("b", "c", "d")
-  result <- compute_governing_factors(df, "a", predictors)
-  expect_true(result$top_var %in% predictors)
-})
-
-test_that("compute_governing_factors ALE is a data.frame", {
-  df <- make_test_df(30)
-  result <- compute_governing_factors(df, "a", c("b", "c"))
-  expect_s3_class(result$ale, "data.frame")
-})
-
-test_that("compute_governing_factors PDP is a data.frame", {
-  df <- make_test_df(30)
-  result <- compute_governing_factors(df, "a", c("b", "c"))
-  expect_s3_class(result$pdp, "data.frame")
-})
-
-test_that("compute_governing_factors SHAP is a data.frame", {
-  df <- make_test_df(30)
-  result <- compute_governing_factors(df, "a", c("b", "c"))
-  expect_s3_class(result$shap, "data.frame")
-  expect_true("feature_value" %in% colnames(result$shap))
-  expect_true("contribution" %in% colnames(result$shap))
-})
-
 test_that("compute_governing_factors handles a single predictor", {
   df <- make_test_df(30)
-  result <- compute_governing_factors(df, "a", "b")
-  expect_true(!is.null(result))
+  result <- without_partial_match_notices(
+    compute_governing_factors(df, "a", "b"))
   expect_equal(result$top_var, "b")
-})
-
-test_that("compute_governing_factors respects n_permutations parameter", {
-  df <- make_test_df(20)
-  result <- compute_governing_factors(df, "a", c("b", "c"), n_permutations = 5)
-  # Importance should have n_vars * (n_permutations + 1) rows
-  # 2 vars * (5 + 1) = 12 rows
-  expect_true(nrow(result$importance) >= 2)
+  expect_setequal(as.character(result$importance$variable), "b")
 })
 
 test_that("compute_governing_factors removes rows with NAs in target/predictors", {
   df <- make_test_df(30)
   df$a[1:5] <- NA
-  result <- compute_governing_factors(df, "a", c("b", "c"))
-  expect_true(!is.null(result))
-  expect_true(nrow(result$importance) >= 1)
+  result <- without_partial_match_notices(
+    compute_governing_factors(df, "a", c("b", "c")))
+  # The five NA-target rows are dropped from the fit and counted out of n_used,
+  # while n_total still reports the sample the user supplied.
+  expect_equal(result$n_total, 30)
+  expect_equal(result$n_used, 25)
+  # And the forest really was grown on those 25 rows, not on 30 with NAs.
+  expect_length(result$model$predicted, 25)
 })
 
 test_that("compute_governing_factors SHAP values are reproducible across calls", {
   df <- make_test_df(30)
-  r1 <- compute_governing_factors(df, "a", c("b", "c"))
-  r2 <- compute_governing_factors(df, "a", c("b", "c"))
+  r1 <- without_partial_match_notices(
+    compute_governing_factors(df, "a", c("b", "c")))
+  r2 <- without_partial_match_notices(
+    compute_governing_factors(df, "a", c("b", "c")))
   expect_equal(r1$shap, r2$shap)
-})
-
-test_that("compute_governing_factors explainer is class 'explainer'", {
-  df <- make_test_df(30)
-  result <- compute_governing_factors(df, "a", c("b", "c", "d"))
-  expect_s3_class(result$explainer, "explainer")
 })
 
 test_that("SHAP dependence contributions have per-observation magnitude (T14)", {
   df <- make_test_df(30)
-  result <- compute_governing_factors(df, "a", "b")
+  result <- without_partial_match_notices(
+    compute_governing_factors(df, "a", "b"))
   # With a single predictor every SHAP permutation attributes the full
   # deviation to that variable, so contribution(i) = f(x_i) - mean(f(X))
   # exactly. The pre-T14 bug summed the aggregated B = 0 row PLUS all
@@ -144,7 +127,10 @@ test_that("SHAP dependence contributions have per-observation magnitude (T14)", 
 test_that("compute_governing_factors does not perturb the caller's RNG (T19)", {
   df <- make_test_df(30)
   set.seed(123); expected_draw <- runif(1)
-  set.seed(123); invisible(compute_governing_factors(df, "a", c("b", "c"))); actual_draw <- runif(1)
+  set.seed(123)
+  invisible(without_partial_match_notices(
+    compute_governing_factors(df, "a", c("b", "c"))))
+  actual_draw <- runif(1)
   expect_equal(actual_draw, expected_draw)
 })
 
@@ -153,8 +139,11 @@ test_that("compute_governing_factors does not perturb the caller's RNG (T19)", {
 test_that("a failed SHAP cluster start restores mc.cores", {
   withr::local_options(mc.cores = 1L)
   testthat::with_mocked_bindings({
-    expect_error(compute_governing_factors(make_test_df(60), "a", c("b", "c", "d"),
-      n_permutations = 1, rf_ntree = 10, shap_sample_size = 50, cores_hint = 3),
+    expect_error(
+      without_partial_match_notices(
+        compute_governing_factors(make_test_df(60), "a", c("b", "c", "d"),
+                                  n_permutations = 1, rf_ntree = 10,
+                                  shap_sample_size = 50, cores_hint = 3)),
       "forced cluster startup failure")
     expect_identical(getOption("mc.cores"), 1L)
   }, makeClusterPSOCK = function(...) stop("forced cluster startup failure"),
@@ -171,9 +160,10 @@ test_that("compute_governing_factors aborts when the cancel flag is set", {
   # The first checkpoint runs before the random forest is fitted, so a flag
   # that is already set must abort essentially immediately.
   expect_error(
-    compute_governing_factors(df, "a", preds, n_permutations = 2,
-                              rf_ntree = 10, shap_sample_size = 10,
-                              cancel_file = cancel_file),
+    without_partial_match_notices(
+      compute_governing_factors(df, "a", preds, n_permutations = 2,
+                                rf_ntree = 10, shap_sample_size = 10,
+                                cancel_file = cancel_file)),
     "cancelled by user")
 })
 
@@ -183,11 +173,13 @@ test_that("compute_governing_factors is unchanged when no cancel file is given",
   missing_flag <- file.path(tempdir(), "gov_cancel_never_created.txt")
   unlink(missing_flag)
 
-  a <- compute_governing_factors(df, "a", preds, n_permutations = 2,
-                                 rf_ntree = 20, shap_sample_size = 10)
-  b <- compute_governing_factors(df, "a", preds, n_permutations = 2,
-                                 rf_ntree = 20, shap_sample_size = 10,
-                                 cancel_file = missing_flag)
+  a <- without_partial_match_notices(
+    compute_governing_factors(df, "a", preds, n_permutations = 2,
+                                   rf_ntree = 20, shap_sample_size = 10))
+  b <- without_partial_match_notices(
+    compute_governing_factors(df, "a", preds, n_permutations = 2,
+                                   rf_ntree = 20, shap_sample_size = 10,
+                                   cancel_file = missing_flag))
   expect_equal(a$importance, b$importance)
   expect_equal(a$shap, b$shap)
   expect_identical(a$top_var, b$top_var)
@@ -198,9 +190,10 @@ test_that("compute_governing_factors is unchanged when no cancel file is given",
 test_that("the PDP is the mean prediction with the feature held fixed", {
   d <- sf::st_drop_geometry(golden_sf("core", localities = "Yorga"))[
     , c("ph", "v82", "v87", "v43")]
-  res <- compute_governing_factors(d, "ph", c("v82", "v87", "v43"),
-                                   n_permutations = 5, rf_ntree = 60,
-                                   shap_sample_size = 40)
+  res <- without_partial_match_notices(
+    compute_governing_factors(d, "ph", c("v82", "v87", "v43"),
+                                     n_permutations = 5, rf_ntree = 60,
+                                     shap_sample_size = 40))
   expect_equal(res$n_used, nrow(d))
 
   # Friedman (2001): the partial dependence at v is the average prediction with
@@ -221,9 +214,10 @@ test_that("the PDP is the mean prediction with the feature held fixed", {
 test_that("the SHAP sample is the documented deterministic draw", {
   d <- sf::st_drop_geometry(golden_sf("core", localities = "Yorga"))[
     , c("ph", "v82", "v87", "v43")]
-  res <- compute_governing_factors(d, "ph", c("v82", "v87", "v43"),
-                                   n_permutations = 5, rf_ntree = 60,
-                                   shap_sample_size = 25)
+  res <- without_partial_match_notices(
+    compute_governing_factors(d, "ph", c("v82", "v87", "v43"),
+                                     n_permutations = 5, rf_ntree = 60,
+                                     shap_sample_size = 25))
 
   # The sampled rows come from a fixed seed, so the plotted feature values are
   # reproducible and are the sampled rows' own values - not a re-sort, not a
@@ -237,9 +231,10 @@ test_that("SHAP contributions do not scale with the permutation count", {
   d <- sf::st_drop_geometry(golden_sf("core", localities = "Yorga"))[
     , c("ph", "v82", "v87", "v43")]
   mag <- function(B) {
-    r <- compute_governing_factors(d, "ph", c("v82", "v87", "v43"),
-                                   n_permutations = B, rf_ntree = 60,
-                                   shap_sample_size = 25)
+    r <- without_partial_match_notices(
+    compute_governing_factors(d, "ph", c("v82", "v87", "v43"),
+                                     n_permutations = B, rf_ntree = 60,
+                                     shap_sample_size = 25))
     mean(abs(r$shap$contribution))
   }
 
@@ -251,4 +246,42 @@ test_that("SHAP contributions do not scale with the permutation count", {
   m14 <- mag(14)
   expect_gt(m4, 0)
   expect_lt(abs(m14 / m4 - 1), 0.5)
+})
+
+
+# ── The Tabular Data Metrics table ─────────────────────────────────────────
+
+test_that("the governing-factors table keeps full precision and names its units", {
+  res <- list(
+    importance = data.frame(variable = c("som", "clay", "sand"),
+                            dropout_loss = c(2.001495588850122, 0.5, 1.25)),
+    model = list(rsq = c(0.10, 0.4213)))
+  df <- gov_summary_df(res, NULL)
+
+  expect_equal(names(df), c("Governing Factor / Metric", "Value", "Unit"))
+  # The model-quality row comes first, and the two quantities are no longer
+  # mixed under one "Value (RMSE increase | OOB %)" heading: each row states
+  # its own unit.
+  expect_match(df[[1]][1], "OOB variance explained", fixed = TRUE)
+  expect_equal(df$Value[1], 42.13)
+  expect_equal(df$Unit[1], "% of variance (out-of-bag)")
+  expect_true(all(df$Unit[-1] == "RMSE increase"))
+  expect_equal(length(unique(df$Unit)), 2)
+
+  # Importances are the values the model reported, in decreasing order, at full
+  # precision - the display formats them (they used to print as raw doubles).
+  expect_equal(df$Value[-1], sort(res$importance$dropout_loss, decreasing = TRUE))
+  expect_equal(df[[1]][-1], c("som", "sand", "clay"))
+  expect_equal(format_sig(df$Value[2]), "2.001")
+
+  # Without a usable OOB figure the table is the importance rows alone.
+  bare <- gov_summary_df(list(importance = res$importance, model = list(rsq = NA_real_)), NULL)
+  expect_equal(nrow(bare), 3)
+  expect_null(gov_summary_df(NULL))
+
+  # The module keeps only the OOB figure and drops the forest and the DALEX
+  # explainer once a run lands, so the table has to read either shape.
+  kept <- gov_summary_df(list(importance = res$importance, oob_rsq = 0.4213), NULL)
+  expect_equal(kept$Value[1], 42.13)
+  expect_equal(kept[[1]], df[[1]])
 })

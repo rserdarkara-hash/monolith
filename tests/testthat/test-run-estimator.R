@@ -68,9 +68,28 @@ test_that("estimate_run_duration returns list with expected names", {
   expect_setequal(names(result), expected_names)
 })
 
-test_that("estimate_run_duration cold-start produces positive time", {
-  result <- estimate_run_duration(c(100), "OK", comp_mode = FALSE, cores = 4)
-  expect_true(result$est_time_sec > 0)
+test_that("degenerate sample counts stand in as 50, and the estimate covers the biggest locality", {
+  est <- function(n, ...) estimate_run_duration(n, "OK", comp_mode = FALSE, cores = 4, ...)
+
+  # An unknown (NA) or empty (0) locality count is replaced by 50 rather than
+  # dropped, so the estimate is the one for a 50-sample locality - not merely
+  # "greater than zero", which every implementation satisfies.
+  expect_identical(est(c(100, NA, 50)), est(c(100, 50, 50)))
+  expect_identical(est(c(0, 100)), est(c(50, 100)))
+  expect_identical(est(c(NA_real_, 0)), est(c(50, 50)))
+
+  for (n in list(c(100), c(100, NA, 50), c(0, 100), c(NA_real_, 0))) {
+    r <- est(n)
+    expect_true(is.finite(r$est_time_sec))
+    expect_gt(r$est_time_sec, 0)
+  }
+
+  # The name this test used to carry, now asserted: a batch can never be
+  # estimated at less than the single largest locality in it, however many
+  # cores the work is spread over.
+  expect_gte(est(c(10, 500))$est_time_sec, est(c(500))$est_time_sec)
+  expect_gte(estimate_run_duration(rep(100, 8), "OK", FALSE, 64)$est_time_sec,
+             estimate_run_duration(c(100), "OK", FALSE, 64)$est_time_sec)
 })
 
 test_that("estimate_run_duration method multipliers differ by method", {
@@ -106,16 +125,6 @@ test_that("estimate_run_duration comp_mode doubles model count", {
   expect_equal(r_comp$n_models, r_single$n_models * 2)
 })
 
-test_that("estimate_run_duration handles NA sample counts", {
-  result <- estimate_run_duration(c(100, NA, 50), "OK", comp_mode = FALSE, cores = 4)
-  expect_true(result$est_time_sec > 0)
-})
-
-test_that("estimate_run_duration handles zero sample counts", {
-  result <- estimate_run_duration(c(0, 100), "OK", comp_mode = FALSE, cores = 4)
-  expect_true(result$est_time_sec > 0)
-})
-
 test_that("estimate_run_duration is_long_run TRUE for slow methods", {
   # RFK with comp_mode and many localities should be flagged as long
   r <- estimate_run_duration(rep(500, 10), "RFK", comp_mode = TRUE, cores = 4)
@@ -135,12 +144,6 @@ test_that("estimate_run_duration est_time_str is human-readable", {
 test_that("estimate_run_duration estimate_text includes model count", {
   r <- estimate_run_duration(c(100, 200), "OK", comp_mode = FALSE, cores = 4)
   expect_match(r$estimate_text, "~.*model")
-})
-
-test_that("estimate_run_duration single-locality time is at least max of per-loc times", {
-  r <- estimate_run_duration(c(10, 500), "OK", comp_mode = FALSE, cores = 4)
-  # The estimated time should be at least the single largest locality time
-  expect_true(r$est_time_sec > 0)
 })
 
 test_that("estimate_run_duration distributed time benefits from more cores", {

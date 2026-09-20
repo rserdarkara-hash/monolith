@@ -30,8 +30,10 @@ tuning_ui <- function(id, label,
       div(class = "mn-subsection",
           h5("Manual Tuning"),
           selectInput(paste0(id, "_m_loc"), "Locality to Tune", choices = NULL),
+          # Offered only when the Predicted surface gets its own parameter
+          # ("Fit Actual/Predicted separately"); otherwise it reuses the Actual one.
           conditionalPanel(
-              condition = "input.comp_mode == true || ['pred', 'pred_ss', 'resid'].includes(input.value_type)",
+              condition = "(input.comp_mode == true || ['pred', 'pred_ss', 'resid'].includes(input.value_type)) && input.sep_fit == true",
               radioButtons(paste0(id, "_m_target"), "Target",
                            choices = c("Actual" = "act", "Predicted" = "pre"), inline = TRUE)
           ),
@@ -477,7 +479,8 @@ sci_metric_tooltips <- function() {
   c(
     "Source" = "Model and cross-validation design that produced this row's metrics.",
     "RMSE" = "Root Mean Square Error of the cross-validation residuals, in the variable's units. Lower is better.",
-    "NRMSE (%)" = "RMSE expressed as a percentage of the observed mean. Scale-free, so it compares across variables; undefined (NA) when the observed mean is zero.",
+    "NRMSE (mean, %)" = "RMSE as a percentage of the absolute observed mean, i.e. CV(RMSE). Needs a ratio scale: n/a¹ when the observed values span zero, NA when the observed mean is exactly zero.",
+    "NRMSE (SD)" = "RMSE divided by the standard deviation of the observed values: the prediction error as a multiple of the target's spread. Unchanged by shifting the variable's origin, so it stays defined for signed or centred targets. It equals 1/RPD and sqrt((1 - NSE)(n - 1)/n), so it restates, rather than adds to, the evidence in those columns.",
     "MAE" = "Mean Absolute Error of the cross-validation residuals, in the variable's units. Less sensitive to single large errors than RMSE.",
     "R² (Corr)" = "Squared Pearson correlation between observed and CV-predicted values. Measures association only; insensitive to systematic bias.",
     "R² (NSE/Trad)" = "Nash-Sutcliffe efficiency (traditional R²): 1 - SSE/SStot against the observed mean. 1 = perfect, 0 = no better than predicting the mean, negative = worse than the mean.",
@@ -485,9 +488,10 @@ sci_metric_tooltips <- function() {
     "Lin's CCC (Agree)" = "Lin's Concordance Correlation Coefficient: agreement with the 1:1 line, combining precision (correlation) and accuracy (bias/scale shift). 1 = perfect agreement. NA when either vector is constant.",
     "RPD (Prec)" = "Ratio of Performance to Deviation: SD(observed) / RMSE. Chemometrics convention: > 2 good, 1.4-2 fair, < 1.4 poor.",
     "RPIQ" = "Ratio of Performance to Interquartile distance: IQR(observed) / RMSE. The RPD analogue for skewed distributions, where the SD is a poor spread measure. Higher is better.",
-    "SMAPE (%)" = "Symmetric Mean Absolute Percentage Error: scale-free accuracy; 0% is perfect.",
-    "Moran's I" = "Spatial autocorrelation of the CV residuals (symmetric 8-nearest-neighbour weights). Read it against its null expectation E[I] = -1/(n-1) (shown per row on hover), not against 0: values near E[I] mean spatially unstructured errors, clearly higher values signal unmodelled spatial pattern. NA* = the statistic could not be computed for this point set.",
-    "Moran p" = "Two-sided significance of Moran's I under the normality assumption (spdep::moran.test). Small p = the residual autocorrelation is unlikely under the no-structure null. NA* where no sampling distribution is available (the all-pairs fallback weighting) or where Moran's I itself could not be computed."
+    "SMAPE (%)" = "Symmetric Mean Absolute Percentage Error: scale-free accuracy; 0% is perfect. n/a¹ when the observed values span zero, where a single sign disagreement contributes the maximum term however small both values are.",
+    "Moran's I" = "Spatial autocorrelation of the CV residuals (symmetric 8-nearest-neighbour weights). Read it against its null expectation E[I] = -1/(n-1) (shown per row on hover), not against 0. A clearly higher value is consistent with spatial structure the prediction procedure did not capture; it is not by itself an instruction to change engine. A value near E[I] is not proof of a clean model either: random folds leave each held-out point's neighbours in training, which can mask residual structure. Rows scored under Spatial Block CV are marked † and read differently (see the note under the table). NA* = the statistic could not be computed for this point set.",
+    "Block-CV residual clustering" = "Moran's I of the pooled out-of-fold residuals under Spatial Block CV. Those residuals inherit the fold geometry and a shared extrapolation condition within each withheld block, so this statistic measures clustering of block-CV errors; fold geometry and shared extrapolation error confound it, and it cannot on its own diagnose a missing spatial trend. Its p-value is not reported.",
+    "Moran p" = "Two-sided significance of Moran's I under the normality assumption (spdep::moran.test). Small p = the residual autocorrelation is unlikely under the no-structure null. NA† under Spatial Block CV, where that reference distribution does not hold. NA* where no sampling distribution is available (the all-pairs fallback weighting) or where Moran's I itself could not be computed."
   )
 }
 build_rk_trend_ui <- function(lm_sum, dt_id, raw_id) {
@@ -526,9 +530,10 @@ build_rk_trend_ui <- function(lm_sum, dt_id, raw_id) {
            "assume independent residuals. Regression Kriging kriges these residuals ",
            "precisely because they are spatially autocorrelated, which lowers the ",
            "effective sample size and biases the standard errors downward, so ",
-           "significance is overstated. Check the residual Moran's I in the Model ",
-           "Performance table: the further it sits above its expectation ",
-           "E[I] = -1/(n-1), the more optimistic this table is. The coefficient ",
+           "significance is overstated. The residual field to judge that on is the ",
+           "Internal Residual Variogram below, which is the variogram of these very ",
+           "residuals: the more of its sill sits in the structured part rather than ",
+           "the nugget, the more optimistic this table is. The coefficient ",
            "estimates themselves remain unbiased."),
     tags$details(style = "margin-top: 4px;",
       tags$summary("Raw R model summary", style = "cursor: pointer; font-size: 0.8em; opacity: 0.7;"),
@@ -745,12 +750,76 @@ complete_case_note <- function(n_used, n_total) {
           if (dropped > 0) sprintf(" (%d dropped for missing values)", dropped) else "")
 }
 
+# Browser twin of format_sig() (ui_formatting.R): four significant digits,
+# "0" for zero, a whole number exactly, every integer digit from 1000 up,
+# scientific notation below 1e-4. Numeric
+# table columns keep their numbers (DataTables still sorts on them) and only
+# their DISPLAY is formatted, through sig_render_defs(). Mounted once in
+# ui_main.R's head. Non-numeric cells pass through unchanged.
+format_sig_js <- function() {
+  "
+window.mnFormatSig = function (d) {
+  if (d === null || d === undefined || d === '') return '';
+  if (typeof d === 'string' && !/^\\s*-?(\\d+\\.?\\d*|\\.\\d+)([eE][-+]?\\d+)?\\s*$/.test(d)) return d;
+  var x = Number(d);
+  if (!isFinite(x)) return d;
+  if (x === Math.round(x) && Math.abs(x) < 1e15) return (x + 0).toFixed(0);
+  if (Math.abs(x) >= 1000) return (Math.round(x) + 0).toFixed(0);
+  if (Math.abs(x) < 1e-4) return x.toExponential(3).replace(/e([+-])(\\d)$/, 'e$10$2');
+  return String(Number(x.toPrecision(4)));
+};
+"
+}
+
+# The three markers a result table can print in place of a number, and the
+# sentence each one needs. A cell can carry the short form; the explanation
+# belongs under the table, and every table that can show a marker must show
+# the SAME sentence for it - which is why the texts live here and not at the
+# render sites. table_footnote() emits only the ones a table actually used.
+METRIC_MARKER_NOTES <- c(
+  scale = paste("n/a¹ Not reported for targets whose observed values span zero.",
+                "Mean- and percentage-normalised errors have no interpretation on a",
+                "signed or centred scale. NRMSE (SD) is reported instead."),
+  block = paste("† Under Spatial Block CV the pooled out-of-fold residuals inherit the",
+                "spatial fold geometry and a shared extrapolation condition within each",
+                "withheld block, so this statistic measures clustering of block-CV errors",
+                "and its usual reference distribution does not hold: the p-value is not",
+                "reported, and the value cannot on its own diagnose a missing spatial trend."),
+  na    = paste("NA* Not computable for this point set (see the Run Log); it does not mean",
+                "the quantity is zero or that no structure was found.")
+)
+
+table_footnote <- function(markers) {
+  notes <- unname(METRIC_MARKER_NOTES[intersect(names(METRIC_MARKER_NOTES), markers)])
+  if (!length(notes)) return(NULL)
+  htmltools::tags$div(class = "mn-table-note", lapply(notes, htmltools::tags$div))
+}
+
+# DataTables columnDefs entry that displays `cols` of `df` through
+# mnFormatSig() while sorting and copying still see the numbers. `rownames`
+# shifts the column index when the table shows row names.
+sig_render_defs <- function(df, cols, rownames = FALSE) {
+  idx <- match(cols, names(df))
+  idx <- idx[!is.na(idx)]
+  if (!length(idx)) return(list())
+  list(list(targets = idx - 1L + as.integer(isTRUE(rownames)),
+            render = DT::JS(
+              "function (data, type) {",
+              "  return type === 'display' && typeof window.mnFormatSig === 'function'",
+              "    ? window.mnFormatSig(data) : data;",
+              "}")))
+}
+
 # Shared DT wrapper for the compact summary tables on the Scientific Analysis
-# tab, matching the Classification Suite look (dom = 't', scrollX). Paging is
-# disabled because dom = 't' hides the paging controls: with the default
-# pageLength, rows beyond the first page would be silently unreachable in
-# variable-length tables (e.g. per-locality variogram parameters).
-sci_dt <- function(df, escape = TRUE, header_tooltips = NULL) {
+# tab, matching the Classification Suite look (dom = 't'). Paging is disabled
+# because dom = 't' hides the paging controls: with the default pageLength,
+# rows beyond the first page would be silently unreachable in variable-length
+# tables (e.g. per-locality variogram parameters). `scroll_x = FALSE` for a
+# table that fits the narrowest supported viewport: its header and body stay
+# one table, so they cannot drift apart. `signif_cols` names the numeric
+# columns displayed at four significant digits.
+sci_dt <- function(df, escape = TRUE, header_tooltips = NULL, scroll_x = TRUE,
+                   signif_cols = NULL) {
   # Never return NULL: DT's htmlwidgets binding reads `data.lazyRender` BEFORE
   # its own `data === null` branch, so a NULL payload arriving at a table that
   # is currently hidden (this tab renders eagerly, suspendWhenHidden = FALSE)
@@ -766,7 +835,8 @@ sci_dt <- function(df, escape = TRUE, header_tooltips = NULL) {
   # the copy button to report it instead of copying a 1 x 1 "table".
   status_like <- ncol(df) == 1 && nrow(df) == 1 && names(df)[1] %in% c("Status", "Error")
   tbl_class <- if (status_like) "display mn-status-table" else "display"
-  opts <- list(dom = 't', paging = FALSE, scrollX = TRUE)
+  opts <- list(dom = 't', paging = FALSE, scrollX = isTRUE(scroll_x))
+  if (!is.null(signif_cols)) opts$columnDefs <- sig_render_defs(df, signif_cols)
   if (!is.null(header_tooltips)) {
     ths <- lapply(names(df), function(nm) {
       if (nm %in% names(header_tooltips)) {

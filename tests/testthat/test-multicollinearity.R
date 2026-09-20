@@ -124,20 +124,6 @@ test_that("auto-detects numeric columns when vars = NULL", {
   expect_false("cat2" %in% res$kept)
 })
 
-test_that("handles singular covariance matrix via fallback", {
-  # Create exactly collinear columns that produce a singular matrix
-  df <- data.frame(
-    a = 1:10,
-    b = 2 * (1:10),       # b = 2*a, perfect collinearity
-    c = rnorm(10, 5, 1)
-  )
-  res <- detect_multicollinearity_engine(df, vars = c("a", "b", "c"),
-                                         vif_threshold = 10)
-  # Should not error; should drop at least one of a or b
-  expect_true(length(res$dropped) >= 1)
-  expect_true("c" %in% res$kept)
-})
-
 test_that("the singular-matrix fallback drops the globally redundant member, whatever the column order", {
   # `ab` is an exact linear combination of `a` and `b`, so the correlation
   # matrix is singular and solve() throws -> the fallback picks the drop. `b`
@@ -167,32 +153,39 @@ test_that("the singular-matrix fallback drops the globally redundant member, wha
 
 test_that("pairwise_threshold parameter is respected", {
   df <- make_test_df(30)
-  # With threshold = 0.0, nearly everything is flagged
+  # Both ends, or the parameter is only half asserted: at 0.0 every pair
+  # clears the bar and is reported, at 1.0 none does.
   res_low <- detect_multicollinearity_engine(df, vars = c("a", "b", "c"),
                                              pairwise_threshold = 0.0)
-  # With threshold = 1.0, nothing is flagged
+  expect_true(res_low$has_collinearity)
+  expect_gt(nrow(res_low$pairs), 0)
+  expect_equal(nrow(res_low$pairs), choose(3, 2))
+
   res_high <- detect_multicollinearity_engine(df, vars = c("a", "b", "c"),
                                               pairwise_threshold = 1.0)
   expect_false(res_high$has_collinearity)
+  expect_null(res_high$pairs)
 })
 
 # ── check_vif ──────────────────────────────────────────────────────────────
 
-test_that("check_vif returns kept and dropped lists", {
-  df <- make_collinear_df(20)
-  res <- check_vif(df, threshold = 10)
-  expect_true(is.list(res))
-  expect_true("kept" %in% names(res))
-  expect_true("dropped" %in% names(res))
-})
+test_that("check_vif forwards the engine's four fields unchanged", {
+  # check_vif is a four-line forwarder over detect_multicollinearity_engine.
+  # Its whole contract is that the four fields arrive intact, so assert
+  # equality with the engine rather than re-testing the gate through it.
+  for (thr in c(5, 10, Inf)) {
+    df <- make_collinear_df(30)
+    got <- check_vif(df, threshold = thr)
+    ref <- detect_multicollinearity_engine(df, vif_threshold = thr)
+    expect_named(got, c("kept", "dropped", "dropped_constant", "dropped_vif"))
+    for (f in names(got)) expect_identical(got[[f]], ref[[f]], info = paste(thr, f))
+  }
 
-test_that("check_vif default threshold drops highly collinear vars", {
-  df <- make_collinear_df(30)
-  res <- check_vif(df, threshold = 10)
-  expect_true(length(res$kept) > 0)
-  # v3 and v4 should survive
-  expect_true("v3" %in% res$kept)
-  expect_true("v4" %in% res$kept)
+  # And the fields carry something at the default threshold, so an accidental
+  # all-empty forward cannot pass the equality above by agreeing on nothing.
+  res <- check_vif(make_collinear_df(30), threshold = 10)
+  expect_gte(length(res$dropped_vif), 1L)
+  expect_true(all(c("v3", "v4") %in% res$kept))
 })
 
 # ── Numeric contract: the VIF itself ───────────────────────────────────────

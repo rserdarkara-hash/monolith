@@ -1,13 +1,5 @@
 # test-discretization.R — tests for discretize_numeric_var.
 
-test_that("median split produces two factor levels", {
-  x <- c(1, 2, 3, 10, 20, 30)
-  result <- discretize_numeric_var(x, method = "median")
-  expect_s3_class(result, "factor")
-  expect_length(levels(result), 2)
-  expect_match(levels(result)[1], "<= Median|<= Mean")
-})
-
 test_that("mean split produces two factor levels", {
   x <- c(1, 2, 3, 4, 5)
   result <- discretize_numeric_var(x, method = "mean")
@@ -56,25 +48,24 @@ test_that("includes variable name prefix when provided", {
   expect_match(levels(result)[1], "pH:")
 })
 
-test_that("median split assigns correctly", {
-  x <- c(1, 2, 3, 4, 100)  # median = 3
-  result <- discretize_numeric_var(x, method = "median")
-  expect_equal(as.character(result[1]), levels(result)[1])  # 1 <= 3
-  expect_equal(as.character(result[5]), levels(result)[2])  # 100 > 3
-})
-
 # ── Edge cases ────────────────────────────────────────────────────────────
 
-test_that("discretize_numeric_var handles two unique values", {
-  x <- c(1, 2)
-  result <- discretize_numeric_var(x, method = "median")
-  expect_s3_class(result, "factor")
-})
+test_that("degenerate inputs still produce a usable factor", {
+  # Two points: the median falls between them, so each lands in its own class.
+  two <- discretize_numeric_var(c(1, 2), method = "median")
+  expect_length(levels(two), 2L)
+  expect_equal(as.integer(two), c(1L, 2L))
 
-test_that("discretize_numeric_var handles single value with mean method", {
-  x <- rep(10, 10)
-  result <- discretize_numeric_var(x, method = "mean")
-  expect_s3_class(result, "factor")
+  # A constant column has a mean but no spread: both labels still exist and
+  # every row is <= the mean, so the panel shows one populated group.
+  flat <- discretize_numeric_var(rep(10, 10), method = "mean")
+  expect_length(levels(flat), 2L)
+  expect_true(all(as.integer(flat) == 1L))
+
+  # An infinite value does not break the median split (it would the mean one).
+  inf <- discretize_numeric_var(c(1, 2, 3, Inf, 5), method = "median")
+  expect_length(levels(inf), 2L)
+  expect_equal(as.integer(inf), c(1L, 1L, 1L, 2L, 2L))
 })
 
 test_that("discretize_numeric_var handles negative values", {
@@ -82,12 +73,6 @@ test_that("discretize_numeric_var handles negative values", {
   result <- discretize_numeric_var(x, method = "median")
   expect_s3_class(result, "factor")
   expect_length(levels(result), 2)
-})
-
-test_that("discretize_numeric_var handles Inf values", {
-  x <- c(1, 2, 3, Inf, 5)
-  result <- discretize_numeric_var(x, method = "median")
-  expect_s3_class(result, "factor")
 })
 
 # ── Numeric contract: where the split actually falls ───────────────────────
@@ -120,11 +105,13 @@ test_that("the median and mean splits cut at median() and mean()", {
 
   fm <- discretize_numeric_var(x, "median")
   med <- median(x)
+  expect_equal(levels(fm), c("<= Median", "> Median"))
   expect_lte(max(x[as.integer(fm) == 1L]), med)
   expect_gt(min(x[as.integer(fm) == 2L]), med)
 
   fa <- discretize_numeric_var(x, "mean")
   mu <- mean(x)
+  expect_equal(levels(fa), c("<= Mean", "> Mean"))
   expect_lte(max(x[as.integer(fa) == 1L]), mu)
   expect_gt(min(x[as.integer(fa) == 2L]), mu)
 

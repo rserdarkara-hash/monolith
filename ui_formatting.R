@@ -292,9 +292,13 @@ build_regional_params_df <- function(type, loc, regional_params, has_pre, export
 # archived runs be checked for having scored the same rows in the same folds
 # (`pop_id`), and what the folds re-estimated (`refit`). Coverage comes off
 # perform_cv: metrics are computed on the predicted samples, so a row below
-# 100% describes fewer samples than the design asked for.
+# 100% describes fewer samples than the design asked for. `moran` is the
+# row's moran_reading(): under Spatial Block CV the p-value is not reported
+# and `Moran Context` names what the statistic measures there, so a reader of
+# the file alone cannot take it for the random-CV quantity. `Target spans
+# zero` explains an NA in NRMSE (mean) and SMAPE, which do not apply there.
 cv_metrics_export_df <- function(res, source_label, cv_design = NA_character_,
-                                 cv_info = NULL) {
+                                 cv_info = NULL, moran = moran_reading(NA_character_)) {
   if (is.null(res)) return(NULL)
   cov_pct <- res$coverage %||% NA_real_
   out <- data.frame(Source = source_label,
@@ -305,13 +309,52 @@ cv_metrics_export_df <- function(res, source_label, cv_design = NA_character_,
                     `n expected` = as.integer(res$n_expected %||% NA),
                     `n predicted` = as.integer(res$n %||% NA),
                     `Coverage (%)` = if (is.na(cov_pct)) NA_real_ else 100 * as.numeric(cov_pct),
+                    `Target spans zero` = isTRUE(res$signed_target),
                     check.names = FALSE, stringsAsFactors = FALSE)
   for (k in names(CV_METRIC_LABELS)) {
     v <- res[[k]]
     out[[unname(CV_METRIC_LABELS[[k]])]] <-
       if (is.null(v) || length(v) != 1) NA_real_ else as.numeric(v)
   }
+  if (!moran$report_p) out[["Moran p"]] <- NA_real_
+  out[["Moran Context"]] <- moran$context
   out
+}
+
+# The fold design one CV metrics row was scored under: the plan the strategy
+# resolves to at this n (resolve_cv_plan), unless the metrics record that a
+# Spatial Block request fell back to random folds because k-means failed.
+# Returns resolve_cv_plan()'s list, relabelled in that case.
+applied_cv_plan <- function(n_obs, strategy = "auto", res = NULL) {
+  plan <- resolve_cv_plan(strategy, n_obs)
+  if (identical(plan$type, "block") && isTRUE(res$block_fallback)) {
+    plan <- list(type = "random_kfold", k = plan$k,
+                 label = "Random 10-fold CV [Spatial Block clustering failed]")
+  }
+  plan
+}
+
+# How the residual Moran's I of a CV metrics row is read, from the fold
+# designs behind it (one type for a locality; one per pooled locality for a
+# "Total (Combined)" row). Under ordinary CV it diagnoses model-error
+# structure and its p-value is reported. Under Spatial Block CV the pooled
+# out-of-fold residuals also inherit the fold geometry and a shared
+# extrapolation condition inside each withheld block; spdep's reference
+# distribution knows neither, so the statistic is reported as block-CV
+# residual clustering and the p-value is not. A pool of localities scored
+# under different designs is read the ordinary way and flagged `mixed`.
+moran_reading <- function(plan_types) {
+  plan_types <- unique(plan_types[!is.na(plan_types)])
+  block <- length(plan_types) == 1 && plan_types == "block"
+  mixed <- length(plan_types) > 1
+  list(block = block, mixed = mixed,
+       label = if (block) "Block-CV residual clustering" else "Moran's I",
+       context = if (block) {
+         "block-CV residual clustering (transfer/extrapolation error); p not reported"
+       } else if (mixed) {
+         "model-error structure; pooled residuals mix fold designs"
+       } else "model-error structure",
+       report_p = !block)
 }
 
 # Mean and SD across fold realizations (repeated CV) as an exportable frame:
@@ -340,53 +383,111 @@ cv_repeats_export_df <- function(summ, source_label) {
 # predictions). perform_cv() owns every definition, so this table and Model
 # Performance cannot drift apart. Two documented departures from Model
 # Performance (Scientific Guide 5): MBE is reported predicted-minus-observed,
-# and NMAE has no CV counterpart - it comes off the raw residuals so a
-# small-mean variable does not carry display rounding into a percentage.
-# moran = FALSE: an uploaded prediction column carries no CV residual field.
-# round_values = TRUE is the card's display rounding (perform_cv's own
-# dictionary: 4 dp, 2 dp for the percentage and ratio metrics).
-pred_perf_df <- function(obs, pre, round_values = FALSE) {
+# and NMAE has no CV counterpart, so it is computed here under the same
+# sign-crossing rule as NRMSE (mean). moran = FALSE: an uploaded prediction
+# column carries no CV residual field. `Note` names a value that is NA because
+# the metric does not apply (the target spans zero), so the exported sheet
+# can tell it from one that could not be computed.
+pred_perf_df <- function(obs, pre) {
   ok <- !is.na(obs) & !is.na(pre)
   obs <- obs[ok]; pre <- pre[ok]
   if (length(obs) < 3) return(NULL)
-  m <- perform_cv(data.frame(var1.observed = obs, var1.pred = pre), moran = FALSE,
-                  round_values = round_values)
+  m <- perform_cv(data.frame(var1.observed = obs, var1.pred = pre), moran = FALSE)
+  signed <- isTRUE(m$signed_target)
   mean_v <- mean(obs)
-  mae_raw <- mean(abs(obs - pre))
-  nmae <- if (is.finite(mae_raw) && abs(mean_v) > 0) (mae_raw / abs(mean_v)) * 100 else NA_real_
-  if (isTRUE(round_values)) nmae <- round(nmae, 2)
+  mae <- mean(abs(obs - pre))
+  nmae <- if (!signed && is.finite(mae) && abs(mean_v) > 0) (mae / abs(mean_v)) * 100 else NA_real_
+  metric <- c("R² (NSE/Traditional)", "R² (Correlation)", "RMSE", "NRMSE (mean, %)",
+              "NRMSE (SD)", "MAE", "NMAE (mean, %)", "MBE (ML pred - observed)",
+              "Lin's CCC (Agree)", "RPD (Precision)", "RPIQ", "SMAPE (%)", "n")
+  ratio_scale_only <- c("NRMSE (mean, %)", "NMAE (mean, %)", "SMAPE (%)")
   data.frame(
-    Metric = c("R² (NSE/Traditional)", "R² (Correlation)", "RMSE", "NRMSE (%)",
-               "MAE", "NMAE (%)", "MBE (ML pred - observed)", "Lin's CCC (Agree)",
-               "RPD (Precision)", "RPIQ", "SMAPE (%)", "n"),
-    Value = as.numeric(c(m$nse, m$r2, m$rmse, m$nrmse_mean, m$mae, nmae, -m$me,
-                         m$ccc, m$rpd, m$rpiq, m$smape, m$n)),
+    Metric = metric,
+    Value = as.numeric(c(m$nse, m$r2, m$rmse, m$nrmse_mean, m$nrmse_sd, m$mae, nmae,
+                         -m$me, m$ccc, m$rpd, m$rpiq, m$smape, m$n)),
+    Note = ifelse(signed & metric %in% ratio_scale_only, SIGNED_TARGET_NOTE, ""),
     stringsAsFactors = FALSE
   )
 }
 
+# The uploaded-prediction card and the Model Performance table can score
+# different samples, and neither number is wrong. The model's point set drops
+# rows with no measured target FIRST and deduplicates co-located points after
+# (dedup_valid_points); the displayed set deduplicates first and is then
+# filtered to rows carrying both values, so a co-located pair whose measurement
+# sits on one member and whose prediction sits on the other contributes a
+# different member to each. Returns NULL when the two agree - a note that fires
+# on every run is noise.
+pred_pop_note <- function(card_n, model_n) {
+  if (!isTRUE(is.finite(card_n)) || !isTRUE(is.finite(model_n))) return(NULL)
+  if (isTRUE(card_n == model_n)) return(NULL)
+  paste0("Scored on the displayed point set: coordinate-deduplicated rows carrying both a ",
+         "measured and a predicted value (n = ", card_n, "). This is not the model's ",
+         "cross-validation population (n = ", model_n, "), which drops rows with no measured ",
+         "value before deduplicating, so a co-located pair can contribute a different member ",
+         "to each.")
+}
+
 # Class-agreement table from a compute_agreement_metrics() result.
-agreement_metrics_df <- function(ag, round_values = FALSE) {
+agreement_metrics_df <- function(ag) {
   if (is.null(ag) || !is.null(ag$status)) return(NULL)
-  v <- as.numeric(c(ag$accuracy, ag$bal_accuracy, ag$off_by_one,
-                    ag$mcc, ag$kappa, ag$kappa_linear))
   data.frame(
     Metric = c("Overall Accuracy", "Balanced Accuracy", "Off-by-one Accuracy",
                "Matthews Corr. Coef. (MCC)", "Kappa (Unweighted)",
                "Weighted Kappa (Linear)"),
-    Value = if (isTRUE(round_values)) round(v, 4) else v,
+    Value = as.numeric(c(ag$accuracy, ag$bal_accuracy, ag$off_by_one,
+                         ag$mcc, ag$kappa, ag$kappa_linear)),
     stringsAsFactors = FALSE
   )
 }
 
-# Screen rounding for a statistic in the variable's own units: three decimals,
-# or four significant digits below 1. A fixed number of decimals collapses a
-# small-unit variable (total N spans 0.0175-0.214 %; a fitted nugget of
-# 2.151e-4) to one significant digit or to zero.
-display_num <- function(x) {
-  x <- as.numeric(x)
-  ifelse(is.finite(x) & abs(x) < 1, signif(x, 4), round(x, 3))
+# Display formatting for every statistic the app prints: four significant
+# digits, so a small value never reads as zero. Zero prints as "0", a whole
+# number prints exactly (a count must not lose digits), a value of 1000 or more
+# keeps every integer digit (123456.7 ha reads 123457, not 123500), values
+# below 1e-4 in magnitude switch to scientific notation, everything else is
+# fixed notation at four significant digits. Returns character, NA for a
+# non-finite value.
+# mnFormatSig() (format_sig_js(), ui_components.R) applies the same rule in
+# the browser to numeric table columns, so the two must change together; they
+# can differ in the last digit only at an exact decimal tie.
+format_sig <- function(x) {
+  x <- suppressWarnings(as.numeric(x))
+  out <- rep(NA_character_, length(x))
+  ok <- is.finite(x)
+  whole <- ok & x == round(x) & abs(x) < 1e15
+  big <- ok & !whole & abs(x) >= 1000
+  small <- ok & !whole & abs(x) < 1e-4
+  rest <- ok & !whole & !big & !small
+  # + 0 turns a negative zero into 0, which formatC would print as "-0".
+  out[whole] <- formatC(x[whole] + 0, format = "f", digits = 0)
+  out[big] <- formatC(round(x[big]) + 0, format = "f", digits = 0)
+  out[small] <- formatC(x[small], format = "e", digits = 3)
+  out[rest] <- trimws(formatC(signif(x[rest], 4), format = "fg", digits = 4))
+  out
 }
+
+# Legend title of a map layer, one composition for the Map Viewer and the
+# exported figure: the variable and its unit, prefixed for an uncertainty or
+# residual layer.
+map_legend_title <- function(label, unit = "", layer = "value") {
+  u <- if (length(unit) == 1 && !is.na(unit) && nzchar(unit)) unit else ""
+  switch(layer,
+    se = paste0("SE: ", label, if (nzchar(u)) paste0(" ", u) else ""),
+    var = paste0("Variance: ", label, if (nzchar(u)) paste0(" (", u, ")^2") else " (squared units)"),
+    resid = paste("Resid:", label),
+    point_resid = paste("Point Resid:", label),
+    trimws(paste(label, u)))
+}
+
+# What a cancelled run's record says wherever its results would be.
+RUN_CANCELLED_NOTE <- paste(
+  "This run was cancelled before it produced results. The configuration shown",
+  "is what was requested; no surface, metrics or exports were produced.")
+
+# One phrase for the NA a signed target gets in NRMSE (mean), NMAE and SMAPE:
+# the export's Note column and the screen's footnote say the same thing.
+SIGNED_TARGET_NOTE <- "not reported: observed values span zero"
 
 # summary() of one or two numeric vectors as a tidy frame, values left numeric.
 # A FIXED row set keeps the two columns in step: summary() appends an "NA's"
@@ -396,8 +497,7 @@ display_num <- function(x) {
 # missing-value row is shown only when there is something to report. A second
 # vector with no observed value keeps its column (statistics NA, the NA's row
 # counting it), so an empty predicted side reads as empty rather than absent.
-summary_stats_df <- function(a, b = NULL, labels = c("Value", "Predicted"),
-                             round_values = FALSE) {
+summary_stats_df <- function(a, b = NULL, labels = c("Value", "Predicted")) {
   rows <- c("Min.", "1st Qu.", "Median", "Mean", "3rd Qu.", "Max.", "NA's")
   stat_rows <- rows[rows != "NA's"]
   col <- function(x) {
@@ -410,7 +510,6 @@ summary_stats_df <- function(a, b = NULL, labels = c("Value", "Predicted"),
       v[keep] <- as.numeric(s[keep])
     }
     v[["NA's"]] <- sum(is.na(x))
-    if (isTRUE(round_values)) v[] <- display_num(v)
     v
   }
   ca <- col(a)
@@ -462,11 +561,19 @@ stats_table_vectors <- function(df, meta, loc_col, localities = NULL) {
 # reported for a Matern structure only (it is inert for the others). A nested
 # model names every structure, and its ranges are those of the structure that
 # reaches its sill last. A pure-nugget model reports nugget and sill with no
-# range. Unrounded unless round_values = TRUE (the card's display rounding).
-vgm_params_row <- function(f, round_values = FALSE) {
+# range. Values are unrounded; displays format them.
+#
+# `max_lag` and `sill_resolved` come from the fit's own diagnostics: a sill the
+# empirical variogram never reached is MODEL-EXTRAPOLATED, so the structural
+# dependency derived from it is not identified by the data. NA for a supplied
+# (manual) model, where the user chose the parameters and no empirical support
+# was recorded - "not reliably identified" is a statement about a FIT, not
+# about a model the user applied.
+vgm_params_row <- function(f) {
   out <- list(model = NA_character_, kappa = NA_real_, nugget = NA_real_,
               sill = NA_real_, range = NA_real_, practical_range = NA_real_,
-              sdep = NA_real_)
+              sdep = NA_real_, max_lag = NA_real_, sill_resolved = NA,
+              target_degenerate = FALSE)
   if (is.null(f) || NROW(f) == 0) return(out)
   mdl <- as.character(f$model)
   is_nug <- mdl == "Nug"
@@ -484,26 +591,53 @@ vgm_params_row <- function(f, round_values = FALSE) {
     if (identical(mdl[lead], "Mat")) out$kappa <- f$kappa[lead]
   }
   if (isTRUE(out$sill > 0)) out$sdep <- ((out$sill - out$nugget) / out$sill) * 100
-  if (isTRUE(round_values)) {
-    out$nugget <- display_num(out$nugget)
-    out$sill <- display_num(out$sill)
-    out$range <- round(out$range, 1)
-    out$practical_range <- round(out$practical_range, 1)
-    out$sdep <- round(out$sdep, 1)
+  d <- attr(f, "vgm_diagnostics")
+  if (!is.null(d$max_lag)) out$max_lag <- suppressWarnings(as.numeric(d$max_lag)[1])
+  out$sill_resolved <- if (!is.null(d$sill_resolved)) {
+    as.logical(d$sill_resolved)[1]
+  } else if (is.na(out$max_lag) || is.na(out$practical_range)) {
+    NA
+  } else {
+    out$practical_range <= out$max_lag
   }
+  out$target_degenerate <- isTRUE(d$target_degenerate)
   out
 }
 
+# The Variogram Parameters cell text when the target carries no usable
+# variance: the fitted sill is then numerical noise, not an estimate.
+VGM_DEGENERATE_NOTE <- paste(
+  "Target has no usable variance in this locality. No spatial structure can be",
+  "estimated; the fitted parameters below the numerical noise floor are not reported.")
+
 # Screen flavour: "NA" for an absent value, the smoothness beside a Matern
 # model name and the percent sign on Structural Dependency, all character so
-# one column can mix the model name with numbers.
+# one column can mix the model name with numbers. Where the sill is not
+# resolved inside the observed lag range the Structural Dependency cell states
+# that instead of a percentage, and carries the model-extrapolated figure in
+# its tooltip - a number a reader would otherwise take as measured. Cells are
+# HTML, so the card renders with escape = FALSE.
 .vgm_params_chr <- function(f) {
-  p <- vgm_params_row(f, round_values = TRUE)
+  p <- vgm_params_row(f)
   if (is.na(p$model)) return(rep("NA", 6))
-  chr <- function(x) if (is.na(x)) "NA" else as.character(x)
-  c(if (is.na(p$kappa)) p$model else paste0(p$model, " (kappa = ", p$kappa, ")"),
-    chr(p$nugget), chr(p$sill), chr(p$range), chr(p$practical_range),
-    if (is.na(p$sdep)) "NA" else paste0(p$sdep, "%"))
+  chr <- function(x) if (is.na(x)) "NA" else format_sig(x)
+  if (isTRUE(p$target_degenerate)) return(rep("Not estimated", 6))
+  tip <- function(txt, title) {
+    paste0("<span title='", htmltools::htmlEscape(title, attribute = TRUE),
+           "' style='cursor: help; text-decoration: underline dotted 1px;'>", txt, "</span>")
+  }
+  unresolved <- identical(p$sill_resolved, FALSE)
+  qualifier <- paste0("The fitted sill is not reached within the observed lag range (max lag ",
+                      chr(p$max_lag), ").")
+  sdep_cell <- if (unresolved) {
+    tip("Not reliably identified",
+        paste0("Model-extrapolated: ",
+               if (is.na(p$sdep)) "NA" else paste0(format_sig(p$sdep), "%"), ". ", qualifier))
+  } else if (is.na(p$sdep)) "NA" else paste0(format_sig(p$sdep), "%")
+  c(if (is.na(p$kappa)) p$model else paste0(p$model, " (kappa = ", format_sig(p$kappa), ")"),
+    chr(p$nugget), chr(p$sill), chr(p$range),
+    if (unresolved) tip(chr(p$practical_range), qualifier) else chr(p$practical_range),
+    sdep_cell)
 }
 
 # The Variogram Parameters card. "Total (Combined)" lists every fitted
@@ -512,11 +646,18 @@ vgm_params_row <- function(f, round_values = FALSE) {
 # store was fitted, which sci_dt() renders as the empty state.
 vgm_params_table_df <- function(v_fit_list, loc) {
   if (identical(loc, "Total (Combined)")) {
-    return(vgm_params_export_df(v_fit_list, round_values = TRUE))
+    return(vgm_params_export_df(v_fit_list))
   }
   f_a <- v_fit_list[[paste0(loc, "_act")]]
   f_p <- v_fit_list[[paste0(loc, "_pre")]]
   if (is.null(f_a) && is.null(f_p)) return(NULL)
+  # A target with no usable variance produces a sill 60 orders of magnitude
+  # below the data and a "Structural Dependence 100%" manufactured from
+  # numerical noise. Report the cause instead of the parameters.
+  fits <- Filter(Negate(is.null), list(f_a, f_p))
+  if (all(vapply(fits, vgm_target_degenerate, logical(1)))) {
+    return(data.frame(Status = VGM_DEGENERATE_NOTE, stringsAsFactors = FALSE))
+  }
   res <- data.frame(Param = c("Model", "Nugget", "Sill", "Range (a)",
                               "Practical Range", "Structural Dep."),
                     Actual = .vgm_params_chr(f_a), stringsAsFactors = FALSE)
@@ -527,7 +668,7 @@ vgm_params_table_df <- function(v_fit_list, loc) {
 }
 
 # Export flavour: tidy, one row per fitted locality/target, numeric columns.
-vgm_params_export_df <- function(v_fit_list, locs = NULL, round_values = FALSE) {
+vgm_params_export_df <- function(v_fit_list, locs = NULL) {
   if (is.null(v_fit_list) || length(v_fit_list) == 0) return(NULL)
   if (is.null(locs)) locs <- unique(sub("_(act|pre)$", "", names(v_fit_list)))
   rows <- list()
@@ -535,13 +676,16 @@ vgm_params_export_df <- function(v_fit_list, locs = NULL, round_values = FALSE) 
     for (tgt in c("act", "pre")) {
       f <- v_fit_list[[paste0(l, "_", tgt)]]
       if (is.null(f)) next
-      p <- vgm_params_row(f, round_values = round_values)
+      p <- vgm_params_row(f)
       rows[[length(rows) + 1]] <- data.frame(
         Locality = l,
         Target = if (tgt == "act") "Actual" else "Predicted",
         Model = p$model, Kappa = p$kappa, Nugget = p$nugget, Sill = p$sill,
         `Range (a)` = p$range, `Practical Range` = p$practical_range,
+        # A file cannot carry a tooltip, so the numeric structural dependency
+        # stays and the two columns that qualify it travel beside it.
         `Structural Dep. (%)` = p$sdep,
+        `Max Lag` = p$max_lag, `Sill Resolved` = p$sill_resolved,
         check.names = FALSE, stringsAsFactors = FALSE)
     }
   }
@@ -820,6 +964,64 @@ is_valid_col_ref <- function(x) {
   !is.null(x) && length(x) == 1 && !is.na(x) && nzchar(x)
 }
 
+# Per locality and surface, the covariates each mapped model used and the ones
+# the collinearity screen removed, from the worker results (aux_used_* and
+# aux_dropped_*, RK/RFK/CK only). The screen runs on each locality's own rows,
+# so the record is kept per locality: a union would describe no fitted model.
+covariate_screen_record <- function(res_all) {
+  retained <- list(); dropped <- list()
+  for (res in res_all) {
+    for (tg in c("act", "pre")) {
+      used <- res[[paste0("aux_used_", tg)]]
+      if (is.null(used)) next
+      surface <- if (tg == "act") "actual" else "predicted"
+      if (is.null(retained[[res$l]])) { retained[[res$l]] <- list(); dropped[[res$l]] <- list() }
+      retained[[res$l]][[surface]] <- paste(used, collapse = ", ")
+      dropped[[res$l]][[surface]] <- paste(res[[paste0("aux_dropped_", tg)]], collapse = ", ")
+    }
+  }
+  list(retained = retained, dropped = dropped)
+}
+
+# The covariate line of the run configuration panel: what was selected and
+# what the fitted models used. One statement when every locality and surface
+# kept the same set, otherwise one per locality and surface. A model that used
+# none fell back to Ordinary Kriging (RK/RFK/CK only reach none that way).
+covariate_record_text <- function(cfg) {
+  sel <- cfg$covariates_selected
+  if (is.null(sel) || is.na(sel) || !nzchar(sel)) return(NULL)
+  txt <- paste0("Covariates selected: ", sel)
+  flat <- function(x) unlist(lapply(names(x), function(l) {
+    v <- unlist(x[[l]])
+    stats::setNames(v, paste0(l, if (length(v) > 1) paste0(" (", names(v), ")") else ""))
+  }))
+  ret <- flat(cfg$covariates_retained)
+  if (!length(ret)) return(txt)
+  drp <- flat(cfg$covariates_dropped)[names(ret)]
+  used <- ifelse(nzchar(ret), ret, "none (Ordinary Kriging fallback)")
+  gone <- ifelse(is.na(drp) | !nzchar(drp), "none", drp)
+  if (length(unique(used)) == 1 && length(unique(gone)) == 1) {
+    return(paste0(txt, " | used: ", used[1], " | removed by the screen: ", gone[1]))
+  }
+  paste0(txt, " | used per locality: ",
+         paste0(names(ret), ": ", used, " (removed: ", gone, ")", collapse = "; "))
+}
+
+# Where the Context panel opens: the first category holding a variable with an
+# uploaded prediction column, and in the category the first such variable.
+# Those are the variables the app can map end to end; the variable list has no
+# target/covariate flag, so this is the one signal there is. Falls back to the
+# first category and its first variable.
+default_var_pick <- function(vars, category = NULL) {
+  cat_of <- vapply(vars, function(x) as.character(x$category %||% ""), character(1))
+  has_pred <- vapply(vars, function(x) is_valid_col_ref(x$pred) || is_valid_col_ref(x$pred_ss),
+                     logical(1))
+  cats <- unique(cat_of)
+  if (is.null(category)) category <- c(cats[cats %in% cat_of[has_pred]], cats)[1]
+  pick <- c(which(cat_of == category & has_pred), which(cat_of == category))[1]
+  list(category = category, var = if (is.na(pick)) NULL else as.character(vars[[pick]]$actual))
+}
+
 # Sidebar bivariate screen, independent of interpolation and its CV. SS uses
 # the chosen partition on both sources; CVE and Actual use all scoped rows.
 rank_auxiliary_correlations <- function(data, mapping, variable, value_type = "actual",
@@ -1006,38 +1208,40 @@ process_grouping_vars <- function(df, vars, types) {
 # per-group trend fits and PCA. The module keeps the reactive reads and the
 # formatting; the arithmetic lives here so it is reachable from the test suite.
 
-# Per-group n / mean / sd / min / max plus a TOTAL row.
+# Per-group summary plus a TOTAL row, at full precision (the module formats).
 # `x` and `group` are parallel vectors. Groups are formed the way aggregate()'s
 # formula interface does (rows with an NA in either vector are dropped), so
 # every group statistic is computed on complete pairs, while the TOTAL row
-# summarises every non-NA x regardless of its group.
-desc_summary_table <- function(x, group, digits = 3) {
+# summarises every non-NA x regardless of its group, with the same statistics.
+# Beside the mean and SD, which a few outliers can move a long way, the table
+# carries their robust counterparts: the median, the quartiles (quantile type 7,
+# R's default, so it agrees with summary() elsewhere in the app), the IQR
+# (Q3 - Q1) and the MAD. MAD is stats::mad(): the median absolute deviation
+# scaled by 1.4826, a consistent estimator of sigma for a normal sample, so it
+# reads on the same scale as the SD beside it.
+DESC_SUMMARY_STATS <- c("Mean", "SD", "Median", "Q1", "Q3", "IQR", "MAD", "Min", "Max")
+
+desc_summary_table <- function(x, group) {
+  stats_of <- function(v) {
+    q <- stats::quantile(v, c(0.25, 0.5, 0.75), type = 7, names = FALSE)
+    c(n = length(v), Mean = mean(v), SD = stats::sd(v), Median = q[2],
+      Q1 = q[1], Q3 = q[3], IQR = q[3] - q[1], MAD = stats::mad(v),
+      Min = min(v), Max = max(v))
+  }
   agg <- stats::aggregate(x ~ group, data = data.frame(x = x, group = group),
-                          FUN = function(v) c(n = length(v), mean = mean(v), sd = stats::sd(v),
-                                              min = min(v), max = max(v)))
-  m <- agg[, 2]
-  # unname(): with a single group m[, "mean"] drops to a length-1 vector that
-  # still carries the COLUMN name, which data.frame() would then adopt as the
-  # row name - and DT renders row names, so the default "All" grouping showed a
-  # leading column reading "mean". Every column is stripped for symmetry.
-  res <- data.frame(
-    Group = agg[, 1],
-    Count = as.integer(m[, "n"]),
-    Mean = unname(round(m[, "mean"], digits)),
-    SD = unname(round(m[, "sd"], digits)),
-    Min = unname(round(m[, "min"], digits)),
-    Max = unname(round(m[, "max"], digits)),
-    row.names = NULL
-  )
+                          FUN = stats_of)
+  # aggregate() stores a vector-valued FUN as ONE matrix column, one row per group.
   ok <- !is.na(x)
-  rbind(res, data.frame(
-    Group = "TOTAL",
-    Count = sum(ok),
-    Mean = round(mean(x[ok]), digits),
-    SD = round(stats::sd(x[ok]), digits),
-    Min = round(min(x[ok]), digits),
-    Max = round(max(x[ok]), digits)
-  ))
+  m <- rbind(agg$x, stats_of(x[ok]))
+  # unname(): with a single group a column of the statistics matrix is a
+  # length-1 vector that still carries the COLUMN name, which data.frame()
+  # would then adopt as the row name - and DT renders row names, so the default
+  # "All" grouping showed a leading column reading "mean".
+  res <- data.frame(Group = c(as.character(agg[, 1]), "TOTAL"),
+                    Count = as.integer(unname(m[, "n"])),
+                    row.names = NULL, stringsAsFactors = FALSE)
+  for (s in DESC_SUMMARY_STATS) res[[s]] <- unname(m[, s])
+  res
 }
 
 # Trend statistic per group for the scatter panel's fitted curve.
@@ -1101,14 +1305,32 @@ desc_group_fit_stats <- function(df, x_var, y_var, fit, groups,
 # caller can align a grouping vector to it) and how many rows the complete-case
 # filter removed. `scale = TRUE` is a correlation PCA, FALSE a covariance PCA;
 # both centre.
+# A column with exactly or effectively no variance over those rows (the
+# engines' own rule, .is_degenerate_covariate) carries no information and
+# cannot be standardised, so it is left out and named; the remaining columns
+# keep the requested scaling. Below two informative columns the PCA is refused:
+# `res` is NULL and `refusal` says why.
 desc_pca_fit <- function(df, vars, labels = vars, scale = TRUE) {
   keep <- stats::complete.cases(df[, vars, drop = FALSE])
   df_clean <- df[keep, vars, drop = FALSE]
   colnames(df_clean) <- labels
-  list(res = stats::prcomp(df_clean, scale. = isTRUE(scale), center = TRUE),
-       data = df_clean,
-       keep = keep,
-       dropped = nrow(df) - nrow(df_clean))
+  informative <- vapply(df_clean, function(v) !.is_degenerate_covariate(v), logical(1))
+  out <- list(res = NULL, data = df_clean[, informative, drop = FALSE], keep = keep,
+              # `dropped` counts ROWS removed by the complete-case filter;
+              # `dropped_constant` names the COLUMNS removed for having no variance.
+              dropped = nrow(df) - nrow(df_clean),
+              dropped_constant = labels[!informative], refusal = NULL)
+  if (sum(informative) < 2) {
+    n_const <- sum(!informative)
+    out$refusal <- sprintf(
+      "PCA needs at least two variables with variance. %s %s none over the %d complete rows and %s excluded; %s.",
+      paste(labels[!informative], collapse = ", "), if (n_const == 1) "has" else "have",
+      nrow(df_clean), if (n_const == 1) "was" else "were",
+      if (sum(informative) == 1) "only one usable variable remains" else "no usable variable remains")
+    return(out)
+  }
+  out$res <- stats::prcomp(out$data, scale. = isTRUE(scale), center = TRUE)
+  out
 }
 
 
@@ -1117,8 +1339,8 @@ desc_pca_fit <- function(df, vars, labels = vars, scale = TRUE) {
 # points under the chosen strategy. Delegates to resolve_cv_plan
 # (spatial_helpers.R) so the label can never disagree with the folds that were
 # built, including Spatial Block's small-n degradation to LOOCV.
-cv_type_label <- function(n_obs, strategy = "auto") {
-  resolve_cv_plan(strategy, n_obs)$label
+cv_type_label <- function(n_obs, strategy = "auto", res = NULL) {
+  applied_cv_plan(n_obs, strategy, res)$label
 }
 
 find_subset_column <- function(cols) {

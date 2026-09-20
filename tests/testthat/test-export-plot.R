@@ -111,7 +111,6 @@ test_that("no downloadHandler content function returns without writing its file"
 # ── showtext / device resolution ───────────────────────────────────────────
 
 test_that("with_showtext_dpi applies the setting and restores it", {
-  skip_if_not_installed("showtext")
   before <- showtext::showtext_opts()$dpi
   inside <- with_showtext_dpi(456, showtext::showtext_opts()$dpi)
   expect_equal(inside, 456)
@@ -120,7 +119,6 @@ test_that("with_showtext_dpi applies the setting and restores it", {
 
 test_that("exported text is sized by the theme, not by the export DPI", {
   skip_if_not_installed("png")
-  skip_if_not_installed("showtext")
   # setup.R disables showtext for the suite; the app runs with it on
   # (global.R), and that is the only state in which this defect exists.
   showtext::showtext_auto(TRUE)

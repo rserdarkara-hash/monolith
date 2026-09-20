@@ -93,13 +93,24 @@ run_optimizer_async <- function(
       # worker function is globalenv-enclosed and furrr ships a lean value to
       # each nested worker instead of walking an observer's environment chain.
       source("spatial_helpers.R", local = FALSE)
+      # A pool worker is REUSED across features, so this session may carry
+      # whatever plan the last task left in it. A task whose teardown did not
+      # complete leaves plan(cluster) pointing at a cluster nobody owns any
+      # more, and nbrOfWorkers() then reports that dead cluster's size (2 in a
+      # direct test, after its stopCluster): the guard below reads it as
+      # "already parallel", skips building a live cluster, and the map runs
+      # against those sockets. Start from a known state instead of trusting
+      # the inherited one.
+      future::plan(future::sequential)
       worker_fn <- match.fun(worker_name)
 
       nested_cl <- NULL
       old_mc_cores <- getOption("mc.cores")
       tryCatch(
         {
-          if (nested_workers >= 2L && future::nbrOfWorkers() == 1L) {
+          # No `nbrOfWorkers() == 1L` clause: the plan reset above makes it
+          # true by construction.
+          if (nested_workers >= 2L) {
             # PSOCK workers report mc.cores = 1; tell parallelly what the main
             # session allocated to this batch before spawning, or its worker-count
             # guard misfires.
@@ -123,12 +134,15 @@ run_optimizer_async <- function(
         },
         finally = {
           options(mc.cores = old_mc_cores)
+          # Stop the cluster FIRST, and let neither step's failure cancel the
+          # other. Switching the plan away from an unhealthy cluster can itself
+          # throw, which used to leave the session on the dead cluster even
+          # though stopCluster had run - the exact state the reset at the top
+          # of this body has to undo on the next task.
           if (!is.null(nested_cl)) {
-            tryCatch(
-              future::plan(future::sequential),
-              finally = parallel::stopCluster(nested_cl)
-            )
+            tryCatch(parallel::stopCluster(nested_cl), error = function(e) NULL)
           }
+          tryCatch(future::plan(future::sequential), error = function(e) NULL)
         }
       )
     },
@@ -218,7 +232,9 @@ observeEvent(input$opt_tps, {
   meta <- get_current_meta()
   req(meta)
 
-  targets <- if (input$comp_mode || input$value_type != "actual") {
+  # Unticked "Fit Actual/Predicted separately": the Predicted surface reuses
+  # the measured values' parameter, so only the Actual target is searched.
+  targets <- if ((input$comp_mode || input$value_type != "actual") && isTRUE(input$sep_fit)) {
     c("act", "pre")
   } else {
     "act"
@@ -402,7 +418,9 @@ observeEvent(input$opt_idw, {
   meta <- get_current_meta()
   req(meta)
 
-  targets <- if (input$comp_mode || input$value_type != "actual") {
+  # Unticked "Fit Actual/Predicted separately": the Predicted surface reuses
+  # the measured values' parameter, so only the Actual target is searched.
+  targets <- if ((input$comp_mode || input$value_type != "actual") && isTRUE(input$sep_fit)) {
     c("act", "pre")
   } else {
     "act"
@@ -726,11 +744,11 @@ observeEvent(input$apply_manual, {
 
 observeEvent(
   list(input$idw_mode, input$idw_m_loc, input$comp_mode, input$idw_m_target,
-       input$value_type, input$var_id, input$subset),
+       input$sep_fit, input$value_type, input$var_id, input$subset),
   {
     req(input$idw_mode == "manual", input$idw_m_loc)
     loc <- input$idw_m_loc
-    target <- manual_param_target(input$comp_mode, input$value_type, input$idw_m_target)
+    target <- manual_param_target(input$comp_mode, input$value_type, input$idw_m_target, input$sep_fit)
     val <- get_regional_param("IDW", loc, target, default = input$idw_p,
                               key = current_tuning_keys()[[target]])
     updateSliderInput(session, "idw_m_p", value = val)
@@ -740,7 +758,7 @@ observeEvent(
 observeEvent(input$apply_idw_manual, {
   req(input$idw_mode == "manual", input$idw_m_loc)
   loc <- input$idw_m_loc
-  target <- manual_param_target(input$comp_mode, input$value_type, input$idw_m_target)
+  target <- manual_param_target(input$comp_mode, input$value_type, input$idw_m_target, input$sep_fit)
   key <- current_tuning_keys()[[target]]
   req(!is.na(key))
   set_regional_param("IDW", loc, target, input$idw_m_p, key)
@@ -752,11 +770,11 @@ observeEvent(input$apply_idw_manual, {
 
 observeEvent(
   list(input$tps_mode, input$tps_m_loc, input$comp_mode, input$tps_m_target,
-       input$value_type, input$var_id, input$subset),
+       input$sep_fit, input$value_type, input$var_id, input$subset),
   {
     req(input$tps_mode == "manual", input$tps_m_loc)
     loc <- input$tps_m_loc
-    target <- manual_param_target(input$comp_mode, input$value_type, input$tps_m_target)
+    target <- manual_param_target(input$comp_mode, input$value_type, input$tps_m_target, input$sep_fit)
     val <- get_regional_param("TPS", loc, target, default = input$tps_lambda,
                               key = current_tuning_keys()[[target]])
     updateSliderInput(session, "tps_m_lambda", value = val)
@@ -766,7 +784,7 @@ observeEvent(
 observeEvent(input$apply_tps_manual, {
   req(input$tps_mode == "manual", input$tps_m_loc)
   loc <- input$tps_m_loc
-  target <- manual_param_target(input$comp_mode, input$value_type, input$tps_m_target)
+  target <- manual_param_target(input$comp_mode, input$value_type, input$tps_m_target, input$sep_fit)
   key <- current_tuning_keys()[[target]]
   req(!is.na(key))
   set_regional_param("TPS", loc, target, input$tps_m_lambda, key)

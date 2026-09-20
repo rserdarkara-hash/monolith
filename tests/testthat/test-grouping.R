@@ -24,31 +24,24 @@ test_that("creates factor group_id for categorical variable", {
   expect_true(length(levels(result$group_id)) >= 1)
 })
 
-test_that("discretizes numeric variable by median", {
-  df <- make_test_df(20)
-  result <- process_grouping_vars(df, "a", "numeric_median")
-  expect_s3_class(result$group_id, "factor")
-  expect_length(levels(result$group_id), 2)
-})
-
-test_that("discretizes numeric variable by mean", {
-  df <- make_test_df(20)
-  result <- process_grouping_vars(df, "a", "numeric_mean")
-  expect_s3_class(result$group_id, "factor")
-  expect_length(levels(result$group_id), 2)
-})
-
-test_that("discretizes numeric variable by tertiles", {
-  df <- make_test_df(20)
-  result <- process_grouping_vars(df, "a", "numeric_tertiles")
-  expect_s3_class(result$group_id, "factor")
-  expect_true(length(levels(result$group_id)) >= 1)
-})
-
-test_that("discretizes numeric variable by quintiles", {
+test_that("each numeric_* key routes to its own discretiser method", {
+  # The discretiser's own numeric contract lives in test-discretization.R.
+  # What process_grouping_vars adds is the key -> method mapping, so assert
+  # that and nothing else: the routed column must BE the direct call.
   df <- make_test_df(30)
-  result <- process_grouping_vars(df, "a", "numeric_quintiles")
-  expect_s3_class(result$group_id, "factor")
+  keys <- c(numeric_median = "median", numeric_mean = "mean",
+            numeric_tertiles = "tertiles", numeric_quintiles = "quintiles")
+  for (k in names(keys)) {
+    got <- process_grouping_vars(df, "a", k)$group_id
+    expect_identical(got, discretize_numeric_var(df$a, method = keys[[k]], var_name = "a"),
+                     info = k)
+  }
+
+  # The four keys are genuinely four different cuts, so a mapping collapsed
+  # onto one method cannot pass the loop above unnoticed.
+  lvl <- lapply(names(keys), function(k) levels(process_grouping_vars(df, "a", k)$group_id))
+  expect_equal(lengths(lvl), c(2L, 2L, 3L, 5L))
+  expect_length(unique(lvl), 4L)
 })
 
 test_that("handles interaction of multiple grouping vars", {
@@ -67,16 +60,6 @@ test_that("handles mixed categorical and numeric grouping", {
 })
 
 # ── filter_active_groups ──────────────────────────────────────────────────
-
-test_that("filter_active_groups filters to selected groups", {
-  df <- make_test_df(20)
-  df <- process_grouping_vars(df, "cat1", "categorical")
-  all_levels <- levels(df$group_id)
-  if (length(all_levels) >= 2) {
-    result <- filter_active_groups(df, all_levels[1])
-    expect_true(nrow(result) <= nrow(df))
-  }
-})
 
 test_that("filter_active_groups returns all rows when no group_id column", {
   df <- make_test_df(10)

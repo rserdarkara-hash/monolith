@@ -1,151 +1,131 @@
-# test-core-plots.R — tests for generate_core_plot, generate_ghosted_plot,
-# and generate_advanced_plot. Verifies ggplot output and basic structure.
+# test-core-plots.R — tests for generate_core_plot, generate_ghosted_plot and
+# generate_advanced_plot, plus the RF-importance, variogram and sci_dt builders.
 
 df <- make_test_df(30)
 
-# ── generate_core_plot ─────────────────────────────────────────────────────
+# ── The three plot builders ────────────────────────────────────────────────
+#
+# expect_s3_class(p, "ggplot") does not build the plot. ggplot() is lazy, so an
+# aesthetic naming a column that does not exist survives the class check and
+# fails only when the panel is drawn. ggplot_build() is what turns
+# "constructed" into "renders", so these sweep the plot types through it.
 
-test_that("histogram returns ggplot", {
+build_ok <- function(p) expect_no_error(suppressWarnings(ggplot2::ggplot_build(p)))
+placeholder_label <- function(p) ggplot2::ggplot_build(p)$data[[1]]$label
+
+test_that("every core plot type renders", {
+  for (pt in c("histogram", "density", "boxplot", "violin", "scatter", "ecdf")) {
+    p <- generate_core_plot(df, "a", group_col = "cat1", plot_type = pt)
+    expect_s3_class(p, "ggplot")
+    build_ok(p)
+  }
+
+  # No group column at all: the builder substitutes a single "All" level
+  # rather than leaving an aesthetic pointing at a column that is not there.
   p <- generate_core_plot(df, "a", plot_type = "histogram")
-  expect_s3_class(p, "ggplot")
+  build_ok(p)
+  expect_identical(levels(ggplot2::ggplot_build(p)$plot$data$group_id), "All")
+
+  # A second variable sends boxplot and violin through the pivot_longer branch,
+  # which draws one facet per variable.
+  for (pt in c("boxplot", "violin")) {
+    p <- generate_core_plot(df, "a", y_var = "b", group_col = "cat1", plot_type = pt)
+    build_ok(p)
+    expect_equal(nrow(ggplot2::ggplot_build(p)$layout$layout), 2L)
+  }
 })
 
-test_that("density returns ggplot", {
-  p <- generate_core_plot(df, "a", plot_type = "density")
-  expect_s3_class(p, "ggplot")
+test_that("every scatter fit renders, with and without a y variable", {
+  # This path used to wrap the call in tryCatch and convert any error into
+  # skip("Known .data pronoun bug in scatter+fit path"). The aes() defers
+  # .data[[x_col]] and resolves x_col from the enclosing frame, so the path
+  # does not error and the skip absorbed nothing - which under a SKIP 0 policy
+  # means a future regression here would have been reported as a skip.
+  for (fit in c("none", "linear", "loess", "polynomial", "gam")) {
+    build_ok(generate_core_plot(df, "a", y_var = "b", plot_type = "scatter",
+                                scatter_fit = fit))
+    # Without y_var the fit is taken against the row index instead, which is
+    # the branch that resolves x_col to "index_seq".
+    build_ok(generate_core_plot(df, "a", plot_type = "scatter", scatter_fit = fit))
+  }
+
+  # A fit really was added, and "none" really adds nothing.
+  n_layers <- function(fit) {
+    length(generate_core_plot(df, "a", y_var = "b", plot_type = "scatter",
+                              scatter_fit = fit)$layers)
+  }
+  expect_equal(n_layers("linear"), n_layers("none") + 1L)
 })
 
-test_that("boxplot returns ggplot", {
-  p <- generate_core_plot(df, "a", group_col = "cat1", plot_type = "boxplot")
-  expect_s3_class(p, "ggplot")
-})
-
-test_that("violin returns ggplot", {
-  p <- generate_core_plot(df, "a", group_col = "cat1", plot_type = "violin")
-  expect_s3_class(p, "ggplot")
-})
-
-test_that("scatter with y_var returns ggplot", {
-  p <- generate_core_plot(df, "a", y_var = "b", group_col = "cat1",
-                          plot_type = "scatter")
-  expect_s3_class(p, "ggplot")
-})
-
-test_that("scatter with linear fit returns ggplot", {
-  # The .data pronoun in geom_smooth mapping can error outside ggplot's
-  # data mask context — this is a known source-code issue.  Skip the test
-  # explicitly when the bug fires instead of silently swallowing the error.
-  p <- tryCatch(
-    generate_core_plot(df, "a", y_var = "b", plot_type = "scatter",
-                       scatter_fit = "linear"),
-    error = function(e) {
-      skip(paste("Known .data pronoun bug in scatter+fit path:", e$message))
-    }
-  )
-  expect_s3_class(p, "ggplot")
-})
-
-test_that("scatter with loess fit returns ggplot", {
-  p <- tryCatch(
-    generate_core_plot(df, "a", y_var = "b", plot_type = "scatter",
-                       scatter_fit = "loess"),
-    error = function(e) {
-      skip(paste("Known .data pronoun bug in scatter+fit path:", e$message))
-    }
-  )
-  expect_s3_class(p, "ggplot")
-})
-
-test_that("ecdf returns ggplot", {
-  p <- generate_core_plot(df, "a", group_col = "cat1", plot_type = "ecdf")
-  expect_s3_class(p, "ggplot")
-})
-
-test_that("handles missing group_col by using default", {
-  p <- generate_core_plot(df, "a", plot_type = "histogram")
-  expect_s3_class(p, "ggplot")
-})
-
-# ── generate_ghosted_plot ─────────────────────────────────────────────────
-
-test_that("ghosted histogram returns ggplot", {
-  # Create a "local" subset and a "global" superset
+test_that("every ghosted plot type renders over its global backdrop", {
   df_local <- df[df$cat1 == "Low", ]
-  p <- generate_ghosted_plot(df, df_local, "a", plot_type = "histogram")
-  expect_s3_class(p, "ggplot")
+  for (pt in c("histogram", "density", "boxplot", "violin", "scatter", "ecdf")) {
+    p <- generate_ghosted_plot(df, df_local, "a", group_col = "cat1", plot_type = pt)
+    expect_s3_class(p, "ggplot")
+    build_ok(p)
+    # The ghost IS the point: a grey global layer under a coloured local one.
+    expect_gte(length(p$layers), 2L)
+  }
+  build_ok(generate_ghosted_plot(df, df_local, "a", y_var = "b",
+                                 group_col = "cat1", plot_type = "scatter"))
+  # No group column: both frames get the same substituted level.
+  build_ok(generate_ghosted_plot(df, df_local, "a", plot_type = "histogram"))
 })
 
-test_that("ghosted density returns ggplot", {
-  df_local <- df[df$cat1 == "High", ]
-  p <- generate_ghosted_plot(df, df_local, "a",
-                             group_col = "cat1", plot_type = "density")
-  expect_s3_class(p, "ggplot")
+test_that("every advanced plot type renders", {
+  cases <- list(
+    list(plot_type = "qq",              vars = "a"),
+    list(plot_type = "sinaplot",        vars = "a"),
+    list(plot_type = "sinaplot",        vars = c("a", "b")),
+    list(plot_type = "ridge",           vars = "a"),
+    list(plot_type = "joyplot",         vars = "a"),
+    list(plot_type = "density_heatmap", vars = c("a", "b")),
+    list(plot_type = "parallel",        vars = c("a", "b", "c", "d")),
+    list(plot_type = "radar",           vars = c("a", "b", "c"))
+  )
+  for (cs in cases) {
+    p <- generate_advanced_plot(df, vars = cs$vars, group_col = "cat1",
+                                plot_type = cs$plot_type)
+    expect_s3_class(p, "ggplot")
+    build_ok(p)
+  }
+
+  # Each surface fit is a separate model call whose prediction feeds the tiles.
+  for (fit in c("linear", "loess", "polynomial", "gam", "tps")) {
+    # mgcv's own contrasts = / contrasts.arg notice; see helper.R.
+    p <- without_partial_match_notices(
+      generate_advanced_plot(df, vars = c("a", "b", "c"),
+                             plot_type = "xyz_surface", xyz_fit = fit))
+    build_ok(p)
+    # One filled tile per prediction-grid cell. A fit that failed draws the
+    # single-row "Model fitting failed" notice instead, so the count is what
+    # separates a surface from an excuse.
+    expect_equal(nrow(ggplot2::ggplot_build(p)$data[[1]]), 50L * 50L, info = fit)
+  }
 })
 
-test_that("ghosted boxplot returns ggplot", {
-  df_local <- df[df$cat1 != "Med", ]
-  p <- generate_ghosted_plot(df, df_local, "a",
-                             group_col = "cat1", plot_type = "boxplot")
-  expect_s3_class(p, "ggplot")
-})
+test_that("a selection too small for the plot draws its own explanation", {
+  # These names used to promise a requirement the bodies never checked: the
+  # radar test passed two variables and asserted success, and the density
+  # heatmap test passed exactly two and asserted nothing about the rule.
+  expect_match(placeholder_label(generate_advanced_plot(df, vars = c("a", "b"),
+                                                        plot_type = "radar")),
+               "Radar requires >=3 vars", fixed = TRUE)
+  expect_match(placeholder_label(generate_advanced_plot(df, vars = "a",
+                                                        plot_type = "density_heatmap")),
+               "requires two numeric variables", fixed = TRUE)
+  expect_match(placeholder_label(generate_advanced_plot(df, vars = "a",
+                                                        plot_type = "parallel")),
+               "requires >=2 vars", fixed = TRUE)
+  expect_match(placeholder_label(generate_advanced_plot(df, vars = c("a", "b"),
+                                                        plot_type = "xyz_surface")),
+               "requires 3 numeric variables", fixed = TRUE)
 
-# ── generate_advanced_plot ────────────────────────────────────────────────
-
-test_that("QQ plot returns ggplot", {
-  p <- generate_advanced_plot(df, vars = "a", plot_type = "qq")
-  expect_s3_class(p, "ggplot")
-})
-
-test_that("sina-style plot returns ggplot", {
-  p <- generate_advanced_plot(df, vars = "a", group_col = "cat1",
-                              plot_type = "sinaplot")
-  expect_s3_class(p, "ggplot")
-})
-
-test_that("ridge/joyplot returns ggplot", {
-  p <- generate_advanced_plot(df, vars = "a", group_col = "cat1",
-                              plot_type = "ridge")
-  expect_s3_class(p, "ggplot")
-})
-
-test_that("density heatmap requires two vars", {
-  p <- generate_advanced_plot(df, vars = c("a", "b"), plot_type = "density_heatmap")
-  expect_s3_class(p, "ggplot")
-})
-
-test_that("parallel coordinates returns ggplot", {
-  p <- generate_advanced_plot(df, vars = c("a", "b", "c", "d"),
-                              group_col = "cat1", plot_type = "parallel")
-  expect_s3_class(p, "ggplot")
-})
-
-test_that("radar chart requires >= 3 vars", {
-  p <- generate_advanced_plot(df, vars = c("a", "b"), plot_type = "radar")
-  expect_s3_class(p, "ggplot")
-})
-
-test_that("radar chart with >= 3 vars returns ggplot", {
-  p <- generate_advanced_plot(df, vars = c("a", "b", "c"),
-                              group_col = "cat1", plot_type = "radar")
-  expect_s3_class(p, "ggplot")
-})
-
-test_that("XYZ surface returns ggplot", {
-  p <- generate_advanced_plot(df, vars = c("a", "b", "c"),
-                              plot_type = "xyz_surface", xyz_fit = "linear")
-  expect_s3_class(p, "ggplot")
-})
-
-test_that("XYZ surface with loess fit returns ggplot", {
-  p <- generate_advanced_plot(df, vars = c("a", "b", "c"),
-                              plot_type = "xyz_surface", xyz_fit = "loess")
-  expect_s3_class(p, "ggplot")
-})
-
-test_that("XYZ surface with TPS fit returns ggplot", {
-  p <- generate_advanced_plot(df, vars = c("a", "b", "c"),
-                              plot_type = "xyz_surface", xyz_fit = "tps")
-  expect_s3_class(p, "ggplot")
+  # And one more variable draws the plot itself, not the notice.
+  expect_gt(length(generate_advanced_plot(df, vars = c("a", "b", "c"),
+                                          plot_type = "radar")$layers), 1L)
+  expect_gt(length(generate_advanced_plot(df, vars = c("a", "b"),
+                                          plot_type = "density_heatmap")$layers), 0L)
 })
 
 # ── Scientific Analysis naming radio: RF importance + CK id relabeling ──────
@@ -154,7 +134,9 @@ test_that("build_rf_importance_plot maps covariate names through metadata", {
   set.seed(42)
   df_rf <- data.frame(a = rnorm(30), b = rnorm(30))
   df_rf$y <- df_rf$a + rnorm(30, sd = 0.1)
-  rf <- randomForest::randomForest(y ~ a + b, data = df_rf, ntree = 25)
+  # randomForest's own seq(along = ) notice; see helper.R.
+  rf <- without_partial_match_notices(
+    randomForest::randomForest(y ~ a + b, data = df_rf, ntree = 25))
   meta <- list(list(actual = "a", label = "Alpha"), list(actual = "b", label = "Beta"))
 
   p_lab <- build_rf_importance_plot(rf, "T", meta)

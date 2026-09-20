@@ -1,3 +1,38 @@
+# The Tabular Data Metrics table of a governing-factors result: the model's own
+# quality first, then one row per covariate in decreasing importance.
+#
+# Value and Unit are separate columns because the two quantities are not the
+# same kind of number - permutation importance is an RMSE increase in the
+# target's units, the model-quality row is a percentage - and a single column
+# headed "Value (RMSE increase | OOB %)" left the reader to work out which was
+# which. Values are unrounded; the display formats them.
+gov_summary_df <- function(res, vars_metadata = NULL) {
+  if (is.null(res) || is.null(res$importance)) return(NULL)
+  vip <- res$importance
+  vip <- vip[order(vip$dropout_loss, decreasing = TRUE), , drop = FALSE]
+  out <- data.frame(
+    `Governing Factor / Metric` = vapply(as.character(vip$variable),
+                                         function(v) get_var_label(v, vars_metadata),
+                                         character(1), USE.NAMES = FALSE),
+    Value = as.numeric(vip$dropout_loss),
+    Unit = "RMSE increase",
+    check.names = FALSE, stringsAsFactors = FALSE
+  )
+  # Report the quality of the RF model behind the SHAP/importance results:
+  # OOB % variance explained (pseudo-R² on out-of-bag data). The module keeps
+  # `oob_rsq` and drops the forest once a run lands (see the completion
+  # handler); a direct call still hands over the whole result.
+  oob_rsq <- res$oob_rsq
+  if (is.null(oob_rsq)) oob_rsq <- tryCatch(utils::tail(res$model$rsq, 1), error = function(e) NULL)
+  if (!is.null(oob_rsq) && length(oob_rsq) == 1 && is.finite(oob_rsq)) {
+    out <- rbind(data.frame(
+      `Governing Factor / Metric` = "RF model quality: OOB variance explained",
+      Value = 100 * as.numeric(oob_rsq), Unit = "% of variance (out-of-bag)",
+      check.names = FALSE, stringsAsFactors = FALSE), out)
+  }
+  out
+}
+
 gov_factors_ui <- function(id) {
   ns <- shiny::NS(id)
   
@@ -20,18 +55,18 @@ gov_factors_ui <- function(id) {
           shiny::radioButtons(ns("gov_effect_type"), "Functional Effect Plot:", choices = c("ALE" = "ale", "PDP" = "pdp"), inline = TRUE)
         ),
         shiny::column(9,
-          # Driven by shinyjs::show/hide (immediate custom messages), not a
-          # conditionalPanel on output$gov_ready: output values only flush
-          # after the run observer finishes, and that observer blocks for
-          # seconds while future_promise serializes data to the worker - the
-          # spinner would otherwise appear ~10s after the button press.
+          # Driven by shinyjs::show/hide (custom messages), not a
+          # conditionalPanel on output$gov_ready: an output value does not
+          # reach the browser until the run observer returns, so the spinner
+          # has to be switched on by a message rather than by a reactive
+          # output.
           shinyjs::hidden(
             shiny::div(id = ns("gov_running_panel"),
               style = "text-align: center; padding: 100px 50px; background-color: var(--mn-surface); border-radius: 8px; border: 2px dashed var(--mn-text-3); margin-bottom: 20px; transition: all 0.3s ease;",
               shiny::icon("circle-notch", class = "fa-spin fa-4x", style = "color: var(--mn-text-3); margin-bottom: 20px;"),
               shiny::h3("Executing Machine Learning Analytics...", style = "color: var(--mn-text); font-weight: 600; margin-bottom: 10px;"),
               shiny::p("Fitting high-dimensional Random Forest models and extracting explanatory SHAP, PDP, and ALE profiles in the background.", style = "color: var(--mn-text-2); font-size: 1.1em;"),
-              shiny::p("The dashboard becomes responsive once the module starts (up to a minute or two - when the 'Running...' indicator appears on the button at the left side); recommended use is one large fitting per session (memory optimisation is in progress for the module).", style = "color: var(--mn-text-3); font-style: italic; font-size: 0.9em; margin-top: 15px;"),
+              shiny::p("The dashboard stays responsive while the module is running.", style = "color: var(--mn-text-3); font-style: italic; font-size: 0.9em; margin-top: 15px;"),
               shiny::actionButton(ns("gov_cancel_btn"), "Cancel Run",
                                   icon = shiny::icon("stop"),
                                   class = "btn-danger btn-sm",
@@ -182,9 +217,9 @@ gov_factors_server <- function(id, data_reactive, vars_metadata_reactive) {
       # label inside a .action-label child span, which raw innerHTML replacement
       # destroys (later restores would append instead of replace).
       shiny::updateActionButton(session, "gov_run_btn", label = "Running...", icon = shiny::icon("spinner", class = "fa-spin"))
-      # Immediate (custom-message) feedback: the future_promise dispatch below
-      # blocks this observer for seconds, so queued output/input updates would
-      # only reach the browser after that.
+      # Feedback by custom message, for the reason given at the panel's
+      # definition: nothing this observer writes reaches the browser until it
+      # returns.
       shinyjs::hide("gov_idle_content")
       shinyjs::show("gov_running_panel")
 
@@ -202,10 +237,29 @@ gov_factors_server <- function(id, data_reactive, vars_metadata_reactive) {
       # availableCores() reports 1, which would suppress the SHAP escalation.
       cores_hint_val <- tryCatch(as.integer(future::availableCores()), error = function(e) 1L)
       cancel_file_ship <- gov_cancel_file
+      proj_root_ship <- getwd()
 
+      # `globals =` is pinned to plain data and the worker builds the helper
+      # set itself, the way the interpolation and classification workers do.
+      # Left to automatic discovery this dispatch also shipped ten MASKED base
+      # generics - rbind (spam), nrow/mean/aggregate/as.data.frame/which.max
+      # (terra) - picked up from the main session's search path.
+      # compute_governing_factors() never reads them, because it resolves
+      # through its own globalenv, but deserializing their package references
+      # made every gov worker attach spam, terra, fields and sf for nothing,
+      # and put them in the export that `future.globals.maxSize` measures.
       promises::future_promise({
+        setwd(proj_root_ship)
         library(DALEX)
         library(randomForest)
+        # compute_governing_factors() and gov_shap_item() are top level in a
+        # fragment registered in spatial_helpers.R, so the worker defines them.
+        source("spatial_helpers.R", local = FALSE)
+        # Same reason as the run and optimizer dispatches: this pool worker is
+        # shared, and compute_governing_factors() decides whether to escalate
+        # SHAP by reading nbrOfWorkers(), which a leaked plan would answer with
+        # a dead cluster's size.
+        future::plan(future::sequential)
         compute_governing_factors(
           df = df,
           target_col = target_col,
@@ -217,12 +271,20 @@ gov_factors_server <- function(id, data_reactive, vars_metadata_reactive) {
           cancel_file = cancel_file_ship
         )
       },
+      globals = list(proj_root_ship = proj_root_ship, df = df,
+                     target_col = target_col, preds = preds, n_perms = n_perms,
+                     ntree_val = ntree_val, shap_size_val = shap_size_val,
+                     cores_hint_val = cores_hint_val,
+                     cancel_file_ship = cancel_file_ship),
       # Parallel-safe L'Ecuyer stream for the worker. Without it a fresh PSOCK
       # process seeds itself from clock/PID entropy and future warns
       # "UNRELIABLE VALUE: ... generated random numbers without specifying
-      # argument 'seed'". Numerics-neutral: compute_governing_factors() opens
-      # with set.seed(12345) under a two-sided sandbox, so it overwrites
-      # whatever stream the worker was handed before drawing anything.
+      # argument 'seed'". compute_governing_factors() then draws inside
+      # with_seed() (spatial_vgm.R), which NAMES the generator instead of
+      # inheriting this L'Ecuyer stream, so the importance and SHAP values a
+      # run produces here are the ones the same call produces in-process, in a
+      # script or in test-governing-factors.R. The worker's own stream is
+      # restored on the way out, so furrr's per-element independence holds.
       seed = TRUE) %...>% (function(res) {
         reset_gov_run_ui()
         if (!is.null(res)) {
@@ -231,6 +293,15 @@ gov_factors_server <- function(id, data_reactive, vars_metadata_reactive) {
           # sidebar target or the underlying table changes afterwards.
           res$target_col <- target_col
           res$analysis_df <- df
+          # The panels read the importance and SHAP frames, the ALE/PDP
+          # profiles and the forest's OOB R^2 - never the forest itself, and
+          # never the DALEX explainer. Both are kept for the life of the tab
+          # otherwise: the forest is ~5 MB at 1,035 rows and 200 trees and
+          # ~32 MB at 3,000 rows and 500 trees, and the explainer holds a
+          # reference to it. Keep the one number, drop the objects.
+          res$oob_rsq <- tryCatch(utils::tail(res$model$rsq, 1), error = function(e) NULL)
+          res$model <- NULL
+          res$explainer <- NULL
           gov_rv$res <- res
           gov_rv$ready <- "yes"
           shiny::showNotification("ML evaluation completed successfully!", type = "message")
@@ -366,26 +437,14 @@ gov_factors_server <- function(id, data_reactive, vars_metadata_reactive) {
     
     output$gov_summary_table <- DT::renderDataTable({
       shiny::req(gov_rv$res)
-      vip_df <- gov_rv$res$importance
-      vip_df <- vip_df[order(vip_df$dropout_loss, decreasing = TRUE), ]
-      
-      vip_df$variable <- sapply(as.character(vip_df$variable), function(v) get_var_label(v, vars_metadata_reactive()))
-
-      # Report the quality of the RF model behind the SHAP/importance results:
-      # OOB % variance explained (pseudo-R² on out-of-bag data).
-      oob_rsq <- tryCatch(utils::tail(gov_rv$res$model$rsq, 1), error = function(e) NULL)
-      if (!is.null(oob_rsq) && length(oob_rsq) == 1 && is.finite(oob_rsq)) {
-        vip_df <- rbind(
-          data.frame(variable = "RF model quality: OOB variance explained (%)",
-                     dropout_loss = round(100 * oob_rsq, 2)),
-          vip_df
-        )
-      }
-      colnames(vip_df) <- c("Governing Factor / Metric", "Value (RMSE increase | OOB %)")
-
+      df <- gov_summary_df(gov_rv$res, vars_metadata_reactive())
       # paging off: dom = 't' shows no paging controls, so rows past the first
-      # page would be unreachable on screen and missing from a copy.
-      DT::datatable(vip_df, options = list(dom = 't', paging = FALSE, scrollX = TRUE), rownames = FALSE)
+      # page would be unreachable on screen and missing from a copy. Values stay
+      # numeric and are formatted at four significant digits for display: the
+      # importances used to print as raw doubles (2.001495588850122).
+      DT::datatable(df, options = list(dom = 't', paging = FALSE, scrollX = TRUE,
+                                       columnDefs = sig_render_defs(df, "Value")),
+                    rownames = FALSE)
     })
     
     gov_build_imp_plot <- function() { shiny::req(gov_rv$res); gov_create_plot("importance", expanded = TRUE) }

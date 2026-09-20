@@ -32,25 +32,30 @@ compute_normality <- function(x) {
     method = "None",
     statistic = NA,
     p_value = NA,
-    n = 0
+    n = 0,
+    # Why no test was run, so the verdict can say it rather than blaming the
+    # sample size for a constant column.
+    reason = "no numeric values"
   )
-  
+
   if (is.null(x) || !is.numeric(x)) {
     return(default_res)
   }
-  
+
   clean_x <- x[!is.na(x)]
   n <- length(clean_x)
   default_res$n <- n
-  
+
   if (n < 3) {
+    default_res$reason <- "fewer than 3 non-missing values"
     return(default_res)
   }
-  
+
   if (var(clean_x) == 0) {
+    default_res$reason <- "the values are constant"
     return(default_res)
   }
-  
+
   tryCatch({
     if (n < 5000) {
       test_res <- shapiro.test(clean_x)
@@ -73,8 +78,39 @@ compute_normality <- function(x) {
     )
   }, error = function(e) {
     warning("Normality computation failed: ", e$message)
+    default_res$reason <- paste("the test failed:", e$message)
     default_res
   })
+}
+
+#' The normality verdict as one sentence, for reading and for copying.
+#'
+#' The verdict used to live only in an icon's `title`, so it could not be
+#' copied into a report or read without hovering; the tooltip keeps the long
+#' explanation and the per-group breakdown, this is the line on the page. It
+#' names the test, its statistic with the symbol that test reports (W for
+#' Shapiro-Wilk, D for Lilliefors), the p-value through the app's own
+#' format_p_value(), the significance stars and n, and states the conclusion
+#' at alpha = 0.05 in words.
+normality_verdict_text <- function(res, on_residuals = FALSE) {
+  what <- if (isTRUE(on_residuals)) "within-group residuals" else "raw values"
+  if (identical(res$status, "insufficient")) {
+    return(sprintf("Normality not tested on the %s: %s (n = %d).",
+                   what, res$reason %||% "the test could not be run", res$n))
+  }
+  sym <- if (grepl("Shapiro-Wilk", res$method)) "W" else "D"
+  stars <- signif_stars(res$p_value)
+  sprintf("%s on the %s: %s = %s, p %s%s, n = %d. %s",
+          res$method, what, sym, format_sig(res$statistic),
+          if (grepl("<", format_p_value(res$p_value))) format_p_value(res$p_value)
+            else paste("=", format_p_value(res$p_value)),
+          if (nzchar(stars)) paste0(" ", stars) else "",
+          res$n,
+          if (identical(res$status, "normal")) {
+            "No significant departure from normality at alpha = 0.05."
+          } else {
+            "Significant departure from normality at alpha = 0.05."
+          })
 }
 
 desc_exploratory_ui <- function(id) {
@@ -340,9 +376,10 @@ desc_exploratory_server <- function(id, data_reactive, vars_metadata_reactive,
         if (p_type %in% c("boxplot", "violin", "sinaplot")) {
           shiny::div(style="background-color: var(--mn-surface-2); padding: 10px; border-radius: 6px; border: 1px solid var(--mn-line); margin-bottom: 10px;",
               shiny::h5(style="margin-top:0; color: var(--mn-text);",
-                  "Statistical Significance Tests",
-                  shiny::uiOutput(ns("desc_normality_indicator"), inline = TRUE)
-              ),
+                  "Statistical Significance Tests"),
+              # Its own line, not inside the heading: the verdict is a full
+              # sentence now, and a heading is the wrong place to wrap one.
+              shiny::uiOutput(ns("desc_normality_indicator")),
               # radioButtons, not a checkbox group: only ONE test is ever used
               # (add_stat_layer takes stat_test[1], which is CHOICE order, not
               # click order), so a multi-select control silently discarded the
@@ -440,8 +477,8 @@ desc_exploratory_server <- function(id, data_reactive, vars_metadata_reactive,
       if (res$status == "insufficient") {
         icon_element <- shiny::icon("circle-question", style = "color: var(--mn-text-3); font-size: 13px; cursor: help;")
         tooltip_title <- sprintf(
-          "Normality Test: Insufficient data (n = %d). Typically n >= 3 is required.%s",
-          res$n,
+          "Normality Test: not run (%s; n = %d).%s",
+          res$reason %||% "the test could not be run", res$n,
           group_breakdown
         )
       } else if (res$status == "normal") {
@@ -471,10 +508,18 @@ desc_exploratory_server <- function(id, data_reactive, vars_metadata_reactive,
         )
       }
       
+      # The verdict is TEXT on the page, not only a hover: it is what a reader
+      # copies into a report, so it has to be a complete sentence and to survive
+      # a copy. The icon stays as the severity cue and the tooltip keeps the
+      # long explanation and the per-group breakdown.
       shiny::tags$span(
         style = "margin-left: 5px; display: inline-block; vertical-align: middle;",
         title = tooltip_title,
-        icon_element
+        icon_element,
+        shiny::tags$span(
+          style = "margin-left: 5px; font-size: 0.78em; font-weight: 400; color: var(--mn-text-2);",
+          normality_verdict_text(res, used_residuals)
+        )
       )
     })
     
@@ -588,25 +633,31 @@ desc_exploratory_server <- function(id, data_reactive, vars_metadata_reactive,
       var <- input$desc_var_x
       if(!is.numeric(df[[var]])) return(data.frame(Message="Selected primary variable is not numeric."))
       
-      # Arithmetic (per-group n/mean/sd/min/max, the TOTAL row and the trend
-      # fits) lives in ui_formatting.R; this block selects the data and formats.
+      # Arithmetic (the per-group statistics, the TOTAL row and the trend fits)
+      # lives in ui_formatting.R; this block selects the data and formats.
       res <- desc_summary_table(df[[var]], df$group_id)
-      
+      num_cols <- DESC_SUMMARY_STATS
+
       if (input$desc_plot_type == "scatter" && !is.null(input$desc_scatter_fit) && input$desc_scatter_fit != "none") {
         y_var <- if(!is.null(input$desc_var_y) && input$desc_var_y != "") input$desc_var_y else NULL
         if (!is.null(y_var)) {
            fits <- desc_group_fit_stats(df, var, y_var, input$desc_scatter_fit, res$Group)
-           
+
            if (input$desc_scatter_fit == "loess") {
-               res$`Squared Correlation (Not true R²)` <- round(fits$r2, 3)
+               res$`Squared Correlation (Not true R²)` <- as.numeric(fits$r2)
+               num_cols <- c(num_cols, "Squared Correlation (Not true R²)")
            } else {
-               res$Trend_R2 <- round(fits$r2, 3)
+               res$Trend_R2 <- as.numeric(fits$r2)
+               num_cols <- c(num_cols, "Trend_R2")
            }
            res$Trend_PVal <- format.pval(fits$p, digits = 3, eps = 0.001)
         }
       }
-      
-      DT::datatable(res, options = list(pageLength = 10, dom = 'tip', scrollX = TRUE))
+
+      # rownames default to TRUE here, so the column indexes shift by one.
+      DT::datatable(res, options = list(pageLength = 10, dom = 'tip', scrollX = TRUE,
+                                        columnDefs = sig_render_defs(res, num_cols,
+                                                                     rownames = TRUE)))
       # server = FALSE: every page is in the browser, so the copy button can
       # read the whole table rather than the page on screen.
     }, server = FALSE)
@@ -903,82 +954,117 @@ desc_exploratory_server <- function(id, data_reactive, vars_metadata_reactive,
       )
     })
     
-    pca_rv <- shiny::reactiveValues(res = NULL, data = NULL, cols = NULL, groups = NULL, collinearity_warn = FALSE, collinear_pairs = NULL, scaled = TRUE)
-    
+    # guard: the advisory findings of check_collinearity() awaiting the user's
+    # answer; refusal: why the PCA was not run; dropped_constant: the columns
+    # the fitted PCA left out for having no variance.
+    pca_rv <- shiny::reactiveValues(res = NULL, data = NULL, cols = NULL, groups = NULL,
+                                    guard = NULL, refusal = NULL, dropped_constant = NULL,
+                                    scaled = TRUE)
+
+    # One path for Run PCA and for continuing past the guard. Complete-case
+    # filter, the zero-variance exclusion and prcomp live in desc_pca_fit
+    # (ui_formatting.R).
+    run_pca <- function(df) {
+      vars_lab <- get_var_labels(input$pca_vars, vmeta())
+      fit <- tryCatch(desc_pca_fit(df, input$pca_vars, vars_lab, scale = input$pca_scale),
+                      error = function(e) {
+                        showNotification(paste("PCA Failed:", e$message), type = "error")
+                        NULL
+                      })
+      if (is.null(fit)) return(invisible(NULL))
+      pca_rv$guard <- NULL
+      pca_rv$refusal <- fit$refusal
+      pca_rv$dropped_constant <- fit$dropped_constant
+      if (!is.null(fit$refusal)) {
+        pca_rv$res <- NULL
+        shiny::updateTextInput(session, "pca_ready_flag", value = "no")
+        return(invisible(NULL))
+      }
+      if (fit$dropped > 0) {
+        showNotification(sprintf("Warning: %d rows were dropped due to missing values (NA) in the selected variables.", fit$dropped), type = "warning", duration = 10)
+      }
+      pca_rv$res <- fit$res
+      pca_rv$scaled <- isTRUE(input$pca_scale)
+      pca_rv$data <- fit$data
+      pca_rv$cols <- colnames(fit$data)
+      pca_rv$groups <- if ("group_id" %in% colnames(df)) df$group_id[fit$keep] else NULL
+      shiny::updateTextInput(session, "pca_ready_flag", value = "yes")
+    }
+
     shiny::observeEvent(input$run_pca_btn, {
       req(rv_analytics_data(), input$pca_vars)
       df <- rv_filtered_analytics_data()
-      
+
       if(nrow(df) < 5 || length(input$pca_vars) < 3) {
         showNotification("Insufficient data or variables for PCA.", type="error")
         return()
       }
-      
+
       col_check <- check_collinearity(df, input$pca_vars, threshold = 0.95)
-      
+
       if (col_check$has_collinearity) {
-        pca_rv$collinearity_warn <- TRUE
-        pca_rv$collinear_pairs <- col_check$pairs
+        # Correlated pairs and high VIF are judgement calls: stop and ask.
+        pca_rv$guard <- col_check
+        pca_rv$refusal <- NULL
         pca_rv$res <- NULL
         shiny::updateTextInput(session, "pca_ready_flag", value = "no")
       } else {
-        pca_rv$collinearity_warn <- FALSE
-        pca_rv$collinear_pairs <- NULL
-        
-        vars_lab <- get_var_labels(input$pca_vars, vmeta())
-
-        tryCatch({
-          # Complete-case filter + prcomp live in desc_pca_fit (ui_formatting.R).
-          fit <- desc_pca_fit(df, input$pca_vars, vars_lab, scale = input$pca_scale)
-          if (fit$dropped > 0) {
-              showNotification(sprintf("Warning: %d rows were dropped due to missing values (NA) in the selected variables.", fit$dropped), type = "warning", duration = 10)
-          }
-          pca_rv$res <- fit$res
-          pca_rv$scaled <- isTRUE(input$pca_scale)
-          pca_rv$data <- fit$data
-          pca_rv$cols <- vars_lab
-          pca_rv$groups <- if ("group_id" %in% colnames(df)) df$group_id[fit$keep] else NULL
-          shiny::updateTextInput(session, "pca_ready_flag", value = "yes")
-        }, error = function(e) {
-          showNotification(paste("PCA Failed:", e$message), type="error")
-        })
+        run_pca(df)
       }
     })
-    
+
+    # Three kinds of finding, each under its own heading and sentence. Only the
+    # first two are advisory, so the button to continue follows them; a
+    # constant column is never a reason to stop, because it is excluded anyway.
+    # The same slot carries a refusal, or, once a PCA is shown, the standing
+    # note naming the columns it left out.
     output$pca_collinearity_warning_ui <- shiny::renderUI({
-      if (!pca_rv$collinearity_warn) return(NULL)
-      
+      lab <- function(v) get_var_labels(v, vmeta())
+      if (!is.null(pca_rv$refusal)) {
+        return(shiny::div(class = "alert alert-danger",
+          shiny::h4(shiny::icon("ban"), "PCA not run"),
+          shiny::p(pca_rv$refusal)))
+      }
+      g <- pca_rv$guard
+      if (is.null(g)) {
+        dc <- pca_rv$dropped_constant
+        if (is.null(pca_rv$res) || !length(dc)) return(NULL)
+        return(shiny::div(class = "mn-notice",
+          shiny::icon("info-circle"),
+          sprintf(" Excluded from this PCA (no variance over the analysed rows): %s. The remaining %d variables are %s.",
+                  paste(dc, collapse = ", "), ncol(pca_rv$res$rotation),
+                  if (isTRUE(pca_rv$scaled)) "standardised" else "centred")))
+      }
+      section <- function(title, sentence, items) {
+        shiny::tagList(shiny::h5(style = "font-weight: 600; margin-top: 12px;", title),
+                       shiny::p(sentence),
+                       shiny::tags$ul(lapply(items, shiny::tags$li)))
+      }
       shiny::div(class = "alert alert-warning",
-          shiny::h4(shiny::icon("exclamation-triangle"), "High Collinearity Detected!"),
-          shiny::p("The following variable pairs have a correlation > 0.95. This can severely distort PCA results (multicollinearity)."),
-          shiny::tags$ul(
-            lapply(seq_len(nrow(pca_rv$collinear_pairs)), function(i) {
-              shiny::tags$li(paste0(pca_rv$collinear_pairs$var1[i], " & ", pca_rv$collinear_pairs$var2[i], " (r = ", round(pca_rv$collinear_pairs$r[i], 3), ")"))
-            })
-          ),
-          shiny::p("You should either remove one of the correlated variables from your selection, or force execution if you know what you're doing."),
-          shiny::actionButton(ns("pca_force_btn"), "Ignore Warning & Force PCA", class="btn-danger")
+        shiny::h4(shiny::icon("exclamation-triangle"), "Check the selected variables"),
+        if (nrow(g$pairs) > 0) section(
+          "Highly correlated pairs",
+          "These pairs have |r| > 0.95. Near-duplicate variables dominate the first components and split their loadings, so the biplot understates every other variable.",
+          sprintf("%s & %s (r = %s)", lab(g$pairs$var1), lab(g$pairs$var2), format_sig(g$pairs$r))),
+        if (nrow(g$high_vif) > 0) section(
+          "High multicollinearity (VIF > 10)",
+          "These variables are predicted almost exactly by a combination of the others, so their contribution to a component is not separately identifiable.",
+          sprintf("%s (VIF = %s)", lab(g$high_vif$variable),
+                  ifelse(is.finite(g$high_vif$vif), format_sig(g$high_vif$vif),
+                         "not finite: the correlation matrix is singular"))),
+        if (length(g$constant) > 0) section(
+          "No variance",
+          "These variables are constant across the selected rows. They carry no information and cannot be standardised, so they are excluded from the PCA.",
+          lab(g$constant)),
+        shiny::p(style = "margin-top: 10px;",
+                 "Remove the variables named above from the selection, or continue with them: correlated and high-VIF variables are advisory findings."),
+        shiny::actionButton(ns("pca_force_btn"), "Ignore Warning & Force PCA", class = "btn-danger")
       )
     })
-    
+
     shiny::observeEvent(input$pca_force_btn, {
       req(rv_analytics_data(), input$pca_vars)
-      df <- rv_filtered_analytics_data()
-      
-      vars_lab <- get_var_labels(input$pca_vars, vmeta())
-
-      tryCatch({
-        fit <- desc_pca_fit(df, input$pca_vars, vars_lab, scale = input$pca_scale)
-        pca_rv$res <- fit$res
-        pca_rv$scaled <- isTRUE(input$pca_scale)
-        pca_rv$data <- fit$data
-        pca_rv$cols <- vars_lab
-        pca_rv$groups <- if ("group_id" %in% colnames(df)) df$group_id[fit$keep] else NULL
-        pca_rv$collinearity_warn <- FALSE
-        shiny::updateTextInput(session, "pca_ready_flag", value = "yes")
-      }, error = function(e) {
-        showNotification(paste("PCA Failed:", e$message), type="error")
-      })
+      run_pca(rv_filtered_analytics_data())
     })
     
     output$pca_plot_controls <- shiny::renderUI({
@@ -1043,6 +1129,14 @@ desc_exploratory_server <- function(id, data_reactive, vars_metadata_reactive,
           aligned_df <- data.frame(group_id = pca_rv$groups %||% factor(rep("All", nrow(pca_rv$res$x))))
           p <- generate_pca_biplot_3d(pca_rv$res, aligned_df, pc_x = input$pca_pc_x, pc_y = input$pca_pc_y, pc_z = input$pca_pc_z, group_col="group_id")
        }
+          # The columns left out for having no variance travel with the figure,
+          # including the PNG the expand modal downloads.
+          dc <- pca_rv$dropped_constant
+          if (inherits(p, "ggplot") && length(dc)) {
+            p <- p + labs(caption = paste(c(p$labels$caption,
+                                            paste("Excluded (no variance):", paste(dc, collapse = ", "))),
+                                          collapse = "\n"))
+          }
           p
        })
     })

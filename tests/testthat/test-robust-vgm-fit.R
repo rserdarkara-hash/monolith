@@ -77,10 +77,139 @@ test_that("returned fit carries the vgm_diagnostics contract", {
   fit <- suppressWarnings(robust_vgm_fit(h$v_emp, h$v_data))
   d <- attr(fit, "vgm_diagnostics")
   expect_type(d, "list")
-  expect_named(d, c("n_tried", "n_flawed", "flawed_winner"), ignore.order = TRUE)
+  expect_named(d, c("n_tried", "n_flawed", "flawed_winner", "status",
+                    "practical_range", "max_lag", "sill_resolved", "range_side",
+                    "trend_suspected", "target_degenerate"), ignore.order = TRUE)
   expect_identical(d$n_tried, 16L)
   expect_identical(d$n_flawed, 16L)
   expect_true(is.logical(d$flawed_winner))
+  expect_true(d$status %in% VGM_FIT_STATUSES)
+  # The categorical and the two legacy booleans must agree: they are read by
+  # the CK seed guard and the map banner respectively.
+  expect_identical(vgm_fit_status(fit), d$status)
+  expect_equal(isTRUE(attr(fit, "flawed_winner")), identical(d$status, "singular_selected"))
+  expect_equal(isTRUE(attr(fit, "is_fallback")),
+               d$status %in% c("fit_failed", "heuristic_fallback"))
+})
+
+test_that("a converged fit outside the lag window beats a flawed one and a guess", {
+  # The range window is a DIAGNOSTIC, not an eligibility rule. On a
+  # trend-bearing field no candidate converges inside the window, so the old
+  # rule found nothing eligible and returned the heuristic Spherical guess.
+  # Among converged eligible candidates the lowest SSErr wins, whatever its range.
+  h <- make_trend_vgm_input()
+  fit <- suppressWarnings(robust_vgm_fit(h$v_emp, h$v_data))
+  d <- attr(fit, "vgm_diagnostics")
+
+  # Re-derive the selection here rather than reading it off the output.
+  cands <- screen_vgm_candidates(h)
+  converged <- Filter(function(x) x$valid && !x$flawed, cands)
+  expect_gt(length(converged), 0)
+  expect_false(any(vapply(converged, function(x) x$resolved, logical(1))))  # the premise
+  expected <- converged[[which.min(vapply(converged, function(x) x$sse, numeric(1)))]]$fit
+
+  expect_identical(as.character(fit$model[2]), as.character(expected$model[2]))
+  expect_equal(fit$range[2], expected$range[2], tolerance = 1e-8)
+  expect_false(isTRUE(attr(fit, "is_fallback")))
+  expect_false(isTRUE(attr(fit, "flawed_winner")))
+  expect_identical(d$status, "range_unresolved")
+  # Used, but not presented as identified: the range sits beyond the cutoff
+  # and the empirical variogram is still climbing there.
+  expect_false(d$sill_resolved)
+  expect_identical(d$range_side, "beyond")
+  expect_true(d$trend_suspected)
+  expect_gt(d$practical_range, d$max_lag)
+})
+
+test_that("a better-fitting unresolved fit is not beaten by a resolved one", {
+  # The case a hard resolved-first tier gets wrong: both a converged candidate
+  # whose range the lags resolve and a converged one whose range they do not,
+  # and the unresolved one fits the empirical variogram better. Range
+  # resolution is a diagnostic; the fitting criterion decides.
+  h <- make_mixed_vgm_input()
+  cands <- screen_vgm_candidates(h)
+  converged <- Filter(function(x) x$valid && !x$flawed, cands)
+  sse <- vapply(converged, function(x) x$sse, numeric(1))
+  res <- vapply(converged, function(x) x$resolved, logical(1))
+  expect_true(any(res) && any(!res))                 # the premise
+  best_res <- min(sse[res]); best_unres <- min(sse[!res])
+  expect_gt(best_res / best_unres, 1.5)               # a real gap, not a tie
+
+  fit <- suppressWarnings(robust_vgm_fit(h$v_emp, h$v_data))
+  winner <- converged[[which.min(sse)]]$fit
+  expect_identical(as.character(fit$model[2]), as.character(winner$model[2]))
+  expect_equal(attr(fit, "SSErr"), best_unres, tolerance = 1e-10)
+  expect_identical(attr(fit, "vgm_diagnostics")$status, "range_unresolved")
+  expect_false(isTRUE(attr(fit, "flawed_winner")))
+
+  # The resolved candidate would have been the resolved-first answer.
+  resolved_first <- converged[res][[which.min(sse[res])]]$fit
+  expect_false(isTRUE(all.equal(attr(fit, "SSErr"), attr(resolved_first, "SSErr"))))
+})
+
+test_that("range resolution breaks a numerical tie and nothing more", {
+  # Two candidates tied on the criterion: the resolved one is taken. A
+  # resolved candidate that fits measurably worse is not.
+  f_unres <- gstat::vgm(2, "Mat", 3000, 0.5, kappa = 1.5)
+  f_res <- gstat::vgm(2, "Gau", 300, 0.5)
+  tied <- list(list(fit = f_unres, sse = 1e-4, range_resolved = FALSE),
+               list(fit = f_res, sse = 1e-4 * (1 + 1e-10), range_resolved = TRUE))
+  expect_identical(as.character(.vgm_pick_best(tied)$fit$model[2]), "Gau")
+  apart <- list(list(fit = f_unres, sse = 1e-4, range_resolved = FALSE),
+                list(fit = f_res, sse = 1.01e-4, range_resolved = TRUE))
+  expect_identical(as.character(.vgm_pick_best(apart)$fit$model[2]), "Mat")
+  # The tie band is numerical, not a preference margin.
+  expect_lte(VGM_SSE_TIE_REL, 1e-6)
+})
+
+test_that("the five fit statuses map to the attributes the UI reads", {
+  # fit_failed is reachable end to end: fewer than 5 bins.
+  h <- make_hostile_vgm_input(seed = 1)
+  expect_identical(vgm_fit_status(robust_vgm_fit(h$v_emp[1:3, ], h$v_data)), "fit_failed")
+  expect_identical(vgm_fit_status(robust_vgm_fit(NULL, rnorm(10))), "fit_failed")
+
+  # heuristic_fallback needs every candidate to be ineligible, which
+  # no real empirical variogram in this suite produces; pin the mapping.
+  fb <- make_mock_vgm()
+  attr(fb, "is_fallback") <- TRUE
+  attr(fb, "vgm_diagnostics") <- list(status = "heuristic_fallback", n_tried = 16L)
+  expect_identical(vgm_fit_status(fb), "heuristic_fallback")
+
+  fw <- make_mock_vgm(); attr(fw, "flawed_winner") <- TRUE
+  expect_identical(vgm_fit_status(fw), "singular_selected")
+  # A supplied (manual) model carries no diagnostics and is not degraded.
+  expect_identical(vgm_fit_status(make_mock_vgm()), "ok")
+  expect_identical(vgm_fit_status(NULL), "fit_failed")
+
+  expect_match(vgm_status_label("range_unresolved"), "range unresolved by lag support")
+  expect_match(vgm_status_label("heuristic_fallback"), "heuristic")
+})
+
+test_that("the rising-at-the-cutoff detector needs a rise, not a wobble", {
+  h <- make_trend_vgm_input()
+  rising <- h$v_emp; rising$gamma <- seq(1, 10, length.out = nrow(rising))
+  flat <- h$v_emp
+  flat$gamma <- c(seq(1, 9, length.out = 5), rep(9, nrow(flat) - 5))
+  expect_true(.vgm_still_rising(rising))
+  expect_false(.vgm_still_rising(flat))
+  # A single noisy last bin must not trip it: the detector compares thirds.
+  noisy <- flat; noisy$gamma[nrow(noisy)] <- 9.4
+  expect_false(.vgm_still_rising(noisy))
+  expect_true(is.na(.vgm_still_rising(h$v_emp[1:3, ])))
+  expect_true(is.na(.vgm_still_rising(NULL)))
+})
+
+test_that("a degenerate target is reported on the fit, not hidden in its sill", {
+  h <- make_hostile_vgm_input(seed = 1)
+  const <- suppressWarnings(robust_vgm_fit(h$v_emp, rep(7, 48)))
+  expect_true(attr(const, "vgm_diagnostics")$target_degenerate)
+  expect_true(vgm_target_degenerate(const))
+  # near_constant: sd/max ~ 1.4e-8 sits ABOVE .is_degenerate_covariate's 1e-8
+  # relative floor, so it is a real (tiny) variance and is NOT suppressed.
+  set.seed(9)
+  near <- suppressWarnings(robust_vgm_fit(h$v_emp, 7 + rnorm(48, 0, 1e-7)))
+  expect_false(vgm_target_degenerate(near))
+  expect_false(vgm_target_degenerate(make_mock_vgm()))
 })
 
 test_that("the candidate screen refuses a negative nugget", {
@@ -110,6 +239,17 @@ test_that("the candidate screen refuses a negative nugget", {
   v_emp <- gstat::variogram(v ~ 1, pts, width = lags$width, cutoff = lags$cutoff)
   fit <- suppressWarnings(robust_vgm_fit(v_emp, pts$v))
   expect_true(is.finite(fit$psill[1]) && fit$psill[1] >= 0)
+})
+
+test_that("auto-fit eligibility rejects non-finite criteria and structural sills", {
+  fit <- gstat::vgm(psill = 2, model = "Sph", range = 300, nugget = 0.05)
+  expect_true(.vgm_autofit_eligible(fit, sse = 1, practical_range = 300))
+  expect_false(.vgm_autofit_eligible(fit, sse = Inf, practical_range = 300))
+  expect_false(.vgm_autofit_eligible(fit, sse = NULL, practical_range = 300))
+
+  infinite_sill <- fit
+  infinite_sill$psill[2] <- Inf
+  expect_false(.vgm_autofit_eligible(infinite_sill, sse = 1, practical_range = 300))
 })
 
 test_that("diagnostics present on the tiny-variogram early return", {
@@ -297,6 +437,41 @@ test_that("build_vgm_warning_html flags a Gaussian or Matern model with a small 
   expect_null(build_vgm_warning_html(list(LocB_act = manual_vgm(1, "Mat", 300, 0.2))))
 })
 
+test_that("a converged out-of-window fit gets its own band, not the failure band", {
+  f <- gstat::vgm(psill = 2, model = "Exp", range = 300, nugget = 0.5) # practical 900
+  attr(f, "vgm_diagnostics") <- list(status = "range_unresolved", practical_range = 900,
+                                     max_lag = 700, sill_resolved = FALSE,
+                                     range_side = "beyond", trend_suspected = FALSE,
+                                     target_degenerate = FALSE)
+  html <- build_vgm_warning_html(list(LocA_act = f))
+  expect_match(html, "Variogram range not resolved", fixed = TRUE)
+  expect_match(html, "Practical range extends beyond sampled lag support for: LocA (actual)", fixed = TRUE)
+  expect_no_match(html, "Variogram fit failed", fixed = TRUE)
+  expect_no_match(html, "non-converged or singular", fixed = TRUE)
+
+  # The window fails at both ends, and the two mean opposite things.
+  below <- f
+  attr(below, "vgm_diagnostics")$range_side <- "below"
+  html_b <- build_vgm_warning_html(list(LocB_act = below))
+  expect_match(html_b, "Practical range is below sampled-distance resolution", fixed = TRUE)
+  expect_match(html_b, "effective short-range resolution threshold", fixed = TRUE)
+  expect_match(html_b, "near-pure nugget", fixed = TRUE)
+  expect_no_match(html_b, "extends beyond sampled lag support", fixed = TRUE)
+})
+
+test_that("a variogram still rising at the cutoff gets a hedged trend advisory", {
+  f <- gstat::vgm(psill = 2, model = "Exp", range = 300, nugget = 0.5)
+  attr(f, "vgm_diagnostics") <- list(status = "range_unresolved", practical_range = 900,
+                                     max_lag = 700, sill_resolved = FALSE,
+                                     range_side = "beyond", trend_suspected = TRUE,
+                                     target_degenerate = FALSE)
+  html <- build_vgm_warning_html(list(LocA_act = f))
+  expect_match(html, "Sill not observed; possible large-scale trend", fixed = TRUE)
+  expect_match(html, "Regression Kriging", fixed = TRUE)
+  # A rising variogram is a diagnostic for trend, never proof of it.
+  expect_no_match(html, "non-stationarity detected", fixed = TRUE)
+})
+
 test_that("banner close button targets its own container, not a fixed id", {
   f_fw <- make_mock_vgm(); attr(f_fw, "flawed_winner") <- TRUE
   html <- build_vgm_warning_html(list(L1_act = f_fw))
@@ -316,6 +491,99 @@ test_that("red-only banner omits the amber section", {
   html <- build_vgm_warning_html(list(L1_act = f_fb))
   expect_match(html, "default spherical variogram model", fixed = TRUE)
   expect_no_match(html, "non-converged or singular", fixed = TRUE)
+})
+
+# ── Sill-derived diagnostics and their qualifier ────────────────────────────
+
+test_that("structural dependency is qualified when the sill is not resolved", {
+  # Practical range 3a = 900 m against a 700 m cutoff: the sill the percentage
+  # is derived from was never reached by the data.
+  f <- gstat::vgm(psill = 2, model = "Exp", range = 300, nugget = 0.5)
+  attr(f, "vgm_diagnostics") <- list(status = "range_unresolved", max_lag = 700,
+                                     sill_resolved = FALSE, target_degenerate = FALSE)
+  p <- vgm_params_row(f)
+  expect_equal(p$practical_range, 900)
+  expect_equal(p$max_lag, 700)
+  expect_false(p$sill_resolved)
+  expect_equal(p$sdep, 80)   # (2.5 - 0.5) / 2.5
+
+  chr <- .vgm_params_chr(f)
+  expect_match(chr[6], "Not reliably identified", fixed = TRUE)
+  expect_match(chr[6], "Model-extrapolated: 80%", fixed = TRUE)   # in the tooltip
+  expect_match(chr[5], "max lag 700", fixed = TRUE)
+
+  # Resolved: the plain percentage, no qualifier anywhere.
+  g <- gstat::vgm(psill = 2, model = "Exp", range = 100, nugget = 0.5) # practical 300
+  attr(g, "vgm_diagnostics") <- list(status = "ok", max_lag = 700,
+                                     sill_resolved = TRUE, target_degenerate = FALSE)
+  chr_ok <- .vgm_params_chr(g)
+  expect_identical(chr_ok[6], "80%")
+  expect_no_match(chr_ok[5], "max lag", fixed = TRUE)
+
+  # A supplied model records no empirical support, so the qualifier must not
+  # fire for it: the user chose those parameters.
+  m <- manual_vgm(2, "Exp", 300, 0.5)
+  expect_true(is.na(vgm_params_row(m)$sill_resolved))
+  expect_identical(.vgm_params_chr(m)[6], "80%")
+})
+
+test_that("the variogram export carries the lag support beside the percentage", {
+  f <- gstat::vgm(psill = 2, model = "Exp", range = 300, nugget = 0.5)
+  attr(f, "vgm_diagnostics") <- list(status = "range_unresolved", max_lag = 700,
+                                     sill_resolved = FALSE, target_degenerate = FALSE)
+  df <- vgm_params_export_df(list(LocA_act = f, LocA_pre = manual_vgm(2, "Exp", 300, 0.5)))
+  expect_true(all(c("Max Lag", "Sill Resolved") %in% names(df)))
+  expect_equal(df$`Structural Dep. (%)`[1], 80)   # a file cannot carry a tooltip
+  expect_equal(df$`Max Lag`[1], 700)
+  expect_false(df$`Sill Resolved`[1])
+  expect_true(is.na(df$`Sill Resolved`[2]))       # the manual model
+})
+
+test_that("a degenerate target reports its cause instead of a noise sill", {
+  f <- gstat::vgm(psill = 1e-60, model = "Exp", range = 70, nugget = 0)
+  attr(f, "vgm_diagnostics") <- list(status = "ok", max_lag = 700,
+                                     sill_resolved = TRUE, target_degenerate = TRUE)
+  df <- vgm_params_table_df(list(LocA_act = f), "LocA")
+  expect_identical(names(df), "Status")
+  expect_match(df$Status[1], "no usable variance", fixed = TRUE)
+
+  # With a usable Predicted surface beside it, the table still renders and the
+  # degenerate column says so rather than printing 100% structural dependency.
+  g <- gstat::vgm(psill = 2, model = "Exp", range = 100, nugget = 0.5)
+  attr(g, "vgm_diagnostics") <- list(status = "ok", max_lag = 700,
+                                     sill_resolved = TRUE, target_degenerate = FALSE)
+  df2 <- vgm_params_table_df(list(LocA_act = f, LocA_pre = g), "LocA")
+  expect_true(all(c("Param", "Actual", "Predicted") %in% names(df2)))
+  expect_true(all(df2$Actual == "Not estimated"))
+  expect_identical(df2$Predicted[6], "80%")
+})
+
+test_that("the per-fold variogram status is summarised and logged by fold", {
+  cv <- structure(list(), class = "list")
+  attr(cv, "cv_fold_meta") <- list(
+    "1" = list(vgm_status = "ok"),
+    "2" = list(vgm_status = "range_unresolved"),
+    "3" = list(vgm_status = "heuristic_fallback"),
+    "7" = list(vgm_status = "singular_selected"),
+    "10" = list(vgm_status = "ok"))
+  tb <- .cv_fold_status_table(cv)
+  expect_identical(tb$status, c("heuristic_fallback", "singular_selected",
+                                "range_unresolved", "ok"))   # worst first
+  expect_identical(tb$n, c(1L, 1L, 1L, 2L))
+  expect_identical(tb$folds[tb$status == "ok"], "1, 10")
+  expect_identical(tb$folds[tb$status == "range_unresolved"], "2")
+
+  res <- .log_vgm_fold_status(list(cv_obj = cv, log_msg = ""), "OK", "West_Field")
+  expect_match(res$log_msg, "West_Field: 3 of 5 folds", fixed = TRUE)
+  expect_match(res$log_msg, "Fold 2: converged fit, range unresolved by lag support", fixed = TRUE)
+  expect_match(res$log_msg, "Fold 3: heuristic fallback", fixed = TRUE)
+  expect_match(res$log_msg, "Fold 7: singular/non-converged fit selected", fixed = TRUE)
+
+  # Every fold clean: nothing to say.
+  clean <- structure(list(), class = "list")
+  attr(clean, "cv_fold_meta") <- list("1" = list(vgm_status = "ok"))
+  expect_identical(.log_vgm_fold_status(list(cv_obj = clean, log_msg = ""), "OK", "L")$log_msg, "")
+  expect_null(.cv_fold_status_table(structure(list(), class = "list")))
 })
 
 # ── calc_directional_variogram (anisotropy diagnostic) ──────────────────────
@@ -570,10 +838,11 @@ test_that("vgm_params_row keeps small-unit parameters at full precision", {
   expect_equal(out$Nugget, 2.151e-4)
   expect_equal(out$Sill, 3.722e-4)
 
-  # the card: four significant digits below 1, not a fixed number of decimals
-  shown <- vgm_params_row(m, round_values = TRUE)
-  expect_equal(shown$nugget, 2.151e-4)
-  expect_equal(shown$sdep, round(p$sdep, 1))
+  # The card shows these very values at four significant digits, so a small
+  # nugget reaches the reader with all four digits rather than as 0 (it sits
+  # above the 1e-4 switch, so in fixed notation).
+  expect_equal(format_sig(p$nugget), "0.0002151")
+  expect_equal(format_sig(p$sdep), "42.21")
 })
 
 test_that("the practical range makes families comparable; kappa travels with Matern", {
@@ -635,11 +904,16 @@ test_that("vgm_params_export_df is one tidy numeric row per fitted target", {
   out <- vgm_params_export_df(fits)
 
   expect_equal(names(out), c("Locality", "Target", "Model", "Kappa", "Nugget", "Sill",
-                             "Range (a)", "Practical Range", "Structural Dep. (%)"))
+                             "Range (a)", "Practical Range", "Structural Dep. (%)",
+                             "Max Lag", "Sill Resolved"))
   expect_equal(nrow(out), 3)
   expect_equal(out$Locality, c("A", "A", "B"))
   expect_equal(out$Target, c("Actual", "Predicted", "Actual"))
-  expect_true(all(vapply(out[4:9], is.numeric, logical(1))))
+  expect_true(all(vapply(out[4:10], is.numeric, logical(1))))
+  # These fits carry no diagnostics (hand-built, not from the screen), so the
+  # lag support is unknown and nothing is claimed about the sill.
+  expect_true(all(is.na(out$`Max Lag`)))
+  expect_true(all(is.na(out$`Sill Resolved`)))
   expect_equal(out$Sill, c(1.0, 1.0, 1.0))
   expect_equal(out$`Range (a)`, c(300, 500, 200))
   # Sph 300 x 1, Exp 500 x 3, Gau 200 x sqrt(3): comparable across the rows
@@ -668,9 +942,9 @@ test_that("vgm_params_table_df transposes a named locality and pools the total",
   act_only <- vgm_params_table_df(fits["A_act"], "A")
   expect_equal(names(act_only), c("Param", "Actual"))
 
-  # the combined card is the export frame at display rounding
+  # the combined card IS the export frame: one builder, one set of numbers
   total <- vgm_params_table_df(fits, "Total (Combined)")
-  expect_equal(total, vgm_params_export_df(fits, round_values = TRUE))
+  expect_equal(total, vgm_params_export_df(fits))
 
   mat <- vgm_params_table_df(list(M_act = gstat::vgm(1, "Mat", 100, 0.2, kappa = 1.5)), "M")
   expect_equal(mat$Actual[1], "Mat (kappa = 1.5)")

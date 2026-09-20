@@ -7,8 +7,11 @@
 # interpolation workers can resolve them by sourcing that file alone.
 
 # Builds the Map Viewer variogram-quality banner from the per-locality fit
-# list. Red = heuristic fallback (fit failed entirely); amber = auto-fit had
-# to select a non-converged/singular candidate. Returns NULL when clean.
+# list, one band per distinct condition. Red = the fit failed entirely and a
+# heuristic model was used; amber = a non-converged/singular candidate was
+# selected, a converged fit whose range the lags cannot resolve, a variogram
+# still rising at the cutoff, or a smooth family at a negligible nugget.
+# A converged fit is NEVER reported as a failed one. Returns NULL when clean.
 # `target` limits the banner to the fits a specific map actually used:
 # "act" (actual maps), "pre" (predicted maps), or NULL for both (residual
 # maps, which derive from both fits).
@@ -25,18 +28,35 @@ build_vgm_warning_html <- function(v_fit_list, target = NULL) {
   fallback_keys <- character(0)
   flawed_keys <- character(0)
   smooth_keys <- character(0)
+  beyond_keys <- character(0)
+  below_keys <- character(0)
+  trend_keys <- character(0)
   for (n in names(v_fit_list)) {
     if (!is.null(target) && !grepl(paste0("_", target, "$"), n)) next
-    if (isTRUE(attr(v_fit_list[[n]], "is_fallback"))) {
+    f <- v_fit_list[[n]]
+    status <- vgm_fit_status(f)
+    if (status %in% c("fit_failed", "heuristic_fallback")) {
       fallback_keys <- c(fallback_keys, display_key(n))
-    } else if (isTRUE(attr(v_fit_list[[n]], "flawed_winner"))) {
+    } else if (identical(status, "singular_selected")) {
       flawed_keys <- c(flawed_keys, display_key(n))
+    } else if (identical(status, "range_unresolved")) {
+      # The window fails at BOTH ends and the two mean opposite things, so the
+      # side is recorded at fit time rather than re-derived here.
+      if (identical(attr(f, "vgm_diagnostics")$range_side, "below")) {
+        below_keys <- c(below_keys, display_key(n))
+      } else {
+        beyond_keys <- c(beyond_keys, display_key(n))
+      }
     }
-    if (isTRUE(vgm_smooth_nugget_share(v_fit_list[[n]]) < VGM_SMOOTH_NUGGET_WARN_SHARE)) {
+    if (isTRUE(attr(f, "vgm_diagnostics")$trend_suspected)) {
+      trend_keys <- c(trend_keys, display_key(n))
+    }
+    if (isTRUE(vgm_smooth_nugget_share(f) < VGM_SMOOTH_NUGGET_WARN_SHARE)) {
       smooth_keys <- c(smooth_keys, display_key(n))
     }
   }
-  if (length(fallback_keys) == 0 && length(flawed_keys) == 0 && length(smooth_keys) == 0) return(NULL)
+  if (length(fallback_keys) == 0 && length(flawed_keys) == 0 && length(smooth_keys) == 0 &&
+      length(beyond_keys) == 0 && length(below_keys) == 0 && length(trend_keys) == 0) return(NULL)
 
   red_part <- if (length(fallback_keys) > 0) {
     paste0("<span style='color:var(--mn-danger);'>Note: Variogram fit failed for some localities (",
@@ -48,12 +68,41 @@ build_vgm_warning_html <- function(v_fit_list, target = NULL) {
            paste(flawed_keys, collapse = ", "),
            ".<br>No candidate model converged cleanly, so the best-scoring (lowest-error) fit was used to build this map. The map is still valid to explore, but variogram parameters may be imprecise &mdash; interpret interpolations with caution.</span>")
   } else ""
+  # A converged fit whose practical range lies outside the span the empirical
+  # variogram resolves. The model is used; what it CLAIMS is what is limited.
+  unresolved_part <- if (length(beyond_keys) > 0 || length(below_keys) > 0) {
+    beyond_line <- if (length(beyond_keys) > 0) {
+      paste0("<br>Practical range extends beyond sampled lag support for: ",
+             paste(beyond_keys, collapse = ", "),
+             ". Its sill and range are extrapolated beyond the observed spatial support.")
+    } else ""
+    below_line <- if (length(below_keys) > 0) {
+      paste0("<br>Practical range is below sampled-distance resolution for: ",
+             paste(below_keys, collapse = ", "),
+             ". It is below the application's effective short-range resolution threshold, ",
+             "so the empirical lags cannot resolve spatial structure at that scale and the fit ",
+             "behaves as near-pure nugget.")
+    } else ""
+    paste0("<span style='color:var(--mn-warn);'>Variogram range not resolved within the empirical lag window.",
+           "<br>The prediction used a converged fit whose range falls outside the span the empirical variogram resolves.",
+           beyond_line, below_line, "</span>")
+  } else ""
+  # Hedged on purpose: a monotone rising variogram is a strong diagnostic for
+  # trend, not proof of it. Never state that non-stationarity was detected.
+  trend_part <- if (length(trend_keys) > 0) {
+    paste0("<span style='color:var(--mn-warn);'>Sill not observed; possible large-scale trend for: ",
+           paste(trend_keys, collapse = ", "),
+           ".<br>The empirical variogram continues to increase near the lag cutoff, so the range and sill ",
+           "are weakly constrained. This can indicate either long-range spatial dependence or ",
+           "non-stationarity. Consider modelling the systematic trend with suitable covariates ",
+           "(Regression Kriging) and fitting the variogram to the residuals.</span>")
+  } else ""
   smooth_part <- if (length(smooth_keys) > 0) {
     paste0("<span style='color:var(--mn-warn);'>Gaussian or Mat&eacute;rn variogram with a nugget below 5% of the sill for: ",
            paste(smooth_keys, collapse = ", "),
            ".<br>Kriging with such a model can place predictions far outside the observed range &mdash; check the map against the data, or add a nugget.</span>")
   } else ""
-  parts <- c(red_part, amber_part, smooth_part)
+  parts <- c(red_part, amber_part, unresolved_part, trend_part, smooth_part)
 
   paste0("<div class='vgm-fallback-warn' style='font-weight:bold; background:var(--mn-surface); border:1px solid var(--mn-line); padding:5px 25px 5px 5px; border-radius:4px; position:relative;'>",
          "<button onclick='this.parentElement.style.display=\"none\";' style='position:absolute; top:2px; right:2px; background:none; border:none; color:var(--mn-danger); font-size:16px; font-weight:bold; cursor:pointer;'>&times;</button>",
@@ -309,7 +358,7 @@ generate_base_plot <- function(item, input, agro_params = NULL) {
                   shape = 21, color = "black", size = 3, stroke = 0.3) +
           scale_fill_distiller(palette = resolve_resid_palette(input), direction = 1,
                                limits = c(-abs_max, abs_max), na.value = "grey50",
-                               name = NULL) +
+                               name = item$legend) +
           coord_sf()
         return(bp)
       }
@@ -331,7 +380,9 @@ generate_base_plot <- function(item, input, agro_params = NULL) {
           if (!is_class && !is_resid) pal_name <- "viridis"
       }
       
-      leg_name <- NULL
+      # The variable and its unit, as the Map Viewer's legend reads
+      # (map_legend_title, stamped on the registry item).
+      leg_name <- item$legend
       
       bp <- ggplot() + geom_spatraster(data = obj[[1]])
       
@@ -375,11 +426,14 @@ generate_base_plot <- function(item, input, agro_params = NULL) {
       bp
     }
 
+    # export_item_obj: an uncertainty item stores a derivation of a surface the
+    # registry already holds, not a second copy of its values.
+    obj <- export_item_obj(item)
     if (item$type == "map") {
-      return(build_map(item$obj, item$label, kind = item$kind))
+      return(build_map(obj, item$label, kind = item$kind))
     } else {
-      p1 <- build_map(item$obj$act, "Actual", is_tiled = TRUE, kind = item$kind)
-      p2 <- build_map(item$obj$pre, "Predicted", is_tiled = TRUE, kind = item$kind)
+      p1 <- build_map(obj$act, "Actual", is_tiled = TRUE, kind = item$kind)
+      p2 <- build_map(obj$pre, "Predicted", is_tiled = TRUE, kind = item$kind)
       return(list(p1 = p1, p2 = p2))
     }
     
@@ -1062,7 +1116,8 @@ generate_partial_correlation <- function(df, vars, control_vars = NULL, method =
   p <- ggplot(cormat_df, aes(x=Var1, y=Var2, fill=pCorr)) + 
     geom_tile(color = "white") +
     geom_text(aes(label = round(pCorr, 2)), color = ifelse(abs(cormat_df$pCorr) > 0.5, "white", "black"), size=3) +
-    scale_fill_gradient2(low = "red", high = "blue", mid = "white", midpoint = 0, limits = c(-1,1), name="Partial\nCorrelation") +
+    scale_fill_gradient2(low = "red", high = "blue", mid = "white", midpoint = 0, limits = c(-1,1),
+                         name = if (n_ctrl == 0) "Correlation" else "Partial\nCorrelation") +
     theme_minimal() + 
     theme(axis.text.x = element_text(angle = 45, vjust = 1, hjust = 1)) +
     labs(x="", y="",
@@ -1241,30 +1296,22 @@ generate_spatial_cross_correlogram <- function(df, var1, var2, x_col, y_col,
   return(p)
 }
 
+# The PCA guard's three findings, kept apart because they mean different
+# things: `pairs` (var1, var2, r) with |r| above `threshold`, `high_vif`
+# (variable, vif) removed by the iterative VIF > 10 screen, and `constant`, the
+# variables with no variance. `has_collinearity` covers the first two only:
+# they are judgement calls the user may continue past, while a constant cannot
+# enter a standardised PCA at all and is excluded by desc_pca_fit().
 check_collinearity <- function(df, vars, threshold = 0.95) {
   res <- detect_multicollinearity_engine(df, vars = vars, pairwise_threshold = threshold, vif_threshold = 10)
-  
-  has_coll <- res$has_collinearity || (length(res$dropped) > 0)
-  
-  pairs_df <- res$pairs
-  if (length(res$dropped) > 0) {
-    if (is.null(pairs_df)) {
-      pairs_df <- data.frame(var1 = character(), var2 = character(), r = numeric(), stringsAsFactors = FALSE)
-    }
-    # The engine drops ZERO-VARIANCE covariates into the same vector as the
-    # collinear ones; reporting a constant to the PCA user as a collinearity
-    # problem sends them to inspect a correlation that does not exist.
-    for (d_var in res$dropped) {
-      pairs_df <- rbind(pairs_df, data.frame(
-        var1 = d_var,
-        var2 = if (d_var %in% res$dropped_constant) "Constant (no variance)" else "High VIF (> 10)",
-        r = NA,
-        stringsAsFactors = FALSE
-      ))
-    }
-  }
-  
-  return(list(has_collinearity = has_coll, pairs = pairs_df))
+  pairs <- res$pairs %||% data.frame(var1 = character(), var2 = character(), r = numeric(),
+                                     stringsAsFactors = FALSE)
+  vif <- res$vif_at_drop %||% numeric(0)
+  high_vif <- data.frame(variable = as.character(names(vif)), vif = unname(vif),
+                         stringsAsFactors = FALSE)
+  list(has_collinearity = nrow(pairs) > 0 || nrow(high_vif) > 0,
+       pairs = pairs, high_vif = high_vif,
+       constant = res$dropped_constant %||% character(0))
 }
 
 generate_pca_scree <- function(pca_res) {
@@ -1691,16 +1738,36 @@ add_map_ruler <- function(map, position = "bottomleft") {
     ")
 }
 
+# The outline of a point with no measured value. A literal, not a theme token:
+# leaflet writes this straight into the SVG `stroke` presentation attribute,
+# where a CSS var() does not resolve. Mid grey, so it reads on both a light
+# and a dark basemap.
+MISSING_VALUE_POINT_COLOR <- "#9AA0A6"
+MISSING_VALUE_POINT_LABEL <- "No measured value (not used in the fit)"
+
+# `value_col` names the mapped variable's column. Points with no value there
+# render HOLLOW - position still visible, but unmistakably not a measurement -
+# and gain their own legend entry. The display set is deliberately wider than
+# the fitted set (see run_regional_interpolation), so the distinction has to be
+# on the map rather than in a caption nobody reads.
 add_styled_points <- function(map, pts_sf, color_by = "none", custom_colors = NULL,
                               show_labels = FALSE, label_field = "none",
                               label_size = 11, marker_size = 3,
-                              popup_fn = NULL, legend_layer_id = NULL) {
+                              popup_fn = NULL, legend_layer_id = NULL,
+                              value_col = NULL) {
 
   crs_obj <- sf::st_crs(pts_sf)
   pts_view <- if (is.na(crs_obj$epsg) || crs_obj$epsg != 4326) sf::st_transform(pts_sf, 4326) else pts_sf
   if (nrow(pts_view) == 0) return(map)
 
   use_groups <- color_by != "none" && color_by %in% colnames(pts_view)
+  no_value <- if (!is.null(value_col) && value_col %in% colnames(pts_view)) {
+    is.na(pts_view[[value_col]])
+  } else rep(FALSE, nrow(pts_view))
+
+  legend_colors <- character(0)
+  legend_labels <- character(0)
+  legend_title <- NULL
 
   if (use_groups && !is.null(custom_colors)) {
     grp_vals <- as.character(pts_view[[color_by]])
@@ -1717,19 +1784,37 @@ add_styled_points <- function(map, pts_sf, color_by = "none", custom_colors = NU
     fill_colors <- pal_fn(grp_vals)
     border_color <- "white"
     fill_opacity <- 0.85
-
-    map <- map %>% leaflet::addLegend(
-      position = "bottomleft",
-      colors = unname(custom_colors[groups]),
-      labels = groups,
-      title = color_by,
-      opacity = 0.9,
-      layerId = legend_layer_id
-    )
+    legend_colors <- unname(custom_colors[groups])
+    legend_labels <- groups
+    legend_title <- color_by
   } else {
     fill_colors <- "cyan"
     border_color <- "cyan"
     fill_opacity <- 0.5
+  }
+
+  # Applied last, so switching the colour-by mode cannot hide the distinction.
+  if (any(no_value)) {
+    n <- nrow(pts_view)
+    fill_colors <- rep(fill_colors, length.out = n)
+    border_color <- rep(border_color, length.out = n)
+    fill_opacity <- rep(fill_opacity, length.out = n)
+    fill_colors[no_value] <- MISSING_VALUE_POINT_COLOR
+    border_color[no_value] <- MISSING_VALUE_POINT_COLOR
+    fill_opacity[no_value] <- 0
+    legend_colors <- c(legend_colors, MISSING_VALUE_POINT_COLOR)
+    legend_labels <- c(legend_labels, MISSING_VALUE_POINT_LABEL)
+  }
+
+  if (length(legend_colors) > 0) {
+    map <- map %>% leaflet::addLegend(
+      position = "bottomleft",
+      colors = legend_colors,
+      labels = legend_labels,
+      title = legend_title,
+      opacity = 0.9,
+      layerId = legend_layer_id
+    )
   }
 
   popups <- NULL

@@ -40,8 +40,20 @@ A dropdown switches between thirteen visualization modes:
 
 **2.4 Normality testing**
 *   An integrated normality test assesses the distribution assumptions behind the parametric options.
-*   **Test selection by sample size:** Shapiro-Wilk (Shapiro & Wilk 1965) below n = 5000, switching to the Lilliefors (Kolmogorov-Smirnov) test (Lilliefors 1967) at or above it, which is where `shapiro.test` stops accepting input. Below n = 3, or on a constant variable, no test is reported.
+*   **Test selection by sample size:** Shapiro-Wilk (Shapiro & Wilk 1965) below n = 5000, switching to the Lilliefors (Kolmogorov-Smirnov) test (Lilliefors 1967) at or above it, which is where `shapiro.test` stops accepting input. Below n = 3, or on a constant variable, no test is reported and the readout says which of the two applied.
 *   **Group-aware:** with a grouping variable active, each group is tested separately and the overall test runs on the group residuals, so between-group differences do not register as non-normality. Without grouping it runs on the raw values. The readout states which was used.
+*   **The verdict is text, not only a tooltip.** Beside the severity icon the panel prints one sentence naming the test, its statistic with that test's own symbol (*W* for Shapiro-Wilk, *D* for Lilliefors), the p-value, the significance stars, n, and the conclusion at alpha = 0.05, so it can be read without hovering and copied into a report. The icon's tooltip keeps the longer explanation and the per-group breakdown.
+
+**2.5 Group statistics table**
+
+Under the plot, one row per group plus a TOTAL row over every non-missing value. Beside **Count**, **Mean** and **SD** the table reports the robust counterparts, because a few outliers move the moments a long way and leave these where they are:
+
+*   **Median**, **Q1** and **Q3** from `stats::quantile(type = 7)`, R's default, so the quartiles agree with `summary()` elsewhere in the app.
+*   **IQR** = Q3 - Q1.
+*   **MAD**, `stats::mad()`, the median absolute deviation **scaled by 1.4826**. The constant makes it a consistent estimator of sigma for a normal sample, which is what lets it be read on the same scale as the SD beside it; an unscaled MAD would invite a wrong comparison.
+*   **Min** and **Max** close the row.
+
+Values are computed at full precision and displayed to four significant digits, so a small-unit variable keeps its digits and a near-constant column is never shown as a constant one. On a scatterplot with a trend line the table gains that fit's R² (or, for loess, its squared correlation) and p-value per group.
 
 ---
 
@@ -70,9 +82,13 @@ Linear and monotonic relationships between the numeric variables in the dataset.
 
 ## 4. Tab 3: Principal Component Analysis (PCA)
 
-**4.1 Automated collinearity filter**
-*   Before PCA executes, the selected variables are scanned. Near-perfect pairwise collinearity (|*r*| > 0.95), or a variable the iterative VIF screen removes at VIF > 10, raises a warning panel that intercepts the process, lists the conflicting pairs and variables, and prevents execution. An "Ignore Warning & Force PCA" button is available for advanced users. The guard exists because collinear inputs distort the loading vectors severely.
-*   The same scan flags variables that are **constant** over the current selection (zero variance). These are listed as *Constant (no variance)* rather than *High VIF*, because a constant is not a collinearity problem: it carries no information at all and would make the correlation matrix singular on its own.
+**4.1 Variable screen before the PCA**
+*   Before PCA executes, the selected variables are scanned, and what the scan finds is reported in up to three sections, each with its own heading and sentence (a section with nothing to report is left out):
+    *   **Highly correlated pairs:** pairs with |*r*| > 0.95, each with its *r*. Near-duplicate variables dominate the first components and split their loadings, so the biplot understates every other variable.
+    *   **High multicollinearity (VIF > 10):** the variables the iterative VIF screen removes, each with its VIF at the step it was removed ("not finite" where the correlation matrix is singular, i.e. a variable is an exact combination of others). Such a variable is predicted almost exactly by a combination of the others, so its contribution to a component is not separately identifiable.
+    *   **No variance:** variables constant across the selected rows. They carry no information and cannot be standardised.
+*   The first two are **advisory**: they stop the PCA and offer **Ignore Warning & Force PCA**, because keeping a correlated variable can be a legitimate choice. The third is not a judgement call, so it never stops anything and never comes with the button: a variable with exactly or effectively no variance (the same rule the interpolation engines apply to covariates) is excluded from the PCA automatically, and the remaining variables keep "Scale & Center Data". A PCA with excluded variables shows a standing note above the results naming them, and every PCA figure, including the downloaded PNG, names them in its caption.
+*   **At least two variables with variance are needed.** When the exclusion leaves fewer, the PCA is refused with a persistent message naming the excluded variables, in place of the results.
 
 **4.2 Plot settings**
 *   **Types:** Scree Plot, Biplot (2D), Biplot (3D), Loadings, Contribution, Quality of Representation (cos2), Cumulative Variance, and Mahalanobis Distance.
@@ -109,6 +125,7 @@ Two explainability frameworks are available:
 
 **5.4 Tabular data metrics**
 *   The metrics table lists each governing factor's mean increase in RMSE after permutation relative to the unshuffled forest, in the target's units. Values near zero indicate little change in model error. It leads with an **RF model quality row, out-of-bag (OOB) % variance explained**, so the reliability of the random forest behind the importance and SHAP results can be judged directly. Low OOB values mean the explainability outputs describe a weak model and should be interpreted cautiously.
+*   The table has three columns, **Governing Factor / Metric**, **Value** and **Unit**, because the two kinds of number in it are not on one scale: the importance rows are an RMSE increase in the target's units, the model-quality row a percentage of variance. Values are displayed at four significant digits.
 
 ---
 

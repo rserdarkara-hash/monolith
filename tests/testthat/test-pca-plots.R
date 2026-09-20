@@ -1,6 +1,4 @@
-# test-pca-plots.R — tests for PCA plotting functions.
-# These tests verify that each function returns a ggplot (or plotly) object
-# given a valid prcomp result.
+# test-pca-plots.R — tests for the PCA plotting functions.
 
 # ── Shared fixture ─────────────────────────────────────────────────────────
 
@@ -9,29 +7,64 @@ make_pca <- function(n = 30, seed = 42) {
   prcomp(df[, c("a", "b", "c", "d", "e")], scale. = TRUE, center = TRUE)
 }
 
-# ── generate_pca_scree ────────────────────────────────────────────────────
+# ── The builder sweep ──────────────────────────────────────────────────────
+#
+# expect_s3_class(p, "ggplot") does not build the plot, so an aesthetic naming
+# a column that is not there survives it. Each builder is swept through
+# ggplot_build() here, with the one quantity its panel exists to show.
 
-test_that("generate_pca_scree returns ggplot with correct bar count", {
+test_that("every PCA builder renders, and shows the quantity it is named for", {
   pca <- make_pca()
-  p <- generate_pca_scree(pca)
-  expect_s3_class(p, "ggplot")
+  df <- make_test_df(30)
+  k <- length(pca$sdev)
+  var_exp <- unname(pca$sdev^2 / sum(pca$sdev^2))
+
+  for (p in list(generate_pca_scree(pca),
+                 generate_pca_biplot(pca, df, pc_x = 1, pc_y = 2),
+                 generate_pca_biplot(pca, df, pc_x = 1, pc_y = 2, group_col = "cat1"),
+                 generate_pca_loadings(pca, pc = 1),
+                 generate_pca_contribution(pca, pc = 1),
+                 generate_pca_cos2(pca, axes = 1:2),
+                 generate_pca_cumvar(pca),
+                 generate_pca_mahalanobis(pca))) {
+    expect_s3_class(p, "ggplot")
+    expect_no_error(ggplot2::ggplot_build(p))
+  }
+
+  # One bar per component, carrying that component's variance share.
+  scree <- generate_pca_scree(pca)$data
+  expect_equal(nrow(scree), k)
+  expect_equal(scree$Variance, var_exp)
+
+  # Contribution is loading^2 as a percentage, with the dashed reference line
+  # at the contribution every variable would have if all contributed equally.
+  contrib <- generate_pca_contribution(pca, pc = 1)
+  vars <- rownames(pca$rotation)
+  expect_equal(setNames(contrib$data$Value, contrib$data$Variable)[vars],
+               setNames(pca$rotation[, 1]^2 * 100, vars))
+  href <- Filter(function(l) inherits(l$geom, "GeomHline"), contrib$layers)
+  expect_length(href, 1L)
+  expect_equal(href[[1]]$data$yintercept, 100 / k)
+
+  # Cumulative variance ends at exactly 1, with the 80 % threshold drawn.
+  cum <- generate_pca_cumvar(pca)
+  expect_equal(cum$data$CumVar, cumsum(var_exp))
+  expect_equal(cum$data$CumVar[k], 1)
+  expect_equal(Filter(function(l) inherits(l$geom, "GeomHline"),
+                      cum$layers)[[1]]$data$yintercept, 0.8)
+
+  # Loadings are the rotation column itself, ordered by absolute weight.
+  load <- generate_pca_loadings(pca, pc = 1)$data
+  expect_equal(setNames(load$Value, load$Variable)[vars],
+               setNames(pca$rotation[, 1], vars))
+
+  # The 3D biplot is plotly, not ggplot, with and without a grouping column.
+  expect_s3_class(generate_pca_biplot_3d(pca, df, pc_x = 1, pc_y = 2, pc_z = 3), "plotly")
+  expect_s3_class(generate_pca_biplot_3d(pca, df, pc_x = 1, pc_y = 2, pc_z = 3,
+                                         group_col = "cat1"), "plotly")
 })
 
 # ── generate_pca_biplot ───────────────────────────────────────────────────
-
-test_that("generate_pca_biplot returns ggplot", {
-  pca <- make_pca()
-  df <- make_test_df(30)
-  p <- generate_pca_biplot(pca, df, pc_x = 1, pc_y = 2)
-  expect_s3_class(p, "ggplot")
-})
-
-test_that("generate_pca_biplot with group_col adds colors", {
-  pca <- make_pca()
-  df <- make_test_df(30)
-  p <- generate_pca_biplot(pca, df, pc_x = 1, pc_y = 2, group_col = "cat1")
-  expect_s3_class(p, "ggplot")
-})
 
 test_that("generate_pca_biplot handles na.omit correctly when caller aligns dataframe", {
   df <- make_test_df(30)
@@ -48,29 +81,7 @@ test_that("generate_pca_biplot handles na.omit correctly when caller aligns data
   expect_s3_class(p, "ggplot")
 })
 
-# ── generate_pca_loadings ─────────────────────────────────────────────────
-
-test_that("generate_pca_loadings returns ggplot", {
-  pca <- make_pca()
-  p <- generate_pca_loadings(pca, pc = 1)
-  expect_s3_class(p, "ggplot")
-})
-
-# ── generate_pca_contribution ─────────────────────────────────────────────
-
-test_that("generate_pca_contribution returns ggplot with reference line", {
-  pca <- make_pca()
-  p <- generate_pca_contribution(pca, pc = 1)
-  expect_s3_class(p, "ggplot")
-})
-
 # ── generate_pca_cos2 ─────────────────────────────────────────────────────
-
-test_that("generate_pca_cos2 returns ggplot", {
-  pca <- make_pca()
-  p <- generate_pca_cos2(pca, axes = 1:2)
-  expect_s3_class(p, "ggplot")
-})
 
 test_that("cos2 is a bounded quality of representation in BOTH PCA modes", {
   # cos2 = share of a variable's own variance captured by the selected PCs, so
@@ -106,21 +117,7 @@ test_that("cos2 for a scaled PCA is unchanged by the normalisation", {
                legacy, tolerance = 1e-10)
 })
 
-# ── generate_pca_cumvar ───────────────────────────────────────────────────
-
-test_that("generate_pca_cumvar returns ggplot approaching 1.0", {
-  pca <- make_pca()
-  p <- generate_pca_cumvar(pca)
-  expect_s3_class(p, "ggplot")
-})
-
 # ── generate_pca_mahalanobis ──────────────────────────────────────────────
-
-test_that("generate_pca_mahalanobis returns ggplot", {
-  pca <- make_pca()
-  p <- generate_pca_mahalanobis(pca)
-  expect_s3_class(p, "ggplot")
-})
 
 test_that("generate_pca_mahalanobis handles exactly collinear variables", {
   df <- make_collinear_df()
@@ -131,21 +128,6 @@ test_that("generate_pca_mahalanobis handles exactly collinear variables", {
 })
 
 # ── generate_pca_biplot_3d ────────────────────────────────────────────────
-
-test_that("generate_pca_biplot_3d returns plotly object", {
-  pca <- make_pca()
-  df <- make_test_df(30)
-  p <- generate_pca_biplot_3d(pca, df, pc_x = 1, pc_y = 2, pc_z = 3)
-  expect_s3_class(p, "plotly")
-})
-
-test_that("generate_pca_biplot_3d with group_col adds coloring", {
-  pca <- make_pca()
-  df <- make_test_df(30)
-  p <- generate_pca_biplot_3d(pca, df, pc_x = 1, pc_y = 2, pc_z = 3,
-                              group_col = "cat1")
-  expect_s3_class(p, "plotly")
-})
 
 test_that("generate_pca_biplot_3d handles na.omit correctly when caller aligns dataframe", {
   df <- make_test_df(30)

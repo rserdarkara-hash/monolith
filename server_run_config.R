@@ -69,12 +69,15 @@
     cats <- unique(sapply(vars, function(x) x$category))
 
     current_cat <- input$var_category
-    sel_cat <- if(!is.null(current_cat) && current_cat %in% cats) current_cat else cats[1]
+    # A new variable list opens on a variable with predictions, not on its
+    # first category, which is often the covariates (default_var_pick).
+    sel_cat <- if(!is.null(current_cat) && current_cat %in% cats) current_cat else default_var_pick(vars)$category
     updateSelectInput(session, "var_category", choices = cats, selected = sel_cat)
-    
+
     filtered <- Filter(function(x) x$category == sel_cat, vars)
     choices <- setNames(sapply(filtered, function(x) x$actual), sapply(filtered, function(x) x$label))
-    shinyWidgets::updatePickerInput(session, "var_id", choices = choices)
+    sel_var <- if (isTruthy(input$var_id) && input$var_id %in% choices) input$var_id else default_var_pick(vars, sel_cat)$var
+    shinyWidgets::updatePickerInput(session, "var_id", choices = choices, selected = sel_var)
   })
 
   # Guard: only offer ML prediction/residual views when the selected variable
@@ -418,7 +421,13 @@
     
     tryCatch({
       cfg <- jsonlite::fromJSON(config_path, simplifyVector = FALSE)
-      
+      # A run record carries no session field, so it would "load" as nothing.
+      refusal <- session_config_refusal(cfg)
+      if (!is.null(refusal)) {
+        showNotification(refusal, type = "error", duration = 15)
+        return()
+      }
+
       if (!is.null(cfg$vars_mapping)) {
         rv$mapping$vars <- cfg$vars_mapping
       }

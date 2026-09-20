@@ -90,10 +90,49 @@ ui <- fluidPage(
          });
        });"
     )),
-    # DT tables in this app pre-render while their tab is hidden
-    # (suspendWhenHidden = FALSE); with scrollX the cloned header is then
-    # sized against a zero-width container, so realign columns on tab reveal.
-    tags$script(HTML("$(document).on('shown.bs.tab', 'a[data-toggle=\"tab\"]', function () { setTimeout(function () { if ($.fn.dataTable) { $.fn.dataTable.tables({ visible: true, api: true }).columns.adjust(); } }, 60); });")),
+    # A scrollX DataTable is two tables - a cloned header and the body - kept
+    # aligned by pixel widths DataTables computes from the rendered cells. Those
+    # widths are wrong whenever they were computed against a container that was
+    # not its final size, which in this app is the normal case: the tables
+    # pre-render while their tab is hidden (suspendWhenHidden = FALSE) and
+    # several sit inside conditionalPanels. Realign on every event that can
+    # change a table's box: a tab reveal, Shiny making an output visible, and
+    # the table's own redraw. columns.adjust() only - NEVER .draw() from a draw
+    # handler - and once per animation frame per table, after the layout has
+    # settled, rather than on a fixed timer that can fire too early.
+    tags$script(HTML("
+      (function () {
+        function adjust(tbl) {
+          if (!tbl || !$.fn.dataTable || !$.fn.dataTable.isDataTable(tbl)) return;
+          if (tbl._mnAdjustPending) return;
+          tbl._mnAdjustPending = true;
+          window.requestAnimationFrame(function () {
+            tbl._mnAdjustPending = false;
+            if (!$(tbl).is(':visible')) return;
+            try { $(tbl).DataTable().columns.adjust(); } catch (e) {}
+          });
+        }
+        function adjustVisible() {
+          if (!$.fn.dataTable) return;
+          window.requestAnimationFrame(function () {
+            try { $.fn.dataTable.tables({ visible: true, api: true }).columns.adjust(); } catch (e) {}
+          });
+        }
+        $(document).on('shown.bs.tab', 'a[data-toggle=\"tab\"]', adjustVisible);
+        // shiny:visualchange fires on the OUTPUT element, not on the DataTables
+        // wrapper, so resolve the table from the element inside the handler.
+        $(document).on('shiny:visualchange', '.shiny-datatable-output', function () {
+          $(this).find('table.dataTable').each(function () { adjust(this); });
+        });
+        $(document).on('draw.dt', function (e, settings) {
+          adjust(settings ? settings.nTable : null);
+        });
+      })();
+    ")),
+    # Four-significant-digit display formatting for numeric table cells, so a
+    # small value never reads as 0. Kept in ui_components.R beside its R twin
+    # format_sig(), so the shipped script is testable.
+    tags$script(HTML(format_sig_js())),
     # Copy-a-result-table-to-the-clipboard: reads the rendered table off the
     # DOM and puts HTML + tab-separated text on the clipboard together, so one
     # click pastes into Word as a table and into Excel as cells. Kept in

@@ -451,7 +451,11 @@ test_that("every emitted metric id and estimator has a display label", {
 
   lab <- classif_label_metrics(m)
   expect_true(all(lab$.metric_label %in% unname(classif_metric_labels())))
-  expect_true(all(lab$.estimator_label %in% unname(classif_estimator_labels())))
+  # A macro average carries the denominator it was taken over, and a binary
+  # one its event class, so the base label is a prefix rather than the whole
+  # string - the label itself must still come from the dictionary.
+  base <- sub(" \\((K = [0-9]+|event: .*)\\)$", "", lab$.estimator_label)
+  expect_true(all(base %in% unname(classif_estimator_labels())))
 
   # Unknown ids degrade to the raw id instead of NA.
   fake <- data.frame(.metric = "new_metric", .estimator = "new_est", .estimate = 1)
@@ -480,6 +484,38 @@ test_that("class raster embeds a colour table that survives GeoTIFF round-trip",
   expect_equal(as.integer(terra::values(r2, mat = FALSE)),
                as.integer(terra::values(rl$class, mat = FALSE)))
   unlink(c(tf, paste0(tf, ".aux.xml")))
+})
+
+test_that("the class download carries its legend: tif, sidecar and legend CSV", {
+  grid <- expand.grid(x = seq(450000, 450800, by = 200),
+                      y = seq(5800000, 5800800, by = 200))
+  levs <- c("Low", "Med", "High")
+  grid$.pred_class <- factor(rep(levs, length.out = nrow(grid)), levels = levs)
+  for (l in levs) grid[[paste0(".pred_", l)]] <- 1 / 3
+  grid$.entropy <- 1
+  rl <- classif_surface_to_rasters(grid, res = 200, crs_wkt = sf::st_crs(32633)$wkt,
+                                   levels_order = levs)
+
+  src <- tempfile("cls_src"); dir.create(src)
+  out <- tempfile("cls_out"); dir.create(out)
+  zf <- tempfile(fileext = ".zip")
+  on.exit(unlink(c(src, out, zf), recursive = TRUE), add = TRUE)
+  files <- classif_class_download_files(rl$class, src)
+  zip::zip(zf, files = basename(files), root = src, mode = "cherry-pick")
+  expect_setequal(zip::zip_list(zf)$filename,
+                  c("predicted_class.tif", "predicted_class.tif.aux.xml",
+                    "predicted_class_legend.csv"))
+
+  # Unzipped side by side, the sidecar restores the class names on the codes.
+  zip::unzip(zf, exdir = out)
+  back <- terra::rast(file.path(out, "predicted_class.tif"))
+  cats <- terra::cats(back)[[1]]
+  expect_equal(as.character(cats[[2]][match(1:3, cats[[1]])]), levs)
+  expect_equal(as.integer(terra::values(back, mat = FALSE)),
+               as.integer(terra::values(rl$class, mat = FALSE)))
+  # The CSV names the same codes without depending on the sidecar at all.
+  leg <- utils::read.csv(file.path(out, "predicted_class_legend.csv"))
+  expect_equal(leg, data.frame(ID = 1:3, class = levs))
 })
 
 test_that("run_classification_pipeline returns only serialisable pieces and honours make_surface", {
@@ -1343,6 +1379,18 @@ test_that("classif_build_target widens label precision when rounded breaks colli
   expect_gte(nlevels(tv), 2)
 })
 
+test_that("the top bin label is closed, as its interval is", {
+  # cut(include.lowest = TRUE, right = FALSE) closes the HIGHEST interval at
+  # the top, so its label must end in "]"; every other stays half-open.
+  df <- data.frame(v = c(0, 0.5, 1, 1.5, 2, 2.5, 3))
+  tv <- classif_build_target(df, mode = "bin", cat_col = NULL, num_col = "v",
+                             n_classes = 3, style = "equal")
+  expect_equal(levels(tv), c("[0, 1)", "[1, 2)", "[2, 3]"))
+  # The maximum belongs to the closed top class; the break values open theirs.
+  expect_equal(as.character(tv[df$v == 3]), "[2, 3]")
+  expect_equal(as.character(tv[df$v %in% c(1, 2)]), c("[1, 2)", "[2, 3]"))
+})
+
 test_that("classif_build_target never labels an interval as a single point", {
   # Quantile breaks that are distinct but round to the same 2-dp value on ONE
   # side produce a label like "[0.07, 0.07)": a real interval that reads as an
@@ -1440,6 +1488,12 @@ test_that("pooled out-of-fold importance averages each covariate over the folds 
   pp <- .classif_pool_fold_importance(plain, c("a", "b"))
   expect_equal(pp$importance[pp$predictor == "a"], (1 * 10 + 3 * 30) / 40)
   expect_equal(pp$importance[pp$predictor == "b"], (2 * 10 + 4 * 30) / 40)
+  expect_equal(pp$baseline_logloss[1], (0.4 * 10 + 0.6 * 30) / 40)
+
+  # The label the Scientific Analysis panel reads to say these deltas were
+  # measured on held-out rows, and the nothing-to-pool case.
+  expect_true(all(pp$evaluated_on == "out-of-fold"))
+  expect_null(.classif_pool_fold_importance(list(), c("a", "b")))
 })
 
 test_that("out-of-fold importance is scored on held-out rows and labelled", {
@@ -1506,22 +1560,6 @@ test_that("out-of-fold importance is not computed unless asked for", {
     pts, "soil", c("elev", "slope"), method = "rf", strategy = "standard",
     v = 3L, depth = "none"))
   expect_null(cv$importance)
-})
-
-test_that("pooling fold importances equals a size-weighted mean", {
-  # The pooled delta must be what one evaluation over every out-of-fold row
-  # would give, so folds contribute in proportion to the rows they scored.
-  parts <- list(
-    list(delta = c(1, 0), baseline = 0.5, n = 10),
-    list(delta = c(3, 4), baseline = 1.5, n = 30)
-  )
-  out <- .classif_pool_fold_importance(parts, c("a", "b"))
-  # a: (1*10 + 3*30)/40 = 2.5 ; b: (0*10 + 4*30)/40 = 3.0
-  expect_equal(out$importance[out$predictor == "a"], 2.5)
-  expect_equal(out$importance[out$predictor == "b"], 3.0)
-  expect_equal(out$baseline_logloss[1], (0.5 * 10 + 1.5 * 30) / 40)
-  expect_true(all(out$evaluated_on == "out-of-fold"))
-  expect_null(.classif_pool_fold_importance(list(), c("a", "b")))
 })
 
 test_that("the baked-block fast path reproduces the re-bake-per-shuffle deltas", {
@@ -1801,12 +1839,107 @@ test_that("pooled metrics reproduce a hand-built 3x3 confusion matrix", {
   expect_equal(get("bal_accuracy"), mean((rec + spec) / 2), tolerance = 1e-12)
 })
 
+test_that("macro averages keep a never-predicted class in the denominator", {
+  # The F13 case: the model assigns class C to nothing. yardstick's multiclass
+  # precision finds 0/0 there, warns inside the worker where nothing sees it,
+  # and drops C from the average - so precision and F1 were averaged over two
+  # classes while recall was averaged over three, and a macro F1 could exceed
+  # both of its own components. Every number below is written out by hand.
+  cm <- matrix(c(5, 1, 0,        # truth A: 5 -> A, 1 -> B
+                 2, 4, 0,        # truth B: 2 -> A, 4 -> B
+                 1, 2, 0),       # truth C: 1 -> A, 2 -> B, none -> C
+               nrow = 3, byrow = TRUE,
+               dimnames = list(c("A", "B", "C"), c("A", "B", "C")))
+  m <- classif_compute_metrics(make_cm_pred_df(cm), "soil")
+  get <- function(id) m$.estimate[m$.metric == id]
+
+  # per class: precision = tp / predicted, recall = tp / reference
+  prec <- c(A = 5 / 8, B = 4 / 7, C = 0)      # C: no predictions -> 0, not dropped
+  rec  <- c(A = 5 / 6, B = 4 / 6, C = 0 / 3)
+  f1   <- c(A = 2 * prec[["A"]] * rec[["A"]] / (prec[["A"]] + rec[["A"]]),
+            B = 2 * prec[["B"]] * rec[["B"]] / (prec[["B"]] + rec[["B"]]),
+            C = 0)
+  expect_equal(get("precision"), mean(prec), tolerance = 1e-12)
+  expect_equal(get("recall"), mean(rec), tolerance = 1e-12)
+  expect_equal(get("f_meas"), mean(f1), tolerance = 1e-12)
+
+  # All three over the SAME three classes, and the table says so.
+  expect_true(all(m$.n_classes[m$.metric %in% c("precision", "recall", "f_meas")] == 3))
+  # Each class's F1 is a harmonic mean, so it cannot exceed that class's
+  # arithmetic mean; averaging preserves it. The violation of this inequality
+  # is what proved the denominators differed.
+  expect_lte(get("f_meas"), (get("precision") + get("recall")) / 2 + 1e-12)
+
+  # The estimator label carries the denominator into the table and the CSV.
+  lab <- classif_label_metrics(m)
+  expect_equal(lab$.estimator_label[lab$.metric == "f_meas"], "Macro average (K = 3)")
+})
+
+test_that("a class with no reference samples yields NA recall, never a silent 0", {
+  # n_true == 0 is a data-state problem, not a model failure: unused target
+  # levels are dropped before CV (run_classification_cv), so this cannot arise
+  # for a pooled run - and if it ever did, the macro recall must fail loudly.
+  truth <- factor(c("A", "A", "B", "B"), levels = c("A", "B", "C"))
+  pred <- factor(c("A", "B", "B", "C"), levels = c("A", "B", "C"))
+  m <- classif_macro_metrics(truth, pred)
+  pc <- attr(m, "per_class")
+
+  expect_true(is.na(pc$recall[pc$class == "C"]))
+  expect_true(is.na(m$.estimate[m$.metric == "recall"]))
+  expect_true(is.na(m$.estimate[m$.metric == "f_meas"]))
+  # A predicted-but-unsupported class still costs the class it displaced.
+  expect_equal(pc$recall[pc$class == "B"], 1 / 2)
+})
+
+test_that("two-class runs keep the binary estimator and its numbers", {
+  levs <- c("Yes", "No")
+  truth <- factor(c(rep("Yes", 6), rep("No", 6)), levels = levs)
+  pred <- factor(c("Yes", "Yes", "Yes", "No", "No", "No",
+                   "Yes", "No", "No", "No", "No", "No"), levels = levs)
+  m <- classif_macro_metrics(truth, pred)
+  get <- function(id) m$.estimate[m$.metric == id]
+
+  expect_true(all(m$.estimator == "binary"))
+  # identical to yardstick's binary estimator, event = first level
+  expect_equal(get("precision"), yardstick::precision_vec(truth, pred))
+  expect_equal(get("recall"), yardstick::recall_vec(truth, pred))
+  expect_equal(get("f_meas"), yardstick::f_meas_vec(truth, pred))
+  expect_equal(classif_label_metrics(m)$.estimator_label[1], "Binary (event: Yes)")
+
+  # The one case that moves: no predicted events. yardstick returns NA with a
+  # warning; the zero-division rule scores it 0, as it does for multiclass.
+  none <- classif_macro_metrics(truth, factor(rep("No", 12), levels = levs))
+  expect_equal(none$.estimate[none$.metric == "precision"], 0)
+  expect_equal(none$.estimate[none$.metric == "f_meas"], 0)
+  expect_true(is.na(suppressWarnings(yardstick::precision_vec(
+    truth, factor(rep("No", 12), levels = levs)))))
+})
+
+test_that("per-area macro F1 is taken over the classes that area holds", {
+  pd <- data.frame(
+    truth = factor(c("A", "A", "B", "B", "C", "C", "A", "B"), levels = c("A", "B", "C")),
+    .pred_class = factor(c("A", "B", "B", "B", "C", "A", "A", "B"), levels = c("A", "B", "C")),
+    .scope_group = c(rep("g1", 4), rep("g2", 4)))
+  gm <- classif_group_metrics(pd, "truth")
+
+  # g1 holds only A and B, so its macro F1 is over two classes and says so;
+  # g2 holds all three. Two areas' F1 scores are not over the same class set,
+  # which is exactly why K is reported per row.
+  expect_equal(gm$K[gm$scope == "g1"], 2L)
+  expect_equal(gm$K[gm$scope == "g2"], 3L)
+  # The Total row reproduces the pooled headline macro F1.
+  pooled <- classif_compute_metrics(pd, "truth")
+  expect_equal(gm$f_meas[gm$scope == "Total"],
+               pooled$.estimate[pooled$.metric == "f_meas"], tolerance = 1e-12)
+})
+
 test_that("per-class accuracy is producer = recall and user = precision", {
   cm <- make_cm_known()
   pc <- classif_per_class_accuracy(make_cm_pred_df(cm), "soil")
 
   expect_equal(pc$class, colnames(cm))
   expect_equal(pc$n, as.integer(rowSums(cm)))       # n counts ACTUAL samples
+  expect_equal(pc$n_pred, as.integer(colSums(cm)))  # and n_pred the predictions
   # Producer accuracy is the omission-error complement (recall, by truth row);
   # user accuracy is the commission-error complement (precision, by predicted
   # column). Swapping them is the classic reporting error, so both are pinned.
@@ -1818,6 +1951,70 @@ test_that("per-class accuracy is producer = recall and user = precision", {
   expect_equal(pc$user_accuracy, c(5 / 7, 4 / 6, 6 / 7), tolerance = 1e-12)
 })
 
+test_that("the metrics CSV carries the rows a reader needs to check the averages", {
+  pd <- data.frame(
+    truth = factor(c("A", "A", "B", "B", "C", "C", "A", "B"), levels = c("A", "B", "C")),
+    .pred_class = factor(c("A", "B", "B", "B", "C", "A", "A", "B"), levels = c("A", "B", "C")),
+    .scope_group = c(rep("g1", 4), rep("g2", 4)))
+  res <- list(cv_metrics = classif_compute_metrics(pd, "truth"),
+              per_class = classif_per_class_accuracy(pd, "truth"),
+              conf_mat = yardstick::conf_mat(pd, truth = truth, estimate = .pred_class),
+              group_metrics = classif_group_metrics(pd, "truth"),
+              levels = c("A", "B", "C"))
+  area <- data.frame(class = c("A", "B", "C"), n_cells = c(10L, 20L, 0L),
+                     area_ha = c(1.5, 3.25, 0))
+  csv <- classif_metrics_csv_df(res, area = area, area_note = "Covariate model surface")
+
+  expect_equal(names(csv), c("scope", "metric", "yardstick_id", "estimator", "value"))
+  expect_true(all(c("Total", "g1", "g2", "Per class", "Confusion matrix",
+                    "Class area") %in% csv$scope))
+
+  # The confusion block is the whole pooled sample, once.
+  cmb <- csv[csv$scope == "Confusion matrix", ]
+  expect_equal(sum(cmb$value), nrow(pd))
+  expect_equal(nrow(cmb), 9)
+  expect_true(all(grepl("^truth . / predicted .$", cmb$metric)))
+
+  # And the per-class block reproduces the pooled macro averages exactly, which
+  # is what makes the file checkable: precision 0 where a class was never
+  # predicted, recall from the reference support.
+  pc <- csv[csv$scope == "Per class", ]
+  by_id <- function(id) pc$value[pc$yardstick_id == id]
+  npred <- by_id("n_predicted")
+  prec <- ifelse(npred == 0, 0, by_id("user_accuracy"))
+  rec <- by_id("producer_accuracy")
+  f1 <- ifelse(prec + rec == 0, 0, 2 * prec * rec / (prec + rec))
+  pool <- csv[csv$scope == "Total", ]
+  expect_equal(mean(prec), pool$value[pool$yardstick_id == "precision"], tolerance = 1e-12)
+  expect_equal(mean(rec), pool$value[pool$yardstick_id == "recall"], tolerance = 1e-12)
+  expect_equal(mean(f1), pool$value[pool$yardstick_id == "f_meas"], tolerance = 1e-12)
+  expect_equal(by_id("n_reference"), as.numeric(table(pd$truth)))
+
+  # The area block is the surface the maps show, named with its threshold.
+  ab <- csv[csv$scope == "Class area", ]
+  expect_equal(sum(ab$value[ab$yardstick_id == "area_ha"]), sum(area$area_ha))
+  expect_true(all(ab$estimator == "Covariate model surface"))
+
+  # Without a rasterised surface the file simply has no area block.
+  expect_false("Class area" %in% classif_metrics_csv_df(res)$scope)
+})
+
+test_that("the metrics CSV marks a class the model never predicted", {
+  cm <- matrix(c(5, 1, 0, 2, 4, 0, 1, 2, 0), nrow = 3, byrow = TRUE,
+               dimnames = list(c("A", "B", "C"), c("A", "B", "C")))
+  pd <- make_cm_pred_df(cm, target = "soil")
+  res <- list(cv_metrics = classif_compute_metrics(pd, "soil"),
+              per_class = classif_per_class_accuracy(pd, "soil"),
+              conf_mat = yardstick::conf_mat(pd, truth = soil, estimate = .pred_class),
+              levels = c("A", "B", "C"))
+  csv <- classif_metrics_csv_df(res)
+
+  ua <- csv[csv$yardstick_id == "user_accuracy", ]
+  expect_equal(ua$estimator[grepl("^C:", ua$metric)], "no predictions")
+  expect_true(is.na(ua$value[grepl("^C:", ua$metric)]))
+  expect_true(all(ua$estimator[!grepl("^C:", ua$metric)] == "Pooled out-of-fold"))
+})
+
 test_that("the reported estimator is the averaging actually performed", {
   pred_df <- make_cm_pred_df()
   m <- classif_label_metrics(classif_compute_metrics(pred_df, "soil"))
@@ -1826,7 +2023,8 @@ test_that("the reported estimator is the averaging actually performed", {
   expect_equal(est("accuracy"), "multiclass")
   expect_equal(est("kap"), "multiclass")
   expect_equal(est("f_meas"), "macro")
-  expect_equal(m$.estimator_label[m$.metric == "f_meas"], "Macro average")
+  # The label names the denominator too: three classes here, all three in it.
+  expect_equal(m$.estimator_label[m$.metric == "f_meas"], "Macro average (K = 3)")
 
   # Macro, not weighted macro. The fixture's classes are unbalanced enough that
   # the two averages differ, so this cannot pass by coincidence.

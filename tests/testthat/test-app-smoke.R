@@ -9,9 +9,15 @@
 # engines assume, and the tab strip's stable `value=` ids still drive the
 # sidebar swap.
 #
-# Deliberately NOT attempted: upload -> run -> export flows. Those dispatch
-# parallel futures, which are flaky under a test harness and would make the
-# suite depend on wall-clock timing.
+# Deliberately NOT attempted: export flows, and any assertion on a run's
+# NUMBERS. Those dispatch parallel futures and would make the suite depend on
+# wall-clock timing. The last three tests do run the pipeline, because their
+# subjects cannot be reached any other way: whether a rendered DataTable puts
+# its values under their own headings is a property of the browser's layout,
+# and whether a restored or cancelled run is described consistently across the
+# panels needs real runs to archive, restore and cancel. They compare runs with
+# each other (hashes, the record's fields), never with fixed numbers, and skip
+# rather than fail if a run does not complete in time.
 #
 # The whole file self-skips unless a Chromium-based browser and shinytest2 are
 # available (CI has neither, and CI expansion is a standing decision).
@@ -58,13 +64,25 @@ smoke_app <- local({
     # paths (as do the docs drawer, assets and the run pipeline's main_wd).
     shim <- file.path(tempdir(), "monolith_smoke_app")
     dir.create(shim, showWarnings = FALSE, recursive = TRUE)
+    # The server body is evaluated in the shim's own frame, so the run state
+    # (rv) can be exported for the archive/restore and cancel tests; a surface
+    # is exported as a hash of its cell values, not as the raster.
     writeLines(c(
       sprintf('.monolith_root <- "%s"', proj_root),
       'setwd(.monolith_root)',
       'source("monolith.R")',
       'shiny::shinyApp(ui = ui, server = function(input, output, session) {',
       '  setwd(.monolith_root)',
-      '  server(input, output, session)',
+      '  eval(body(server))',
+      '  shiny::exportTestValues(run_state = list(',
+      '    run_id = rv$run_config_summary$run_id,',
+      '    method = rv$run_config_summary$method,',
+      '    status = rv$run_config_summary$status,',
+      '    disp_method = rv$disp$method,',
+      '    rast_hash = if (!is.null(rv$rast)) rlang::hash(terra::values(rv$rast, mat = FALSE)),',
+      '    rmse = if (length(rv$cv_metrics_act)) rv$cv_metrics_act[[1]]$rmse,',
+      '    map_label = rv$export_registry$map_actual$label,',
+      '    history = vapply(rv$run_history, function(h) h$config$method, character(1))))',
       '})'
     ), file.path(shim, "app.R"))
 
@@ -356,6 +374,200 @@ test_that("auxiliary correlation switches and table work in the browser", {
   app$wait_for_idle()
   expect_false(visible("corr_source"))
   expect_false(visible("corr_subset"))
+})
+
+# Clicks Run and answers every modal on the way to the revealed maps, in ONE
+# wait loop: the "Previous Results Detected" modal opens BEFORE the run starts,
+# so a loop that only watches reveal_maps_btn waits for a run that never began.
+# `prev` is the answer to that modal. TRUE when the maps were revealed.
+run_and_reveal <- function(app, prev = "discard", timeout = 600) {
+  state <- function() {
+    jsonlite::fromJSON(app$get_js(
+      "JSON.stringify({
+         prev: !!document.getElementById('discard_prev_run'),
+         confirm: !!document.getElementById('confirm_start_run'),
+         reveal: !!document.getElementById('reveal_maps_btn') &&
+                 document.getElementById('reveal_maps_btn').offsetParent !== null,
+         title: (document.getElementById('map_processing_title') || {}).innerText || ''
+       })"))
+  }
+  app$click("run")
+  # Generous: late in the full suite the machine is loaded, and the run starts
+  # its own PSOCK workers.
+  deadline <- Sys.time() + timeout
+  repeat {
+    s <- try(state(), silent = TRUE)
+    if (!inherits(s, "try-error")) {
+      if (isTRUE(s$prev)) app$click(paste0(prev, "_prev_run"))
+      else if (isTRUE(s$confirm)) app$click("confirm_start_run")
+      else if (isTRUE(s$reveal)) { app$click("reveal_maps_btn"); app$wait_for_idle(); return(TRUE) }
+      else if (grepl("Failed", s$title)) return(FALSE)
+    }
+    if (Sys.time() > deadline) return(FALSE)
+    Sys.sleep(1)
+  }
+}
+
+test_that("Model Performance values sit under their own headings", {
+  app <- smoke_app()
+  # A displaced value is not cosmetic: at a 1600 px viewport the body table ran
+  # 162 px wider than its cloned header, so RMSE printed under MAE and NRMSE
+  # under R2. The offset depends on the viewport and on the data, so it is
+  # measured at two widths, and again after leaving and returning to the tab -
+  # the revisit is what a fixed-timer adjust could not fix.
+  # A scattered point set, not the collinear CRS fixture above: a line has no
+  # domain to interpolate over, so the run produces no table to measure.
+  ctr <- sf::st_coordinates(sf::st_transform(
+    sf::st_sfc(sf::st_point(c(12.958, 52.466)), crs = 4326), 32633))
+  set.seed(3)
+  d <- data.frame(locality = "Potsdam",
+                  x = ctr[1] + runif(30, -2000, 2000),
+                  y = ctr[2] + runif(30, -1500, 1500),
+                  value = runif(30, 10, 24))
+  ll <- sf::st_coordinates(sf::st_transform(
+    sf::st_as_sf(d, coords = c("x", "y"), crs = 32633), 4326))
+  d <- data.frame(d[, c("locality", "x", "y")], lon = ll[, 1], lat = ll[, 2], value = d$value)
+  csv <- tempfile(fileext = ".csv")
+  withr::defer(unlink(csv))
+  utils::write.csv(d, csv, row.names = FALSE)
+
+  app$upload_file(user_file = csv)
+  app$wait_for_idle()
+  app$set_inputs(var_id = "value", method = "IDW", value_type = "actual")
+  app$wait_for_idle()
+
+  skip_if_not(run_and_reveal(app), "the interpolation run did not finish inside the smoke harness")
+
+  # header.left vs body.left for the first and last column of the rendered
+  # table. Under scrollX these are two tables; the whole point is that they
+  # agree.
+  offsets <- function() {
+    jsonlite::fromJSON(app$get_js(
+      "(function () {
+         var root = document.getElementById('metrics_table');
+         if (!root) return 'null';
+         var h = root.querySelectorAll('.dataTables_scrollHead thead tr th');
+         var b = root.querySelectorAll('.dataTables_scrollBody tbody tr:first-child td');
+         if (!h.length) { h = root.querySelectorAll('thead tr th');
+                          b = root.querySelectorAll('tbody tr:first-child td'); }
+         if (!h.length || h.length !== b.length) return 'null';
+         var d = [];
+         for (var i = 0; i < h.length; i++) {
+           d.push(Math.abs(h[i].getBoundingClientRect().left -
+                           b[i].getBoundingClientRect().left));
+         }
+         return JSON.stringify(d);
+       })()"))
+  }
+
+  # Poll rather than read once: wait_for_idle() can return before DataTables
+  # has drawn the table (and after a tab switch, before the realignment frame).
+  settled_offsets <- function(timeout = 30) {
+    end <- Sys.time() + timeout
+    repeat {
+      d <- tryCatch(offsets(), error = function(e) NULL)
+      if (length(d)) return(d)
+      if (Sys.time() > end) return(NULL)
+      Sys.sleep(0.5)
+    }
+  }
+
+  app$set_inputs(main_tabs = "tab_analysis")
+  app$wait_for_idle()
+  for (w in c(1600, 1366)) {
+    app$set_window_size(width = w, height = 900)
+    app$wait_for_idle()
+    d <- settled_offsets()
+    skip_if(is.null(d), "the Model Performance table did not render")
+    expect_lt(max(d), 1.5)                 # first and last column included
+
+    # Leave and come back: the table re-renders while hidden, which is the
+    # state its column widths used to be computed in.
+    app$set_inputs(main_tabs = "tab_map")
+    app$wait_for_idle()
+    app$set_inputs(main_tabs = "tab_analysis")
+    app$wait_for_idle()
+    Sys.sleep(0.5)                         # one animation frame is enough; be generous
+    expect_lt(max(settled_offsets()), 1.5)
+  }
+
+  # The browser's formatter and R's must agree, or a number means one thing in
+  # a table and another in the file exported beside it.
+  vals <- c(0, 1.2e-7, 0.1238, 30.4204, 632, 12345.6, 123456.7, 0.0025, -0.00005)
+  js_out <- app$get_js(sprintf(
+    "JSON.stringify([%s].map(function (v) { return window.mnFormatSig(v); }))",
+    paste(format(vals, scientific = TRUE), collapse = ", ")))
+  expect_equal(jsonlite::fromJSON(js_out), format_sig(vals))
+})
+
+# The archive and the cancel path, in the booted app: both are about which run
+# every panel describes, and neither can be asserted without a real run.
+smoke_run_state <- function(app) app$get_value(export = "run_state")
+
+test_that("restoring an archived run brings back its maps, metrics and record together", {
+  app <- smoke_app()
+  first <- smoke_run_state(app)
+  skip_if(is.null(first$rast_hash) || !identical(first$method, "IDW"),
+          "the IDW run of the previous test did not complete")
+
+  # A second run with another engine, archiving the first when asked.
+  app$set_inputs(method = "OK")
+  app$wait_for_idle()
+  skip_if_not(run_and_reveal(app, prev = "archive"),
+              "the second run did not finish inside the smoke harness")
+  second <- smoke_run_state(app)
+  expect_equal(second$method, "OK")
+  expect_false(identical(second$rast_hash, first$rast_hash))
+  expect_equal(second$history, "IDW")
+
+  # Restoring the IDW run brings back its record, its surface and its metrics
+  # together - restoring used to swap the record and the registry only - and
+  # the OK run goes into the archive in its place. The archive panel renders
+  # only while its tab is open.
+  app$set_inputs(main_tabs = "tab_export")
+  app$wait_for_idle()
+  app$click(paste0("restore_run_", first$run_id))
+  app$wait_for_idle()
+  back <- smoke_run_state(app)
+  expect_equal(back$run_id, first$run_id)
+  expect_equal(back$method, "IDW")
+  expect_equal(back$disp_method, "IDW")
+  expect_identical(back$rast_hash, first$rast_hash)
+  expect_equal(back$rmse, first$rmse)
+  expect_match(back$map_label, get_method_label("IDW"), fixed = TRUE)
+  expect_equal(back$history, "OK")
+  expect_equal(as.character(app$get_value(output = "disp_method")), "IDW")
+})
+
+test_that("a cancelled run is labelled cancelled and never archived", {
+  app <- smoke_app()
+  before <- smoke_run_state(app)
+  skip_if(!identical(before$method, "IDW"), "the restore test did not leave the IDW run on screen")
+
+  # Archive the run on screen when asked, then cancel as soon as the button is up.
+  visible <- function(id) isTRUE(app$get_js(sprintf(
+    "var el = document.getElementById('%s'); !!el && el.offsetParent !== null;", id)))
+  app$set_inputs(method = "OK")
+  app$click("run")
+  deadline <- Sys.time() + 180
+  clicked <- FALSE
+  repeat {
+    if (visible("archive_prev_run")) app$click("archive_prev_run")
+    else if (visible("cancel_model_btn")) { app$click("cancel_model_btn"); clicked <- TRUE; break }
+    if (Sys.time() > deadline) break
+    Sys.sleep(0.3)
+  }
+  skip_if_not(clicked, "the run never showed its Cancel button")
+  app$wait_for_idle()
+  st <- smoke_run_state(app)
+  skip_if(!identical(st$status, "cancelled"), "the run finished before the cancellation reached it")
+
+  expect_equal(st$method, "OK")
+  expect_null(st$rast_hash)
+  # The IDW run on screen was archived; the cancelled record was not.
+  expect_setequal(st$history, c("IDW", "OK"))
+  expect_match(app$get_html("#run_status_chip"), "Cancelled", fixed = TRUE)
+  expect_match(app$get_html("#run_config_display_map"), "CANCELLED", fixed = TRUE)
 })
 
 # Shut the app down here rather than at suite teardown: global.R sets

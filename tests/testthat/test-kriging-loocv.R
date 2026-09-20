@@ -14,26 +14,6 @@ test_that("perform_kriging_loocv returns NULL for fewer than 3 points", {
   expect_null(result)
 })
 
-test_that("perform_kriging_loocv does not throw on incomplete cases", {
-  pts <- make_test_points(5)
-  pts$aux1[1] <- NA
-  result <- tryCatch(
-    perform_kriging_loocv(
-      pts, "v", c("aux1"),
-      lags_func = calc_scientific_lags,
-      vgm_fit_func = robust_vgm_fit,
-      model_type = "lm",
-      l = "test", prefix = "act"
-    ),
-    error = function(e) structure(list(msg = e$message), class = "cv_err")
-  )
-  # Either NULL (filtered to < 3 points) or an sf object
-  expect_true(is.null(result) || inherits(result, "sf") || inherits(result, "cv_err"))
-  if (inherits(result, "sf")) {
-    expect_true("observed" %in% colnames(result))
-  }
-})
-
 test_that("lm and rf kriging CV return a complete common schema", {
   pts <- make_test_points(12)
   for (engine in c("lm", "rf")) {
@@ -45,6 +25,22 @@ test_that("lm and rf kriging CV return a complete common schema", {
     expect_equal(cv$observed, pts$v)
     expect_true(all(is.finite(cv$var1.pred)))
     expect_true(all(is.na(cv$var1.var)))
+  }
+})
+
+test_that("every RK and RFK fold reports the state of its residual variogram", {
+  # The residual variogram is refitted per fold by the same screen OK uses, so
+  # a fold can take a degraded fit the map never did; the run log can only name
+  # it if the fold reports it.
+  pts <- make_test_points(12)
+  for (engine in c("lm", "rf")) {
+    cv <- suppressWarnings(perform_kriging_loocv(pts, "v", "aux1", calc_scientific_lags,
+      robust_vgm_fit, model_type = engine, rf_ntree = 50))
+    st <- .cv_fold_statuses(cv)
+    expect_length(st, length(unique(cv$fold)))
+    expect_true(all(st %in% VGM_FIT_STATUSES))
+    tb <- .cv_fold_status_table(cv)
+    expect_equal(sum(tb$n), length(st))
   }
 })
 

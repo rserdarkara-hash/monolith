@@ -8,6 +8,18 @@
         msg)
   }
 
+  # Run warnings, in the panel rather than only in the run log. Each entry is
+  # "<locality> (<surface>): <message>" as persist_run_warnings() recorded it;
+  # the card is absent when the run raised none.
+  output$run_warnings_card <- renderUI({
+    w <- rv$run_warnings
+    if (is.null(w) || length(w) == 0) return(NULL)
+    sci_card("Run Warnings",
+             "Conditions the interpolation reported for individual localities.",
+             tags$ul(style = "margin: 0; padding-left: 20px; color: var(--mn-text-2);",
+                     lapply(w, function(x) tags$li(x))))
+  })
+
   # A missing per-locality trend object is NOT "nothing worth saying": for
   # RK/RFK it means the trend step did not run for that locality, so
   # apply_kriging_pipeline took its Ordinary Kriging fallback (it writes
@@ -224,7 +236,18 @@
   output$vgm_params_table <- DT::renderDataTable({
     loc <- input$sel_loc_stats; req(loc)
     fits <- if (isTRUE(sci_vgm_tuning())) tuning_vgm_entries(rv$v_fit_list) else rv$disp$v_fits
-    sci_dt(vgm_params_table_df(fits, loc))
+    df <- vgm_params_table_df(fits, loc)
+    # A named locality transposes to three narrow character columns and needs no
+    # scrollX; the pooled listing is wide and numeric, so it keeps both.
+    if (identical(loc, "Total (Combined)")) {
+      # "Sill Resolved" is logical: the significant-digit renderer would turn
+      # TRUE into 1.
+      sci_dt(df, signif_cols = if (!is.null(df))
+        setdiff(names(df), c("Locality", "Target", "Model", "Sill Resolved")))
+    } else {
+      # The cells carry the sill qualifier as a tooltip span (.vgm_params_chr).
+      sci_dt(df, scroll_x = FALSE, escape = FALSE)
+    }
   })
   build_tps_gcv_diag <- function(target) {
     loc <- input$sel_loc_stats; req(loc, identical(rv$disp$method, "TPS"))
@@ -455,7 +478,9 @@
   output$regional_params_table <- DT::renderDataTable({
     loc <- input$sel_loc_stats; req(loc, (rv$disp$method %||% "") %in% c("IDW", "TPS"))
     has_pre <- isTRUE(rv$disp$comp_mode) || !identical(rv$disp$value_type, "actual")
-    sci_dt(build_regional_params_df(rv$disp$method, loc, rv$disp$regional_params, has_pre))
+    # Two or three narrow columns: no scrollX, so header and body stay one table.
+    sci_dt(build_regional_params_df(rv$disp$method, loc, rv$disp$regional_params, has_pre),
+           scroll_x = FALSE)
   })
 
   # Both descriptive cards read stats_table_vectors() (ui_formatting.R), the
@@ -468,8 +493,10 @@
     req(meta)
     sv <- stats_table_vectors(rv$user_data, meta, rv$mapping$loc, meta$localities)
     if (is.null(sv)) return(sci_dt(NULL))
-    sci_dt(summary_stats_df(sv$act, sv$pre, labels = c("Total_Actual", "Total_Predicted"),
-                            round_values = TRUE))
+    st <- summary_stats_df(sv$act, sv$pre, labels = c("Total_Actual", "Total_Predicted"))
+    # scroll_x = FALSE: two or three narrow columns fit the smallest supported
+    # viewport, so the table stays ONE table and its header cannot drift.
+    sci_dt(st, scroll_x = FALSE, signif_cols = setdiff(names(st), "Metric"))
   })
 
   output$stats_table_loc <- DT::renderDataTable({
@@ -479,8 +506,8 @@
     req(meta)
     sv <- stats_table_vectors(rv$user_data, meta, rv$mapping$loc, input$sel_loc_stats)
     if (is.null(sv)) return(sci_dt(NULL))
-    sci_dt(summary_stats_df(sv$act, sv$pre, labels = c("Selected_Actual", "Selected_Predicted"),
-                            round_values = TRUE))
+    st <- summary_stats_df(sv$act, sv$pre, labels = c("Selected_Actual", "Selected_Predicted"))
+    sci_dt(st, scroll_x = FALSE, signif_cols = setdiff(names(st), "Metric"))
   })
 
   # Hectares per class for ONE surface, UNROUNDED and in class order (0 for a
@@ -564,7 +591,9 @@
     err <- attr(ha, "area_error")
     if (!is.null(err)) return(data.frame(Error = as.character(err)))
     class_names <- if (isTruthy(input$color_style == "bin")) params$leg_labels else params$labels
-    data.frame(Class = class_names, Ha = round(ha, 2))
+    # Unrounded: a small field's class can cover less than 0.005 ha, which
+    # two decimals printed (and exported) as 0. The card formats it instead.
+    data.frame(Class = class_names, Ha = as.numeric(ha))
   }
 
   calc_area_df <- function(r_obj, r_id = NULL) {
@@ -606,16 +635,16 @@
     area_ha_to_df(ha, params)
   })
 
-  output$area_table_total_act <- DT::renderDataTable({ req(length(rv$loc_names) > 1, input$color_style %in% c("agro", "bin")); sci_dt(area_df_total_act()) })
-  output$area_table_total_pre <- DT::renderDataTable({ req(length(rv$loc_names) > 1, input$color_style %in% c("agro", "bin")); sci_dt(area_df_total_pre()) })
+  output$area_table_total_act <- DT::renderDataTable({ req(length(rv$loc_names) > 1, input$color_style %in% c("agro", "bin")); sci_dt(area_df_total_act(), signif_cols = "Ha") })
+  output$area_table_total_pre <- DT::renderDataTable({ req(length(rv$loc_names) > 1, input$color_style %in% c("agro", "bin")); sci_dt(area_df_total_pre(), signif_cols = "Ha") })
 
   output$area_table_loc_act <- DT::renderDataTable({
     req(rv$rast_list_act, input$color_style %in% c("agro", "bin")); loc <- input$sel_loc_stats
-    if(loc == "Total (Combined)") sci_dt(NULL) else sci_dt(calc_area_df(rv$rast_list_act[[loc]], paste0("loc_act_", loc)))
+    if(loc == "Total (Combined)") sci_dt(NULL) else sci_dt(calc_area_df(rv$rast_list_act[[loc]], paste0("loc_act_", loc)), signif_cols = "Ha")
   })
   output$area_table_loc_pre <- DT::renderDataTable({
     req(rv$rast_list_pre, input$color_style %in% c("agro", "bin")); loc <- input$sel_loc_stats
-    if(loc == "Total (Combined)") sci_dt(NULL) else sci_dt(calc_area_df(rv$rast_list_pre[[loc]], paste0("loc_pre_", loc)))
+    if(loc == "Total (Combined)") sci_dt(NULL) else sci_dt(calc_area_df(rv$rast_list_pre[[loc]], paste0("loc_pre_", loc)), signif_cols = "Ha")
   })
 
   # Class-area and class-agreement exports follow the CLASSIFICATION, not the
@@ -759,6 +788,25 @@
                ") the fold's covariate screen kept a different set than the map; see the Run Log.")
       }
     }
+    # A fold whose variogram fell back to the heuristic, kept a singular
+    # candidate, or converged to a range outside the lag support scored a
+    # different model than the one that drew the map. The run log names the
+    # individual folds and what happened to each.
+    vgm_txt <- {
+      bad <- lapply(infos, function(x) {
+        tb <- x$vgm_status
+        if (is.null(tb)) NULL else tb[tb$status != "ok", , drop = FALSE]
+      })
+      hit <- vapply(bad, function(b) !is.null(b) && nrow(b) > 0, logical(1))
+      if (any(hit)) {
+        k <- sum(vapply(bad[hit], function(b) sum(b$n), numeric(1)))
+        n <- sum(vapply(infos[hit], function(x) sum(x$vgm_status$n), numeric(1)))
+        paste0(" In ", k, " of ", n, " folds (",
+               paste(unique(names(infos)[hit]), collapse = ", "),
+               ") the fold's variogram was degraded, or its range fell outside the lag",
+               " support; see the Run Log.")
+      }
+    }
     cov_txt <- {
       short <- Filter(function(m) isTRUE((m$coverage %||% 1) < 1),
                       c(rv$cv_metrics_act, if (isTRUE(rv$has_predictions)) rv$cv_metrics_pre))
@@ -766,12 +814,20 @@
         " Some rows are INCOMPLETE: part or all of their samples received no cross-validation prediction (see the Run Log), and their metrics describe the predicted samples only."
       }
     }
-    refit_note <- if (!is.null(reuse_txt) || !is.null(cov_txt)) {
+    # Unseparated IDW/TPS: the Predicted surface's parameter is the Actual one.
+    sep_txt <- if (isTRUE(rv$has_predictions) && isFALSE(rv$run_config_summary$sep_fit)) {
+      switch(method_now,
+        "IDW" = " The Predicted surface uses the Actual surface's power (Fit Actual/Predicted Separately is off).",
+        "TPS" = " The Predicted surface uses the Actual surface's lambda; on Auto (GCV), the one GCV selects for the measured values, reselected in each fold (Fit Actual/Predicted Separately is off).",
+        NULL)
+    }
+    refit_note <- if (!is.null(reuse_txt) || !is.null(cov_txt) || !is.null(vgm_txt)) {
       tags$div(
         style = "font-size: 0.82em; color: var(--mn-text-2); margin: -4px 0 8px 0;",
         tags$span(style = "color: var(--mn-text-3);",
                   paste0(get_method_label(rv$disp$method), reuse_txt %||% "",
-                         cond_txt %||% "", shared_txt %||% "", screen_txt %||% "", cov_txt %||% ""))
+                         cond_txt %||% "", shared_txt %||% "", sep_txt %||% "",
+                         screen_txt %||% "", vgm_txt %||% "", cov_txt %||% ""))
       )
     }
     tagList(
@@ -787,25 +843,44 @@
     )
   })
 
-  output$metrics_table <- DT::renderDataTable({
+  # ── Model Performance ─────────────────────────────────────────────────────
+  # One reactive behind two outputs: the table and the footnote that explains
+  # its markers. They must agree about which markers the table contains, so
+  # neither re-derives them.
+  #
+  # Markers, all three distinct on purpose:
+  #   NA*   the statistic could not be computed for this point set (too few
+  #         points, no coordinates, a failed neighbour search) - it NEVER means
+  #         "no spatial structure was found".
+  #   n/a1  the metric does not apply to this target: mean- and
+  #         percentage-normalised errors have no interpretation where the
+  #         observed values span zero.
+  #   NA†   not reported under Spatial Block CV, where Moran's reference
+  #         distribution does not hold.
+  metrics_rows <- reactive({
     req(input$sel_loc_stats)
     loc <- input$sel_loc_stats
-    
+    strat <- rv$cv_strategy_sel %||% "auto"
+
     # One definition of the Model Performance column set, shared by the empty
     # stub and by both populated branches so they cannot drift apart. The
     # labels and their order mirror the uploaded-prediction metrics table so the
-    # two can be read side by side: perform_cv already computed MAE, NRMSE, CCC
-    # and RPIQ, they were simply never displayed. Moran's I / p have no
-    # counterpart there (uploaded predictions carry no CV residual field).
+    # two can be read side by side. Moran's I / p have no counterpart there
+    # (uploaded predictions carry no CV residual field).
     # CV_METRIC_LABELS (ui_formatting.R) is that one definition; the export
     # flavour of this table reads the same vector. Moran's null expectation is
     # dropped here because it rides along as a per-row tooltip below - a file
     # cannot carry a tooltip, so the export keeps it as a column.
-    metric_cols <- c("Source", unname(CV_METRIC_LABELS[setdiff(names(CV_METRIC_LABELS), "moran_e")]))
-    # NA in the Moran columns means the statistic could not be computed for this
-    # point set (fewer than 3 points, no coordinate columns, or the neighbour
-    # search failed) - it never means "no spatial structure was detected".
+    keys <- setdiff(names(CV_METRIC_LABELS), "moran_e")
+    metric_cols <- c("Source", unname(CV_METRIC_LABELS[keys]))
+    # Displayed at four significant digits by the browser formatter; the two
+    # scale-dependent metrics and the two Moran cells are character, because
+    # they can carry a marker instead of a number.
+    num_cols <- unname(CV_METRIC_LABELS[setdiff(keys, c("nrmse_mean", "smape",
+                                                        "moran_i", "moran_p"))])
     na_marker <- '<span title="Not computable (see Run Log)">NA*</span>'
+    na_scale <- '<span title="Not reported: the observed values span zero (see the note under the table)">n/a¹</span>'
+    na_block <- '<span title="Not reported under Spatial Block CV (see the note under the table)">NA†</span>'
 
     # The Source cell states WHAT was scored, not only how: the fold plan, the
     # cross-validation population, how many of the expected samples got a
@@ -836,94 +911,131 @@
               htmltools::htmlEscape(txt))
     }
 
-    get_metrics_df <- function(cv_list, data_list, label, info_list) {
-      if(loc == "Total (Combined)") {
+    row_spec <- function(cv_list, data_list, label, info_list) {
+      markers <- character(0)
+      if (loc == "Total (Combined)") {
         # Pool in the auto-UTM zone of the combined centroid: pooled Moran's I
         # uses these coordinates, and EPSG:3857 distances are inflated by
         # 1/cos(latitude). perform_cv/.cv_to_df extract x/y from the geometry.
         res <- perform_pooled_cv(data_list, cv_list)
-        if(is.null(res)) {
-          empty_df <- data.frame(Source=paste0(label, " (pooled CV)"), RMSE=NA, NRMSE_Pct=NA, MAE=NA, R2_Corr=NA, R2_NSE=NA, Bias_ME=NA, CCC=NA, RPD_Prec=NA, RPIQ=NA, SMAPE_Pct=NA, Moran_I=NA, Moran_P=NA)
-          names(empty_df) <- metric_cols
-          return(empty_df)
+        # The pooled row mixes localities that need not share a fold design, so
+        # its Moran reading is the block one only when every pooled locality
+        # resolved to blocks.
+        types <- vapply(names(data_list), function(l) {
+          applied_cv_plan(nrow(data_list[[l]]), strat, cv_list[[l]])$type
+        }, character(1))
+        mor <- moran_reading(types)
+        design <- paste0("pooled per-locality CV",
+                         if (mor$mixed) ", mixed fold designs" else "")
+        src_label <- if (is.null(res)) paste0(label, " (pooled CV)") else {
+          source_cell(label, design, res, pooled_cv_population(info_list[names(data_list)]))
         }
-
-        src_label <- source_cell(label, "pooled per-locality CV", res,
-                                 pooled_cv_population(info_list[names(data_list)]))
-        rmse <- res$rmse
-        nrmse <- res$nrmse_mean
-        mae <- res$mae
-        r2 <- res$r2
-        nse <- res$nse
-        me <- res$me
-        ccc <- res$ccc
-        rpd <- res$rpd
-        rpiq <- res$rpiq
-        smape <- res$smape
-        moran_i <- res$moran_i
-        moran_e <- res$moran_e
-        moran_p <- res$moran_p
       } else {
         res <- cv_list[[loc]]
-        n_obs <- if(!is.null(data_list[[loc]])) nrow(data_list[[loc]]) else NA
-        src_label <- if(!is.null(res)) {
-          source_cell(label, cv_type_label(n_obs, rv$cv_strategy_sel), res, info_list[[loc]])
+        n_obs <- if (!is.null(data_list[[loc]])) nrow(data_list[[loc]]) else NA
+        # The APPLIED plan, not the requested strategy: a locality below
+        # CV_BLOCK_MIN_N was scored by LOOCV, and a failed k-means clustering
+        # left random folds. Neither may be reported as Spatial Block CV.
+        plan <- applied_cv_plan(n_obs, strat, res)
+        mor <- moran_reading(plan$type)
+        src_label <- if (!is.null(res)) {
+          source_cell(label, plan$label, res, info_list[[loc]])
         } else {
           # An all-NA row used to be labelled plain "(CV)", indistinguishable
           # from a computed one; say that CV did not produce metrics here.
           paste0(label, " (CV unavailable - see Run Log)")
         }
-        rmse <- if(!is.null(res)) res$rmse else NA
-        nrmse <- if(!is.null(res)) res$nrmse_mean else NA
-        mae  <- if(!is.null(res)) res$mae else NA
-        r2   <- if(!is.null(res)) res$r2 else NA
-        nse  <- if(!is.null(res)) res$nse else NA
-        me   <- if(!is.null(res)) res$me else NA
-        ccc  <- if(!is.null(res)) res$ccc else NA
-        rpd  <- if(!is.null(res)) res$rpd else NA
-        rpiq <- if(!is.null(res)) res$rpiq else NA
-        smape <- if(!is.null(res)) res$smape else NA
-        moran_i <- if(!is.null(res)) res$moran_i else NA
-        moran_e <- if(!is.null(res)) res$moran_e else NA
-        moran_p <- if(!is.null(res)) res$moran_p else NA
       }
-                  res_df <- data.frame(
-                    Source = src_label,
-                    RMSE = round(rmse, 4),
-                    NRMSE_Pct = round(nrmse, 4),
-                    MAE = round(mae, 4),
-                    R2_Corr = round(r2, 4),
-                    R2_NSE = round(nse, 4),
-                    Bias_ME = round(me, 4),
-                    CCC = round(ccc, 4),
-                    RPD_Prec = round(rpd, 4),
-                    RPIQ = round(rpiq, 4),
-                    SMAPE_Pct = round(smape, 4),
-                    # The null expectation rides along as a per-row tooltip: I is
-                    # centred on E[I] = -1/(n-1), not on 0, so an I marginally
-                    # above zero is not evidence of clustering at small n.
-                    Moran_I = if(is.na(moran_i)) na_marker else sprintf(
-                      '<span title="Expected I under no spatial autocorrelation: E[I] = -1/(n-1) = %s">%s</span>',
-                      if(is.na(moran_e)) "NA" else as.character(round(moran_e, 4)),
-                      as.character(round(moran_i, 4))),
-                    # Rendered like every other p in the app ("< 0.001" rather
-                    # than a rounded 0), HTML-escaped because this table renders
-                    # with escape = FALSE. NA on the all-pairs fallback path,
-                    # which has no sampling distribution.
-                    Moran_P = if(is.na(moran_p)) na_marker else htmltools::htmlEscape(format_p_value(moran_p))
-                    )
-                    names(res_df) <- metric_cols
-                    res_df
-                    }
 
-    m_act <- get_metrics_df(rv$cv_metrics_act, rv$cv_data_act, "Actual Model", rv$cv_info_act)
-    if(rv$has_predictions) {
-      m_pre <- get_metrics_df(rv$cv_metrics_pre, rv$cv_data_pre, "Predicted Model", rv$cv_info_pre)
-      # escape = FALSE keeps the tooltip-bearing spans in the two Moran columns
-      sci_dt(rbind(m_act, m_pre), escape = FALSE, header_tooltips = sci_metric_tooltips())
-    } else {
-      sci_dt(m_act, escape = FALSE, header_tooltips = sci_metric_tooltips())
+      has_cv <- !is.null(res)
+      val <- function(k) {
+        v <- if (has_cv) res[[k]] else NULL
+        if (is.null(v) || length(v) != 1) NA_real_ else as.numeric(v)
+      }
+      # A metric that does not apply to this target says so; one that could not
+      # be computed says that instead; neither is left blank.
+      scale_cell <- function(k) {
+        if (!has_cv) return("")
+        if (isTRUE(res$signed_target)) { markers <<- c(markers, "scale"); return(na_scale) }
+        v <- val(k)
+        if (is.null(v) || length(v) != 1 || is.na(v)) { markers <<- c(markers, "na"); return(na_marker) }
+        format_sig(v)
+      }
+      nrmse_cell <- scale_cell("nrmse_mean")
+      smape_cell <- scale_cell("smape")
+
+      moran_i <- val("moran_i"); moran_e <- val("moran_e"); moran_p <- val("moran_p")
+      i_cell <- if (is.na(moran_i)) {
+        markers <- c(markers, "na"); na_marker
+      } else if (mor$block) {
+        markers <- c(markers, "block")
+        sprintf('<span title="Block-CV residual clustering: these residuals inherit the fold geometry and a shared extrapolation condition within each withheld block. E[I] = -1/(n-1) = %s">%s†</span>',
+                if (is.na(moran_e)) "NA" else format_sig(moran_e), format_sig(moran_i))
+      } else {
+        # The null expectation rides along as a per-row tooltip: I is centred on
+        # E[I] = -1/(n-1), not on 0, so an I marginally above zero is not
+        # evidence of clustering at small n.
+        sprintf('<span title="Expected I under no spatial autocorrelation: E[I] = -1/(n-1) = %s">%s</span>',
+                if (is.na(moran_e)) "NA" else format_sig(moran_e), format_sig(moran_i))
+      }
+      p_cell <- if (!mor$report_p && !is.na(moran_i)) {
+        markers <- c(markers, "block"); na_block
+      } else if (is.na(moran_p)) {
+        markers <- c(markers, "na"); na_marker
+      } else {
+        # Rendered like every other p in the app ("< 0.001" rather than a
+        # rounded 0), HTML-escaped because this table renders with escape = FALSE.
+        htmltools::htmlEscape(format_p_value(moran_p))
+      }
+
+      df <- data.frame(Source = src_label, stringsAsFactors = FALSE)
+      for (k in keys) {
+        lab <- unname(CV_METRIC_LABELS[[k]])
+        df[[lab]] <- switch(k,
+          nrmse_mean = nrmse_cell,
+          smape      = smape_cell,
+          moran_i    = i_cell,
+          moran_p    = p_cell,
+          val(k))
+      }
+      list(df = df, block = isTRUE(mor$block), label = mor$label,
+           markers = unique(markers))
     }
+
+    specs <- list(row_spec(rv$cv_metrics_act, rv$cv_data_act, "Actual Model", rv$cv_info_act))
+    if (isTRUE(rv$has_predictions)) {
+      specs <- c(specs, list(row_spec(rv$cv_metrics_pre, rv$cv_data_pre,
+                                      "Predicted Model", rv$cv_info_pre)))
+    }
+    df <- do.call(rbind, lapply(specs, `[[`, "df"))
+    # The column heading can only carry one reading, so it takes the block one
+    # only when every row in the table was scored under blocks; otherwise the
+    # block rows are marked in their own cells.
+    block_all <- all(vapply(specs, `[[`, logical(1), "block"))
+    if (block_all) names(df)[names(df) == "Moran's I"] <- "Block-CV residual clustering"
+
+    list(df = df, num_cols = num_cols, block_all = block_all,
+         markers = unique(unlist(lapply(specs, `[[`, "markers"))))
+  })
+
+  run_cancelled <- reactive(identical(rv$run_config_summary$status, "cancelled"))
+
+  output$metrics_table <- DT::renderDataTable({
+    # A cancelled run produced no metrics. Rows reading "CV unavailable" would
+    # describe a run that finished without cross-validation.
+    if (run_cancelled()) return(sci_dt(data.frame(Status = RUN_CANCELLED_NOTE)))
+    m <- metrics_rows()
+    # escape = FALSE keeps the tooltip-bearing spans in the marker cells
+    sci_dt(m$df, escape = FALSE, header_tooltips = sci_metric_tooltips(),
+           signif_cols = m$num_cols)
+  })
+
+  # The markers' footnote, under the table rather than in it: a table cell can
+  # carry the short form, the sentence that makes it readable cannot live there.
+  output$metrics_table_notes <- renderUI({
+    if (run_cancelled()) return(NULL)
+    m <- metrics_rows()
+    table_footnote(m$markers)
   })
 
   # ── Repeated cross-validation (opt-in) ────────────────────────────────────
@@ -934,13 +1046,22 @@
   # than this SD is fold luck, not skill.
   cv_repeat_row <- function(summ, label) {
     if (is.null(summ)) return(NULL)
-    fmt <- function(m, s) {
+    # Every cell is the string "mean ± SD", so the browser formatter cannot
+    # reach this table: the significant-digit rule is applied here instead.
+    # Both terms share one notation - a mean in fixed notation beside an SD in
+    # scientific reads as two different quantities - and the pair switches to
+    # scientific only when a term would otherwise be quantized to zero.
+    fmt <- function(m, s, key) {
+      if (isTRUE(summ$signed_target) && key %in% c("nrmse_mean", "smape")) return("n/a¹")
       if (!is.finite(m)) return("NA")
-      digits <- if (abs(m) >= 100) 2 else 4
-      # formatC, not round(): a small SD next to a larger mean would otherwise
-      # print in scientific notation ("0.0287 ± 5e-04"), which reads as a
-      # different quantity at a glance. drop0trailing keeps short values short.
-      num <- function(x) formatC(round(x, digits), format = "f", digits = digits, drop0trailing = TRUE)
+      terms <- c(m, if (is.finite(s)) s)
+      terms <- terms[terms != 0]
+      num <- if (length(terms) && min(abs(terms)) < 1e-4) {
+        function(x) formatC(x, format = "e", digits = 3)
+      } else {
+        digits <- if (abs(m) >= 100) 2 else 4
+        function(x) formatC(round(x, digits), format = "f", digits = digits, drop0trailing = TRUE)
+      }
       paste0(num(m), " ± ", if (is.finite(s)) num(s) else "NA")
     }
     # Realizations can differ in how many samples they managed to predict, so
@@ -957,7 +1078,7 @@
       stringsAsFactors = FALSE
     )
     for (k in names(CV_REPEAT_METRICS)) {
-      row[[k]] <- fmt(summ$mean[[k]], summ$sd[[k]])
+      row[[k]] <- fmt(summ$mean[[k]], summ$sd[[k]], k)
     }
     names(row) <- c("Source", unname(CV_REPEAT_METRICS))
     row
@@ -987,6 +1108,12 @@
     sci_dt(df, header_tooltips = sci_metric_tooltips())
   })
 
+  output$cv_repeats_notes <- renderUI({
+    df <- cv_repeat_rows()
+    req(df)
+    table_footnote(if (any(vapply(df, function(col) any(col == "n/a¹"), logical(1)))) "scale")
+  })
+
   output$uploaded_metrics_table <- DT::renderDataTable({
           req(rv$sf, input$sel_loc_stats)
           loc <- input$sel_loc_stats
@@ -1006,8 +1133,39 @@
           # against |mean| (a signed denominator reports a negative error
           # percentage for an anomaly variable), and NA - never Inf or NaN -
           # for every degenerate ratio.
-          sci_dt(pred_perf_df(df$v, df$pv, round_values = TRUE))
+          perf <- pred_perf_df(df$v, df$pv)
+          if (is.null(perf)) return(sci_dt(NULL))
+          # The Note column explains the NAs of a signed target in the exported
+          # sheet; on screen that becomes the n/a¹ marker and one footnote.
+          shown <- data.frame(Metric = perf$Metric,
+                              Value = ifelse(nzchar(perf$Note), "n/a¹", format_sig(perf$Value)),
+                              stringsAsFactors = FALSE)
+          shown$Value[is.na(shown$Value)] <- "NA"
+          sci_dt(shown)
         })
+
+  output$uploaded_metrics_notes <- renderUI({
+    req(rv$sf, input$sel_loc_stats)
+    loc <- input$sel_loc_stats
+    df <- rv$sf %>% st_drop_geometry() %>% filter(!is.na(v), !is.na(pv))
+    if (loc != "Total (Combined)") df <- df %>% filter(loc == !!loc)
+    perf <- if (nrow(df) >= 3) pred_perf_df(df$v, df$pv) else NULL
+    req(!is.null(perf))
+    # The model's own population, read off the run's CV record rather than
+    # recomputed - it is what the Model Performance table above reports.
+    model_n <- if (identical(loc, "Total (Combined)")) {
+      vals <- vapply(rv$cv_metrics_act, function(m) as.numeric(m$n_expected %||% m$n %||% NA), numeric(1))
+      if (length(vals) && any(is.finite(vals))) sum(vals, na.rm = TRUE) else NA_real_
+    } else {
+      m <- rv$cv_metrics_act[[loc]]
+      as.numeric(m$n_expected %||% m$n %||% NA)
+    }
+    pop_note <- pred_pop_note(nrow(df), model_n)
+    tagList(
+      table_footnote(if (any(nzchar(perf$Note))) "scale"),
+      if (!is.null(pop_note)) tags$div(class = "mn-table-note", tags$div(pop_note))
+    )
+  })
   output$kappa_table <- DT::renderDataTable({
     req(rv$sf, input$sel_loc_stats, input$kappa_bin_method)
     
@@ -1030,7 +1188,7 @@
     ag <- compute_agreement_metrics(df$v, df$pv, method = input$kappa_bin_method, params = params)
     if(!is.null(ag$status)) return(sci_dt(data.frame(Status = ag$status)))
 
-    sci_dt(agreement_metrics_df(ag, round_values = TRUE))
+    sci_dt(agreement_metrics_df(ag), signif_cols = "Value")
   })
 
   output$log_output <- renderText({ rv$log })
@@ -1044,12 +1202,13 @@
   # flush makes the tab current the moment it is opened. Plots stay
   # suspended: hidden plots re-render on reveal anyway (client sizing).
   for (out_id in c("vgm_params_table", "regional_params_table", "metrics_table",
+                   "metrics_table_notes", "cv_repeats_notes", "uploaded_metrics_notes",
                    "cv_strategy_badge", "cv_repeats_table",
                    "stats_table_total", "stats_table_loc",
                    "area_table_total_act", "area_table_total_pre",
                    "area_table_loc_act", "area_table_loc_pre",
                    "uploaded_metrics_table", "kappa_table",
-                   "run_config_display", "log_output",
+                   "run_config_display", "log_output", "run_warnings_card",
                    # raw RK summaries live inside a collapsed <details>:
                    # opening it fires no Shiny visibility event, so they must
                    # render eagerly or they would stay blank until reveal
@@ -1063,10 +1222,17 @@
   # would silence a warning that is still true the second time round (e.g. an
   # unchanged strict buffer/resolution pair).
   observeEvent(rv$run_counter, last_notified_warnings(character(0)))
+  log_warn_lines <- function(log) {
+    grep("\\[WARN\\]", unlist(strsplit(log %||% "", "\n", fixed = TRUE)), value = TRUE)
+  }
+  # Called when an archived run is restored: its warnings were announced when
+  # it ran, and its restored log must not announce them again.
+  mark_log_warnings_announced <- function() {
+    last_notified_warnings(union(last_notified_warnings(), log_warn_lines(rv$log)))
+  }
   observeEvent(rv$log, {
     req(rv$log)
-    log_lines <- unlist(strsplit(rv$log, "\n", fixed = TRUE))
-    warn_lines <- grep("\\[WARN\\]", log_lines, value = TRUE)
+    warn_lines <- log_warn_lines(rv$log)
     new_warns <- setdiff(warn_lines, last_notified_warnings())
     if (length(new_warns) > 0) {
       for (w in new_warns) {

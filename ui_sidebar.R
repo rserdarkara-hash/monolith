@@ -36,11 +36,13 @@ ui_sidebar_panel <- sidebarPanel(width = 3,
                        checkboxInput("comp_mode", HTML(paste0("Comparison Mode", info_tooltip("comp_mode", "Splits the viewer to compare the Actual (observed) map against the map of your uploaded ML predictions. Useful for visual validation."))), FALSE),
                        # Every prediction or residual view kriges a predicted
                        # surface, so this governs it with or without Comparison Mode.
-                       checkboxInput("sep_fit", HTML(paste0("Fit Actual/Predicted Separately", info_tooltip("sep_fit_info", "Ordinary Kriging only. Checked (recommended): the Predicted surface uses its own variogram. Unchecked: it uses the measured-value variogram, the run's own Actual fit under Auto-Fit or the applied Actual model under Manual. Manual tuning then offers only the Actual target."))), TRUE)
+                       checkboxInput("sep_fit", HTML(paste0("Fit Actual/Predicted Separately", info_tooltip("sep_fit_info", "Checked (recommended): the Predicted surface gets its own model - its own variogram under Ordinary Kriging, its own power under IDW, its own lambda under TPS. Unchecked: it reuses the model fitted to the measured values - the Actual variogram (the run's own Actual fit under Auto-Fit, the applied Actual model under Manual), the Actual power, and the Actual lambda (on Auto, the one GCV selects for the measured values) - and tuning and optimization offer the Actual target only. RK, RFK and CK always fit each surface on its own."))), TRUE)
                      ),          # Also shown while the Map Viewer displays a comparison, so the
                      # option stays reachable for the maps it styles after the
-                     # sidebar is set up for a non-comparison next run.
-                     conditionalPanel(condition = "(input.comp_mode && ['pred', 'pred_ss'].includes(input.value_type)) || /^view_comp/.test(input.map_view || '')",
+                     # sidebar is set up for a non-comparison next run. That arm
+                     # also requires the DISPLAYED run to have a prediction side:
+                     # the view menu's value alone can outlive the comparison.
+                     conditionalPanel(condition = "(input.comp_mode && ['pred', 'pred_ss'].includes(input.value_type)) || (output.disp_has_pred == 'yes' && /^view_comp/.test(input.map_view || ''))",
                            checkboxInput("match_scales", HTML(paste0("Match Scales", info_tooltip("match_info", "Forces the map legends for Actual and Predicted data to use the same color range, for the surfaces and for their standard-error or variance maps."))), FALSE))
         ))
       )
@@ -174,7 +176,7 @@ ui_sidebar_panel <- sidebarPanel(width = 3,
                     manual_slider_args = list(label = "Power (p)", min = 0.5, max = 5, value = 2, step = 0.1),
                     optimize_btn_label = "OPTIMIZE IDW FACTORS",
                     manual_btn_label = "Apply Manual Power",
-                    top_extra_ui = sliderInput("idw_nmax", HTML(paste0("Max Neighbors", info_tooltip("idw_nmax_info", "Limits the IDW calculation to the closest N points. This prevents distant, unrelated data from distorting local predictions. Select this BEFORE optimizing."))), min = 4, max = 50, value = 12),
+                    top_extra_ui = sliderInput("idw_nmax", HTML(paste0("Max Neighbors", info_tooltip("idw_nmax_info", "Limits the IDW calculation to the closest N points. This prevents distant, unrelated data from distorting local predictions. Select this BEFORE optimizing."))), min = 4, max = 50, value = 12, ticks = FALSE),
                     extra_ui = div(style="background-color: var(--mn-surface-2); border: 1px solid var(--mn-line); border-radius: 4px; padding: 10px; color: var(--mn-text);", tableOutput("idw_metrics_table"))
                 )
             ),

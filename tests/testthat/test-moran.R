@@ -29,17 +29,6 @@ test_that("calc_moran returns an all-NA list for NULL coords", {
   expect_moran_all_na(calc_moran(c(1, 2, 3), NULL))
 })
 
-test_that("calc_moran handles duplicated coordinates by jittering", {
-  set.seed(42)
-  n <- 5
-  # All points at the same location → duplicates
-  coords <- matrix(rep(c(450000, 5800000), each = n), ncol = 2)
-  residuals <- rnorm(n)
-  moran_val <- calc_moran(residuals, coords)$i
-  # May return NA or a value — must not throw an uncaught error
-  expect_true(is.na(moran_val) || is.numeric(moran_val))
-})
-
 test_that("calc_moran is reproducible for duplicate coordinates and preserves RNG state", {
   set.seed(7)
   n <- 12
@@ -86,19 +75,6 @@ test_that("calc_moran reports the null expectation and a two-sided p-value", {
   expect_lte(m$p, 1)
 })
 
-test_that("calc_moran handles collinear coordinates gracefully", {
-  # Collinear coordinates (points on a line) may cause issues with
-  # neighbour-search or distance-weighting.  Verify the function doesn't
-  # throw an uncaught error.
-  n <- 6
-  coords <- cbind(seq_len(n), seq_len(n))  # collinear
-  residuals <- 1:n
-  m <- suppressWarnings(calc_moran(residuals, coords))
-  expect_true(is.na(m$i) || is.numeric(m$i))
-  # Whichever path served it, E[I] is available analytically.
-  expect_true(is.na(m$i) || isTRUE(all.equal(m$e_i, -1 / (n - 1))))
-})
-
 test_that("calc_moran's duplicate jitter scales to the coordinate magnitude", {
   # A fixed 1e-8 displacement is only ~10 ULPs at a UTM northing of 4.5e6, so
   # it collides back onto the original double and leaves duplicates in place;
@@ -131,15 +107,6 @@ test_that("calc_moran's duplicate jitter scales to the coordinate magnitude", {
   set.seed(1); new_amt <- jitter(v, amount = max(1e-8, 1e4 * 1e-9, 4500000 * 1e-12))
   expect_lt(length(unique(old_amt)), 6L)
   expect_equal(length(unique(new_amt)), 6L)
-})
-
-test_that("calc_moran stays reproducible for duplicate coordinates", {
-  set.seed(11)
-  coords <- cbind(runif(40, 450000, 451000), runif(40, 4500000, 4501000))
-  coords[1:5, ] <- coords[1, ]
-  resid <- rnorm(40)
-  expect_equal(suppressWarnings(calc_moran(resid, coords)),
-               suppressWarnings(calc_moran(resid, coords)))
 })
 
 # ── Numeric contract: Moran's I ────────────────────────────────────────────
@@ -187,7 +154,6 @@ test_that("calc_moran reports E[I] = -1/(n-1) exactly", {
 })
 
 test_that("calc_moran agrees with spdep on the graph it builds", {
-  skip_if_not_installed("spdep")
   pts <- golden_sf("tiny")
   co <- sf::st_coordinates(pts)
   z <- residuals(lm(ph ~ v82, data = sf::st_drop_geometry(pts)))
@@ -219,4 +185,67 @@ test_that("structure raises I above E[I] and shuffling collapses it back", {
   shuffled <- with_seed(7, sample(grad))
   got_s <- calc_moran(shuffled, co)
   expect_lt(abs(got_s$i - got_s$e_i), abs(got$i - got$e_i) / 3)
+})
+
+
+# ── How the statistic is READ, per fold design ─────────────────────────────
+# calc_moran itself is unchanged by the block-CV round (the tests above pin
+# that). What changed is the reading: under Spatial Block CV the pooled
+# out-of-fold residuals inherit the fold geometry and a shared extrapolation
+# condition inside each withheld block, so spdep's reference distribution does
+# not describe them. The presentation layer must decide that from the APPLIED
+# fold plan, never from the strategy the user selected.
+
+test_that("the block-CV reading follows the applied plan, not the requested strategy", {
+  block <- moran_reading(applied_cv_plan(100, "block")$type)
+  expect_true(block$block)
+  expect_equal(block$label, "Block-CV residual clustering")
+  expect_false(block$report_p)
+  expect_match(block$context, "extrapolation")
+
+  # Below CV_BLOCK_MIN_N the run was scored by LOOCV however the selector was
+  # set, so it reads the ordinary way and keeps its p-value. This is the case
+  # that would have shipped mislabelled.
+  small <- moran_reading(applied_cv_plan(CV_BLOCK_MIN_N - 1L, "block")$type)
+  expect_false(small$block)
+  expect_equal(small$label, "Moran's I")
+  expect_true(small$report_p)
+
+  for (s in c("auto", "loocv")) {
+    r <- moran_reading(applied_cv_plan(100, s)$type)
+    expect_false(r$block, info = s)
+    expect_true(r$report_p, info = s)
+  }
+
+  # A k-means collapse leaves random folds under a block request: make_cv_folds
+  # marks them and perform_cv carries the mark, so the row is not reported as
+  # a block design either.
+  fell_back <- applied_cv_plan(100, "block", list(block_fallback = TRUE))
+  expect_equal(fell_back$type, "random_kfold")
+  expect_match(fell_back$label, "Spatial Block clustering failed")
+  expect_false(moran_reading(fell_back$type)$block)
+})
+
+test_that("a pooled row reads as block only when every locality was one", {
+  all_block <- moran_reading(c("block", "block"))
+  expect_true(all_block$block)
+  expect_false(all_block$mixed)
+
+  mixed <- moran_reading(c("block", "loocv"))
+  expect_false(mixed$block)
+  expect_true(mixed$mixed)
+  expect_true(mixed$report_p)
+  expect_match(mixed$context, "mix fold designs")
+
+  # Nothing known about the design: the ordinary reading, never the block one.
+  expect_false(moran_reading(character(0))$block)
+  expect_false(moran_reading(NA_character_)$block)
+})
+
+test_that("make_cv_folds marks a block request that fell back to random folds", {
+  co <- cbind(runif(60, 0, 1000), runif(60, 0, 1000))
+  folds <- make_cv_folds(co, "block", 60)
+  # k-means succeeded here, so the folds carry no mark and nothing to explain.
+  expect_null(attr(folds, "block_fallback"))
+  expect_false(isTRUE(perform_cv(NULL)$block_fallback))
 })

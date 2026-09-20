@@ -15,34 +15,23 @@ test_that("non-metre input coordinates and spacing use local UTM metres", {
   expect_equal(calc_metric_spacing(feet), calc_metric_spacing(expected), tolerance = 1e-7)
 })
 
-test_that("validate_crs accepts EPSG code string and returns crs object", {
-  result <- validate_crs("EPSG:4326")
-  expect_s3_class(result, "crs")
-})
+test_that("validate_crs accepts every format sf reads, and rejects what it cannot", {
+  # Returning a "crs" object for a valid string is st_crs()'s own contract;
+  # what this function owns is which inputs it lets through and that the CRS
+  # it hands back is the one that was asked for.
+  wkt <- paste0('GEOGCS["WGS 84",DATUM["WGS_1984",SPHEROID["WGS 84",6378137,',
+                '298.257223563]],PRIMEM["Greenwich",0],',
+                'UNIT["degree",0.0174532925199433]]')
+  for (spec in c("EPSG:4326", wkt, "+proj=longlat +datum=WGS84 +no_defs")) {
+    result <- validate_crs(spec)
+    expect_s3_class(result, "crs")
+    expect_equal(result, sf::st_crs(spec))
+    expect_true(sf::st_is_longlat(result))
+  }
 
-test_that("validate_crs accepts WKT string and returns crs object", {
-  wkt <- 'GEOGCS["WGS 84",DATUM["WGS_1984",SPHEROID["WGS 84",6378137,298.257223563]],PRIMEM["Greenwich",0],UNIT["degree",0.0174532925199433]]'
-  result <- validate_crs(wkt)
-  expect_s3_class(result, "crs")
-})
-
-test_that("validate_crs accepts proj4 string and returns crs object", {
-  result <- validate_crs("+proj=longlat +datum=WGS84 +no_defs")
-  expect_s3_class(result, "crs")
-})
-
-test_that("validate_crs errors on invalid CRS string", {
-  expect_error(
-    validate_crs("not_a_valid_crs_string_xyz"),
-    NULL
-  )
-})
-
-test_that("validate_crs errors on empty string", {
-  expect_error(
-    validate_crs(""),
-    NULL
-  )
+  for (bad in c("not_a_valid_crs_string_xyz", "")) {
+    expect_error(validate_crs(bad), NULL)
+  }
 })
 
 test_that("validate_crs EPSG:32633 returns a projected CRS", {
@@ -717,6 +706,26 @@ test_that("neither CRS selector carries a default zone", {
   expect_match(tabs, 'uiOutput("crs_landing_note")', fixed = TRUE)
   # rv$mapping$crs must start unset too, or the default returns by the back door
   expect_match(setup, "x = NULL, y = NULL, loc = NULL, crs = NULL", fixed = TRUE)
+})
+
+test_that("a new upload keeps a Target CRS the user chose and clears one the app filled", {
+  # The predicate behind the upload reset. The Input Data CRS is always
+  # cleared: a CRS established for one file is not established for the next.
+  # The Target Mapping CRS names the system the outputs are produced in, so a
+  # deliberate choice stays and a value the app filled is re-identified.
+  expect_true(crs_chosen_by_user("EPSG:32633"))
+  expect_false(crs_chosen_by_user("EPSG:32633", auto = c("EPSG:4326", "EPSG:32633")))
+  expect_false(crs_chosen_by_user(""))
+  expect_false(crs_chosen_by_user(NULL))
+  # A value still waiting for its clear to reach the browser is not a choice.
+  expect_false(crs_chosen_by_user("EPSG:32633", stale = "EPSG:32633"))
+
+  root <- normalizePath(file.path(testthat::test_path(), "..", ".."), mustWork = TRUE)
+  ds <- paste(readLines(file.path(root, "server_data_setup.R"), warn = FALSE), collapse = "\n")
+  expect_match(ds, "crs_chosen_by_user(input[[id]], session_state$crs_auto[[id]], session_state$crs_stale[[id]])",
+               fixed = TRUE)
+  # The shipped sample's preset still sets both selectors.
+  expect_match(ds, 'keep_target <- crs_user_chose("crs_selection") && !is_sample_upload()', fixed = TRUE)
 })
 
 test_that("the setup guards report the landing position and catch swapped axes", {

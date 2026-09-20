@@ -26,6 +26,43 @@ method_has_variance <- function(method) {
     method %in% METHODS_WITH_VARIANCE
 }
 
+#' Detach a fitted model from the frame it was fitted in.
+#'
+#' A formula built inside a function carries that function's whole frame as its
+#' environment, and the `terms` object a model keeps inherits it. So an RK
+#' `summary.lm` or an RFK forest returned from a worker serialized the
+#' locality's point set, prediction grid, covariate grid and kriging output
+#' along with itself, and the main session then held that frame for the
+#' displayed run and for every archived copy of it. Measured on 83 points at a
+#' 60 m cell size: `summary.lm` 15.72 MB against 0.003 MB of summary, the
+#' forest 17.60 MB against 0.46 MB of forest, and both grow with the grid.
+#'
+#' Only the reporting path reads these afterwards - coefficients and fit
+#' statistics for RK, `randomForest::importance()` for RFK - and neither
+#' touches the environment. The terms object itself is kept, so a model that
+#' is handed complete `newdata` still predicts. Apply it where the result
+#' crosses back to the main session, after every in-worker prediction.
+#'
+#' A fitted model can hold the frame TWICE: `$terms`, and the `terms` attribute
+#' of the model frame it kept in `$model`. Detaching only the first frees
+#' nothing from a fitted `lm` (measured: 1.532 MB before and after; 0.006 MB
+#' once both are detached). The objects this is applied to today carry one each
+#' - a `summary.lm` keeps no `$model`, and a `randomForest` keeps no model
+#' frame - but the second holder is what a bare `lm` would arrive with.
+#'
+#' CK's gstat object is deliberately NOT detached: `variogram(g)` is called on
+#' the stored object to draw the cross-variogram, its frame is bounded by the
+#' point set the object holds anyway, and it measured 0.16 MB on the same
+#' fixture.
+detach_model_frame <- function(model) {
+  if (is.null(model)) return(model)
+  if (!is.null(model$terms)) attr(model$terms, ".Environment") <- globalenv()
+  if (!is.null(attr(model$model, "terms"))) {
+    attr(attr(model$model, "terms"), ".Environment") <- globalenv()
+  }
+  model
+}
+
 # The power search uses the SAME fold authority as every reported CV
 # (make_cv_folds / resolve_cv_plan), so the power that builds the surface and
 # the metrics that score it share one validation design. It matters most under
@@ -37,6 +74,14 @@ method_has_variance <- function(method) {
 # explicit nfold vector draws nothing. One fold vector is shared across all
 # candidate powers, so the comparison stays paired.
 optimize_idw_p <- function(pts, target_var, nmax = 12, cv_strategy = "auto") {
+  # An explicit NULL overrides the default above, and the optimizer observer
+  # ships `input$idw_nmax` straight through: a slider that has not rendered
+  # yet (the sidebar section collapsed, or the method just switched to IDW)
+  # reached gstat as nmax = NULL and failed the whole optimization with
+  # "argument is of length zero". The run path applies `%||% 12` before the
+  # dispatch and apply_IDW applies it again; this is the one entry point that
+  # had no such guard.
+  nmax <- nmax %||% 12
   factors <- seq(0.5, 5.0, by = 0.5)
   form <- as.formula(paste0("`", target_var, "` ~ 1"))
   n <- nrow(pts)
@@ -80,7 +125,9 @@ optimize_idw_p <- function(pts, target_var, nmax = 12, cv_strategy = "auto") {
 #' with |r| > `pairwise_threshold`, drops degenerate (constant) covariates, then
 #' drops the highest-VIF covariate one at a time while any VIF exceeds
 #' `vif_threshold` (`Inf` = keep all). Returns `list(has_collinearity, pairs,
-#' kept, dropped, dropped_constant, dropped_vif)`.
+#' kept, dropped, dropped_constant, dropped_vif, vif_at_drop)`; `vif_at_drop`
+#' is each VIF-dropped covariate's VIF at the step it was removed (Inf where the
+#' correlation matrix was singular, so no finite VIF exists).
 detect_multicollinearity_engine <- function(df, vars = NULL, vif_threshold = 10, pairwise_threshold = 0.95) {
   # sf's geometry column is sticky under `[ , ]`, so an sf input would carry an
   # sfc into the degenerate scan (is.finite() on an sfc errors) and, if it ever
@@ -102,6 +149,7 @@ detect_multicollinearity_engine <- function(df, vars = NULL, vif_threshold = 10,
   # Two DIFFERENT reasons to drop a covariate share the `dropped` vector, and
   # consumers were labelling all of them "High VIF". Track them apart.
   dropped_constant <- character(0)
+  vif_at_drop <- numeric(0)
 
   # One degenerate scan shared by the pairwise report and the zero-var prune
   # below (kept is not modified in between).
@@ -202,14 +250,16 @@ detect_multicollinearity_engine <- function(df, vars = NULL, vif_threshold = 10,
           sort(pair, decreasing = TRUE, method = "radix")[1]
         }
         dropped <- c(dropped, var_to_drop)
+        vif_at_drop[[var_to_drop]] <- Inf
         kept <- setdiff(kept, var_to_drop)
         next
       }
-      
+
       max_vif <- max(vif_vals)
       if (max_vif > vif_threshold) {
         var_to_drop <- names(vif_vals)[which.max(vif_vals)]
         dropped <- c(dropped, var_to_drop)
+        vif_at_drop[[var_to_drop]] <- max_vif
         kept <- setdiff(kept, var_to_drop)
       } else {
         break
@@ -225,7 +275,8 @@ detect_multicollinearity_engine <- function(df, vars = NULL, vif_threshold = 10,
     # components let callers report the actual reason.
     dropped = dropped,
     dropped_constant = dropped_constant,
-    dropped_vif = setdiff(dropped, dropped_constant)
+    dropped_vif = setdiff(dropped, dropped_constant),
+    vif_at_drop = vif_at_drop
   ))
 }
 
@@ -384,6 +435,10 @@ safe_run_cv <- function(res, expr, label) {
         ".")
     }
   }
+
+  # Per-fold variogram state, summarised as plain data so the Model Performance
+  # card can say that some folds were not `ok` without re-reading the CV object.
+  res$cv_vgm_status <- .cv_fold_status_table(cv_obj)
 
   res$cv_obj <- cv_obj
   res$cv_metrics <- perform_cv(cv_obj)
@@ -580,7 +635,7 @@ rf_infinitesimal_jackknife_var <- function(pred_individual, inbag, chunk = 2000L
     }
     kr <- krige(form_ok, train, newdata, model = fit_i, debug.level = 0)
     list(pred = kr$var1.pred, var = kr$var1.var,
-         meta = list(is_fallback = isTRUE(attr(fit_i, "is_fallback"))))
+         meta = list(vgm_status = vgm_fit_status(fit_i)))
   }
 }
 
@@ -591,6 +646,31 @@ rf_infinitesimal_jackknife_var <- function(pred_individual, inbag, chunk = 2000L
   if (!length(meta)) return(list(n = 0L, total = 0L))
   list(n = sum(vapply(meta, function(m) isTRUE(m[[field]]), logical(1))),
        total = length(meta))
+}
+
+#' The variogram status of every fold that reported one, named by fold label.
+#' A fold whose engine records no status is `ok`: it fitted nothing degraded.
+.cv_fold_statuses <- function(cv_obj) {
+  meta <- attr(cv_obj, "cv_fold_meta")
+  meta <- Filter(function(m) !is.null(m$vgm_status), meta)
+  if (!length(meta)) return(character(0))
+  vapply(meta, function(m) as.character(m$vgm_status)[1], character(1))
+}
+
+#' One row per distinct fold status, worst first: `status`, `n`, and the fold
+#' labels that reported it. This is the carrier the main session reads, so it
+#' stays plain data (it crosses the future boundary inside `cv_info`).
+.cv_fold_status_table <- function(cv_obj) {
+  st <- .cv_fold_statuses(cv_obj)
+  if (!length(st)) return(NULL)
+  present <- intersect(VGM_FIT_STATUSES, unique(st))
+  rows <- lapply(present, function(s) {
+    labs <- names(st)[st == s]
+    data.frame(status = s, n = length(labs),
+               folds = paste(labs[order(suppressWarnings(as.numeric(labs)), labs)], collapse = ", "),
+               stringsAsFactors = FALSE)
+  })
+  do.call(rbind, rows)
 }
 
 # Shared "the covariate engine failed, fall back to Ordinary Kriging" tail,
@@ -605,6 +685,8 @@ rf_infinitesimal_jackknife_var <- function(pred_individual, inbag, chunk = 2000L
 .ok_fallback <- function(res, data, target_var, grid_p, lags, method_params,
                          l, prefix, engine_label, cv_label, tag_model_type = FALSE) {
   write_warning_file(l, prefix, paste0(engine_label, " failed, using Ordinary Kriging fallback."))
+  # The mapped surface uses no covariate; the screen's record (aux_dropped) stands.
+  res$aux_used <- character(0)
   form_ok <- reformulate("1", response = target_var)
   res$v_emp <- variogram(form_ok, data, width = lags$width, cutoff = lags$cutoff)
   res$fit <- robust_vgm_fit(res$v_emp, data[[target_var]])
@@ -618,17 +700,24 @@ rf_infinitesimal_jackknife_var <- function(pred_individual, inbag, chunk = 2000L
     run_kriging_folds(pop, target_var, row_id, folds, fold_okfb, method_params$cancel_file, progress)
   }
   res <- .run_kriging_cv(res, cv_one, method_params, data, cv_label, l, prefix)
-  .log_vgm_fold_fallbacks(res, cv_label)
+  .log_vgm_fold_status(res, cv_label, l)
 }
 
-#' Append a run-log line naming the folds whose variogram came from the
-#' heuristic fallback rather than a fitted candidate.
-.log_vgm_fold_fallbacks <- function(res, label) {
-  fb <- .cv_fold_flag_count(res$cv_obj, "is_fallback")
-  if (fb$n > 0) {
-    res$log_msg <- paste0(res$log_msg, "\n[", label, " CV] ", fb$n, " of ", fb$total,
-                          " folds fell back to the heuristic variogram.")
-  }
+#' Append a run-log block naming every fold whose variogram was not `ok`, with
+#' the locality it belongs to - a count alone says neither which folds nor in
+#' what way they were degraded, and a log line with no locality is unreadable
+#' on a multi-locality run.
+.log_vgm_fold_status <- function(res, label, locality = NULL) {
+  st <- .cv_fold_statuses(res$cv_obj)
+  bad <- st[st != "ok"]
+  if (!length(bad)) return(res)
+  ord <- order(suppressWarnings(as.numeric(names(bad))), names(bad))
+  lines <- paste0("\n  Fold ", names(bad)[ord], ": ", vapply(bad[ord], vgm_status_label, character(1)))
+  res$log_msg <- paste0(res$log_msg, "\n[", label, " CV] ",
+                        if (!is.null(locality)) paste0(locality, ": "),
+                        length(bad), " of ", length(st),
+                        " folds used a degraded or extrapolative variogram.",
+                        paste(lines, collapse = ""))
   res
 }
 
@@ -665,7 +754,7 @@ apply_kriging_pipeline <- function(engine = c("OK", "RK", "RFK"), data, target_v
       run_kriging_folds(pop, target_var, row_id, folds, fold_ok, method_params$cancel_file, progress)
     }
     res <- .run_kriging_cv(res, cv_one, method_params, data, "OK", l, prefix)
-    res <- .log_vgm_fold_fallbacks(res, "OK")
+    res <- .log_vgm_fold_status(res, "OK", l)
     res$res_sf <- krige(form_ok, data, grid_p, model = res$fit, debug.level = 0)
 
     # gstat returns NA for every location, without a condition, when the
@@ -698,16 +787,21 @@ apply_kriging_pipeline <- function(engine = c("OK", "RK", "RFK"), data, target_v
           res$log_msg <- paste0(res$log_msg, .vif_drop_log(vif_res))
           aux_vars <- vif_res$kept
         }
-        # An empty kept set builds "`v` ~ " and as.formula() dies with
-        # "attempt to use zero-length variable name" — the tryCatch reports that
-        # as "RK/RFK failed", naming the symptom instead of the cause. Say what
-        # actually happened; the locality still routes to the named OK fallback.
-        if (length(aux_vars) == 0) {
-          stop("The covariate screen removed every covariate for this surface ",
-               "(constant and/or collinear within this locality), so ", engine,
-               " has no trend model left. Select different covariates, or answer ",
-               "\"Keep All\" in the collinearity dialog.")
-        }
+      }
+      # For the run record: what the trend model is built on, and what the
+      # screen removed (the selected list says neither). The OK fallback resets
+      # the first to none.
+      res$aux_used <- aux_vars
+      res$aux_dropped <- setdiff(candidates, aux_vars)
+      # An empty kept set builds "`v` ~ " and as.formula() dies with
+      # "attempt to use zero-length variable name" — the tryCatch reports that
+      # as "RK/RFK failed", naming the symptom instead of the cause. Say what
+      # actually happened; the locality still routes to the named OK fallback.
+      if (length(aux_vars) == 0) {
+        stop("The covariate screen removed every covariate for this surface ",
+             "(constant and/or collinear within this locality), so ", engine,
+             " has no trend model left. Select different covariates, or answer ",
+             "\"Keep All\" in the collinearity dialog.")
       }
 
       if (!is.null(method_params$grid_aux)) {
@@ -759,6 +853,7 @@ apply_kriging_pipeline <- function(engine = c("OK", "RK", "RFK"), data, target_v
                                 candidates = candidates, vif_threshold = vif_threshold)
         }
         res <- .run_kriging_cv(res, cv_rk, method_params, data, "RK", l, prefix)
+        res <- .log_vgm_fold_status(res, "RK", l)
       } else if (engine == "RFK") {
         rf_ntree <- if (!is.null(method_params$rf_ntree)) method_params$rf_ntree else 200
         rf_mod <- randomForest::randomForest(form_reg, data = data, ntree = rf_ntree, importance = TRUE, keep.inbag = TRUE)
@@ -826,6 +921,7 @@ apply_kriging_pipeline <- function(engine = c("OK", "RK", "RFK"), data, target_v
                                 candidates = candidates, vif_threshold = vif_threshold)
         }
         res <- .run_kriging_cv(res, cv_rfk, method_params, data, "RFK", l, prefix)
+        res <- .log_vgm_fold_status(res, "RFK", l)
       }
       res
     }, error = function(e) {
@@ -1010,18 +1106,21 @@ apply_CK <- function(data, target_var, grid_p, lags, method_params, aux_vars, l 
         res$log_msg <- paste0(res$log_msg, .vif_drop_log(vif_res))
         aux_vars <- vif_res$kept
       }
-      # CK does not die on an empty set the way RK does — gstat() with only the
-      # primary variable still fits (verified: fit.lmc succeeds on a single
-      # variable) and returns ordinary kriging under a 15-point neighbourhood,
-      # labelled and logged as Co-Kriging. Co-kriging with no secondary variable
-      # is not co-kriging, so send it to the named OK fallback instead of
-      # shipping a mislabelled surface.
-      if (length(aux_vars) == 0) {
-        stop("The covariate screen removed every covariate for this surface ",
-             "(constant and/or collinear within this locality), so Co-Kriging ",
-             "has no secondary variable left. Select different covariates, or ",
-             "answer \"Keep All\" in the collinearity dialog.")
-      }
+    }
+    # For the run record, as in apply_kriging_pipeline.
+    res$aux_used <- aux_vars
+    res$aux_dropped <- setdiff(candidates, aux_vars)
+    # CK does not die on an empty set the way RK does — gstat() with only the
+    # primary variable still fits (verified: fit.lmc succeeds on a single
+    # variable) and returns ordinary kriging under a 15-point neighbourhood,
+    # labelled and logged as Co-Kriging. Co-kriging with no secondary variable
+    # is not co-kriging, so send it to the named OK fallback instead of
+    # shipping a mislabelled surface.
+    if (length(aux_vars) == 0) {
+      stop("The covariate screen removed every covariate for this surface ",
+           "(constant and/or collinear within this locality), so Co-Kriging ",
+           "has no secondary variable left. Select different covariates, or ",
+           "answer \"Keep All\" in the collinearity dialog.")
     }
 
     # Same standardization and LMC fit the folds run, on this surface's rows.
@@ -1119,9 +1218,11 @@ apply_IDW <- function(data, target_var, grid_p, method_params, l = "region", pre
   idw_p <- method_params$idw_p %||% 2
   coords_idw <- sf::st_coordinates(data)
   cv_idw <- function(seed) {
-    krige.cv(form_ok, data, nmax = idw_nmax, set = list(idp = idw_p),
-             nfold = make_cv_folds(coords_idw, method_params$cv_strategy, nrow(data), seed),
-             debug.level = 0)
+    folds <- make_cv_folds(coords_idw, method_params$cv_strategy, nrow(data), seed)
+    cv <- krige.cv(form_ok, data, nmax = idw_nmax, set = list(idp = idw_p),
+                   nfold = folds, debug.level = 0)
+    attr(cv, "block_fallback") <- attr(folds, "block_fallback")
+    cv
   }
   res <- run_cv_with_repeats(res, cv_idw, method_params, nrow(data), "IDW", l, prefix)
 
@@ -1134,11 +1235,14 @@ apply_IDW <- function(data, target_var, grid_p, method_params, l = "region", pre
 
 #' Thin plate spline (fields::Tps) on coordinates scaled to the unit box.
 #' `tps_lambda` NULL/NA/negative selects the smoothing by GCV, 0 interpolates
-#' exactly, a positive value fixes it; CV folds refit under the same rule. Any
-#' failure falls back to apply_IDW() with a named warning.
+#' exactly, a positive value fixes it; CV folds refit under the same rule. With
+#' `method_params$tps_gcv_col` set (an unseparated Predicted surface), a GCV
+#' lambda is the one GCV selects for THAT column (the measured values) on the
+#' same rows, in the map fit and in every fold. Any failure falls back to
+#' apply_IDW() with a named warning.
 apply_TPS <- function(data, target_var, grid_p, method_params, l = "region", prefix = "act") {
   res <- init_interpolation_res()
-  
+
   update_progress_file(l, prefix, 10, 100)
   res$res_sf <- tryCatch({
     raw_pts <- st_coordinates(data)
@@ -1148,23 +1252,31 @@ apply_TPS <- function(data, target_var, grid_p, method_params, l = "region", pre
     if(max_range == 0) max_range <- 1
     pts_sc <- cbind((raw_pts[,1]-xm)/max_range, (raw_pts[,2]-ym)/max_range)
     tps_lam <- method_params$tps_lambda
-    fit_tps <- function(x, y) {
-      # is.na() first: `NA < 0` is NA, which errors the `if` and silently sent
-      # the whole surface down the IDW fallback. NA is treated as "unset",
-      # i.e. the documented Auto (GCV) default, same as NULL / lambda < 0.
-      # Both axes already share one scale. Per-axis scaling would introduce
-      # anisotropy determined by the sample bounding box.
-      if (is.null(tps_lam) || is.na(tps_lam) || tps_lam < 0) {
-        fields::Tps(x, y, scale.type = "unscaled")
-      } else fields::Tps(x, y, lambda = tps_lam, scale.type = "unscaled")
+    # is.na() first: `NA < 0` is NA, which errors the `if` and silently sent
+    # the whole surface down the IDW fallback. NA is treated as "unset", i.e.
+    # the documented Auto (GCV) default, same as NULL / lambda < 0.
+    auto_lam <- is.null(tps_lam) || is.na(tps_lam) || tps_lam < 0
+    gcv_col <- method_params$tps_gcv_col
+    gcv_on <- if (auto_lam && !is.null(gcv_col) && gcv_col %in% names(data)) data[[gcv_col]] else NULL
+    # Fits the spline on the given rows. Both axes already share one scale;
+    # per-axis scaling would introduce anisotropy determined by the sample
+    # bounding box.
+    fit_tps <- function(rows) {
+      x <- pts_sc[rows, , drop = FALSE]
+      y <- data[[target_var]][rows]
+      if (!auto_lam) return(fields::Tps(x, y, lambda = tps_lam, scale.type = "unscaled"))
+      if (is.null(gcv_on)) return(fields::Tps(x, y, scale.type = "unscaled"))
+      m <- is.finite(gcv_on[rows])
+      lam <- fields::Tps(x[m, , drop = FALSE], gcv_on[rows][m], scale.type = "unscaled")$lambda
+      fields::Tps(x, y, lambda = lam, scale.type = "unscaled")
     }
-    
+
     gr_raw <- st_coordinates(grid_p)
     gr_sc <- cbind((gr_raw[,1]-xm)/max_range, (gr_raw[,2]-ym)/max_range)
-    mod <- fit_tps(pts_sc, data[[target_var]])
+    mod <- fit_tps(seq_len(nrow(pts_sc)))
     res$tps_fit <- list(lambda = as.numeric(mod$lambda), eff_df = as.numeric(mod$eff.df))
     if (isTRUE(res$tps_fit$eff_df < 3.5)) {
-      mode <- if (is.null(tps_lam) || is.na(tps_lam) || tps_lam < 0) "GCV" else "Fixed lambda"
+      mode <- if (!auto_lam) "Fixed lambda" else if (!is.null(gcv_on)) "GCV on the measured values" else "GCV"
       msg <- sprintf("%s produced a near-planar TPS surface (effective df %.2f; a plane has df 3). The map is dominated by a linear trend.",
                      mode, res$tps_fit$eff_df)
       write_warning_file(l, prefix, msg)
@@ -1182,7 +1294,7 @@ apply_TPS <- function(data, target_var, grid_p, method_params, l = "region", pre
       for (i in sort(unique(tps_folds))) {
         test_idx <- which(tps_folds == i)
         tmp_mod <- tryCatch({
-          fit_tps(pts_sc[-test_idx, , drop=FALSE], data[[target_var]][-test_idx])
+          fit_tps(setdiff(seq_len(n_pts), test_idx))
         }, error = function(e) NULL)
 
         if (!is.null(tmp_mod)) {
@@ -1192,10 +1304,12 @@ apply_TPS <- function(data, target_var, grid_p, method_params, l = "region", pre
         }
       }
 
-      sf::st_as_sf(
+      cv <- sf::st_as_sf(
         data.frame(observed = data[[target_var]], var1.pred = cv_vals, x = raw_pts[,1], y = raw_pts[,2]),
         coords = c("x", "y"), crs = sf::st_crs(data), remove = FALSE
       )
+      attr(cv, "block_fallback") <- attr(tps_folds, "block_fallback")
+      cv
     }
 
     cv_res <- tps_cv(CV_FOLD_SEED)

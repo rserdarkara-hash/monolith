@@ -28,12 +28,13 @@ test_that("get_var_label handles NA and empty input", {
 })
 
 test_that("get_var_label fuzzy-matches when exact match fails", {
+  # The label must differ from the query, or the fuzzy branch and the miss
+  # branch (which returns the query itself) return the same string and the
+  # assertion cannot tell them apart.
   metadata <- list(
-    list(actual = "Organic_Carbon", label = "Organic Carbon", category = "Soil")
+    list(actual = "Organic_Carbon", label = "Soil Organic Carbon", category = "Soil")
   )
-  # Fuzzy matching should find "Organic Carbon" from "OrganicCarbon"
-  result <- get_var_label("Organic Carbon", metadata)
-  expect_match(result, "Organic")
+  expect_equal(get_var_label("Organic Carbon", metadata), "Soil Organic Carbon")
 })
 
 test_that("get_var_labels vectorizes correctly", {
@@ -81,7 +82,11 @@ test_that("match_metadata_columns returns list of mapped variables", {
   user_cols <- c("pH", "Clay", "Sand", "x", "y")
   result <- match_metadata_columns(m_df, user_cols)
   expect_type(result, "list")
-  expect_true(length(result) >= 1)
+  # Which column was mapped and to what, not just that something was.
+  expect_length(result, 2L)
+  expect_equal(vapply(result, `[[`, character(1), "actual"), c("pH", "Clay"))
+  expect_equal(vapply(result, `[[`, character(1), "label"), c("Soil pH", "Clay Content"))
+  expect_equal(vapply(result, `[[`, character(1), "category"), c("Soil", "Soil"))
 })
 
 test_that("match_metadata_columns assigns palettes", {
@@ -93,9 +98,11 @@ test_that("match_metadata_columns assigns palettes", {
   )
   user_cols <- c("TN", "x", "y")
   result <- match_metadata_columns(m_df, user_cols)
-  if (length(result) > 0) {
-    expect_true("palette" %in% names(result[[1]]))
-  }
+  # No `if` guard: an empty mapping must fail here, not silently pass with no
+  # expectation at all.
+  expect_length(result, 1L)
+  expect_true("palette" %in% names(result[[1]]))
+  expect_equal(result[[1]]$palette, get_default_palette("TN", "Soil", "Total Nitrogen"))
 })
 
 # ── find_subset_column ──────────────────────────────────────────────────────
@@ -111,4 +118,21 @@ test_that("find_subset_column returns NA when no partition column exists", {
   expect_true(is.na(find_subset_column(c("x", "y", "value"))))
   expect_true(is.na(find_subset_column(c("subset_id", "my_subset"))))
   expect_true(is.na(find_subset_column(character(0))))
+})
+
+# ── default_var_pick ────────────────────────────────────────────────────────
+
+test_that("the Context panel opens on a variable that has predictions", {
+  v <- function(actual, category, pred = NA) list(actual = actual, category = category, pred = pred, pred_ss = NA)
+  vars <- list(v("elev", "Covariates"), v("clay", "Covariates"),
+               v("ph", "Soil", pred = "ph_cve"), v("oc", "Soil"), v("n", "Other", pred = "n_cve"))
+  # The first category holding a variable with a prediction column, and in it
+  # that variable - not the list's first category, which here is covariates.
+  expect_equal(default_var_pick(vars), list(category = "Soil", var = "ph"))
+  # Inside a category chosen by the user, the first variable with predictions.
+  expect_equal(default_var_pick(vars, "Other")$var, "n")
+  # No prediction anywhere: the first category and its first variable.
+  plain <- list(v("elev", "Covariates"), v("ph", "Soil"))
+  expect_equal(default_var_pick(plain), list(category = "Covariates", var = "elev"))
+  expect_equal(default_var_pick(plain, "Soil")$var, "ph")
 })
