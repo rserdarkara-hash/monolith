@@ -28,7 +28,7 @@ Whether the target is soil physicochemistry, a topographic interaction, or a man
    more slowly. Either launch from an R console or a terminal, which opens your
    system browser by default, or in RStudio set the **Run App** dropdown to
    *Run External*.
-4. On the **1. Data Setup** tab, upload `sample_data/samp_data_1.xlsx` and, as the variable list, `samp_var_list.xlsx` (optional but recommended for your own data; required for proper investigation of the sample data). Confirm the X/Y mapping and CRS, then move to the Spatial Engine in the sidebar and run an interpolation. The sample file arrives ready to run: **Locality** preset to Kale and Yorga, the two the accompanying manuscript examines in detail, and both CRS selectors preset to `EPSG:32635` (UTM 35N), the zone those localities are on. Clear the Locality box to map all seven. These presets are keyed on the sample file's own name and never apply to a dataset of your own.
+4. On the **Data Setup** tab, upload `sample_data/samp_data_1.xlsx` and, as the variable list, `samp_var_list.xlsx` (optional but recommended for your own data; required for proper investigation of the sample data). Confirm the X/Y mapping and CRS, then move to the Spatial Engine in the sidebar and run an interpolation. The sample file arrives ready to run, with **Locality** preset to Kale and Yorga, the two localities the accompanying manuscript examines in detail, and both CRS selectors preset to `EPSG:32635` (UTM 35N), in which those localities lie. Clear the Locality box to map all seven. These presets are keyed on the sample file's own name and never apply to a dataset of your own.
 
 The sample data carries usage restrictions until its associated manuscript is published; see [License](#license).
 
@@ -66,29 +66,33 @@ The sample data carries usage restrictions until its associated manuscript is pu
 
 ## Workflow Overview
 
-The interface is six numbered tabs. Tabs 1 to 4 are the spine of an interpolation run, from upload to exported figure. Tabs 5 and 6 are independent analyses that need only the confirmed data table, so they can be used without ever running an interpolation.
+The interface consists of six tabs. Tabs on the left form the spine of an interpolation run, from upload to exported figure. Tabs in the middle and on the right are independent analyses that need only the confirmed data table, so they can be used without ever running an interpolation.
 
 ```mermaid
 flowchart TD
     U["Sample table (.xlsx / .csv), optional variable list and boundary shapefile"] --> T1
-    T1["1. Data Setup: column mapping, CRS, validation mini-map"] --> T2
+    T1["Data Setup: column mapping, CRS, validation mini-map"] --> T2
     T1 --> T5
     T1 --> T6
-    T2["2. Map Viewer: context and spatial engine, regions, run and cancel, surface views"] --> T3
-    T3["3. Scientific Analysis and Summary: variograms, CV metrics, residuals, areas"] --> T4
-    T4["4. Export Panel: styled figures, GeoTIFFs, merged tables"]
-    T5["5. Descriptive and Exploratory Suite: statistics, correlation, PCA, governing factors"]
-    T6["6. Classification Suite: class, probability and entropy maps, exported from its own panel"]
+    T2["Sidebar and Map Viewer: context and spatial engine, regions, run and cancel, surface views"] --> T3
+    T3["Scientific Analysis and Summary: variograms, CV metrics, residuals, areas"] --> T4
+    T4["Export Panel: styled figures, GeoTIFFs, merged tables"]
+    T5["Descriptive and Exploratory Suite: statistics, correlation, PCA, governing factors"]
+    T6["Classification Suite: class, probability and entropy maps, exported from its own panel"]
 ```
 
-1. **Data Setup.** Upload the sample table, optionally a variable list and a boundary shapefile, map the X and Y columns, declare the coordinate reference system, and confirm the mapping. The mini-map coloured by locality is the check that coordinates and CRS are right before anything is modelled.
-2. **Map Viewer.** The sidebar holds the entire run configuration in two sections, **1. Context** (locality, data subset, variable category, variable, primary view) and **2. Spatial Engine** (method, auxiliary variables, boundary type, resolution, fitting mode and tuning). Polygons drawn on the map define regions or assign localities. **Run Interpolation** dispatches the job to background workers: the header reports the stage and per-locality progress, the run can be cancelled, and the finished surfaces are inspected here through the view switcher (actual, predicted, comparison, residual, and for a kriging run the standard-error and variance map of each surface). The toolbar's vector exports also live here, because they describe what is on the map: the drawn polygons, and the class zones of the displayed surface.
-3. **Scientific Analysis and Summary.** What the finished run produced for judging it: fitted variograms and per-locality parameters, cross-validation metrics under the applied CV strategy, observed-versus-predicted scatter, the directional variogram diagnostic, Regression Kriging trend coefficients, class area coverage, descriptive statistics and the run log.
-4. **Export Panel.** Every map, table and plot the run registered, styled through the WYSIWYG styler and written one at a time or as a single batch, as publication figures or as georeferenced GeoTIFFs. The run configuration leaves from here as a JSON record.
-5. **Descriptive and Exploratory Suite.** Distributions with significance letters, correlation including the spatial cross-correlogram, PCA, and the Governing Factors module. Driven by the uploaded table, independent of any run.
-6. **Classification Suite.** Supervised multiclass classification from co-sampled covariates, with its own spatial scope, cross-validation strategy and exports. Also independent of any interpolation run.
+**Data Setup:** Upload the sample table, optionally a variable list and a boundary shapefile, map the X and Y columns, declare the coordinate reference system, and confirm the mapping. The mini-map coloured by locality is the check that coordinates and CRS are right before anything is modelled.
 
-Sidebar sections 1 and 2 configure the **next** run only. A completed run keeps the display context it was dispatched with, so changing the sidebar never silently relabels results already on screen.
+**Sidebar and Map Viewer:** The sidebar holds the entire run configuration in two sections, **1. Context** (locality, data subset, variable category, variable, primary view) and **2. Spatial Engine** (method, auxiliary variables, boundary type, resolution, fitting mode and tuning). Polygons drawn on the map define regions or assign localities. **Run Interpolation** dispatches the job to background workers: the header reports the stage and per-locality progress, the run can be cancelled, and the finished surfaces are inspected here through the view switcher (actual, predicted, comparison, residual, and for a kriging run the standard-error and variance map of each surface). The sidebar of the dashboard configures the **next** run only. A completed run keeps the display context it was dispatched with.
+
+**Scientific Analysis and Summary:** What the finished run produced for judging it: fitted variograms and per-locality parameters, cross-validation metrics under the applied CV strategy, observed-versus-predicted scatter for interpolated surfaces, the directional variogram diagnostic, Regression Kriging trend coefficients, class area coverage, descriptive statistics for the area interpolated, the run log and more.
+
+**Export Panel:** Every map, table and plot the run registered, styled through the WYSIWYG styler and written one at a time or as a single batch, as publication figures or as georeferenced GeoTIFFs. The run configuration can be captured from here as a JSON record.
+
+**Descriptive and Exploratory Suite:** Distributions with significance letters, correlation including the spatial cross-correlogram, PCA, and the Governing Factors module. Driven by the uploaded table, independent of any run.
+
+**Classification Suite:** Supervised multiclass classification from co-sampled covariates, with its own spatial scope, cross-validation strategy, entropy/probability maps, and exports. Also independent of any interpolation run.
+
 
 ## Scientific Guardrails
 
@@ -100,13 +104,13 @@ Sidebar sections 1 and 2 configure the **next** run only. A completed run keeps 
 
 * **Extrapolation control:** A dynamic buffering engine scales boundary padding to the selected method and resolution, and a **Point buffer** boundary type disables buffering entirely so coverage is not over-claimed far beyond sample support. In the Classification Suite, predictions are confined to per-locality boundaries and never extend into unsampled corridors between localities.
 
-* **Kriging numerical stability (epsilon-nugget):** For near-zero-variance variables, a tiny nugget is enforced when the empirical nugget is exactly zero, preventing the singular-matrix inversion failures that would otherwise crash Kriging.
+* **Kriging numerical safeguards:** Near-constant targets are recognized as having no meaningful spatial variance rather than being presented as fitted spatial structure. Non-finite kriging predictions and variances are discarded, and a surface with no valid predictions is skipped with a warning instead of breaking the run.
 
-* **Variogram fitting:** Automated least-squares fitting screens four theoretical models (Spherical, Exponential, Gaussian, and Matern with fixed smoothness ν = 1.5) from four starting ranges, and reports each fitted range against the lag window on the practical range, so the window means the same ground distance in every family. When no candidate is eligible for automated selection it falls back to a constrained estimate, so a difficult dataset yields a stable curve instead of a crash or a nonsensical fit.
+* **Variogram fitting:** Auto-Fit compares four theoretical models across multiple starting ranges and selects the best eligible converged fit by weighted least-squares error. A range extending beyond the sampled lag window does not invalidate the fit; instead, Monolith flags weakly resolved range or sill estimates, while singular fits and heuristic fallbacks are used only when stronger fits are unavailable.
 
 * **Multicollinearity gate (shared across modules):** A single VIF plus pairwise-correlation engine guards every covariate-driven method. Regression Kriging and Random Forest Kriging auto-drop covariates with VIF > 10 before fitting; the pre-run auxiliary-variable screen (covariate-assisted runs) and the Classification Suite flag collinear covariates (method-aware: VIF > 5 for Random Forest, VIF > 10 otherwise) and prompt you to drop or keep them; and the PCA module halts outright when any pair exceeds r > 0.95, requiring an explicit override, to protect the loading vectors from distortion.
 
-* **Spatial cross-validation:** Spatial Block CV (k-means folds) is offered and recommended under spatial autocorrelation so error estimates are not optimistically biased by autocorrelated train/test leakage; it falls back to LOOCV below the minimum fold size. Classification uses spatially-aware resampling, and synthetic oversampling (SMOTE) is deliberately not offered because fabricated points would break the spatial-CV leakage guarantee and invent autocorrelation structure.
+* **Spatial cross-validation:** Spatial Block CV (k-means folds) is offered and recommended under spatial autocorrelation so error estimates are not optimistically biased by autocorrelated train/test leakage; it falls back to LOOCV below the minimum fold size. Classification uses spatially aware resampling, and synthetic oversampling (SMOTE) is deliberately not offered because fabricated points would break the spatial-CV leakage guarantee and invent autocorrelation structure.
 
 * **Classification scope adequacy:** Before a classification run, the scoped data are checked for sufficient sample size and per-class counts. Under-powered scopes (too few rows, or classes below the per-class minimum) raise a named warning identifying the offending classes and their counts, so unreliable rare-class results are surfaced rather than presented as trustworthy.
 
@@ -114,7 +118,7 @@ Sidebar sections 1 and 2 configure the **next** run only. A completed run keeps 
 
 ### Diverse Spatial Engine
 
-Deterministic and geostatistical interpolation models for continuous and classified maps, at any scale from single fields to regional landscapes. Monolith's classification engine bins continuous predictions (e.g., Nitrogen levels) into agronomical classes whose limits you define, either from a statistical break algorithm (Jenks, k-means, equal interval) or from supervised limits you enter directly. It outputs exact area coverages (in hectares) per class.
+Deterministic and geostatistical interpolation models for continuous and classified maps, at any scale from single fields to regional landscapes. Monolith's classification engine bins continuous predictions (e.g., Nitrogen levels) into agronomic classes whose limits you define, either from a statistical break algorithm (Jenks, k-means, equal interval) or from supervised limits you enter directly. It outputs exact area coverages (in hectares) per class.
 
 - Inverse Distance Weighting (IDW),
 - Thin Plate Splines (TPS),
@@ -133,7 +137,7 @@ Deterministic and geostatistical interpolation models for continuous and classif
 
 ### Automated and Manual Optimization of Model Fittings
 
-Automated least-squares fitting for variograms for four different models, Generalized Cross-Validation (GCV) for TPS, and cross-validated power optimization for IDW (folds built by the same authority as the reported metrics, so the search follows the selected cross-validation strategy). Interactive variogram fitting and manual tuning overrides are available for expert calibration. Once an interpolation run completes, each result is instantly available for batch export.
+Automated least-squares fitting of four variogram models, Generalized Cross-Validation (GCV) for TPS, and cross-validated power optimization for IDW (folds built by the same authority as the reported metrics, so the search follows the selected cross-validation strategy). Interactive variogram fitting and manual tuning overrides are available for expert calibration. Once an interpolation run completes, each result is instantly available for batch export.
 
 ![Manual variogram tuning panel and the TPS GCV curve](assets/3.png)
 
@@ -151,7 +155,7 @@ A **directional variogram** panel recomputes semivariance within four angular co
 
 ### Uncertainty and Confidence Mapping
 
-The kriging engines return a prediction variance alongside the prediction, and Monolith maps it: variance and standard-error surfaces are produced for the Actual and Predicted runs alike and registered for export next to the prediction maps. For Regression and Random Forest Kriging the reported uncertainty combines the trend and residual components (RFK estimates the forest term by infinitesimal jackknife), so it is not the residual kriging variance on its own. IDW and TPS carry no comparable variance and none is invented for them. A variance surface is shown top right in Figure 4, where the lowest values track the sample points. Scientific Guide §7.
+The kriging engines return a prediction variance alongside the prediction, and Monolith maps it: variance and standard-error surfaces are produced for the runs and registered for export next to the interpolation maps. For Regression and Random Forest Kriging the reported uncertainty combines the trend and residual components (RFK estimates the forest term by infinitesimal jackknife), so it is not the residual kriging variance on its own. A variance surface is shown top right in Figure 4, where the lowest values track the sample points.
 
 ### Unified Interpolation Export Registry
 
@@ -165,7 +169,7 @@ Results also leave as data, not only as pictures. Any single-raster surface (Act
 
 ### Descriptive and Exploratory Suite
 
-Understand your dataset with simultaneous descriptive, correlation, and principal component analyses with results that can be instantly generated and observed by simultaneous categorization and data popularization of choice. The correlation panel includes a **spatial cross-correlogram**, which bins point pairs by ground distance rather than by row order and shows the distance over which two variables genuinely co-vary, the co-regionalisation Co-Kriging exploits. An additional Governing Factors module computes variable importance and effects via Random Forest models with ALE, PDP, and per-observation SHAP analyses, implemented as a decoupled module for performance and modularity.
+Understand your dataset through simultaneous descriptive, correlation, and principal component analyses, with results generated instantly and visualized using the grouping and categorization options of your choice. The correlation panel includes a **spatial cross-correlogram**, which bins point pairs by ground distance rather than by row order and shows the distance over which two variables genuinely co-vary, the co-regionalisation Co-Kriging exploits. An additional Governing Factors module computes variable importance and effects via Random Forest models with ALE, PDP, and per-observation SHAP analyses, implemented as a decoupled module for performance and modularity.
 
 ![Nine panels from the descriptive, correlation, PCA and governing-factors tabs](assets/5.png)
 
@@ -173,7 +177,7 @@ Understand your dataset with simultaneous descriptive, correlation, and principa
 
 ### Classification Suite
 
-Predictive multiclass classification of categorical field states (e.g., soil/management zones) from co-sampled covariates, distinct from the spatial engine's continuous-to-zone binning. Multinomial, Random Forest, and XGBoost learners share a common preprocessing recipe and spatially-aware cross-validation, with per-class accuracy, entropy-based uncertainty mapping, and learner-aware collinearity diagnostics.
+Predictive multiclass classification of categorical field states (e.g., soil/management zones) from co-sampled covariates, distinct from the spatial engine's continuous-to-zone binning. Multinomial, Random Forest, and XGBoost learners share a common preprocessing recipe and spatially aware cross-validation, with per-class accuracy, entropy-based uncertainty mapping, and learner-aware collinearity diagnostics.
 
 ![Classification suite configuration panel and its four result maps](assets/10.png)
 
@@ -187,7 +191,7 @@ Predictive multiclass classification of categorical field states (e.g., soil/man
 
 ### Dynamic UI and Theming
 
-Fully responsive interface with dark/light themes, and interactive figures that can be expanded for detailed numeric examination, accessible data details on maps/graphs for visual audits of hot-points.
+Monolith provides a fully responsive interface with dark/light themes, interactive figures that can be expanded for detailed numerical examination, and accessible data details on maps and graphs for visual audits of hotspots.
 
 ![Expanded interactive plot beside a map point-details popup](assets/7.png)
 
@@ -196,11 +200,11 @@ Fully responsive interface with dark/light themes, and interactive figures that 
 
 ### Mapping Machine Learning Predictions of Variables and Interpreting Spatial Resonance of Prediction Errors
 
-> **Note:** How well machine-learning predictions agree with the true (measured) values is only half of the story: the deviations that emerge once those predictions are mapped are just as important. A model with acceptable global accuracy can still produce spatially clustered errors, and these only become visible when the predictions and their residuals are examined as surfaces.
+> **Note:** How well machine-learning predictions agree with the true (measured) values is not the sole criterion: the deviations that emerge once those predictions are mapped are also important. A model with acceptable global accuracy can still produce spatially clustered errors, and these only become visible when the predictions and their residuals are examined as surfaces.
 
 **1. Visual Validation**
 
-Monolith generates side-by-side "Actual" and "Predicted" surfaces. By matching the color scales, you can instantly verify if the model captures the true variance of the field or just smooths the data.
+Monolith generates side-by-side "Actual" and "Predicted" surfaces. By matching the color scales, you can instantly verify if the model captures the true variation in the field or just smooths the data.
 
 ![Measured and predicted potassium surfaces, continuous and classified](assets/8.png)
 
@@ -213,11 +217,11 @@ To understand the spatial structure of model errors, Monolith provides two diagn
 
 *Interpolated Delta (regional bias):* subtracts the predicted surface from the actual surface, so zones of consistent over- or under-prediction stand out. This is the left panel of the Map Viewer's residual view.
 
-*Point residuals (local model failure):* the prediction error at each sampling point, drawn as discrete markers on a zero-centred diverging scale, and additionally interpolated into an error surface for export, mapping where the model fails to capture local variation.
+*Point residuals (local model failure):* the prediction error at each sampling point, drawn as discrete markers on a zero-centred diverging scale and additionally interpolated into an error surface for export, mapping where the model fails to capture local variation.
 
 ![Interpolated delta surface and point residual markers](assets/9.png)
 
-*Figure 10. The two residual diagnostics for the same pair of measured and predicted potassium surfaces. Left: the interpolated delta between the measured and predicted surfaces. Right: the residual at each sample point on a zero-centred diverging scale, where blue and red mark under- and over-prediction and the size of a cluster of same-signed points is the sign of a spatially structured error.*
+*Figure 10. The two residual diagnostics for the same pair of measured and predicted potassium surfaces. Left: the interpolated delta between the measured and predicted surfaces. Right: the residual at each sample point on a zero-centred diverging scale, where blue and red mark under- and over-prediction and clusters of same-signed points indicate spatially structured error.*
 
 
 ## Installation and Setup Guide
@@ -251,8 +255,11 @@ Two equally valid ways to obtain Monolith:
 
 Monolith depends on **59 packages** for its spatial engine, statistical analytics, and user interface, all pinned in `renv.lock` (see [Reproducible installation](#reproducible-installation-with-renv-optional)): 58 from CRAN, and `leaflet.extras` from its GitHub repository at a pinned commit.
 
-> [!IMPORTANT]
-> **Installing the dependencies.** `global.R` checks the suite at startup, names anything missing, and offers two routes rather than installing on its own. **To use the app, take the first:** `install.packages()` with the current CRAN releases, which arrive as pre-built binaries in a few minutes and need no compiler. **To reproduce the recorded test values of Section 9, take the second:** `renv::restore()`, which installs the exact versions in `renv.lock`. Any of those that CRAN has since superseded build from source, which takes longer and needs a C/C++/Fortran toolchain (RTools on Windows). The pinned versions matter for reproducing the test baselines, not for analysing your own data. Nothing is installed without your explicit confirmation, because an unasked install of the current releases is the one action that can move a recorded baseline with nothing in the repository having changed.
+> **Deciding to install the dependencies:** `global.R` checks the suite at startup, names anything missing, and offers two routes rather than installing on its own:
+
+> **To use the app, take the first:** `install.packages()` with the current CRAN releases, which arrive as pre-built binaries in a few minutes and need no compiler.
+
+> **To reproduce the recorded test values of Section 9, take the second:** `renv::restore()`, which installs the exact versions in `renv.lock`. Any of those that CRAN has since superseded build from source, which takes longer and needs a C/C++/Fortran toolchain (RTools on Windows). The pinned versions matter for reproducing the test baselines (or the baselines that you will create with your own data; see the section below `Freezing your own dataset as the reference`), not for analysing the data. Nothing is installed without your explicit confirmation.
 
 The full dependency suite, grouped by function:
 
@@ -328,7 +335,9 @@ The Data Setup tab validates the mapping before anything is modelled: a mini-map
 
 ### 5. Application Structure
 
-Ensure your project directory maintains the following structure. The application consists of a centralized package loader, a main runner file, and several helper scripts:
+Ensure your project directory has the following structure. 
+
+The application consists of a centralized package loader, a main runner file, and several helper scripts:
 
 ```
 monolith/
@@ -390,7 +399,7 @@ monolith/
 #### Option A: Using RStudio (Recommended)
 1. Open the `monolith.R` file in RStudio.
 2. Ensure all required packages are installed and loaded without errors.
-3. Click the **"Run App"** button located at the top right of the source editor.
+3. Click the **"Run App"** button (with "Run External" ticked for the best performance) located at the top right of the source editor.
 
 #### Option B: Using the R Console
 1. Open your R console or terminal.
@@ -419,7 +428,7 @@ Sample datasets in [sample_data/](sample_data/) let you exercise every module wi
 
 ## Testing and Reproducibility
 
-Monolith ships with a `testthat` suite of 4,448 assertions across 34 test files, covering the interpolation pipeline, cross-validation metrics, variogram fitting, the classification engine, the descriptive/correlation/PCA plot builders, metadata matching and the Governing Factors module. Where a quantity has an external or closed-form reference, the tests assert against that rather than against the app's own output: IDW against the hand-written Shepard sum, Ordinary Kriging against its exactness and pure-nugget closed forms, RK and RFK against the trend-plus-kriged-residual decomposition, VIF against `1/(1 - R²)` from an actual regression, Moran's I against a hand-built weight matrix, the classification and agreement metrics against a hand-built confusion matrix, the agronomical class bins against `terra::classify`'s own output, the PCA spectrum against the eigenvalues of the correlation and covariance matrices, Lin's CCC against a value computed independently with `DescTools`, and the plotted variogram curves against `gstat::variogramLine`. Those tests run on a frozen extract of the sample survey (`tests/testthat/fixtures/`), so their inputs never move and a changed number means the code changed; that directory's `GOLDEN_MANIFEST.md` states what a green suite does and does not establish, and how to substitute your own golden dataset without editing a single test. A separate file boots the assembled application in a headless browser through `shinytest2` and checks the shell (server initialisation, input identifiers, tab wiring, documentation drawer); it skips itself when `shinytest2` or a Chromium-based browser is unavailable. The suite runs on every push through GitHub Actions against the pinned `renv.lock` environment, on Linux and on Windows - the platform is not incidental, since one recorded value was once resolved differently by the two platforms' floating-point paths. A second, weekly workflow (`upstream.yaml`) runs the same suite against the current CRAN releases instead of the pinned ones, so a change in an upstream package that moves one of the recorded values is reported as upstream news rather than discovered months later; it never gates a pull request. To run everything from the project root:
+Monolith ships with a `testthat` suite of 4,448 assertions across 34 test files, covering the interpolation pipeline, cross-validation metrics, variogram fitting, the classification engine, the descriptive/correlation/PCA plot builders, metadata matching and the Governing Factors module. Where a quantity has an external or closed-form reference, the tests assert against that rather than against the app's own output: IDW against the hand-written Shepard sum, Ordinary Kriging against its exactness and pure-nugget closed forms, RK and RFK against the trend-plus-kriged-residual decomposition, VIF against `1/(1 - R²)` from an actual regression, Moran's I against a hand-built weight matrix, the classification and agreement metrics against a hand-built confusion matrix, the agronomical class bins against `terra::classify`'s own output, the PCA spectrum against the eigenvalues of the correlation and covariance matrices, Lin's CCC against a value computed independently with `DescTools`, and the plotted variogram curves against `gstat::variogramLine`. Those tests run on a frozen extract of the sample survey (`tests/testthat/fixtures/`), so their inputs never move and a changed number means the code changed; that directory's `GOLDEN_MANIFEST.md` states what a green suite does and does not establish, and how to substitute your own golden dataset without editing a single test. A separate file boots the assembled application in a headless browser through `shinytest2` and checks the shell (server initialisation, input identifiers, tab wiring, documentation drawer); it skips itself when `shinytest2` or a Chromium-based browser is unavailable. The suite runs on every push through GitHub Actions against the pinned `renv.lock` environment, on Linux and on Windows - the platform is not incidental, since one recorded value was once resolved differently by the two platforms' floating-point paths. A second, weekly workflow (`upstream.yaml`) runs the same suite against the current CRAN releases instead of the pinned ones, so a change in an upstream package that moves one of the recorded values is reported as upstream news rather than being discovered months later; it never gates a pull request. To run everything from the project root:
 
 ```bash
 Rscript tests/testthat.R
@@ -464,13 +473,13 @@ Stating what the application does not do is part of using it correctly:
 
 ## Development and AI Assistance
 
-Monolith was built with AI-assisted development tools and is disclosed here in the interest of scientific transparency: the codebase was initially structured into a Shiny App with **Antigravity CLI** (Google DeepMind), then systematically audited, refined and upgraded with **Claude Code (Fable 5; Anthropic)** and **Codex (GPT Astra; OpenAI)**, covering debugging, performance optimization, maintenance of function flows, and user interface/experience modifications.
+Monolith was built with AI-assisted development tools and is disclosed here in the interest of scientific transparency: the codebase was initially structured as a Shiny App with **Antigravity CLI** (Google DeepMind), then systematically audited, refined and upgraded with **Claude Code (Fable 5; Anthropic)** and **Codex (GPT Astra; OpenAI)**, covering debugging, performance optimization, maintenance of function flows, and user interface/experience modifications.
 
 Human oversight remained central throughout: all methodological choices, model formulations, interpolation engines, variogram fitting, cross-validation metrics, mathematical implementations, and scientific decisions were specified, reviewed, and validated by the author. Numeric behavior is guarded by the `testthat` suite described [above](#testing-and-reproducibility), and any change that alters numeric results is treated as a scientific decision requiring explicit justification. Responsibility for the correctness of the software rests with the author, not the tools. This disclosure mirrors the statement in the associated publication.
 
 ## Author
 
-**R. Serdar Kara** ([ORCID: 0000-0003-1297-2328](https://orcid.org/0000-0003-1297-2328))
+**R. Serdar Kara** ([ORCID: 0000-0003-1297-2328](https://orcid.org/0000-0003-1297-2328)).
 
 ## How to Cite
 
@@ -487,21 +496,21 @@ Human oversight remained central throughout: all methodological choices, model f
 }
 ```
 
-The same reference is available from GitHub's **Cite this repository** button, which reads the [`CITATION.cff`](CITATION.cff) file in the repository root. The DOI above is the **concept DOI** and always resolves to the latest release; Zenodo also mints a version-specific DOI for each release, which is the one to cite when the exact version matters for reproducing a result.
+The same reference is available from GitHub's **Cite this repository** button, which reads the [CITATION.cff](CITATION.cff) file in the repository root. The DOI above is the **concept DOI** and always resolves to the latest release; Zenodo also mints a version-specific DOI for each release, which is the one to cite when the exact version matters for reproducing a result.
 
 ## Contributing and Support
 
 *   **Bug reports & feature requests:** Please open an [Issue](../../issues) on this repository. Include your R version, operating system, and a minimal description of the steps that reproduce the problem.
 *   **Questions:** The [Discussions](../../discussions) tab (if enabled) or an Issue are both fine.
-*   **Pull requests:** Contributions are welcome under the GPL-3.0 terms. Read [`CONTRIBUTING.md`](CONTRIBUTING.md) first: it sets out the architecture rules, how tests must be written, and what a pull request that moves a recorded number has to state.
+*   **Pull requests:** Contributions are welcome under the GPL-3.0 terms. Read [CONTRIBUTING.md](CONTRIBUTING.md) first: it sets out the architecture rules, how tests must be written, and what a pull request that moves a recorded number has to state.
 
 ## License
 
-This project uses a dual-licensing structure, one license for the software and a separate one for the bundled sample data:
+This project uses a dual-licensing structure: one license for the software and a separate one for the bundled sample data:
 
 *   **Software & Source Code**: The core codebase of **Monolith** is licensed under the **GNU General Public License v3.0 (GPL-3.0)**. You are free to run, study, share, and modify the software, provided all derivative works remain open-source under the same terms. See the [LICENSE](LICENSE) file for the full legal text.
 
-*   **Sample Data**: `samp_data_1.xlsx` and its variable list `samp_var_list.xlsx` in [sample_data/](sample_data/) are **not** covered by the GPL-3.0. They accompany a manuscript submitted for peer review and are provided strictly for demonstration, evaluation, and testing of the Monolith application. They are **not** licensed for third-party use until that manuscript is formally published, at which point they will be released under [Creative Commons Attribution 4.0 International (CC BY 4.0)](https://creativecommons.org/licenses/by/4.0/). Until then all rights are reserved and the restrictions apply to all third parties. The full terms are in [sample_data/DATA_LICENSE](sample_data/DATA_LICENSE).
+*   **Sample Data**: `samp_data_1.xlsx` and its variable list `samp_var_list.xlsx` in [sample_data/](sample_data/) are **not** covered by the GPL-3.0. They accompany a manuscript submitted for peer review and are provided strictly for demonstration, evaluation, and testing of the Monolith application. They are **not** licensed for third-party use until that manuscript is formally published, at which point they will be released under [Creative Commons Attribution 4.0 International (CC BY 4.0)](https://creativecommons.org/licenses/by/4.0/). Until then, all rights are reserved and the restrictions apply to all third parties. The full terms are in [sample_data/DATA_LICENSE](sample_data/DATA_LICENSE).
 
 ## Disclaimer
 
