@@ -230,7 +230,7 @@ ui_sidebar_panel <- sidebarPanel(width = 3,
               )
             ),
             
-            shinyWidgets::radioGroupButtons("res_mode", HTML(paste0("Resolution Logic", info_tooltip("res", "Auto (Per Locality): each locality gets its own square cell size from its boundary area (about 100,000 cells, limited to 5-1000 m). Auto (Global): every locality gets the Auto size of the largest boundary, on one shared grid lattice. Fixed: the cell size you set. The sizes a run used are listed by the Map Viewer's resolution overlay."))),
+            shinyWidgets::radioGroupButtons("res_mode", HTML(paste0("Resolution Logic", info_tooltip("res", "Auto (Per Locality): each locality gets its own square cell size from its boundary area (about 100,000 cells, limited to 5-1000 m). Auto (Global): every locality gets the Auto size of the largest boundary, on one shared grid lattice. Both follow area, not sampling density, so a cell can come out much finer than the locality's own sample spacing. Fixed: the cell size you set. The sizes a run used are listed by the Map Viewer's resolution overlay."))),
                          choices = c("Auto (Per Locality)" = "local", "Auto (Global)" = "global", "Fixed" = "fixed"),
                          size = "sm", direction = "vertical", justified = TRUE),
             conditionalPanel(condition = "input.res_mode == 'fixed'",

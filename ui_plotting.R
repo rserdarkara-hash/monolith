@@ -15,7 +15,12 @@
 # `target` limits the banner to the fits a specific map actually used:
 # "act" (actual maps), "pre" (predicted maps), or NULL for both (residual
 # maps, which derive from both fits).
-build_vgm_warning_html <- function(v_fit_list, target = NULL) {
+# `engine` is the displayed run's method. It selects the wording of the
+# still-rising band only: RK and RFK fit the variogram to the residuals of a
+# trend model, so what a value-scale variogram is advised to do about a trend
+# is what they already did. CK never reaches here (it sets no `res$fit`, so it
+# contributes no entry to the fit list) and, like OK, does not detrend.
+build_vgm_warning_html <- function(v_fit_list, target = NULL, engine = NULL) {
   # "LocA_act" -> "LocA" when the map's target is known, otherwise
   # "LocA (actual)" so mixed banners stay unambiguous.
   display_key <- function(n) {
@@ -59,48 +64,64 @@ build_vgm_warning_html <- function(v_fit_list, target = NULL) {
       length(beyond_keys) == 0 && length(below_keys) == 0 && length(trend_keys) == 0) return(NULL)
 
   red_part <- if (length(fallback_keys) > 0) {
-    paste0("<span style='color:var(--mn-danger);'>Note: Variogram fit failed for some localities (",
+    paste0("<span style='color:var(--mn-danger);'>Variogram fit failed for: ",
            paste(fallback_keys, collapse = ", "),
-           ").<br>A default spherical variogram model was used instead so the map could still be produced. The map is shown, but its spatial structure was not estimated from your data &mdash; interpret interpolations with caution.</span>")
+           ".<br>-A default spherical variogram model was used, so the spatial structure was not ",
+           "estimated from your data. Interpret with caution.</span>")
   } else ""
   amber_part <- if (length(flawed_keys) > 0) {
-    paste0("<span style='color:var(--mn-warn);'>Auto-fit selected a non-converged or singular variogram for: ",
+    paste0("<span style='color:var(--mn-warn);'>-Auto-fit selected a non-converged or singular variogram for: ",
            paste(flawed_keys, collapse = ", "),
-           ".<br>No candidate model converged cleanly, so the best-scoring (lowest-error) fit was used to build this map. The map is still valid to explore, but variogram parameters may be imprecise &mdash; interpret interpolations with caution.</span>")
+           ".<br>No candidate converged cleanly, so the lowest-error fit was used. Its parameters ",
+           "may be imprecise; the map remains usable.</span>")
   } else ""
   # A converged fit whose practical range lies outside the span the empirical
   # variogram resolves. The model is used; what it CLAIMS is what is limited.
   unresolved_part <- if (length(beyond_keys) > 0 || length(below_keys) > 0) {
     beyond_line <- if (length(beyond_keys) > 0) {
-      paste0("<br>Practical range extends beyond sampled lag support for: ",
+      paste0("<br>-Practical range extends beyond sampled lag support for: ",
              paste(beyond_keys, collapse = ", "),
-             ". Its sill and range are extrapolated beyond the observed spatial support.")
+             ". Sill and range are extrapolated.")
     } else ""
     below_line <- if (length(below_keys) > 0) {
-      paste0("<br>Practical range is below sampled-distance resolution for: ",
+      paste0("<br>-Practical range is below sampled-distance resolution for: ",
              paste(below_keys, collapse = ", "),
-             ". It is below the application's effective short-range resolution threshold, ",
-             "so the empirical lags cannot resolve spatial structure at that scale and the fit ",
-             "behaves as near-pure nugget.")
+             ". Under the effective short-range resolution threshold the lags cannot resolve ",
+             "structure at that scale, so the fit behaves as near-pure nugget.")
     } else ""
-    paste0("<span style='color:var(--mn-warn);'>Variogram range not resolved within the empirical lag window.",
-           "<br>The prediction used a converged fit whose range falls outside the span the empirical variogram resolves.",
+    paste0("<span style='color:var(--mn-warn);'>-Variogram range not resolved within the empirical lag window.",
+           "<br>The fit converged; what the lags cannot resolve is its range.",
            beyond_line, below_line, "</span>")
   } else ""
   # Hedged on purpose: a monotone rising variogram is a strong diagnostic for
   # trend, not proof of it. Never state that non-stationarity was detected.
+  # Neither branch names an engine to switch to: the empirical variogram cannot
+  # say which cause is acting, and naming one would be circular for whichever
+  # engine is already running.
   trend_part <- if (length(trend_keys) > 0) {
-    paste0("<span style='color:var(--mn-warn);'>Sill not observed; possible large-scale trend for: ",
-           paste(trend_keys, collapse = ", "),
-           ".<br>The empirical variogram continues to increase near the lag cutoff, so the range and sill ",
-           "are weakly constrained. This can indicate either long-range spatial dependence or ",
-           "non-stationarity. Consider modelling the systematic trend with suitable covariates ",
-           "(Regression Kriging) and fitting the variogram to the residuals.</span>")
+    if (isTRUE(engine %in% c("RK", "RFK"))) {
+      paste0("<span style='color:var(--mn-warn);'>-Residual variogram still rising at the lag cutoff for: ",
+             paste(trend_keys, collapse = ", "),
+             ".<br>The fitted trend has not removed the large-scale structure, so range and sill are ",
+             "weakly constrained and the kriging variance with them. Causes it cannot separate: ",
+             "covariates missing that variation, too rigid a trend form, or a correlation length ",
+             "beyond this locality's extent, which no covariate fixes. Predictions near samples stay ",
+             "well supported; see the trend diagnostics and Internal Residual Variogram ",
+             "(Scientific Analysis).</span>")
+    } else {
+      paste0("<span style='color:var(--mn-warn);'>-Sill not observed; possible large-scale trend for: ",
+             paste(trend_keys, collapse = ", "),
+             ".<br>The variogram is still rising at the cutoff, so range and sill are weakly ",
+             "constrained: long-range dependence or non-stationarity, which it cannot separate. ",
+             "Consider Regression Kriging, which fits the variogram to the residuals of a ",
+             "covariate trend.</span>")
+    }
   } else ""
   smooth_part <- if (length(smooth_keys) > 0) {
-    paste0("<span style='color:var(--mn-warn);'>Gaussian or Mat&eacute;rn variogram with a nugget below 5% of the sill for: ",
+    paste0("<span style='color:var(--mn-warn);'>-Gaussian or Mat&eacute;rn variogram with a nugget below 5% of the sill for: ",
            paste(smooth_keys, collapse = ", "),
-           ".<br>Kriging with such a model can place predictions far outside the observed range &mdash; check the map against the data, or add a nugget.</span>")
+           ".<br>Predictions can land far outside the observed range. Check the map against the ",
+           "data, or add a nugget.</span>")
   } else ""
   parts <- c(red_part, amber_part, unresolved_part, trend_part, smooth_part)
 

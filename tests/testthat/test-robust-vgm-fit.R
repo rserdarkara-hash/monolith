@@ -470,6 +470,38 @@ test_that("a variogram still rising at the cutoff gets a hedged trend advisory",
   expect_match(html, "Regression Kriging", fixed = TRUE)
   # A rising variogram is a diagnostic for trend, never proof of it.
   expect_no_match(html, "non-stationarity detected", fixed = TRUE)
+
+  # An unknown engine keeps the value-scale wording: the banner must never
+  # depend on the caller having resolved a method.
+  expect_match(build_vgm_warning_html(list(LocA_act = f), engine = "OK"),
+               "Sill not observed; possible large-scale trend", fixed = TRUE)
+})
+
+test_that("the rising-variogram advisory never tells a detrending engine to detrend", {
+  f <- gstat::vgm(psill = 2, model = "Exp", range = 300, nugget = 0.5)
+  attr(f, "vgm_diagnostics") <- list(status = "range_unresolved", practical_range = 900,
+                                     max_lag = 700, sill_resolved = FALSE,
+                                     range_side = "beyond", trend_suspected = TRUE,
+                                     target_degenerate = FALSE)
+
+  # RK and RFK krige the residuals of a fitted trend, so "model the trend with
+  # covariates and fit the variogram to the residuals" is what they already did.
+  for (eng in c("RK", "RFK")) {
+    html <- build_vgm_warning_html(list(LocA_act = f), engine = eng)
+    expect_match(html, "Residual variogram still rising at the lag cutoff", fixed = TRUE)
+    expect_match(html, "Scientific Analysis", fixed = TRUE)
+    # The circularity guard: no engine is named, in either direction.
+    expect_no_match(html, "Regression Kriging", fixed = TRUE)
+    expect_no_match(html, "Sill not observed", fixed = TRUE)
+    # The extent cause has no in-app remedy and must stay on the list.
+    expect_match(html, "beyond this locality's extent", fixed = TRUE)
+  }
+
+  # CK does not detrend (its variogram is seeded from the measured values), so
+  # it keeps the value-scale wording if it ever reaches this banner.
+  html_ck <- build_vgm_warning_html(list(LocA_act = f), engine = "CK")
+  expect_match(html_ck, "Sill not observed; possible large-scale trend", fixed = TRUE)
+  expect_no_match(html_ck, "Residual variogram still rising", fixed = TRUE)
 })
 
 test_that("banner close button targets its own container, not a fixed id", {

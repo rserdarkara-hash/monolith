@@ -1166,6 +1166,21 @@ table.dataTable tbody tr.odd { background-color: var(--mn-surface-2) !important;
 body.mn-show-legend-title .mn-legend-title { display: inline; }
 body.mn-show-legend-title .leaflet .info.legend > div:first-child:has(.mn-legend-title) { display: block; }
 
+/* The variogram-quality banner. addControl() defaults to the className
+   'info legend', which put this box under the legend rule above: capped at
+   190px and overflow:hidden, so a multi-band message became a column tall
+   enough to outgrow the map, and anything past the cap was cut off with no
+   indication. It is given its own control class instead (see
+   server_map_viewer.R) and sized here: a readable measure, and a height cap
+   that scrolls rather than clips. The shortest map carrying it is the 600px
+   comparison pane, so the cap always leaves the map visible. The font and the
+   shadow are the legend's, which is what this box inherited before it had a
+   class of its own. */
+.vgm-fallback-warn {
+  box-sizing: border-box; width: 300px; max-height: 380px; overflow-y: auto;
+  font: 11.5px/16px var(--mn-sans); box-shadow: var(--mn-shadow);
+}
+
 /* Leaflet's own controls: built into the widget, so the Overlays checkboxes
    that hide them do it from here rather than by re-rendering three maps. */
 body.mn-hide-drawtools .leaflet-draw { display: none !important; }

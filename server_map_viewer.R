@@ -323,9 +323,14 @@
         vgm_target <- if (lab %in% c("actual", "Actual")) "act"
                       else if (lab %in% c("pred", "pred_ss", "Predicted")) "pre"
                       else NULL  # residual maps derive from both fits
-        vgm_warn_html <- build_vgm_warning_html(rv$disp$v_fits, target = vgm_target)
+        vgm_warn_html <- build_vgm_warning_html(rv$disp$v_fits, target = vgm_target,
+                                                engine = rv$disp$method)
         if (!is.null(vgm_warn_html)) {
-          m <- m %>% addControl(html = vgm_warn_html, position = "bottomleft")
+          # className is NOT decorative: addControl() defaults to "info legend",
+          # which lands this banner under the legend rule and its 190px cap plus
+          # overflow:hidden, silently clipping the text and the close button.
+          m <- m %>% addControl(html = vgm_warn_html, position = "bottomleft",
+                                className = "vgm-warn-control leaflet-control")
         }
         # Styling reads (palette, class breaks, SE/variance layer) are
         # isolated: a styling tick must invalidate only the proxy restyler,
