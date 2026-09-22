@@ -173,7 +173,7 @@ test_that("the baselines record the environment they were taken in", {
   expect_false(any(is.na(prov$packages)))
 
   # THIS is the assertion with teeth, and it is a failure rather than a note on
-  # purpose: a session whose gstat/sf/terra/classInt/spdep differs from the one
+  # purpose: a session whose gstat/sf/terra/Ckmeans.1d.dp differs from the one
   # the baselines were taken in cannot say whether a moved value is a code
   # change or an upstream one. Two legitimate answers - restore the recorded
   # versions, or re-record after confirming for yourself that the values did not

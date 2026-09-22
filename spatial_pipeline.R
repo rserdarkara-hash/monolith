@@ -162,7 +162,7 @@ get_joint_scale_values <- function(r1_packed, r2_packed, match_scales, layer = "
 # same reason as interp_run_item / autofit_vgm_item / tps_gcv_item /
 # idw_opt_item: an inline lambda inside compute_governing_factors would close
 # over that function's frame, so future would serialize df, df_clean, rf_model,
-# explainer_rf, vip, vip_df, ale_prof, pdp_prof, old_plan AND shap_cl (the live
+# explainer_rf, imp, vip_agg, ale_prof, pdp_prof, old_plan AND shap_cl (the live
 # PSOCK cluster handle) to every SHAP worker, on top of the model copy already
 # inside the explainer. cancel_path is a PLAIN character path, never a closure,
 # and file.exists() consumes no RNG - so the per-observation L'Ecuyer streams,
@@ -179,12 +179,12 @@ gov_shap_item <- function(i, explainer, newdata, cancel_path = NULL) {
 }
 
 #' Governing-factors analysis: a random forest of the target on the predictors
-#' (complete rows only), DALEX permutation importance, ALE and PDP profiles of
-#' the most important predictor, and its SHAP contributions on a sample of up to
-#' `shap_sample_size` rows. Seeded (12345). Returns `list(model, explainer,
-#' importance, top_var, ale, pdp, shap, n_used, n_total)`, or NULL below 10
-#' complete rows.
-compute_governing_factors <- function(df, target_col, predictors, n_permutations = 10, rf_ntree = 100, shap_sample_size = 100, cores_hint = NULL, cancel_file = NULL) {
+#' (complete rows only), the forest's out-of-bag permutation importance, ALE
+#' and PDP profiles of the most important predictor, and its SHAP contributions
+#' on a sample of up to `shap_sample_size` rows. Seeded (12345). Returns
+#' `list(model, explainer, importance, top_var, ale, pdp, shap, n_used,
+#' n_total)`, or NULL below 10 complete rows.
+compute_governing_factors <- function(df, target_col, predictors, rf_ntree = 100, shap_sample_size = 100, cores_hint = NULL, cancel_file = NULL) {
   req_cols <- c(target_col, predictors)
   df_clean <- df[, req_cols, drop = FALSE]
   df_clean <- df_clean[complete.cases(df_clean), , drop = FALSE]
@@ -193,19 +193,14 @@ compute_governing_factors <- function(df, target_col, predictors, n_permutations
 
   # Cooperative cancellation, same file-flag contract as the classification
   # pipeline: the module touches `cancel_file` from the main session and the
-  # worker aborts at its next checkpoint. Kept as a LOCAL closure rather than a
-  # top-level helper because this function crosses the future boundary through
-  # future's automatic global detection (the gov worker source()s nothing), so
-  # a new global would be one more thing that has to be discovered correctly.
-  # The message is matched by the module's error handler; keep them in sync.
+  # worker aborts at its next checkpoint. The message is matched by the
+  # module's error handler; keep them in sync.
   check_cancel <- function() {
     if (!is.null(cancel_file) && file.exists(cancel_file)) {
       stop("Analysis cancelled by user.", call. = FALSE)
     }
   }
   check_cancel()
-
-  formula_str <- paste(target_col, "~ .")
 
   # Everything that draws runs under the shared two-sided sandbox (with_seed,
   # spatial_vgm.R). NOTE: the cluster-teardown on.exit() below is registered
@@ -214,27 +209,37 @@ compute_governing_factors <- function(df, target_col, predictors, n_permutations
   # at function exit, after the RNG state is restored - the same order as the
   # hand-rolled sandbox this replaced.
   with_seed(12345, {
-    rf_model <- randomForest::randomForest(as.formula(formula_str), data = df_clean, ntree = rf_ntree, importance = TRUE)
-  
+    # Matrix interface, not a formula: the formula method re-reads column names
+    # through make.names() and fails on a target such as "Total N (%)" or a
+    # predictor such as "soil moisture". The forest is the same.
+    rf_model <- randomForest::randomForest(x = df_clean[, predictors, drop = FALSE],
+                                           y = df_clean[[target_col]],
+                                           ntree = rf_ntree, importance = TRUE)
+
     explainer_rf <- DALEX::explain(
-      model = rf_model, 
-      data = df_clean[, predictors, drop = FALSE], 
-      y = df_clean[[target_col]], 
+      model = rf_model,
+      data = df_clean[, predictors, drop = FALSE],
+      y = df_clean[[target_col]],
       label = "Random Forest",
       verbose = FALSE
     )
-  
-    # model_parts runs `n_permutations` full permutation passes internally and
-    # cannot be interrupted mid-call, so this checkpoint bounds cancel latency at
-    # one importance run (as the tuning grid search does in the classifier).
-    check_cancel()
-    vip <- DALEX::model_parts(explainer_rf, B = n_permutations, type = "difference")
 
-    vip_df <- as.data.frame(vip)
-    vip_df <- vip_df[vip_df$variable != "_baseline_" & vip_df$variable != "_full_model_", ]
-    vip_agg <- aggregate(dropout_loss ~ variable, data = vip_df, FUN = mean)
-    top_var <- as.character(vip_agg$variable[which.max(vip_agg$dropout_loss)])
-  
+    # Importance is Breiman's (2001) permutation importance on the OUT-OF-BAG
+    # rows: for every tree, the increase in the MSE of its out-of-bag
+    # predictions when one predictor is permuted, averaged over the trees.
+    # A forest reproduces its own training rows closely, so permuting on the
+    # rows it was grown on scores what the forest memorised as well as what it
+    # learned; the out-of-bag rows are the ones each tree never saw. The
+    # unscaled increase ranks the factors; the scaled form randomForest prints
+    # as %IncMSE (divided by its standard error across trees) is kept beside
+    # it, but it grows with ntree and is not a z-score (Strobl & Zeileis 2008).
+    imp <- randomForest::importance(rf_model, type = 1, scale = FALSE)
+    imp_scaled <- randomForest::importance(rf_model, type = 1, scale = TRUE)
+    vip_agg <- data.frame(variable = rownames(imp), mse_increase = unname(imp[, 1]),
+                          mse_increase_scaled = unname(imp_scaled[rownames(imp), 1]),
+                          stringsAsFactors = FALSE)
+    top_var <- vip_agg$variable[which.max(vip_agg$mse_increase)]
+
     check_cancel()
     ale_prof <- DALEX::model_profile(explainer_rf, variables = top_var, type = "accumulated")
     ale_df <- as.data.frame(ale_prof$agr_profiles)
@@ -351,6 +356,28 @@ crs_metre_factor <- function(crs) {
   if (is.null(co) || is.na(co) || isTRUE(sf::st_is_longlat(co))) return(NA_real_)
   f <- tryCatch(as.numeric(units::set_units(co$ud_unit, "m")), error = function(e) NA_real_)
   if (length(f) == 1 && is.finite(f) && f > 0) f else NA_real_
+}
+
+#' Reproject a finished surface (in the working CRS) into the Target Mapping
+#' CRS. When the two are the same system (terra::same.crs, which equates a
+#' proj4 UTM and its EPSG code but not two datums) the surface is relabelled,
+#' not resampled: terra::project() onto the same system rewrote every cell at
+#' float precision (up to 3e-8 relative on the golden digest) to change only
+#' the CRS's spelling, which the file now carries as the target's EPSG code.
+#' Another projected CRS gets cells of the run's resolution `res_m` (metres)
+#' on one lattice (origin 0): terra's own choice gives a 30 m grid 30.10 m
+#' cells from UTM 35N to 36N, and per-locality origins that the merged surface
+#' would have to resample. A geographic target keeps terra's choice of degrees.
+project_to_target <- function(r, crs_sel, res_m) {
+  if (terra::same.crs(r, crs_sel)) {
+    terra::crs(r) <- crs_sel
+    return(r)
+  }
+  mf <- crs_metre_factor(crs_sel)
+  if (!is.finite(mf) || !isTRUE(is.finite(res_m) && res_m > 0)) {
+    return(terra::project(r, crs_sel))
+  }
+  terra::project(r, crs_sel, res = res_m / mf, origin = c(0, 0))
 }
 
 #' Geographic and non-metre projected input use the WGS 84 UTM zone of the
@@ -799,7 +826,14 @@ run_regional_interpolation <- function(item, current_method, current_crs, aux_va
       }
     }
 
-    grid_r <- grid_template(bbox, actual_res, sf::st_crs(pts)$wkt, snap = shared_grid)
+    # Fixed and Auto (Global) grids sit on one lattice of multiples of the cell
+    # size, so localities that share a working CRS and a cell size share their
+    # cells: terra::merge resamples every raster whose origin differs from the
+    # first one's, which interpolated the merged surface of every locality but
+    # one. Auto (Per Locality) gives each locality its own cell size, so its
+    # grids start at their own boundary's corner.
+    grid_r <- grid_template(bbox, actual_res, sf::st_crs(pts)$wkt,
+                            snap = shared_grid || identical(res_mode, "fixed"))
 
     # Cell centres as a plain MATRIX first. An sfc_POINT stores every node as its
     # own classed numeric(2), ~430 bytes per cell against 16 for a matrix row:
@@ -1029,7 +1063,7 @@ run_regional_interpolation <- function(item, current_method, current_crs, aux_va
         # detach_model_frame: the fitted model's terms otherwise carry this
         # locality's whole pipeline frame (point set, grids, kriging output)
         # back to the main session and into every archived copy of the run.
-        res_out$summ_act <- detach_model_frame(res_a_list$model_summary); res_out$rf_act <- detach_model_frame(res_a_list$rf_model); res_out$gstat_act <- res_a_list$gstat_obj
+        res_out$summ_act <- detach_model_frame(res_a_list$model_summary); res_out$rf_act <- res_a_list$rf_model; res_out$gstat_act <- res_a_list$gstat_obj
         # Covariates the mapped model used and the ones the screen removed
         # (RK/RFK/CK only), for the run configuration.
         res_out$aux_used_act <- res_a_list$aux_used; res_out$aux_dropped_act <- res_a_list$aux_dropped
@@ -1064,7 +1098,7 @@ run_regional_interpolation <- function(item, current_method, current_crs, aux_va
             # returns a gstat idw object, and only the kriging engines produce a
             # meaningful variance. Mirrors the map viewer's own guard.
             fields_a <- if(method_has_variance(current_method) && "var1.var" %in% colnames(res_a_list$res_sf)) c("var1.pred", "var1.var") else "var1.pred"
-            r_a <- terra::rasterize(res_a_list$res_sf, grid_r, field=fields_a) %>% terra::mask(terra::vect(bound)) %>% terra::project(crs_sel)
+            r_a <- terra::rasterize(res_a_list$res_sf, grid_r, field=fields_a) %>% terra::mask(terra::vect(bound)) %>% project_to_target(crs_sel, actual_res)
             # terra names a SINGLE-field rasterization "last", which then travels
             # into the exported GeoTIFF as the band description (TPS surfaces
             # always shipped that way). Name it after the field it holds; every
@@ -1108,7 +1142,7 @@ run_regional_interpolation <- function(item, current_method, current_crs, aux_va
             res_out$v_emp_pre <- res_p_list$v_emp; res_out$v_fit_pre <- res_p_list$fit; res_out$cv_pre <- res_p_list$cv_metrics; res_out$cv_obj_pre <- res_p_list$cv_obj
             res_out$cv_reps_pre <- res_p_list$cv_obj_reps
             res_out$tps_fit_pre <- res_p_list$tps_fit
-            res_out$summ_pre <- detach_model_frame(res_p_list$model_summary); res_out$rf_pre <- detach_model_frame(res_p_list$rf_model); res_out$gstat_pre <- res_p_list$gstat_obj
+            res_out$summ_pre <- detach_model_frame(res_p_list$model_summary); res_out$rf_pre <- res_p_list$rf_model; res_out$gstat_pre <- res_p_list$gstat_obj
             res_out$aux_used_pre <- res_p_list$aux_used; res_out$aux_dropped_pre <- res_p_list$aux_dropped
             res_out$log_msg <- paste0(res_out$log_msg, "\n", res_p_list$log_msg)
             
@@ -1126,7 +1160,7 @@ run_regional_interpolation <- function(item, current_method, current_crs, aux_va
             } else if(!is.null(res_p_list$res_sf)) {
                 # Same method gate as the actual surface above.
                 fields_p <- if(method_has_variance(current_method) && "var1.var" %in% colnames(res_p_list$res_sf)) c("var1.pred", "var1.var") else "var1.pred"
-                r_p <- terra::rasterize(res_p_list$res_sf, grid_r, field=fields_p) %>% terra::mask(terra::vect(bound)) %>% terra::project(crs_sel)
+                r_p <- terra::rasterize(res_p_list$res_sf, grid_r, field=fields_p) %>% terra::mask(terra::vect(bound)) %>% project_to_target(crs_sel, actual_res)
                 if (length(fields_p) == 1L) names(r_p) <- fields_p
                 res_out$r_p <- terra::wrap(r_p)
             }
@@ -1162,7 +1196,7 @@ run_regional_interpolation <- function(item, current_method, current_crs, aux_va
         # is a real ML error) and uses a FIXED idp = 2 rather than the run's
         # optimized power, so error surfaces stay comparable across methods.
         err_mod <- gstat::idw(err ~ 1, pts_err, grid_p, nmax = m_params$idw_nmax %||% 12, idp = 2, debug.level = 0)
-        r_err <- terra::rasterize(err_mod, grid_r, field="var1.pred") %>% terra::mask(terra::vect(bound)) %>% terra::project(crs_sel)
+        r_err <- terra::rasterize(err_mod, grid_r, field="var1.pred") %>% terra::mask(terra::vect(bound)) %>% project_to_target(crs_sel, actual_res)
         res_out$r_point_err <- terra::wrap(r_err)
     }
     
@@ -1296,28 +1330,46 @@ raster_value_layer <- function(r, band = "var1.pred") {
   as.vector(terra::values(layer, na.rm = TRUE))
 }
 
-# Class-break computation for the Agronomical styling algorithms. classInt's
-# "jenks" is O(n^2)-slow and silently switches to an UNSEEDED sample above
-# n = 3000; "kmeans" also draws unseeded random starts. Both are made
-# deterministic here under the app's standard two-sided seed sandbox
-# (seed 12345, caller's .Random.seed restored), and jenks is computed on a
-# seeded subsample capped at max_n (default 5000) - the standard practice for
-# raster classification (GIS packages classify on samples too). Returns the
-# n_c - 1 inner break values, or NULL when vv is too short.
-calc_class_breaks <- function(vv, n_c, style, max_n = 5000L) {
+#' Jenks natural breaks, computed exactly: the partition of `x` into `k`
+#' classes of consecutive values that minimises the within-class sum of squared
+#' deviations (Jenks 1977; Fisher 1958), found by dynamic programming over
+#' EVERY value (Ckmeans.1d.dp, Wang & Song 2011; deterministic, O(n log n)).
+#' Each break lies midway between the largest value of one class and the
+#' smallest of the next, so the partition of the data is the optimum under
+#' either interval closure. A break placed ON a class's largest value (as
+#' classInt's "jenks" returns it) moves that value into the next class under
+#' the app's [low, high) convention. Returns the inner breaks: fewer than
+#' k - 1 when `x` holds fewer than k distinct values.
+natural_breaks <- function(x, k) {
+  x <- x[is.finite(x)]
+  if (length(x) < 2 || k < 2) return(numeric(0))
+  # The package warns (and uses every distinct value as a class) when x holds
+  # fewer distinct values than k; the shorter result says the same thing.
+  fit <- suppressWarnings(Ckmeans.1d.dp::Ckmeans.1d.dp(x, k = k))
+  kk <- length(fit$size)
+  if (kk < 2) return(numeric(0))
+  # Clusters are numbered in increasing order of value, so on sorted values
+  # each one ends where the cumulative size says.
+  xs <- sort(x)
+  ends <- cumsum(fit$size)[-kk]
+  (xs[ends] + xs[ends + 1L]) / 2
+}
+
+# Class-break computation for the Agronomical styling algorithms. "jenks" is
+# natural_breaks() over every value. classInt's "kmeans" draws random starts,
+# so it runs under the app's two-sided seed sandbox (seed 12345, caller's
+# .Random.seed restored). Returns the n_c - 1 inner break values (fewer for
+# data with fewer distinct values), or NULL when vv is too short.
+calc_class_breaks <- function(vv, n_c, style) {
   vv <- vv[is.finite(vv)]
   if (length(vv) < n_c) return(NULL)
+  if (identical(style, "jenks")) return(natural_breaks(vv, n_c))
 
   with_seed(12345, {
-    if (identical(style, "jenks") && length(vv) > max_n) {
-      vv <- sample(vv, max_n)
-    }
-
     tryCatch({
-      # suppressMessages matters: classInt's jenks emits a message() condition
-      # ("Use fisher instead...") that suppressWarnings does not muffle. A stray
-      # message escaping a reactive gets caught by any consumer's tryCatch and
-      # aborts the reactive mid-evaluation, poisoning its cached state.
+      # suppressMessages: a message() escaping a reactive is caught by any
+      # consumer's tryCatch and aborts the reactive mid-evaluation, poisoning
+      # its cached state.
       suppressMessages(suppressWarnings(
         classInt::classIntervals(vv, n = n_c, style = style)$brks[2:n_c]))
     }, error = function(e) {
@@ -1365,7 +1417,7 @@ build_class_zone_sf <- function(r, params, labels = NULL,
     area_df <- as.data.frame(terra::expanse(r_class, unit = "ha", byValue = TRUE))
     area_ha <- rep(NA_real_, length(ids))
     if (all(c("value", "area") %in% names(area_df))) {
-      area_ha <- round(area_df$area[match(ids, as.numeric(as.character(area_df$value)))], 2)
+      area_ha <- area_df$area[match(ids, as.numeric(as.character(area_df$value)))]
     }
 
     # The outer breaks are -Inf / Inf by construction (every value falls in a
@@ -1467,10 +1519,23 @@ autofit_vgm_item <- function(item, current_crs) {
   list(l = item$l, act = res_a, pre = res_p)
 }
 
+# Below this many distinct samples the optimizers search nothing and store
+# nothing, so the locality keeps the sidebar setting: a GCV curve or a CV power
+# search over four points is not an estimate, and storing a stand-in value
+# would override the setting the user chose (Auto (GCV) became exact
+# interpolation).
+OPTIMIZER_MIN_POINTS <- 5L
+.optimizer_skip_note <- function(n) {
+  sprintf("%d distinct sample%s, fewer than %d; nothing stored, so the sidebar setting applies",
+          n, if (n == 1L) "" else "s", OPTIMIZER_MIN_POINTS)
+}
+
 # Per-locality worker for the "OPTIMIZE TPS LAMBDA" button (GCV curve search).
 # item = list(l, df = data.frame(x, y, v)).
 tps_gcv_item <- function(item, current_crs) {
-  if (nrow(item$df) < 5) return(list(l = item$l, best_lam = 0, gcv_data = NULL, err = NULL))
+  if (nrow(item$df) < OPTIMIZER_MIN_POINTS) {
+    return(list(l = item$l, skipped = .optimizer_skip_note(nrow(item$df))))
+  }
 
   # Project before normalizing to the unit box, exactly as apply_TPS does on the
   # run path: on geographic coordinates 1 deg lon != 1 deg lat on the ground, so
@@ -1483,7 +1548,9 @@ tps_gcv_item <- function(item, current_crs) {
   # holds): fields::Tps treats replicates via its pure-error handling, which
   # shifts the GCV curve away from the deduped point set the run actually fits.
   pts_sf <- pts_sf[!duplicated(round(sf::st_coordinates(pts_sf), 2)), ]
-  if (nrow(pts_sf) < 5) return(list(l = item$l, best_lam = 0, gcv_data = NULL, err = NULL))
+  if (nrow(pts_sf) < OPTIMIZER_MIN_POINTS) {
+    return(list(l = item$l, skipped = .optimizer_skip_note(nrow(pts_sf))))
+  }
   raw_coords <- sf::st_coordinates(pts_sf)
   vals <- pts_sf$v
 
@@ -1513,7 +1580,9 @@ tps_gcv_item <- function(item, current_crs) {
 # Per-locality worker for the "OPTIMIZE IDW FACTORS" button.
 # item = list(l, df = data.frame(x, y, v)).
 idw_opt_item <- function(item, current_crs, idw_nmax_val, cv_strategy = "auto") {
-  if (nrow(item$df) < 5) return(list(l = item$l, best_f = 2.0))
+  if (nrow(item$df) < OPTIMIZER_MIN_POINTS) {
+    return(list(l = item$l, skipped = .optimizer_skip_note(nrow(item$df))))
+  }
   # Project first so optimize_idw_p's nmax neighbour selection and distance-decay
   # weighting run on the same metric coordinates the run pipeline uses. IDW is
   # scale-invariant, but degree axes are anisotropic (1 deg lon != 1 deg lat), so
@@ -1525,7 +1594,9 @@ idw_opt_item <- function(item, current_crs, idw_nmax_val, cv_strategy = "auto") 
   # twin predicts its held-out partner at distance zero, so every candidate
   # power scores an exact hit there and the search is inflated.
   pts <- pts[!duplicated(round(sf::st_coordinates(pts), 2)), ]
-  if (nrow(pts) < 5) return(list(l = item$l, best_f = 2.0))
+  if (nrow(pts) < OPTIMIZER_MIN_POINTS) {
+    return(list(l = item$l, skipped = .optimizer_skip_note(nrow(pts))))
+  }
   best_f <- optimize_idw_p(pts, "v", nmax = idw_nmax_val, cv_strategy = cv_strategy)
   list(l = item$l, best_f = best_f)
 }

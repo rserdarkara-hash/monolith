@@ -122,6 +122,20 @@
   # to retire the surplus explicitly (remove_surplus_raster_images).
   map_raster_count <- new.env(parent = emptyenv())
 
+  # The surface a map widget's label shows, whose own class breaks style it;
+  # NULL for the residual maps, which are never classified.
+  class_surface_of <- function(lab) {
+    if (lab %in% c("actual", "Actual")) "act"
+    else if (lab %in% c("pred", "pred_ss", "Predicted")) "pre"
+    else NULL
+  }
+  # Classification of the map with this label, or NULL (continuous styling).
+  class_params_for <- function(lab) {
+    surface <- class_surface_of(lab)
+    if (is.null(surface) || !isTRUE(input$color_style %in% c("agro", "bin"))) return(NULL)
+    tryCatch(classification_params(surface), error = function(e) NULL)
+  }
+
   current_style_sig <- function(lab, class_params) {
     # Effective style: agro/bin without computable class params renders the
     # continuous fallback, so it must share the continuous signature (e.g.
@@ -133,7 +147,7 @@
       style_eff,
       input$palette_select %||% "",
       map_view_layer(),
-      isTRUE(input$match_scales),
+      match_scales_on(),
       if (!is.null(class_params)) paste(signif(class_params$brks, 10), collapse = ",") else "none",
       sep = "|"
     )
@@ -223,12 +237,11 @@
       }
       m <- m %>% leaflet::addLegend(pal = pal, values = c(-abs_max, abs_max), title = legend_var_title(map_legend_title(meta$label, layer = "resid")), layerId = legend_id)
     } else {
-      # Classified styling when requested AND computable; any failure or
-      # not-yet-applied class breaks fall back to the continuous palette so
-      # the viewer NEVER renders an empty base map over a completed run.
-      class_params <- if (input$color_style %in% c("agro", "bin") && !is_uncert_view) {
-        tryCatch(classification_params(), error = function(e) NULL)
-      } else NULL
+      # Classified styling when requested AND computable, with the classes of
+      # the surface this map shows; any failure or not-yet-applied class
+      # breaks fall back to the continuous palette so the viewer NEVER renders
+      # an empty base map over a completed run.
+      class_params <- if (!is_uncert_view) class_params_for(lab) else NULL
 
       if (!is.null(class_params)) {
         pal <- colorBin(class_params$colors, bins = class_params$brks, na.color = "transparent", right = FALSE)
@@ -338,10 +351,7 @@
         isolate({
           m <- style_map_rasters(m, r_list, lab, map_id)
           if (!is.null(map_id)) {
-            cp <- if ((input$color_style %||% "cont") %in% c("agro", "bin")) {
-              tryCatch(classification_params(), error = function(e) NULL)
-            } else NULL
-            assign(map_id, current_style_sig(lab, cp), envir = map_style_sig)
+            assign(map_id, current_style_sig(lab, class_params_for(lab)), envir = map_style_sig)
           }
         })
       }
@@ -378,8 +388,13 @@
     # Styling dependencies, registered unconditionally so the observer is
     # armed even before the first run.
     style_now <- input$color_style %||% "cont"
-    input$palette_select; input$match_scales; map_view_layer()
-    cp <- if (style_now %in% c("agro", "bin")) tryCatch(classification_params(), error = function(e) NULL) else NULL
+    input$palette_select; match_scales_on(); map_view_layer()
+    # Both surfaces' classes are dependencies: each map is restyled with its
+    # own (class_params_for below).
+    if (style_now %in% c("agro", "bin")) {
+      tryCatch(classification_params("act"), error = function(e) NULL)
+      tryCatch(classification_params("pre"), error = function(e) NULL)
+    }
 
     if (is.null(rv$disp)) return(invisible(NULL))
     view <- map_view_base()
@@ -402,7 +417,7 @@
       tgt <- targets[[map_id]]
       r_list <- as_raster_list(tgt$r)
       if (length(r_list) == 0) next
-      sig <- current_style_sig(tgt$lab, cp)
+      sig <- current_style_sig(tgt$lab, class_params_for(tgt$lab))
       if (identical(get0(map_id, envir = map_style_sig), sig)) next
       style_map_rasters(leafletProxy(map_id), r_list, tgt$lab, map_id)
       assign(map_id, sig, envir = map_style_sig)
@@ -539,11 +554,11 @@
       lon <- suppressWarnings(as.numeric(val$lng))
       lat <- suppressWarnings(as.numeric(val$lat))
       if (length(lon) < 2 || length(lon) != length(lat)) return(invisible(NULL))
-      # The CRS of the run ON SCREEN, not whatever the sidebar now holds: the
-      # projected figure exists to be compared with this surface's variogram
-      # range and grid resolution, so it must name the system those were
-      # computed in. Falls back to the live selection only before a first run
-      # has committed one (rv$disp is the same snapshot get_display_meta reads).
+      # The Target Mapping CRS of the run ON SCREEN, not whatever the sidebar
+      # now holds. The projected figure is in that CRS; the models computed in
+      # the working CRS, which coincides with it only when the two are the same
+      # system. Falls back to the live selection only before a first run has
+      # committed one (rv$disp is the same snapshot get_display_meta reads).
       ruler_crs <- rv$disp$crs_sel %||% input$crs_selection
       res <- tryCatch(measure_path_metrics(cbind(lon, lat), ruler_crs),
                       error = function(e) NULL)
@@ -976,8 +991,11 @@
          return(sci_placeholder("Select a locality to inspect its stored variogram for the current variable and data subset."))
        }
        if (target == "act") {
+         # rv$sf is the display set: it keeps samples without a measured value
+         # (gstat refuses a missing response) and sits in the Target Mapping
+         # CRS, which may be geographic.
          pts_sf <- if(!is.null(rv$sf)) {
-           rv$sf
+           validate_and_project_sf(rv$sf[!is.na(rv$sf$v), ])
          } else {
            req(rv$user_data, rv$mapping$x, rv$mapping$y, rv$mapping$crs)
            act_col <- meta$actual
@@ -988,13 +1006,14 @@
            req(nrow(df_clean) >= 3)
            validate_and_project_sf(sf::st_as_sf(df_clean, coords = c("x", "y"), crs = rv$mapping$crs))
          }
-         req(pts_sf)
+         req(pts_sf, nrow(pts_sf) >= 3)
          return(build_variogram_ggplot(gstat::variogram(v ~ 1, pts_sf),
                                        title = paste("Global Variogram (Actual):", sci_disp_label(meta))))
        }
        pred_col <- if(identical(meta$value_type, "pred_ss")) meta$pred_ss else meta$pred
        pts_sf <- if(!is.null(rv$sf) && "pv" %in% colnames(rv$sf)) {
-         rv$sf
+         pv_rows <- rv$sf[!is.na(rv$sf$pv), ]
+         if (nrow(pv_rows) < 3) NULL else validate_and_project_sf(pv_rows)
        } else if(!is.null(pred_col) && pred_col %in% colnames(rv$user_data)) {
          req(rv$user_data, rv$mapping$x, rv$mapping$y, rv$mapping$crs)
          df_clean <- rv$user_data %>%
@@ -1009,7 +1028,7 @@
        if (is.null(pts_sf) || !("pv" %in% colnames(pts_sf))) {
          return(sci_placeholder("Predicted data structure is not available.\nPlease run spatial interpolation first."))
        }
-       return(build_variogram_ggplot(gstat::variogram(pv ~ 1, pts_sf %>% filter(!is.na(pv))),
+       return(build_variogram_ggplot(gstat::variogram(pv ~ 1, pts_sf),
                                      title = paste("Global Variogram (Predicted):", sci_disp_label(meta))))
      }
 
@@ -1033,28 +1052,26 @@
      if (is.null(v_emp)) {
        return(sci_placeholder(paste0("No fitted variogram for this locality yet (", tgt_label, ").\nPress OPTIMIZE ALL VARIOGRAMS in the sidebar (Fitting Mode: Auto-Fit)\nor run an interpolation first.")))
      }
-     manual_model <- NULL; sub <- NULL
+     manual_model <- NULL; manual_sub <- NULL
      manual_applies <- isTRUE(sci_vgm_tuning()) && input$vgm_mode == "manual" && loc == input$m_loc &&
        identical(manual_vgm_target(), target)
      if (isTRUE(manual_applies)) {
        manual_model <- manual_vgm(input$m_psill, input$k_mod, input$m_range, input$m_nugget)
-       sub <- paste("Manual model (red dashed) - weighted SSE (same criterion as Auto-Fit):",
-                    signif(vgm_weighted_sse(v_emp, manual_model), 4))
+       manual_sub <- paste("Manual model (red dashed) - weighted SSE (same criterion as Auto-Fit):",
+                           signif(vgm_weighted_sse(v_emp, manual_model), 4))
        if (isTRUE(vgm_smooth_nugget_share(manual_model) < VGM_SMOOTH_NUGGET_WARN_SHARE)) {
-         sub <- paste0(sub, "\nUnstable in kriging: ", input$k_mod,
-                       " with a nugget below 5% of the sill")
+         manual_sub <- paste0(manual_sub, "\nUnstable in kriging: ", input$k_mod,
+                              " with a nugget below 5% of the sill")
        }
      }
-     # A target with no usable variance in this locality: the empirical points
-     # are all zero and the fitted curve climbs to a sill 60 orders of
-     # magnitude below the data. Show the points, not a model of the noise.
-     if (vgm_target_degenerate(v_fit)) {
-       v_fit <- NULL
-       sub <- paste(c(sub, VGM_DEGENERATE_NOTE), collapse = "\n")
-     }
-     build_variogram_ggplot(v_emp, v_fit,
-                            title = paste0("Fitted (", tgt_label, "): ", loc),
-                            subtitle = sub, manual_model = manual_model)
+     # The fitted model's parameters head the subtitle, as on every variogram
+     # panel. A target with no usable variance in this locality has all-zero
+     # empirical points and a fitted curve 60 orders of magnitude below the
+     # data: the points are drawn, not a model of the noise
+     # (build_fitted_variogram_plot).
+     build_fitted_variogram_plot(v_emp, v_fit,
+                                 title = paste0("Fitted (", tgt_label, "): ", loc),
+                                 extra_sub = manual_sub, manual_model = manual_model)
    }
 
    output$vgm_plot_main <- renderCachedPlot({

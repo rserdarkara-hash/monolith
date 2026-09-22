@@ -467,7 +467,10 @@ test_that("a variogram still rising at the cutoff gets a hedged trend advisory",
                                      target_degenerate = FALSE)
   html <- build_vgm_warning_html(list(LocA_act = f))
   expect_match(html, "Sill not observed; possible large-scale trend", fixed = TRUE)
-  expect_match(html, "Regression Kriging", fixed = TRUE)
+  # The trend case is named by its remedy, never by an engine to switch to:
+  # the variogram alone cannot say which case applies.
+  expect_match(html, "kriging its residuals addresses the trend case", fixed = TRUE)
+  expect_no_match(html, "Regression Kriging", fixed = TRUE)
   # A rising variogram is a diagnostic for trend, never proof of it.
   expect_no_match(html, "non-stationarity detected", fixed = TRUE)
 
@@ -557,6 +560,34 @@ test_that("structural dependency is qualified when the sill is not resolved", {
   m <- manual_vgm(2, "Exp", 300, 0.5)
   expect_true(is.na(vgm_params_row(m)$sill_resolved))
   expect_identical(.vgm_params_chr(m)[6], "80%")
+})
+
+test_that("a variogram subtitle reads the fitted parameters the Variogram Parameters card reports", {
+  # Resolved: family, nugget, partial sill, a and the practical range (3a for Exp).
+  g <- gstat::vgm(psill = 2, model = "Exp", range = 100, nugget = 0.5)
+  attr(g, "vgm_diagnostics") <- list(status = "ok", max_lag = 700,
+                                     sill_resolved = TRUE, target_degenerate = FALSE)
+  expect_identical(vgm_fit_subtitle(g),
+                   "Fitted: Exp (Nugget: 0.5, Partial Sill: 2, Range (a): 100, Practical Range: 300)")
+  # Not resolved: the practical range carries its qualifier, as on the card.
+  f <- gstat::vgm(psill = 2, model = "Exp", range = 300, nugget = 0.5)
+  attr(f, "vgm_diagnostics") <- list(status = "range_unresolved", max_lag = 700,
+                                     sill_resolved = FALSE, target_degenerate = FALSE)
+  expect_match(vgm_fit_subtitle(f),
+               "Practical Range: 900, model-extrapolated beyond the longest lag 700)", fixed = TRUE)
+  # A Matern names its smoothness; small values keep their digits.
+  m <- gstat::vgm(psill = 3.873e-05, model = "Mat", range = 6510, nugget = 0.000172, kappa = 1.5)
+  expect_match(vgm_fit_subtitle(m),
+               "Fitted: Mat, kappa = 1.5 (Nugget: 0.000172, Partial Sill: 3.873e-05, Range (a): 6510,",
+               fixed = TRUE)
+  expect_identical(vgm_fit_subtitle(gstat::vgm(0.4, "Nug", 0)), "Fitted: pure nugget (Nugget: 0.4)")
+  expect_null(vgm_fit_subtitle(NULL))
+  # Never "Fitted" for a model nothing was fitted to: the heuristic stand-in
+  # of a failed fit, or a model the user applied.
+  fb <- robust_vgm_fit(NULL, c(1, 2, 3))
+  expect_match(vgm_fit_subtitle(fb), "^Heuristic fallback, not fitted: Sph ")
+  applied <- stamp_vgm(manual_vgm(2, "Exp", 300, 0.5), "ph", "manual")
+  expect_match(vgm_fit_subtitle(applied), "^Applied manual model: Exp ")
 })
 
 test_that("the variogram export carries the lag support beside the percentage", {

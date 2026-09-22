@@ -173,7 +173,8 @@
       } else {
         paste("Internal Residual Variogram", paste0(title_suffix, ":"), loc)
       }
-      build_variogram_ggplot(v_emp, v_fit, title = ttl)
+      # The model the run kriged with, as the other variogram panels state it.
+      build_fitted_variogram_plot(v_emp, v_fit, title = ttl)
     }
   }
 
@@ -203,13 +204,13 @@
       return(sci_placeholder("Cross-variogram is not available\n(LMC model fit failed, using Ordinary Kriging fallback.)"))
     }
     vm <- variogram(g)
-    # Panel strips carry the gstat ids (internal target id + raw covariate
-    # columns); map them to the run variable's display name and the
-    # covariate labels/column names per the tab's naming radio.
-    ids <- names(g$data)
-    target_name <- sci_disp_label() %||% ids[1]
-    id_labels <- vapply(ids, function(id) {
-      if (id %in% c("v", "pv")) target_name else get_var_label(id, sci_vars_meta())
+    # Panel strips carry the gstat ids (syntactic aliases of the target and
+    # covariate columns, ck_id_columns); map them to the run variable's display
+    # name and the covariate labels/column names per the tab's naming radio.
+    cols <- ck_id_columns(g)
+    target_name <- sci_disp_label() %||% names(cols)[1]
+    id_labels <- vapply(names(cols), function(id) {
+      if (cols[[id]] %in% c("v", "pv")) target_name else get_var_label(cols[[id]], sci_vars_meta())
     }, character(1))
     rel <- relabel_ck_variogram(vm, g$model, id_labels)
     title_suffix <- if (type == "act") "(Actual)" else "(Predicted)"
@@ -584,24 +585,35 @@
     total
   }
 
-  # Shapes a hectare vector (or an error marker) into the displayed table.
+  # Shapes a hectare vector (or an error marker) into the table: each class
+  # with its range, because every surface has its own class breaks, and the
+  # bounds as numbers (open ends NA) so an exported sheet can be recomputed on.
   area_ha_to_df <- function(ha, params) {
     if (is.null(params)) return(data.frame(Status = "Awaiting classification - press Apply to maps and statistics under Map Styling in the sidebar"))
     if (is.null(ha)) return(NULL)
     err <- attr(ha, "area_error")
     if (!is.null(err)) return(data.frame(Error = as.character(err)))
-    class_names <- if (isTruthy(input$color_style == "bin")) params$leg_labels else params$labels
+    fin <- function(x) ifelse(is.finite(x), x, NA_real_)
+    n <- params$n_c
     # Unrounded: a small field's class can cover less than 0.005 ha, which
     # two decimals printed (and exported) as 0. The card formats it instead.
-    data.frame(Class = class_names, Ha = as.numeric(ha))
+    data.frame(Class = params$labels, Range = params$ranges,
+               `Lower Bound` = fin(params$brks[seq_len(n)]),
+               `Upper Bound` = fin(params$brks[seq_len(n) + 1L]),
+               Ha = as.numeric(ha), check.names = FALSE)
+  }
+  # The card shows the ranges; the numeric bounds are for the exported sheet.
+  area_card <- function(df) {
+    sci_dt(df[, setdiff(names(df), c("Lower Bound", "Upper Bound")), drop = FALSE],
+           signif_cols = "Ha")
   }
 
-  calc_area_df <- function(r_obj, r_id = NULL) {
+  calc_area_df <- function(r_obj, r_id = NULL, surface = "act") {
     if (is.null(r_obj)) return(NULL)
     # error-only: catching `condition` here also unwound message() conditions
     # escaping classification_params(), aborting the reactive mid-evaluation
     # and poisoning it for the map renderers (Jenks fell back to continuous)
-    params <- tryCatch(classification_params(), error = function(e) NULL)
+    params <- tryCatch(classification_params(surface), error = function(e) NULL)
     if (is.null(params)) return(area_ha_to_df(NULL, NULL))
     area_ha_to_df(class_area_ha(r_obj, params, r_id), params)
   }
@@ -612,7 +624,7 @@
     if (!is.finite(ov)) return(data.frame(Status = "Locality overlap could not be measured; see the per-locality area tables."))
     if (ov > 0.5) return(data.frame(Status = sprintf(
       "Overlapping locality boundaries would count %.3g ha more than once; no combined total is reported. See the per-locality tables.", ov / 1e4)))
-    params <- tryCatch(classification_params(), error = function(e) NULL)
+    params <- tryCatch(classification_params("act"), error = function(e) NULL)
     if (is.null(params)) return(area_ha_to_df(NULL, NULL))
     ha <- class_area_ha_sum(rv$rast_list_act, "loc_act", params)
     # Only a run that stored no per-locality surface falls back to the merged
@@ -628,23 +640,23 @@
     if (!is.finite(ov)) return(data.frame(Status = "Locality overlap could not be measured; see the per-locality area tables."))
     if (ov > 0.5) return(data.frame(Status = sprintf(
       "Overlapping locality boundaries would count %.3g ha more than once; no combined total is reported. See the per-locality tables.", ov / 1e4)))
-    params <- tryCatch(classification_params(), error = function(e) NULL)
+    params <- tryCatch(classification_params("pre"), error = function(e) NULL)
     if (is.null(params)) return(area_ha_to_df(NULL, NULL))
     ha <- class_area_ha_sum(rv$rast_list_pre, "loc_pre", params)
     if (is.null(ha)) ha <- class_area_ha(rv$rast_pred, params, "total_pre_merged")
     area_ha_to_df(ha, params)
   })
 
-  output$area_table_total_act <- DT::renderDataTable({ req(length(rv$loc_names) > 1, input$color_style %in% c("agro", "bin")); sci_dt(area_df_total_act(), signif_cols = "Ha") })
-  output$area_table_total_pre <- DT::renderDataTable({ req(length(rv$loc_names) > 1, input$color_style %in% c("agro", "bin")); sci_dt(area_df_total_pre(), signif_cols = "Ha") })
+  output$area_table_total_act <- DT::renderDataTable({ req(length(rv$loc_names) > 1, input$color_style %in% c("agro", "bin")); area_card(area_df_total_act()) })
+  output$area_table_total_pre <- DT::renderDataTable({ req(length(rv$loc_names) > 1, input$color_style %in% c("agro", "bin")); area_card(area_df_total_pre()) })
 
   output$area_table_loc_act <- DT::renderDataTable({
     req(rv$rast_list_act, input$color_style %in% c("agro", "bin")); loc <- input$sel_loc_stats
-    if(loc == "Total (Combined)") sci_dt(NULL) else sci_dt(calc_area_df(rv$rast_list_act[[loc]], paste0("loc_act_", loc)), signif_cols = "Ha")
+    if(loc == "Total (Combined)") sci_dt(NULL) else area_card(calc_area_df(rv$rast_list_act[[loc]], paste0("loc_act_", loc), "act"))
   })
   output$area_table_loc_pre <- DT::renderDataTable({
     req(rv$rast_list_pre, input$color_style %in% c("agro", "bin")); loc <- input$sel_loc_stats
-    if(loc == "Total (Combined)") sci_dt(NULL) else sci_dt(calc_area_df(rv$rast_list_pre[[loc]], paste0("loc_pre_", loc)), signif_cols = "Ha")
+    if(loc == "Total (Combined)") sci_dt(NULL) else area_card(calc_area_df(rv$rast_list_pre[[loc]], paste0("loc_pre_", loc), "pre"))
   })
 
   # Class-area and class-agreement exports follow the CLASSIFICATION, not the
@@ -661,14 +673,16 @@
   # classification_params() is read under tryCatch here as at every other call
   # site: an error in an event expression is an unhandled observer error and
   # ends the session.
-  observeEvent(list(tryCatch(classification_params(), error = function(e) NULL),
+  # Each surface's sheets carry its own class breaks.
+  observeEvent(list(tryCatch(classification_params("act"), error = function(e) NULL),
+                    tryCatch(classification_params("pre"), error = function(e) NULL),
                     rv$results_rev), {
     req(rv$disp)
     reg <- isolate(rv$export_registry)
     stale <- grepl("^table_(area|kappa)_", names(reg))
     if (any(stale)) rv$export_registry <- reg[!stale]
 
-    params_now <- tryCatch(classification_params(), error = function(e) NULL)
+    params_now <- tryCatch(classification_params("act"), error = function(e) NULL)
     if (is.null(params_now) || !isTruthy(input$color_style %in% c("agro", "bin"))) return()
     meta <- get_display_meta()
     req(meta, !is.null(rv$rast))
@@ -689,21 +703,22 @@
     for (l in names(rv$rast_list_act)) {
       if (is.null(rv$rast_list_act[[l]])) next
       reg_if_df(paste0("table_area_loc_", l), paste(l, "- Area Coverage"),
-                tryCatch(calc_area_df(rv$rast_list_act[[l]], paste0("loc_act_", l)),
+                tryCatch(calc_area_df(rv$rast_list_act[[l]], paste0("loc_act_", l), "act"),
                          error = function(e) NULL))
     }
     if (has_pre) {
       for (l in names(rv$rast_list_pre)) {
         if (is.null(rv$rast_list_pre[[l]])) next
         reg_if_df(paste0("table_area_pre_loc_", l), paste(l, "- Area Coverage (Predicted)"),
-                  tryCatch(calc_area_df(rv$rast_list_pre[[l]], paste0("loc_pre_", l)),
+                  tryCatch(calc_area_df(rv$rast_list_pre[[l]], paste0("loc_pre_", l), "pre"),
                            error = function(e) NULL))
       }
     }
 
     # Agreement needs an uploaded prediction column AND agronomical classes;
     # quartile binning is a screen-side choice with no map counterpart, so the
-    # export follows the map's own class limits.
+    # export follows the map's class limits: the Actual surface's, one class
+    # definition for both columns of every pair (agro_params).
     params_k <- tryCatch(agro_params(), error = function(e) NULL)
     if (has_pre && !is.null(params_k) && !is.null(rv$sf)) {
       df_k <- rv$sf %>% st_drop_geometry() %>% filter(!is.na(v), !is.na(pv))
@@ -1280,6 +1295,8 @@
       return("No interpolated surface yet. Run an interpolation first.")
     if (!isTRUE(input$color_style %in% c("agro", "bin")))
       return("Class zones exist only under Agronomical or Binned map styling. Switch Map Styling in the sidebar (Agronomical also needs Apply to maps and statistics).")
+    if (identical(input$color_style, "agro") && is.null(agro_applied()))
+      return("Agronomical classes are not applied yet. Press Apply to maps and statistics under Map Styling in the sidebar.")
     if (identical(map_view_base(), "view_resid"))
       return("The residual view is not classified. Switch the Map Viewer to Actual, Predicted or Comparison to export its class zones.")
     if (map_view_layer() %in% c("se", "var") && isTRUE(rv$disp$has_variance))
@@ -1327,20 +1344,21 @@
   # Map Viewer's view switcher rather than the sidebar, for the same reason the
   # Quick Export button does: what is exported must be what is being looked at.
   class_zone_sf <- reactive({
-    params <- tryCatch(classification_params(), error = function(e) NULL)
-    if (is.null(params)) return(NULL)
     meta <- get_display_meta()
     if (is.null(meta)) return(NULL)
 
-    labs <- if (isTruthy(input$color_style == "bin")) params$leg_labels else params$labels
     view <- map_view_base()
     sources <- switch(view,
-      "view_pred"  = list(list(r = rv$rast_pred, tag = "Predicted")),
-      "view_comp"  = list(list(r = rv$rast, tag = "Actual"),
-                          list(r = rv$rast_pred, tag = "Predicted")),
-      list(list(r = rv$rast, tag = "Actual")))
+      "view_pred"  = list(list(r = rv$rast_pred, tag = "Predicted", surface = "pre")),
+      "view_comp"  = list(list(r = rv$rast, tag = "Actual", surface = "act"),
+                          list(r = rv$rast_pred, tag = "Predicted", surface = "pre")),
+      list(list(r = rv$rast, tag = "Actual", surface = "act")))
 
+    # Each surface is dissolved with its own classes, as the map draws it.
     parts <- lapply(sources, function(s) {
+      params <- tryCatch(classification_params(s$surface), error = function(e) NULL)
+      if (is.null(params)) return(NULL)
+      labs <- if (isTruthy(input$color_style == "bin")) params$leg_labels else params$labels
       build_class_zone_sf(s$r, params, labs, s$tag, meta$label, meta$method)
     })
     parts <- Filter(Negate(is.null), parts)

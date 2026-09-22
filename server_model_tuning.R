@@ -69,8 +69,10 @@ run_optimizer_async <- function(
     error = function(e) 1L
   )
 
-  # TPS is memory-heavy. Keep it asynchronous, but do not create
-  # another PSOCK layer inside the promise worker.
+  # A TPS GCV search takes about 0.2 s per locality, less than a nested PSOCK
+  # cluster costs to start (measured 1.7 s serial against 3.4 s on 7 workers),
+  # so TPS stays asynchronous without a second worker layer. IDW, at about 4 s
+  # per locality, gains from one.
   if (identical(worker_name, "tps_gcv_item")) {
     nested_workers <- 1L
   } else {
@@ -201,6 +203,25 @@ run_optimizer_async <- function(
   invisible(NULL)
 }
 
+# Localities an optimizer skipped for too few distinct samples
+# (OPTIMIZER_MIN_POINTS): nothing was stored for them, so the sidebar setting
+# applies. Named in the run log and in one notification per optimization.
+note_optimizer_skips <- function(res_list, jobs, engine) {
+  idx <- which(vapply(res_list, function(r) !is.null(r$skipped), logical(1)))
+  if (length(idx) == 0) return(invisible(NULL))
+  lines <- vapply(idx, function(i) {
+    paste0(jobs[[i]]$l, " (", jobs[[i]]$target, "): ", res_list[[i]]$skipped)
+  }, character(1))
+  rv$log <- paste0(rv$log, "\n[Tuning] ", engine, " optimizer skipped ",
+                   paste(lines, collapse = "; "), ".")
+  showNotification(
+    paste0(engine, " optimizer: ", length(idx), " locality/target pair(s) have fewer than ",
+           OPTIMIZER_MIN_POINTS, " distinct samples. Nothing was stored for them, so the ",
+           "sidebar setting applies (details in the run log)."),
+    type = "warning", duration = 10)
+  invisible(NULL)
+}
+
 # --- TPS Optimization ---
 # Lambda presets: the 0.001-step slider makes the special values -1 (Auto)
 # and 0 (exact interpolation) hard to hit by dragging.
@@ -288,10 +309,12 @@ observeEvent(input$opt_tps, {
     packages = c("sf", "fields"),
     busy_msg = "Optimizing TPS lambda per region in the background; the dashboard stays usable.",
     on_success = function(res_list) {
+      note_optimizer_skips(res_list, jobs, "TPS")
       for (i in seq_along(res_list)) {
         res <- res_list[[i]]
         l <- jobs[[i]]$l
         target <- jobs[[i]]$target
+        if (!is.null(res$skipped)) next
         if (!is.null(res$err)) {
           rv$log <- paste0(rv$log, "\nTPS Opt Error (", l, "): ", res$err)
           showNotification(
@@ -478,7 +501,9 @@ observeEvent(input$opt_idw, {
     packages = c("sf", "gstat"),
     busy_msg = "Calculating optimal IDW factors per region in the background; the dashboard stays usable.",
     on_success = function(res_list) {
+      note_optimizer_skips(res_list, jobs, "IDW")
       for (i in seq_along(res_list)) {
+        if (!is.null(res_list[[i]]$skipped)) next
         set_regional_param(
           "IDW",
           jobs[[i]]$l,
@@ -488,10 +513,9 @@ observeEvent(input$opt_idw, {
         )
       }
 
-      all_best <- sapply(locs, function(l) get_regional_param("IDW", l, "act", key = keys[["act"]]))
-      # Unlike TPS there is no sentinel to filter (idw_opt_item falls back to
-      # a legitimate power of 2.0 and get_regional_param defaults to the same),
-      # so this only guards the slider against a non-finite value.
+      # Powers stored for this run's key only: a skipped locality keeps the
+      # sidebar power and must not pull the slider towards it.
+      all_best <- sapply(locs, function(l) get_regional_param("IDW", l, "act", default = NA_real_, key = keys[["act"]]))
       ok_best <- all_best[is.finite(all_best)]
       if (length(ok_best) > 0) {
         updateSliderInput(session, "idw_p", value = mean(ok_best))
@@ -537,7 +561,7 @@ output$idw_metrics_table <- renderTable({
 
   data.frame(
     Metric = c("Mean CV RMSE (Pooled)", "Mean Bias (ME)"),
-    Value = c(round(avg_rmse, 4), round(avg_me, 4))
+    Value = format_sig(c(avg_rmse, avg_me))
   )
 })
 # Last choice set pushed to each tuning-locality selector: the old code
@@ -816,7 +840,9 @@ observeEvent(input$auto_fit, {
   loc_col <- rv$mapping$loc
   x_col <- rv$mapping$x
   y_col <- rv$mapping$y
-  want_pre <- input$comp_mode || input$value_type != "actual"
+  # Unticked "Fit Actual/Predicted separately": the Predicted surface is
+  # kriged with the measured values' variogram, so none is fitted for it here.
+  want_pre <- (input$comp_mode || input$value_type != "actual") && isTRUE(input$sep_fit)
   pred_col <- if (input$value_type == "pred_ss") meta$pred_ss else meta$pred
   eff_subset <- effective_subset(input$value_type, input$subset, names(user_data))
 

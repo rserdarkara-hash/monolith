@@ -298,7 +298,10 @@ ui_main_tabs <- mainPanel(width = 9,
                                   )),
                                 hr(),
                                 sci_table("kappa_table", "Classification Performance (Uploaded Predictions)",
-                                  selectInput("kappa_bin_method", "Binning Method:", choices = c("Agronomical Classes" = "agro", "Quartiles" = "quartile")))
+                                  selectInput("kappa_bin_method", "Binning Method:", choices = c("Agronomical Classes" = "agro", "Quartiles" = "quartile")),
+                                  conditionalPanel(condition = "input.kappa_bin_method == 'agro'",
+                                    tags$div(class = "mn-table-note",
+                                      "Measured and predicted values are both binned with the Actual surface's classes: agreement is defined only between two columns classified the same way.")))
                               )
                             ),
                             sci_card("Data Summary Statistics",

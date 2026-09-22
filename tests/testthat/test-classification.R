@@ -500,7 +500,9 @@ test_that("the class download carries its legend: tif, sidecar and legend CSV", 
   out <- tempfile("cls_out"); dir.create(out)
   zf <- tempfile(fileext = ".zip")
   on.exit(unlink(c(src, out, zf), recursive = TRUE), add = TRUE)
-  files <- classif_class_download_files(rl$class, src)
+  files <- classif_class_download_files(rl$class, src,
+    tags = c(MONOLITH_VARIABLE = "Soil class", MONOLITH_PRODUCT = "Predicted class",
+             MONOLITH_RUN_ID = ""))
   zip::zip(zf, files = basename(files), root = src, mode = "cherry-pick")
   expect_setequal(zip::zip_list(zf)$filename,
                   c("predicted_class.tif", "predicted_class.tif.aux.xml",
@@ -516,6 +518,14 @@ test_that("the class download carries its legend: tif, sidecar and legend CSV", 
   # The CSV names the same codes without depending on the sidecar at all.
   leg <- utils::read.csv(file.path(out, "predicted_class_legend.csv"))
   expect_equal(leg, data.frame(ID = 1:3, class = levs))
+  # The run tags travel inside the TIFF itself, beside its colour table; an
+  # empty tag is left out rather than written as "NAME=".
+  unlink(file.path(out, "predicted_class.tif.aux.xml"))
+  desc <- terra::describe(file.path(out, "predicted_class.tif"))
+  expect_true(any(grepl("MONOLITH_VARIABLE=Soil class", desc, fixed = TRUE)))
+  expect_true(any(grepl("MONOLITH_PRODUCT=Predicted class", desc, fixed = TRUE)))
+  expect_false(any(grepl("MONOLITH_RUN_ID", desc, fixed = TRUE)))
+  expect_true(any(grepl("Color Table", desc, fixed = TRUE)))
 })
 
 test_that("run_classification_pipeline returns only serialisable pieces and honours make_surface", {
@@ -1287,6 +1297,42 @@ test_that("classification reports the rows used for CV and the final fit", {
   expect_equal(nrow(nn$cv_predictions), n_nn)
 })
 
+test_that("a missing covariate value does not stop the classification maps", {
+  # The covariate surfaces are kriged from the scoped rows, and gstat refuses a
+  # missing value: one incomplete row failed the default map stage after CV
+  # and the final fit had run. They are built from the covariate-complete rows.
+  d <- make_classif_scope_df(nA = 35, nB = 30)
+  d$elev[1:5] <- NA
+  res <- run_classification_pipeline(
+    d, target = "soil", predictors = c("elev", "slope"),
+    x_col = "x", y_col = "y", src_crs = 32633, proj_crs = "EPSG:32633",
+    method = "multinom", strategy = "standard", depth = "none",
+    v = 4, grid_res = 250, make_surface = TRUE)
+  expect_false(is.null(res$surface_df))
+  expect_gt(nrow(res$surface_df), 0)
+  prob_cols <- setdiff(grep("^\\.pred_", names(res$surface_df), value = TRUE), ".pred_class")
+  expect_true(length(prob_cols) > 0)
+  expect_true(all(is.finite(as.matrix(res$surface_df[prob_cols]))))
+})
+
+test_that("a covariate name that is not syntactic gives the results of its twin", {
+  # krige_covariates builds the held-out and grid covariates; gstat re-read
+  # "Elevation (m)" through make.names() and could not find it.
+  d <- make_classif_scope_df(nA = 35, nB = 30)
+  args <- list(target = "soil", x_col = "x", y_col = "y", src_crs = 32633,
+               proj_crs = "EPSG:32633", method = "rf", strategy = "standard",
+               depth = "none", v = 4, grid_res = 250, make_surface = TRUE)
+  plain <- do.call(run_classification_pipeline,
+                   c(list(df = d, predictors = c("elev", "slope")), args))
+  names(d)[names(d) == "elev"] <- "Elevation (m)"
+  odd <- do.call(run_classification_pipeline,
+                 c(list(df = d, predictors = c("Elevation (m)", "slope")), args))
+  expect_equal(odd$cv_metrics, plain$cv_metrics)
+  out_cols <- grep("^\\.pred_|^\\.entropy$", names(plain$surface_df), value = TRUE)
+  expect_equal(odd$surface_df[out_cols], plain$surface_df[out_cols])
+  expect_equal(odd$surface_df[["Elevation (m)"]], plain$surface_df$elev)
+})
+
 test_that("classif_scope_adequacy names the offending classes and shortfalls", {
   # Adequate scope: NULL (no warning).
   ok <- factor(rep(c("A", "B", "C"), each = 10))
@@ -1354,7 +1400,9 @@ test_that("stricter VIF threshold flags moderate collinearity the default keeps"
   expect_true(all(strict$dropped %in% c("x1", "x2")))
 })
 
-test_that("sampled Jenks targets are reproducible and preserve the caller RNG", {
+test_that("Jenks targets draw no random numbers above 3,000 values", {
+  # Natural breaks are exact over every value (natural_breaks), so the caller's
+  # stream is untouched and any seed gives the same classes.
   df <- data.frame(v = seq_len(4000)^1.3)
   a <- with_seed(1, {
     before <- .Random.seed

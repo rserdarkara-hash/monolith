@@ -2237,9 +2237,14 @@ classif_group_metrics <- function(pred_df, target, group_col = ".scope_group") {
 #' stores the category names, and a legend CSV (`ID,class`) that names the codes
 #' without depending on the sidecar surviving the reader's unzip tool. Returns
 #' the paths written; when GDAL wrote no sidecar the bundle is the tif and the
-#' CSV, with a warning.
-classif_class_download_files <- function(class_r, dir, base = "predicted_class") {
+#' CSV, with a warning. `tags` (named character) are the run's MONOLITH_* tags,
+#' set through terra's metadata: GDAL writes them inside the TIFF, and the colour
+#' table and categories are written exactly as without them (a gdal_translate
+#' pass would have to carry those over).
+classif_class_download_files <- function(class_r, dir, base = "predicted_class", tags = NULL) {
   tif <- file.path(dir, paste0(base, ".tif"))
+  tags <- tags[!is.na(tags) & nzchar(tags)]
+  if (length(tags)) terra::metags(class_r) <- tags
   terra::writeRaster(class_r, tif, overwrite = TRUE, datatype = "INT1U")
   cats <- terra::cats(class_r)[[1]]
   legend <- file.path(dir, paste0(base, "_legend.csv"))
@@ -2623,9 +2628,13 @@ run_classification_pipeline <- function(df, target, predictors,
     report("covariates", 0,
            sprintf("Interpolating covariates onto %s grid cells...", n_cell_lab))
     # model$predictors: a covariate the final model's screen removed is never
-    # read by the model, so it is not kriged.
+    # read by the model, so it is not kriged. The surfaces use the rows that
+    # carry every covariate the model reads (a missing target is fine here, as
+    # for RK): gstat refuses a missing value in the variable it kriges.
+    cov_ok <- stats::complete.cases(
+      sf::st_drop_geometry(pts)[, model$predictors, drop = FALSE])
     grid_aux <- build_classification_grid_aux(
-      pts, gr$grid_p, model$predictors,
+      pts[cov_ok, ], gr$grid_p, model$predictors,
       cancel_file = cancel_file,
       progress = function(f) report("covariates", f))
 

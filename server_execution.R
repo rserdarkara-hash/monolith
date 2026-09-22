@@ -716,10 +716,11 @@
       comp_mode = isTRUE(input$comp_mode),
       localities = locs,
       subset = eff_subset,
-      # The CRS this run was computed in. The Map Viewer's ruler reports its
-      # projected figure against it, so that figure keeps naming the system the
-      # displayed surface, its variogram lags and its grid resolution live in
-      # even after the sidebar has been retargeted for the next run.
+      # The Target Mapping CRS of this run: the CRS its rasters were written in.
+      # The Map Viewer's ruler reports its projected figure against it, even
+      # after the sidebar has been retargeted for the next run. The models
+      # computed in the working CRS, which is this system only when the two
+      # coincide.
       crs_sel = input$crs_selection,
       # The INPUT-side mapping this run was computed from. Every layer on the
       # Map Viewer is a snapshot of the last run, so changing the Input Data
@@ -736,6 +737,11 @@
       rv$export_registry <- list()
       rv$rast_list_act <- list(); rv$rast_list_pre <- list(); sf_list <- list(); b_list <- list()
       rv$rast <- NULL; rv$rast_pred <- NULL; rv$rast_res <- NULL; rv$has_predictions <- FALSE
+      # Set only when this run produces them, so they must not survive from the
+      # previous one: a run in which every locality fails would otherwise
+      # register the old run's performance tables under this run's label.
+      rv$rast_point_res <- NULL; rv$sf <- NULL; rv$bound <- NULL
+      rv$bound_overlap_m2 <- c(act = 0, pre = 0)
     rv$log <- paste0("[Run #", rv$run_counter, "] Starting spatial interpolation using method: ", input$method, "...")
     rv$run_warnings <- character(0)
     rv$model_summaries <- list(); rv$rf_models <- list(); rv$gstat_objs <- list()
@@ -1091,7 +1097,9 @@
           }
           if(res$log_msg != "") {
               rv$log <- paste0(rv$log, res$log_msg)
-              if(grepl("Error", res$log_msg)) {
+              # A CV error under finished maps is in the log and in the
+              # locality's Model Performance row, not a failed region.
+              if(locality_run_failed(res, want_pre = comp_mode || val_type != "actual")) {
                 showNotification(paste("Error in region:", l, "-", res$log_msg), type = "error", duration = 15)
                 failed_regions[[l]] <- res$log_msg
               }
@@ -1209,7 +1217,7 @@
     if(length(valid_a) > 0) {
       rv$rast <- merge_wrapped_rasters(valid_a)
       register_export_item("map_actual", paste(meta$label, "- Actual Map -", m_lab), "map", rv$rast, meta$category,
-                           legend = map_legend_title(meta$label, meta$unit))
+                           legend = map_legend_title(meta$label, meta$unit), surface = "act")
       
       # Uncertainty products exist for the kriging engines only. IDW's var1.var
       # is all NA and TPS has none at all, so registering these for those
@@ -1239,7 +1247,7 @@
       rv$rast_pred <- merge_wrapped_rasters(valid_p)
       rv$has_predictions <- TRUE
       register_export_item("map_predicted", paste(meta$label, "- Predicted Map -", m_lab), "map", rv$rast_pred, meta$category,
-                           legend = map_legend_title(meta$label, meta$unit))
+                           legend = map_legend_title(meta$label, meta$unit), surface = "pre")
       
       temp_rast_p <- terra::unwrap(rv$rast_pred)
       if (method_has_variance(current_method) && "var1.var" %in% names(temp_rast_p)) {

@@ -1085,7 +1085,9 @@ test_that("cv_repeats_export_df splits mean and SD into numeric columns", {
     d
   })
   summ <- summarise_cv_repeats(reps)
-  skip_if(is.null(summ), "repeat summary unavailable")
+  # A deterministic four-frame fixture: a NULL summary is a regression, not a
+  # reason to skip.
+  expect_false(is.null(summ))
 
   out <- cv_repeats_export_df(summ, "Actual Model")
 
@@ -1172,6 +1174,21 @@ test_that("format_sig prints four significant digits and never a false zero", {
   }
   # vectorised, and each element decided on its own magnitude
   expect_identical(format_sig(c(0, 1.2e-7, 30.4204)), c("0", "1.200e-07", "30.42"))
+})
+
+test_that("class legend labels state each class's [low, high) range", {
+  # Four classes from three inner breaks, open at both ends: the top class
+  # holds its lower break (>=), and small-scale breaks keep their digits.
+  brks <- c(-Inf, 0.07019, 0.08099, 0.09405, Inf)
+  expect_identical(class_legend_labels(brks),
+                   c("< 0.07019", "0.07019 - 0.08099", "0.08099 - 0.09405", "≥ 0.09405"))
+  expect_identical(class_legend_labels(c(-Inf, 2.1e-5, Inf)), c("< 2.100e-05", "≥ 2.100e-05"))
+  # a surface with a single class
+  expect_identical(class_legend_labels(c(-Inf, Inf)), "All values")
+  # Narrow classes of a large variable: whole units would print 1002 twice.
+  flat <- class_legend_labels(c(-Inf, 1000.92, 1001.64, 1002.36, 1003.08, Inf))
+  expect_identical(flat, c("< 1000.9", "1000.9 - 1001.6", "1001.6 - 1002.4",
+                           "1002.4 - 1003.1", "≥ 1003.1"))
 })
 
 test_that("the browser formatter states the same rule as format_sig", {
@@ -1318,11 +1335,18 @@ test_that("rf_importance_df writes every importance measure the forest recorded"
   grow <- function(...) suppressWarnings(randomForest::randomForest(y ~ ., data = d, ntree = 60, ...))
   with_imp <- grow(importance = TRUE)
   out <- rf_importance_df(with_imp)
-  expect_equal(names(out), c("Variable", "%IncMSE", "IncNodePurity"))
+  lab <- RF_IMPORTANCE_LABELS
+  expect_equal(names(out), c("Variable", lab[["increase"]], lab[["scaled"]], lab[["purity"]]))
   expect_equal(out$Variable[1], "a")
   imp <- randomForest::importance(with_imp)
   expect_equal(out$IncNodePurity, unname(imp[out$Variable, "IncNodePurity"]))
-  expect_false(is.unsorted(rev(out[["%IncMSE"]])))   # ordered by the first measure
+  # The permutation importance twice: the increase in out-of-bag MSE, and the
+  # same divided by its standard error across trees (randomForest's default).
+  raw <- randomForest::importance(with_imp, type = 1, scale = FALSE)
+  expect_equal(out[[lab[["increase"]]]], unname(raw[out$Variable, 1]))
+  expect_equal(out[[lab[["scaled"]]]], unname(imp[out$Variable, "%IncMSE"]))
+  expect_equal(out[[lab[["scaled"]]]], unname(raw[out$Variable, 1] / with_imp$importanceSD[out$Variable]))
+  expect_false(is.unsorted(rev(out[[lab[["increase"]]]])))   # ordered by the unscaled increase
 
   without <- grow()
   out2 <- rf_importance_df(without)

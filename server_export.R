@@ -1,7 +1,8 @@
 # server_export.R (sourced with local = TRUE inside server) - export registry,
 # run-config/run-history panels, WYSIWYG styler and export download handlers.
   register_export_item <- function(id, label, type, obj, category = "General", kind = "value",
-                                   var_label = NULL, legend = NULL, derived = NULL) {
+                                   var_label = NULL, legend = NULL, derived = NULL,
+                                   surface = NULL) {
     # `derived` items carry no payload of their own: export_item_obj()
     # (global_utils.R) rebuilds them from a raster the registry already holds.
     req(!is.null(obj) || !is.null(derived))
@@ -31,6 +32,8 @@
       legend = legend,
       # NULL, or the spec export_item_obj() rebuilds `obj` from.
       derived = derived,
+      # A value map's surface ("act"/"pre"), whose own class breaks style it.
+      surface = surface,
       timestamp = Sys.time()
     )
     
@@ -283,15 +286,27 @@
     invisible(NULL)
   }
 
+  # The class definition(s) an exported map is drawn with, the same ones the
+  # Map Viewer uses: the classes of the surface the map shows, both surfaces'
+  # for the Actual vs Predicted figure. NULL draws the map continuous. Every
+  # value map is registered with its `surface`; residual and uncertainty maps
+  # carry none and are never classified (generate_base_plot).
+  export_class_params <- function(item) {
+    if (!isTRUE(input$color_style %in% c("agro", "bin"))) return(NULL)
+    get <- function(s) tryCatch(classification_params(s), error = function(e) NULL)
+    if (identical(item$type, "map_combined")) return(list(act = get("act"), pre = get("pre")))
+    get(item$surface %||% "act")
+  }
+
   base_preview_plot <- reactive({
     req(active_styler_item(), rv$export_registry)
     item <- rv$export_registry[[active_styler_item()]]
     req(item)
-    
+
     generate_base_plot(
       item = item,
       input = input,
-      agro_params = tryCatch(agro_params(), error = function(e) NULL)
+      agro_params = export_class_params(item)
     )
   })
   
@@ -421,7 +436,8 @@
     legend <- map_legend_title(meta$label, meta$unit,
                                if (view == "view_resid") "resid" else layer)
 
-    register_export_item(id, label, type, target, meta$category, kind = kind, legend = legend)
+    register_export_item(id, label, type, target, meta$category, kind = kind, legend = legend,
+                         surface = if (view == "view_pred") "pre" else if (view == "view_act") "act")
     active_styler_item(id)
 
     shinyjs::click("open_styler")
@@ -759,7 +775,7 @@
           } else if (item$type %in% c("plot", "map", "map_combined")) {
             p_obj <- generate_styled_plot(
               item, input,
-              agro_params = tryCatch(agro_params(), error = function(e) NULL)
+              agro_params = export_class_params(item)
             )
 
             export_plot_to_file(p_obj, file, ext, input)
@@ -860,7 +876,7 @@
             } else {
               p <- generate_styled_plot(
                 item, input,
-                agro_params = tryCatch(agro_params(), error = function(e) NULL)
+                agro_params = export_class_params(item)
               )
               export_plot_to_file(p, filepath, ext, input)
             }

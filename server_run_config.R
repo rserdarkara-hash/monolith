@@ -241,28 +241,40 @@
           "Applying re-encodes every visible map layer and recomputes class areas - expect a few seconds, longer for multi-locality or comparison views."))
   })
 
+  # Match Scales counts only while its checkbox is on screen
+  # (match_scales_shown): the sidebar hides it outside a comparison but it
+  # keeps its value, so a box ticked for an earlier comparison went on pooling
+  # colour ranges and class breaks with no visible control saying so.
+  match_scales_on <- reactive({
+    isTRUE(input$match_scales) &&
+      match_scales_shown(input$comp_mode, input$value_type, disp_has_pred(), map_view_base())
+  })
+
   # Pooled prediction values of both surfaces under Match Scales. Always the
   # PREDICTION band: class breaks are computed from it, and they describe the
   # concentration surfaces whichever layer the Map Viewer is showing.
   joint_vv <- reactive({
-    get_joint_scale_values(rv$rast, rv$rast_pred, input$match_scales, "value")
+    get_joint_scale_values(rv$rast, rv$rast_pred, match_scales_on(), "value")
   })
   # Display-only twin for the SE/variance views: one colour range across both
   # surfaces' uncertainty layers under Match Scales. Never used for breaks.
   joint_uncert_vv <- reactive({
     layer <- map_view_layer()
     if (!layer %in% c("se", "var")) return(NULL)
-    get_joint_scale_values(rv$rast, rv$rast_pred, input$match_scales, layer)
+    get_joint_scale_values(rv$rast, rv$rast_pred, match_scales_on(), layer)
   })
 
-  # Values the class breaks are computed on: joint scale when Match Scales is
-  # on, else the displayed surface, else (pre-run) the raw data column.
-  classification_values <- function(meta, n_min) {
+  # Values ONE surface's class breaks are computed on: that surface's own
+  # values, so each map's classes describe the surface it shows, whichever map
+  # is on screen; both surfaces pooled under Match Scales, the explicit request
+  # for one common scale. Before the first run the raw data column stands in
+  # for the Actual surface.
+  classification_values <- function(meta, n_min, surface = "act") {
     vv <- joint_vv()
     if (is.null(vv)) {
-      vv <- if (map_view_base() %in% c("view_pred", "view_comp")) rast_vals_pre() else rast_vals_act()
+      vv <- if (identical(surface, "pre")) rast_vals_pre() else rast_vals_act()
     }
-    if (is.null(vv)) {
+    if (is.null(vv) && !identical(surface, "pre")) {
       v_data <- rv$user_data[[meta$actual]]
       if (!is.null(v_data)) vv <- v_data[is.finite(v_data)]
     }
@@ -270,13 +282,17 @@
     vv
   }
 
-  classification_params <- reactive({
+  # The inner class breaks of one surface ("act" or "pre"), or NULL. Kept apart
+  # from the colours, which follow the live palette: natural breaks over every
+  # cell take seconds on a large surface, and a palette change must not
+  # recompute them. rv$disp is the committed run context WITHOUT the palette
+  # that get_display_meta() adds.
+  compute_class_breaks <- function(surface) {
     req(input$color_style %in% c("agro", "bin"))
     # Displayed run's variable when one exists (class breaks must describe the
     # map on screen); live selection as pre-run fallback so the styling
     # controls stay usable before the first interpolation.
-    meta <- get_display_meta()
-    if (is.null(meta)) meta <- get_current_meta()
+    meta <- rv$disp %||% get_current_meta()
     req(meta)
 
     if (input$color_style == "agro") {
@@ -284,85 +300,75 @@
       # until APPLY is pressed (the pending-note UI flags the divergence).
       ap <- agro_applied()
       if (is.null(ap)) return(NULL)
-      n_c <- ap$n_classes
-
-      if(ap$method == "limits") {
-        brks_inner <- ap$limits
-        if (is.null(brks_inner)) return(NULL)
-      } else {
-        vv <- classification_values(meta, n_c)
-        if (is.null(vv)) return(NULL)
-        # Seeded (and, for Jenks, subsampled) break computation: classInt's
-        # jenks is O(n^2)-slow on raster-sized vectors and both jenks and
-        # kmeans draw unseeded random numbers internally.
-        brks_inner <- calc_class_breaks(vv, n_c, ap$method)
-        if (is.null(brks_inner)) return(NULL)
-      }
-
-      brks <- sort(unique(c(-Inf, brks_inner, Inf)))
-      n_c_actual <- length(brks) - 1
-
-      rcl_mat <- matrix(NA, nrow = n_c_actual, ncol = 3)
-      for(i in 1:n_c_actual) {
-        rcl_mat[i, ] <- c(brks[i], brks[i+1], i)
-      }
-
-      colors <- get_agro_colors(n_c_actual)
-      labels <- if(n_c_actual==3) c("Low", "Med", "High") else paste("Class", 1:n_c_actual)
-
-      leg_labels <- character(n_c_actual)
-      for(i in 1:n_c_actual) {
-        if(i==1) leg_labels[i] <- paste("<", round(brks[2], 3))
-        else if(i==n_c_actual) leg_labels[i] <- paste(">", round(brks[n_c_actual], 3))
-        else leg_labels[i] <- paste(round(brks[i],3), "-", round(brks[i+1],3))
-      }
-      if(n_c_actual == 3) leg_labels <- paste(labels, ":", leg_labels)
-
-      list(brks = brks, rcl_mat = rcl_mat, colors = colors, labels = labels, leg_labels = leg_labels, n_c = n_c_actual)
-
-    } else {
-      n_c <- 5
-      vv <- classification_values(meta, n_c)
+      if (ap$method == "limits") return(ap$limits)
+      vv <- classification_values(meta, ap$n_classes, surface)
       if (is.null(vv)) return(NULL)
+      # Jenks: exact natural breaks over every value; k-means: seeded
+      # (calc_class_breaks, spatial_pipeline.R).
+      return(calc_class_breaks(vv, ap$n_classes, ap$method))
+    }
+    n_c <- 5
+    vv <- classification_values(meta, n_c, surface)
+    if (is.null(vv)) return(NULL)
+    rng <- range(vv, na.rm = TRUE)
+    if (is.infinite(rng[1]) || is.infinite(rng[2]) || rng[1] == rng[2]) {
+      seq(rng[1], rng[1] + 1, length.out = n_c + 1)[2:n_c]
+    } else {
+      seq(rng[1], rng[2], length.out = n_c + 1)[2:n_c]
+    }
+  }
+  class_breaks_act <- reactive(compute_class_breaks("act"))
+  class_breaks_pre <- reactive(compute_class_breaks("pre"))
 
-      rng <- range(vv, na.rm = TRUE)
-      if(is.infinite(rng[1]) || is.infinite(rng[2]) || rng[1] == rng[2]) {
-        brks_inner <- seq(rng[1], rng[1] + 1, length.out = n_c + 1)[2:n_c]
-      } else {
-        brks_inner <- seq(rng[1], rng[2], length.out = n_c + 1)[2:n_c]
-      }
-      
-      brks <- sort(unique(c(-Inf, brks_inner, Inf)))
-      n_c_actual <- length(brks) - 1
-      
-      rcl_mat <- matrix(NA, nrow = n_c_actual, ncol = 3)
-      for(i in 1:n_c_actual) {
-        rcl_mat[i, ] <- c(brks[i], brks[i+1], i)
-      }
-      
+  # The class definition built on inner breaks: breaks, the reclassification
+  # matrix ([low, high) per class), colours and labels.
+  build_classification_params <- function(brks_inner) {
+    if (is.null(brks_inner)) return(NULL)
+    meta <- get_display_meta() %||% get_current_meta()
+    req(meta)
+
+    brks <- sort(unique(c(-Inf, brks_inner, Inf)))
+    n_c_actual <- length(brks) - 1
+    rcl_mat <- cbind(brks[-length(brks)], brks[-1], seq_len(n_c_actual))
+    # The range of each class, for the legend and the area tables.
+    ranges <- class_legend_labels(brks)
+    if (input$color_style == "agro") {
+      colors <- get_agro_colors(n_c_actual)
+      labels <- if (n_c_actual == 3) c("Low", "Med", "High") else paste("Class", seq_len(n_c_actual))
+      leg_labels <- if (n_c_actual == 3) paste(labels, ":", ranges) else ranges
+    } else {
       is_viridis <- meta$palette == "viridis"
-      colors <- if(is_viridis) {
+      colors <- if (is_viridis) {
         viridis::viridis(n_c_actual, option = meta$palette)
       } else {
         colorRampPalette(RColorBrewer::brewer.pal(min(8, max(3, n_c_actual)), meta$palette))(n_c_actual)
       }
-      
-      labels <- paste("Bin", 1:n_c_actual)
-      
-      leg_labels <- character(n_c_actual)
-      for(i in 1:n_c_actual) {
-        if(i==1) leg_labels[i] <- paste("<", round(brks[2], 3))
-        else if(i==n_c_actual) leg_labels[i] <- paste(">", round(brks[n_c_actual], 3))
-        else leg_labels[i] <- paste(round(brks[i],3), "-", round(brks[i+1],3))
-      }
-      
-      list(brks = brks, rcl_mat = rcl_mat, colors = colors, labels = labels, leg_labels = leg_labels, n_c = n_c_actual)
+      labels <- paste("Bin", seq_len(n_c_actual))
+      leg_labels <- ranges
     }
-  })
+    list(brks = brks, rcl_mat = rcl_mat, colors = colors, labels = labels,
+         leg_labels = leg_labels, ranges = ranges, n_c = n_c_actual)
+  }
 
+  classification_params_act <- reactive(build_classification_params(class_breaks_act()))
+  # The Predicted surface's own classes. One definition serves both surfaces
+  # where the breaks cannot differ: supervised limits, or Match Scales.
+  classification_params_pre <- reactive({
+    shared <- match_scales_on() ||
+      (identical(input$color_style, "agro") && identical(agro_applied()$method, "limits"))
+    if (shared) return(classification_params_act())
+    build_classification_params(class_breaks_pre())
+  })
+  classification_params <- function(surface = "act") {
+    if (identical(surface, "pre")) classification_params_pre() else classification_params_act()
+  }
+
+  # The agreement tables bin each measured value and its uploaded prediction
+  # with ONE class definition, or the agreement would compare two different
+  # class systems: the Actual surface's.
   agro_params <- reactive({
     req(input$color_style == "agro")
-    classification_params()
+    classification_params_act()
   })
 
   volumes <- c(Home = fs::path_home(), Project = getwd())
@@ -495,14 +501,24 @@
     nut <- get_nut_key(vid)
     def_limits <- if(!is.null(nut) && nut %in% names(nutrient_limits)) nutrient_limits[[nut]] else NULL
 
-    # Range hint of the surface the limits will cut (cached per run) so
-    # sensible thresholds can be typed without leaving the sidebar.
+    # Range hint of each surface the limits will cut (cached per run) so
+    # sensible thresholds can be typed without leaving the sidebar. Before a
+    # run, the data column stands in for the Actual surface.
     rng_note <- tryCatch({
-      vv <- classification_values(get_display_meta() %||% get_current_meta(), 2)
-      if (is.null(vv)) NULL else {
-        rng <- range(vv, na.rm = TRUE)
+      meta_r <- get_display_meta() %||% get_current_meta()
+      act_v <- rast_vals_act()
+      if (is.null(act_v)) {
+        v_data <- rv$user_data[[meta_r$actual]]
+        act_v <- v_data[is.finite(v_data)]
+      }
+      pre_v <- rast_vals_pre()
+      rng_line <- function(lab, v) {
+        if (length(v)) sprintf("%s surface range: %s - %s", lab, format_sig(min(v)), format_sig(max(v)))
+      }
+      lines <- c(rng_line("Actual", act_v), rng_line("Predicted", pre_v))
+      if (!length(lines)) NULL else {
         tags$small(style = "display:block; color: var(--mn-text-3); margin-bottom:4px;",
-                   sprintf("Displayed surface range: %.3g - %.3g", rng[1], rng[2]))
+                   HTML(paste(htmltools::htmlEscape(lines), collapse = "<br>")))
       }
     }, error = function(e) NULL)
 

@@ -105,14 +105,13 @@ Machine-learning explainability applied to non-linear relationships and feature 
 
 **5.1 Configuration**
 *   **Target:** the primary soil parameter to explain.
-*   **Predictors:** the environmental or secondary variables acting as potential influences.
-*   **Permutations:** controls the robustness of the random-forest permutation variable-importance calculation (Breiman 2001; Fisher et al. 2019) (10 to 100, default 50).
-*   **Number of trees (ntree):** the size of the underlying random forest (`randomForest`; Liaw & Wiener 2002) (50 to 500, default 100). Higher values stabilise the permutation results but take longer.
+*   **Predictors:** the environmental or secondary variables acting as potential influences, picked from a list with a search box and Select All / Deselect All. The analysis needs at least 50 rows that carry the target and every selected predictor; the message names how many rows qualify when fewer do.
+*   **Number of trees (ntree):** the size of the underlying random forest (`randomForest`; Liaw & Wiener 2002) (50 to 500, default 100). The importance is averaged over the trees, so more trees give a more stable importance estimate, at a longer run.
 *   **SHAP sample size (max):** SHAP explanations are computationally intensive, so this caps the random subsample (50 to 1000, default 100). Lower values run faster for quick exploration; higher values represent the dataset better.
 
 **5.1.1 Cancelling a run**
 
-A **Cancel Run** button sits in the running panel and takes effect at the next checkpoint rather than instantly. Checkpoints sit before the random-forest fit, before the permutation-importance pass, before the ALE/PDP profiles, and between individual SHAP observations. The SHAP loop is normally the longest stage and is checked per observation, so a cancel there is usually picked up within a second or two. The exception is permutation importance, which runs all of its passes inside a single uninterruptible call and must finish before the cancel is seen; lowering **Permutations** shortens that window. A cancelled run keeps no partial results: the previous run's plots stay on screen and the Run Analysis button becomes available again.
+A **Cancel Run** button sits in the running panel and takes effect at the next checkpoint rather than instantly. Checkpoints sit before the random-forest fit, before the ALE/PDP profiles, and between individual SHAP observations. The SHAP loop is normally the longest stage and is checked per observation, so a cancel there is usually picked up within a second or two. The exception is the forest fit, which also computes the importance and runs as a single uninterruptible call; fewer trees shorten that window. A cancelled run keeps no partial results: the previous run's plots stay on screen and the Run Analysis button becomes available again.
 
 **5.2 Functional effect plots**
 
@@ -124,8 +123,8 @@ Two explainability frameworks are available:
 *   Each point is the per-observation SHAP attribution (Lundberg & Lee 2017) of the most important predictor: how much that predictor shifts the model's prediction for that sample away from the dataset-mean prediction, in the target variable's own units. Across all predictors the values sum to the deviation of the sample's prediction from the mean.
 
 **5.4 Tabular data metrics**
-*   The metrics table lists each governing factor's mean increase in RMSE after permutation relative to the unshuffled forest, in the target's units. Values near zero indicate little change in model error. It leads with an **RF model quality row, out-of-bag (OOB) % variance explained**, so the reliability of the random forest behind the importance and SHAP results can be judged directly. Low OOB values mean the explainability outputs describe a weak model and should be interpreted cautiously.
-*   The table has three columns, **Governing Factor / Metric**, **Value** and **Unit**, because the two kinds of number in it are not on one scale: the importance rows are an RMSE increase in the target's units, the model-quality row a percentage of variance. Values are displayed at four significant digits.
+*   The importance of each governing factor is its **out-of-bag permutation importance** (Breiman 2001): for every tree, how much the mean squared error of its predictions on the samples that tree was not grown on increases when that factor's values are shuffled, averaged over the trees, in the target's squared units. Scoring on samples each tree never saw keeps the forest's memory of its own training data out of the ranking: a factor with no real relationship to the target scores near zero, where shuffling on the training samples would still credit it. Values near zero or below indicate the factor adds nothing the forest can use. Correlated factors distort the ranking: the forest divides their shared signal between them, and shuffling one of them alone creates combinations of values the data do not contain (Strobl et al. 2008). The table leads with an **RF model quality row, out-of-bag (OOB) % variance explained**, so the reliability of the random forest behind the importance and SHAP results can be judged directly. Low OOB values mean the explainability outputs describe a weak model and should be interpreted cautiously.
+*   The table has the columns **Governing Factor / Metric**, **Value** and **Unit**, because the two kinds of number in it are not on one scale: the importance rows are an increase in out-of-bag MSE in the target's squared units, the model-quality row a percentage of variance. A fourth column, **Scaled (÷ SE)**, gives each factor's increase divided by its standard error across the trees, the form `randomForest` prints as %IncMSE and the one the Random Forest Kriging importance panel shows. It grows with the number of trees (roughly with its square root), so compare scaled values only between runs with the same ntree; the unscaled increase orders the factors. The importance plot shows both forms side by side. Values are displayed at four significant digits.
 
 ---
 
@@ -178,5 +177,7 @@ Mahalanobis, P. C. (1936). On the generalised distance in statistics. *Proceedin
 Rousseeuw, P. J., & Van Driessen, K. (1999). A fast algorithm for the minimum covariance determinant estimator. *Technometrics*, 41(3), 212-223. https://doi.org/10.1080/00401706.1999.10485670
 
 Shapiro, S. S., & Wilk, M. B. (1965). An analysis of variance test for normality (complete samples). *Biometrika*, 52(3/4), 591-611. https://doi.org/10.2307/2333709
+
+Strobl, C., Boulesteix, A.-L., Kneib, T., Augustin, T., & Zeileis, A. (2008). Conditional variable importance for random forests. *BMC Bioinformatics*, 9, 307. https://doi.org/10.1186/1471-2105-9-307
 
 Tukey, J. W. (1949). Comparing individual means in the analysis of variance. *Biometrics*, 5(2), 99-114. https://doi.org/10.2307/3001913

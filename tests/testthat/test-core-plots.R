@@ -150,6 +150,14 @@ test_that("build_rf_importance_plot maps covariate names through metadata", {
   y_raw <- unlist(lapply(b_raw$layout$panel_params, function(pp) pp$y$get_labels()))
   expect_true(all(c("a", "b") %in% y_raw))
   expect_false(any(c("Alpha", "Beta") %in% y_raw))
+
+  # A forest grown with importance = TRUE gets one panel per measure, the
+  # unscaled increase first, and the strongest covariate at the top.
+  rf_imp <- without_partial_match_notices(
+    randomForest::randomForest(y ~ a + b, data = df_rf, ntree = 25, importance = TRUE))
+  b_imp <- ggplot_build(build_rf_importance_plot(rf_imp, "T", NULL))
+  expect_equal(levels(b_imp$layout$layout$Measure), unname(RF_IMPORTANCE_LABELS))
+  expect_equal(tail(b_imp$layout$panel_params[[1]]$y$get_labels(), 1), "a")
 })
 
 test_that("relabel_ck_variogram renames direct and cross ids consistently", {

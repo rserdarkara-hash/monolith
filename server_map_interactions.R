@@ -207,7 +207,7 @@
       html_content <- paste0(html_content, "<tr style='background-color: var(--mn-surface-2);'><td colspan='2'><b>", cat, "</b></td></tr>")
       for(v in cat_vars) {
         val <- find_val(as.character(v$actual))
-        val_str <- if(!is.null(val) && (is.numeric(val) || !is.na(suppressWarnings(as.numeric(val))))) round(as.numeric(val), 3) else as.character(val %||% "N/A")
+        val_str <- if(!is.null(val) && (is.numeric(val) || !is.na(suppressWarnings(as.numeric(val))))) format_sig(as.numeric(val)) else as.character(val %||% "N/A")
         html_content <- paste0(html_content, "<tr><td style='padding: 3px;'>", v$label, "</td><td style='padding: 3px; text-align: right;'>", val_str, "</td></tr>")
       }
     }
@@ -217,7 +217,7 @@
       html_content <- paste0(html_content, "<tr style='background-color: var(--mn-surface-2);'><td colspan='2'><b>Other Variables</b></td></tr>")
       for(ov in other_vars) {
         val <- find_val(as.character(ov))
-        val_str <- if(!is.null(val) && (is.numeric(val) || !is.na(suppressWarnings(as.numeric(val))))) round(as.numeric(val), 3) else as.character(val %||% "N/A")
+        val_str <- if(!is.null(val) && (is.numeric(val) || !is.na(suppressWarnings(as.numeric(val))))) format_sig(as.numeric(val)) else as.character(val %||% "N/A")
         html_content <- paste0(html_content, "<tr><td style='padding: 3px;'>", ov, "</td><td style='padding: 3px; text-align: right;'>", val_str, "</td></tr>")
       }
     }

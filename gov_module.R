@@ -2,22 +2,26 @@
 # quality first, then one row per covariate in decreasing importance.
 #
 # Value and Unit are separate columns because the two quantities are not the
-# same kind of number - permutation importance is an RMSE increase in the
-# target's units, the model-quality row is a percentage - and a single column
-# headed "Value (RMSE increase | OOB %)" left the reader to work out which was
-# which. Values are unrounded; the display formats them.
+# same kind of number - permutation importance is an increase in out-of-bag
+# MSE, in the target's squared units; the model-quality row is a percentage.
+# The scaled column is the same increase divided by its standard error across
+# trees (randomForest's %IncMSE): unitless, and it grows with the tree count.
+# Values are unrounded; the display formats them.
+GOV_IMPORTANCE_UNIT <- "Increase in out-of-bag MSE (target units squared)"
+GOV_SCALED_COL <- "Scaled (÷ SE)"
 gov_summary_df <- function(res, vars_metadata = NULL) {
   if (is.null(res) || is.null(res$importance)) return(NULL)
   vip <- res$importance
-  vip <- vip[order(vip$dropout_loss, decreasing = TRUE), , drop = FALSE]
+  vip <- vip[order(vip$mse_increase, decreasing = TRUE), , drop = FALSE]
   out <- data.frame(
     `Governing Factor / Metric` = vapply(as.character(vip$variable),
                                          function(v) get_var_label(v, vars_metadata),
                                          character(1), USE.NAMES = FALSE),
-    Value = as.numeric(vip$dropout_loss),
-    Unit = "RMSE increase",
+    Value = as.numeric(vip$mse_increase),
+    Unit = GOV_IMPORTANCE_UNIT,
     check.names = FALSE, stringsAsFactors = FALSE
   )
+  out[[GOV_SCALED_COL]] <- as.numeric(vip$mse_increase_scaled %||% NA_real_)
   # Report the quality of the RF model behind the SHAP/importance results:
   # OOB % variance explained (pseudo-R² on out-of-bag data). The module keeps
   # `oob_rsq` and drops the forest once a run lands (see the completion
@@ -25,10 +29,12 @@ gov_summary_df <- function(res, vars_metadata = NULL) {
   oob_rsq <- res$oob_rsq
   if (is.null(oob_rsq)) oob_rsq <- tryCatch(utils::tail(res$model$rsq, 1), error = function(e) NULL)
   if (!is.null(oob_rsq) && length(oob_rsq) == 1 && is.finite(oob_rsq)) {
-    out <- rbind(data.frame(
+    quality <- data.frame(
       `Governing Factor / Metric` = "RF model quality: OOB variance explained",
       Value = 100 * as.numeric(oob_rsq), Unit = "% of variance (out-of-bag)",
-      check.names = FALSE, stringsAsFactors = FALSE), out)
+      check.names = FALSE, stringsAsFactors = FALSE)
+    quality[[GOV_SCALED_COL]] <- NA_real_
+    out <- rbind(quality, out)
   }
   out
 }
@@ -42,12 +48,11 @@ gov_factors_ui <- function(id) {
         shiny::column(3,
           shiny::div(style = "display: flex; align-items: center; margin-bottom: 10px;",
             shiny::h4("Analysis Configuration", style = "margin: 0; margin-right: 8px;"),
-            shiny::tags$i(class = "fa fa-info-circle", style = "color: var(--mn-text-3); cursor: help;", title = "A minimum of 50 samples is required to reliably execute Machine Learning models.")
+            shiny::tags$i(class = "fa fa-info-circle", style = "color: var(--mn-text-3); cursor: help;", title = "At least 50 complete rows (the target and every selected factor present) are required to fit the random forest reliably.")
           ),
           shiny::uiOutput(ns("gov_target_ui")),
           shiny::uiOutput(ns("gov_predictors_ui")),
-          shiny::sliderInput(ns("gov_permutations"), "Permutations (for RF importance)", min = 10, max = 100, value = 50, step = 10, ticks = FALSE),
-          shiny::sliderInput(ns("gov_ntree"), "Number of Trees (ntree)", min = 50, max = 500, value = 100, step = 50, ticks = FALSE),
+          shiny::sliderInput(ns("gov_ntree"), shiny::tags$span("Number of Trees (ntree)", shiny::tags$i(class = "fa fa-info-circle", title = "Importance is each predictor's permutation importance on the out-of-bag rows, averaged over the trees; more trees give a more stable estimate.", style = "color: var(--mn-text-3); cursor: help; margin-left: 5px;")), min = 50, max = 500, value = 100, step = 50, ticks = FALSE),
           shiny::sliderInput(ns("gov_shap_size"), shiny::tags$span("SHAP Sample Size (Max)", shiny::tags$i(class = "fa fa-info-circle", title = "Lower values calculate faster but are less stable; higher values take longer but represent the dataset better.", style = "color: var(--mn-text-3); cursor: help; margin-left: 5px;")), min = 50, max = 1000, value = 100, step = 50, ticks = FALSE),
           shiny::actionButton(ns("gov_run_btn"), "Run Analysis", class = "btn-primary btn-block"),
           shiny::hr(),
@@ -183,9 +188,9 @@ gov_factors_server <- function(id, data_reactive, vars_metadata_reactive) {
       names(num_cols) <- num_named
       
       shinyWidgets::pickerInput(
-        ns("gov_predictors"), "Governing Factors", 
-        choices = num_cols, multiple = TRUE, 
-        options = list(`actions-box` = TRUE)
+        ns("gov_predictors"), "Governing Factors",
+        choices = num_cols, multiple = TRUE,
+        options = list(`actions-box` = TRUE, `live-search` = TRUE)
       )
     })
     
@@ -198,9 +203,17 @@ gov_factors_server <- function(id, data_reactive, vars_metadata_reactive) {
       shiny::req(df, input$gov_target, input$gov_predictors)
       
       preds <- setdiff(input$gov_predictors, input$gov_target)
-      
-      if (length(preds) < 1 || nrow(df) < 50) {
-        shiny::showNotification("Insufficient data or predictors for analysis. At least 50 observations are required.", type = "error")
+      if (length(preds) < 1) {
+        shiny::showNotification("Select at least one governing factor other than the target.", type = "error")
+        return()
+      }
+      # The forest is fitted on the rows complete across the target and every
+      # factor, so those are the rows that count against the minimum.
+      n_complete <- sum(stats::complete.cases(df[, unique(c(input$gov_target, preds)), drop = FALSE]))
+      if (n_complete < 50) {
+        shiny::showNotification(sprintf(
+          "%d of %d rows have the target and every selected factor; at least 50 such rows are required.",
+          n_complete, nrow(df)), type = "error")
         return()
       }
       
@@ -226,7 +239,6 @@ gov_factors_server <- function(id, data_reactive, vars_metadata_reactive) {
       gov_rv$ready <- "running"
 
       target_col <- input$gov_target
-      n_perms <- input$gov_permutations
       ntree_val <- input$gov_ntree
       shap_size_val <- input$gov_shap_size
       # Ship only the columns the worker uses: compute_governing_factors
@@ -264,7 +276,6 @@ gov_factors_server <- function(id, data_reactive, vars_metadata_reactive) {
           df = df,
           target_col = target_col,
           predictors = preds,
-          n_permutations = n_perms,
           rf_ntree = ntree_val,
           shap_sample_size = shap_size_val,
           cores_hint = cores_hint_val,
@@ -272,7 +283,7 @@ gov_factors_server <- function(id, data_reactive, vars_metadata_reactive) {
         )
       },
       globals = list(proj_root_ship = proj_root_ship, df = df,
-                     target_col = target_col, preds = preds, n_perms = n_perms,
+                     target_col = target_col, preds = preds,
                      ntree_val = ntree_val, shap_size_val = shap_size_val,
                      cores_hint_val = cores_hint_val,
                      cancel_file_ship = cancel_file_ship),
@@ -338,22 +349,33 @@ gov_factors_server <- function(id, data_reactive, vars_metadata_reactive) {
       
       if (plot_type == "importance") {
         vip_df <- gov_rv$res$importance
-        vip_df <- vip_df[!vip_df$variable %in% c("_baseline_", "_full_model_", "(Intercept)"), ]
-        vip_df <- vip_df[order(vip_df$dropout_loss, decreasing = FALSE), ]
+        vip_df <- vip_df[order(vip_df$mse_increase, decreasing = FALSE), ]
         vip_df$variable_label <- sapply(as.character(vip_df$variable), function(v) get_var_label(v, vars_metadata_reactive()))
         # make.unique: two predictors sharing a metadata label would otherwise
         # crash factor() with duplicated levels.
         vip_df$variable_label <- make.unique(unname(vip_df$variable_label))
         vip_df$variable_label <- factor(vip_df$variable_label, levels = vip_df$variable_label)
-        
-        ggplot2::ggplot(vip_df, ggplot2::aes(x = variable_label, y = dropout_loss)) + 
-          ggplot2::geom_bar(stat = "identity", fill = "steelblue") +
-          ggplot2::coord_flip() + 
+        # Both forms of the out-of-bag permutation importance, one panel each:
+        # the increase in MSE, which orders the factors, and the same divided
+        # by its standard error across trees (randomForest's %IncMSE).
+        long <- data.frame(variable_label = vip_df$variable_label, value = vip_df$mse_increase,
+                           measure = RF_IMPORTANCE_LABELS[["increase"]])
+        if (!is.null(vip_df$mse_increase_scaled)) {
+          long <- rbind(long, data.frame(variable_label = vip_df$variable_label,
+                                         value = vip_df$mse_increase_scaled,
+                                         measure = RF_IMPORTANCE_LABELS[["scaled"]]))
+        }
+        long$measure <- factor(long$measure, levels = unique(long$measure))
+
+        ggplot2::ggplot(long, ggplot2::aes(x = value, y = variable_label)) +
+          ggplot2::geom_col(fill = "steelblue") +
+          ggplot2::facet_wrap(~measure, scales = "free_x") +
           ggplot2::labs(title = "Global Variable Importance",
                         subtitle = if (!is.null(gov_rv$res$n_used)) {
                           complete_case_note(gov_rv$res$n_used, gov_rv$res$n_total)
                         },
-                        x = "Variable", y = "RMSE increase after permutation") +
+                        caption = "Scaled values grow with the number of trees: compare them only between runs with the same ntree.",
+                        x = NULL, y = "Variable") +
           ggplot2::theme_minimal(base_size = base_size)
       } else if (plot_type == "interaction_a") {
         shap_df <- gov_rv$res$shap
@@ -443,7 +465,7 @@ gov_factors_server <- function(id, data_reactive, vars_metadata_reactive) {
       # numeric and are formatted at four significant digits for display: the
       # importances used to print as raw doubles (2.001495588850122).
       DT::datatable(df, options = list(dom = 't', paging = FALSE, scrollX = TRUE,
-                                       columnDefs = sig_render_defs(df, "Value")),
+                                       columnDefs = sig_render_defs(df, c("Value", GOV_SCALED_COL))),
                     rownames = FALSE)
     })
     

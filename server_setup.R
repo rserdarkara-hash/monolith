@@ -95,25 +95,11 @@
          lags <- calc_scientific_lags(cv_obj)
          v_res <- variogram(residual ~ 1, cv_obj, width = lags$width, cutoff = lags$cutoff)
          v_fit <- robust_vgm_fit(v_res, cv_obj$residual)
-         v_sub <- if (!is.null(v_fit)) {
-           model_name <- as.character(v_fit$model[2])
-           nugget <- round(v_fit$psill[1], 4)
-           psill <- if(nrow(v_fit) > 1) round(v_fit$psill[2], 4) else 0
-           v_range <- if(nrow(v_fit) > 1) round(v_fit$range[2], 2) else 0
-           paste0("Fitted: ", model_name, " (Nugget: ", nugget, ", Partial Sill: ", psill, ", Range: ", v_range, ")")
-         } else {
-           "Target: Pure Nugget (No structure)"
-         }
          # Residuals with no usable variance: every empirical point sits at the
-         # numerical noise floor and the "fitted" model describes that noise.
-         # Draw the points, suppress the curve, and say why.
-         if (vgm_target_degenerate(v_fit)) {
-           v_fit <- NULL
-           v_sub <- VGM_DEGENERATE_NOTE
-         }
-         build_variogram_ggplot(v_res, v_fit,
-                                title = paste("Residual Variogram:", loc, title_suffix),
-                                subtitle = v_sub)
+         # numerical noise floor, so the points are drawn with the reason and
+         # no curve (build_fitted_variogram_plot).
+         build_fitted_variogram_plot(v_res, v_fit,
+                                     title = paste("Residual Variogram:", loc, title_suffix))
       }, error = function(e) {
          sci_placeholder(paste("Residual variogram error:\n", e$message), size = 4)
       })
@@ -209,7 +195,7 @@
      if(!is.null(rv$disp$v_emps[[paste0(l, "_act")]])) {
        v_emp <- rv$disp$v_emps[[paste0(l, "_act")]]
        v_fit <- rv$disp$v_fits[[paste0(l, "_act")]]
-       p_vgm <- build_variogram_ggplot(v_emp, v_fit, title = paste("Variogram (Actual):", l))
+       p_vgm <- build_fitted_variogram_plot(v_emp, v_fit, title = paste("Variogram (Actual):", l))
        register_export_item(paste0("plot_vgm_act_", l), paste(meta$label, "-", l, "- Variogram (Actual)"), "plot", p_vgm, meta$category)
        df_vgm <- as.data.frame(v_emp) %>% select(np, dist, gamma, dir.hor, dir.ver)
        register_export_item(paste0("table_vgm_act_", l), paste(meta$label, "-", l, "- Variogram Data (Actual)"), "table", df_vgm, meta$category)
@@ -217,7 +203,7 @@
      if((comp_mode || val_type != "actual") && !is.null(rv$disp$v_emps[[paste0(l, "_pre")]])) {
        v_emp_p <- rv$disp$v_emps[[paste0(l, "_pre")]]
        v_fit_p <- rv$disp$v_fits[[paste0(l, "_pre")]]
-       p_vgm_p <- build_variogram_ggplot(v_emp_p, v_fit_p, title = paste("Variogram (Predicted):", l))
+       p_vgm_p <- build_fitted_variogram_plot(v_emp_p, v_fit_p, title = paste("Variogram (Predicted):", l))
        register_export_item(paste0("plot_vgm_pre_", l), paste(meta$label, "-", l, "- Variogram (Predicted)"), "plot", p_vgm_p, meta$category)
        df_vgm_p <- as.data.frame(v_emp_p) %>% select(np, dist, gamma, dir.hor, dir.ver)
        register_export_item(paste0("table_vgm_pre_", l), paste(meta$label, "-", l, "- Variogram Data (Predicted)"), "table", df_vgm_p, meta$category)
@@ -316,9 +302,9 @@
      # CK exports use the same faceted ggplot + metadata labels as the SA tab.
      ck_export_plot <- function(g, title) {
        vm <- variogram(g)
-       ids <- names(g$data)
-       id_labels <- vapply(ids, function(id) {
-         if (id %in% c("v", "pv")) meta$label else get_var_label(id, rv$mapping$vars)
+       cols <- ck_id_columns(g)
+       id_labels <- vapply(names(cols), function(id) {
+         if (cols[[id]] %in% c("v", "pv")) meta$label else get_var_label(cols[[id]], rv$mapping$vars)
        }, character(1))
        rel <- relabel_ck_variogram(vm, g$model, id_labels)
        build_ck_variogram_ggplot(rel$vm, rel$model, title)

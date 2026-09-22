@@ -113,8 +113,8 @@ build_vgm_warning_html <- function(v_fit_list, target = NULL, engine = NULL) {
              paste(trend_keys, collapse = ", "),
              ".<br>The variogram is still rising at the cutoff, so range and sill are weakly ",
              "constrained: long-range dependence or non-stationarity, which it cannot separate. ",
-             "Consider Regression Kriging, which fits the variogram to the residuals of a ",
-             "covariate trend.</span>")
+             "Modelling the trend with covariates and kriging its residuals addresses the trend ",
+             "case; the variogram alone cannot say which case applies.</span>")
     }
   } else ""
   smooth_part <- if (length(smooth_keys) > 0) {
@@ -179,22 +179,30 @@ build_tps_gcv_plot <- function(gcv_list, loc, target = c("act", "pre")) {
          x = "Lambda (Log Scale)", y = "GCV Score")
 }
 
-# RF variable-importance dot chart from a randomForest fit. Covariate names
-# map to display labels when variable metadata is supplied (NULL keeps raw
-# column names); every importance measure the fit carries gets its own panel,
-# mirroring randomForest::varImpPlot's content in a labeled ggplot.
+# RF variable-importance dot chart from a randomForest fit: one panel per
+# measure rf_importance_df() reports (the numeric record exported beside it),
+# covariates ordered by the out-of-bag MSE increase, largest at the top.
+# Covariate names map to display labels when variable metadata is supplied
+# (NULL keeps raw column names).
 build_rf_importance_plot <- function(rf_mod, title, vars_metadata = NULL) {
-  imp <- randomForest::importance(rf_mod)
-  if (is.null(imp) || nrow(imp) == 0) return(NULL)
-  df <- data.frame(Variable = rownames(imp), imp, check.names = FALSE)
-  df$Variable <- unname(get_var_labels(df$Variable, vars_metadata))
+  df <- rf_importance_df(rf_mod)
+  if (nrow(df) == 0) return(NULL)
+  # make.unique: two covariates sharing a metadata label would otherwise
+  # collapse into one factor level.
+  df$Variable <- make.unique(unname(get_var_labels(df$Variable, vars_metadata)))
+  measures <- setdiff(names(df), "Variable")
   long <- tidyr::pivot_longer(df, -Variable, names_to = "Measure", values_to = "Importance")
-  long$Variable <- stats::reorder(long$Variable, long$Importance, FUN = max)
+  long$Measure <- factor(long$Measure, levels = measures)
+  long$Variable <- factor(long$Variable, levels = rev(df$Variable))
   ggplot(long, aes(x = Importance, y = Variable)) +
     geom_segment(aes(x = 0, xend = Importance, yend = Variable), color = "grey70", linewidth = 0.4) +
     geom_point(color = "steelblue", size = 2.5) +
     facet_wrap(~Measure, scales = "free_x") +
-    labs(title = title, x = NULL, y = NULL) +
+    labs(title = title, x = NULL, y = NULL,
+         caption = if (RF_IMPORTANCE_LABELS[["scaled"]] %in% measures) {
+           paste0("The scaled measure grows with the number of trees (", rf_mod$ntree,
+                  " here); IncNodePurity is computed on the trees' own training rows.")
+         }) +
     theme_minimal(base_size = 12) +
     theme(plot.title = element_text(size = 12, face = "bold"))
 }
@@ -266,6 +274,24 @@ build_variogram_ggplot <- function(v_emp, v_fit = NULL, title = "", subtitle = N
     theme_minimal(base_size = 12) +
     theme(plot.title = element_text(size = 12, face = "bold"),
           plot.subtitle = element_text(size = 9, color = "grey30", lineheight = 1.3))
+}
+
+# A fitted variogram's plot with the model's parameters as its subtitle
+# (vgm_fit_subtitle), the one form every variogram panel and export uses. A
+# variable with no usable variance draws its points and the note instead: its
+# fitted curve and parameters describe numerical noise. `extra_sub` lines (a
+# manual-tuning overlay's) follow the parameters.
+build_fitted_variogram_plot <- function(v_emp, v_fit, title, extra_sub = NULL,
+                                        manual_model = NULL) {
+  fit_sub <- vgm_fit_subtitle(v_fit)
+  if (vgm_target_degenerate(v_fit)) {
+    v_fit <- NULL
+    fit_sub <- VGM_DEGENERATE_NOTE
+  }
+  lines <- c(fit_sub, extra_sub)
+  build_variogram_ggplot(v_emp, v_fit, title = title,
+                         subtitle = if (length(lines)) paste(lines, collapse = "\n"),
+                         manual_model = manual_model)
 }
 
 # Directional variogram (anisotropy diagnostic) from calc_directional_variogram:
@@ -357,12 +383,17 @@ ggplotly_smart <- function(p) {
   plotly::ggplotly(p, tooltip = if (has_text) "text" else "all")
 }
 
+# `agro_params` is one class definition, or list(act =, pre =) for the Actual
+# vs Predicted figure, whose panels each keep their own surface's classes.
 generate_base_plot <- function(item, input, agro_params = NULL) {
   req(item)
-  
+
   if (item$type == "map" || item$type == "map_combined") {
-    
-    build_map <- function(obj, label, is_tiled = FALSE, kind = "value") {
+    params_of <- function(surface) {
+      if (is.null(agro_params) || !is.null(agro_params$rcl_mat)) agro_params else agro_params[[surface]]
+    }
+
+    build_map <- function(obj, label, is_tiled = FALSE, kind = "value", agro_params = params_of("act")) {
       # Point error maps: sample-location errors drawn as markers, mirroring
       # the Map Viewer's Point Residuals panel (never a raster surface).
       if (is.list(obj) && inherits(obj$pts, "sf")) {
@@ -453,8 +484,8 @@ generate_base_plot <- function(item, input, agro_params = NULL) {
     if (item$type == "map") {
       return(build_map(obj, item$label, kind = item$kind))
     } else {
-      p1 <- build_map(obj$act, "Actual", is_tiled = TRUE, kind = item$kind)
-      p2 <- build_map(obj$pre, "Predicted", is_tiled = TRUE, kind = item$kind)
+      p1 <- build_map(obj$act, "Actual", is_tiled = TRUE, kind = item$kind, agro_params = params_of("act"))
+      p2 <- build_map(obj$pre, "Predicted", is_tiled = TRUE, kind = item$kind, agro_params = params_of("pre"))
       return(list(p1 = p1, p2 = p2))
     }
     

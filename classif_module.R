@@ -11,16 +11,25 @@
 # ── Target factor construction ──────────────────────────────────────────────
 # Build the categorical target used for modelling. `cat` mode uses an existing
 # categorical column verbatim; `bin` mode discretises a numeric column into
-# ordered classes using classInt break styles (right = FALSE, matching the
-# app's agronomic-class convention so intervals read as [low, high); the top
-# interval also holds the maximum and reads [low, high]).
+# ordered classes - quantile or equal-interval breaks from classInt, or exact
+# Jenks natural breaks - with right = FALSE, matching the app's agronomic-class
+# convention so intervals read as [low, high); the top interval also holds the
+# maximum and reads [low, high].
 classif_build_target <- function(df, mode, cat_col, num_col, n_classes = 4,
                                  style = "quantile") {
   if (identical(mode, "bin")) {
     x <- as.numeric(df[[num_col]])
-    ci <- with_seed(12345L, suppressMessages(
-      classInt::classIntervals(x[is.finite(x)], n = n_classes, style = style)))
-    brks <- unique(ci$brks)
+    xf <- x[is.finite(x)]
+    # Jenks: the exact natural breaks over every value, the same computation
+    # the map classes use (natural_breaks, spatial_pipeline.R). classInt's
+    # quantile and equal-interval styles draw no random numbers.
+    brks <- if (identical(style, "jenks")) {
+      if (length(xf) == 0) return(NULL)
+      c(min(xf), natural_breaks(xf, n_classes), max(xf))
+    } else {
+      suppressMessages(classInt::classIntervals(xf, n = n_classes, style = style))$brks
+    }
+    brks <- unique(brks)
     if (length(brks) < 3) return(NULL)
     # Distinct breaks can still collide after rounding (tight distributions),
     # and factor() errors on duplicated levels — widen the label precision
@@ -972,6 +981,7 @@ classif_server <- function(id, data_reactive, vars_metadata_reactive, spatial_re
       nested_v <- isTRUE(input$nested_cv) && !identical(depth_v, "none")
       make_surf <- isTRUE(input$make_surface)
       target_mode_v <- input$target_mode
+      target_source_v <- if (identical(target_mode_v, "bin")) input$target_num else input$target_cat
       # CRS the run is computed in. classif_resolve_scope falls back to the
       # data's UTM zone when the Target Mapping CRS is geographic (degrees
       # would collapse the metre-based prediction grid to a single cell), and
@@ -1079,6 +1089,8 @@ classif_server <- function(id, data_reactive, vars_metadata_reactive, spatial_re
         res$dropped_covariates <- res$screened_out %||% character(0)
         res$train_xy <- train_xy_v
         res$target_mode <- target_mode_v
+        # The user's column behind ".class_target", for the exports.
+        res$target_source <- target_source_v
         shiny::updateRadioButtons(session, "map_source", selected = "model")
         cl_rv$res <- res
         cl_rv$ready <- "yes"
@@ -1686,6 +1698,18 @@ classif_server <- function(id, data_reactive, vars_metadata_reactive, spatial_re
     # Float rasters (probability, entropy) are data layers and stay
     # full-precision FLT4S - GIS software styles those on load. The class
     # raster ships as a zip (below), because its class names live in a sidecar.
+    # The run's MONOLITH_* tags, shared by every classification GeoTIFF. The
+    # variable is the user's column (as its display label), not the fixed
+    # internal name the analysis frame gives the target.
+    classif_geotiff_tags <- function(res, product) {
+      c(MONOLITH_VARIABLE = get_var_label(res$target_source %||% res$target_col %||% "",
+                                          vars_metadata_reactive()),
+        MONOLITH_PRODUCT = product,
+        MONOLITH_METHOD = res$method %||% "",
+        MONOLITH_RUN_ID = res$run_id %||% "",
+        MONOLITH_APP_VERSION = app_version,
+        MONOLITH_CREATED = format(Sys.time(), "%Y-%m-%dT%H:%M:%S%z"))
+    }
     # Through write_geotiff, like the interpolation exports: real band
     # statistics (a GIS stretches on them) and tags naming the run, stored in
     # the file; a failed tagging pass keeps the raster and says so.
@@ -1697,13 +1721,7 @@ classif_server <- function(id, data_reactive, vars_metadata_reactive, spatial_re
           shiny::req(rl[[which_r]])
           res <- cl_rv$res
           withCallingHandlers(
-            write_geotiff(rl[[which_r]], file, tags = c(
-              MONOLITH_VARIABLE = res$target_col %||% "",
-              MONOLITH_PRODUCT = product,
-              MONOLITH_METHOD = res$method %||% "",
-              MONOLITH_RUN_ID = res$run_id %||% "",
-              MONOLITH_APP_VERSION = app_version,
-              MONOLITH_CREATED = format(Sys.time(), "%Y-%m-%dT%H:%M:%S%z"))),
+            write_geotiff(rl[[which_r]], file, tags = classif_geotiff_tags(res, product)),
             warning = function(w) {
               shiny::showNotification(conditionMessage(w), type = "warning", duration = 10)
               invokeRestart("muffleWarning")
@@ -1725,8 +1743,10 @@ classif_server <- function(id, data_reactive, vars_metadata_reactive, spatial_re
         dir.create(tmp, showWarnings = FALSE, recursive = TRUE)
         on.exit(unlink(tmp, recursive = TRUE), add = TRUE)
         base <- if (identical(rl$source, "nn")) "predicted_class_nn" else "predicted_class"
+        product <- if (identical(rl$source, "nn")) "Spatial 1-NN class" else "Predicted class"
         paths <- withCallingHandlers(
-          classif_class_download_files(rl$class, tmp, base),
+          classif_class_download_files(rl$class, tmp, base,
+                                       tags = classif_geotiff_tags(cl_rv$res, product)),
           warning = function(w) {
             shiny::showNotification(conditionMessage(w), type = "warning", duration = 10)
             invokeRestart("muffleWarning")

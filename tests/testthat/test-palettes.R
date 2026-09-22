@@ -122,6 +122,25 @@ test_that("get_method_label returns empty string for empty/NA input", {
   expect_equal(get_method_label(NULL), "")
 })
 
+test_that("Match Scales counts only where the sidebar shows it", {
+  # The sidebar set up for a comparison of predictions ...
+  expect_true(match_scales_shown(TRUE, "pred", FALSE, "view_act"))
+  expect_true(match_scales_shown(TRUE, "pred_ss", FALSE, "view_act"))
+  # ... or the comparison view of a run that has a predicted surface.
+  expect_true(match_scales_shown(FALSE, "actual", TRUE, "view_comp"))
+  # Hidden: a predictions-only view, an Actual run, a residual view.
+  expect_false(match_scales_shown(FALSE, "pred", TRUE, "view_pred"))
+  expect_false(match_scales_shown(TRUE, "actual", FALSE, "view_act"))
+  expect_false(match_scales_shown(TRUE, "resid", TRUE, "view_resid"))
+  expect_false(match_scales_shown(FALSE, "pred", FALSE, "view_comp"))
+  expect_false(match_scales_shown(NULL, NULL, NULL, NULL))
+  # The checkbox's own conditionalPanel states the same condition.
+  root <- normalizePath(file.path(testthat::test_path(), "..", ".."), winslash = "/")
+  sidebar <- paste(readLines(file.path(root, "ui_sidebar.R"), warn = FALSE), collapse = "\n")
+  expect_match(sidebar, "(input.comp_mode && ['pred', 'pred_ss'].includes(input.value_type)) || (output.disp_has_pred == 'yes' && /^view_comp/.test(input.map_view || ''))",
+               fixed = TRUE)
+})
+
 test_that("res_mode_label names the resolution logic the sidebar offers", {
   # The run record stores the raw id, so the reader has to print the wording
   # the user chose from: pin the ids to the selector itself, or a renamed

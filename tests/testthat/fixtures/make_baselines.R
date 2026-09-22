@@ -93,7 +93,7 @@ baselines$ok_surface_digest <- run_surface_digest(golden_sf("tiny"))
 # ── The environment these values came out of ────────────────────────────────
 # Carried as an attribute, so `names(baselines)` still lists only the baselines
 # themselves. Without it a moved value is ambiguous three ways - the code
-# changed, the fixture changed, or gstat/classInt changed underneath both - and
+# changed, the fixture changed, or gstat/Ckmeans.1d.dp changed underneath both - and
 # the reader has no way to tell which without bisecting. golden_baseline_info()
 # puts these versions into the failure message of every baseline assertion, and
 # test-golden-fixture.R fails when the session no longer matches them.

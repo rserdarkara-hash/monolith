@@ -208,7 +208,7 @@ Monolith generates side-by-side "Actual" and "Predicted" surfaces. By matching t
 
 ![Measured and predicted potassium surfaces, continuous and classified](assets/8.png)
 
-*Figure 9. Measured against machine-learning-predicted potassium, continuous (top, IDW) and binned into shared agronomic classes (bottom, Thin Plate Spline). The class version is directly comparable because both surfaces are cut at the same limits; for the continuous version, tick **Match Scales** to force one colour range across the pair.*
+*Figure 9. Measured against machine-learning-predicted potassium, continuous (top, IDW) and binned into shared agronomic classes (bottom, Thin Plate Spline). The class version is directly comparable when both surfaces are cut at the same limits: supervised limits always are, and **Match Scales** gives Jenks, K-Means and Binned classes one set of breaks computed from both surfaces; for the continuous version, **Match Scales** forces one colour range across the pair.*
 
 
 **2. Residual Diagnostics**
@@ -253,7 +253,7 @@ Two equally valid ways to obtain Monolith:
 
 ### 3. Package Dependencies
 
-Monolith depends on **59 packages** for its spatial engine, statistical analytics, and user interface, all pinned in `renv.lock` (see [Reproducible installation](#reproducible-installation-with-renv-optional)): 58 from CRAN, and `leaflet.extras` from its GitHub repository at a pinned commit.
+Monolith depends on **58 packages** for its spatial engine, statistical analytics, and user interface, all pinned in `renv.lock` (see [Reproducible installation](#reproducible-installation-with-renv-optional)): 57 from CRAN, and `leaflet.extras` from its GitHub repository at a pinned commit.
 
 > **Deciding to install the dependencies:** `global.R` checks the suite at startup, names anything missing, and offers two routes rather than installing on its own:
 
@@ -266,9 +266,9 @@ The full dependency suite, grouped by function:
 | Category | Packages |
 |---|---|
 | **Core App / UI** | `shiny`, `shinyjs`, `shinyWidgets`, `shinyFiles`, `shinycssloaders`, `DT` |
-| **Spatial / GIS** | `sf`, `terra`, `tidyterra`, `leaflet`, `leaflet.extras`, `ggspatial`, `fields`, `classInt`, `gstat`, `concaveman`, `spdep`, `FNN` |
+| **Spatial / GIS** | `sf`, `terra`, `tidyterra`, `leaflet`, `leaflet.extras`, `ggspatial`, `fields`, `classInt`, `Ckmeans.1d.dp`, `gstat`, `concaveman`, `spdep`, `FNN` |
 | **Data Wrangling & I/O** | `dplyr`, `tidyr`, `data.table`, `jsonlite`, `readxl`, `openxlsx`, `officer`, `zip`, `fs` |
-| **Visualization & Theming** | `ggplot2`, `ggpubr`, `plotly`, `RColorBrewer`, `viridis`, `patchwork`, `showtext`, `scales`, `commonmark`, `glue` |
+| **Visualization & Theming** | `ggplot2`, `plotly`, `RColorBrewer`, `viridis`, `patchwork`, `showtext`, `scales`, `commonmark` |
 | **Statistics & Machine Learning** | `randomForest`, `DALEX`, `yardstick`, `agricolae`, `mgcv`, `nortest` |
 | **Classification (tidymodels)** | `parsnip`, `recipes`, `workflows`, `tune`, `rsample`, `dials`, `spatialsample`, `hardhat`, `ranger`, `xgboost`, `nnet` |
 | **Parallelization / Async** | `future`, `furrr`, `promises` |
@@ -293,16 +293,16 @@ Newer CRAN releases are expected to work; if you encounter an inconsistency, mat
 | `terra` | 1.9-50 | `zip` | 3.0.2 | `furrr` | 0.4.0 |
 | `tidyterra` | 1.3.0 | `fs` | 2.1.0 | `promises` | 1.5.0 |
 | `leaflet` | 2.2.3 | `ggplot2` | 4.0.3 | `patchwork` | 1.3.2 |
-| `leaflet.extras` | 2.0.1.9000 | `ggpubr` | 1.0.0 | `showtext` | 0.9-8 |
+| `leaflet.extras` | 2.0.1.9000 | `Ckmeans.1d.dp` | 4.3.6 | `showtext` | 0.9-8 |
 | `ggspatial` | 1.1.10 | `plotly` | 4.12.1 | `scales` | 1.4.0 |
 | `fields` | 17.3 | `RColorBrewer` | 1.1-3 | `commonmark` | 2.0.0 |
-| `classInt` | 0.4-11 | `viridis` | 0.6.5 | `glue` | 1.8.1 |
+| `classInt` | 0.4-11 | `viridis` | 0.6.5 | `DBI` | 1.3.0 |
 | `gstat` | 2.1-6 | `concaveman` | 1.2.0 | `spdep` | 1.4-2 |
 | `FNN` | 1.1.4.1 | `parsnip` | 1.6.0 | `recipes` | 1.4.0 |
 | `workflows` | 1.3.0 | `tune` | 2.1.0 | `rsample` | 1.3.2 |
 | `dials` | 1.4.4 | `spatialsample` | 0.6.1 | `hardhat` | 1.4.3 |
 | `ranger` | 0.18.0 | `xgboost` | 3.2.1.1 | `nnet` | 7.3-21 |
-| `DBI` | 1.3.0 | `RSQLite` | 3.53.3 |  |  |
+| `RSQLite` | 3.53.3 |  |  |  |  |
 
 **Runtime environment:** R 4.5.2 (ucrt) · GDAL 3.12.1 · GEOS 3.14.1 · PROJ 9.7.1 · Windows 11 (also runs on macOS and Linux).
 
@@ -310,7 +310,7 @@ Newer CRAN releases are expected to work; if you encounter an inconsistency, mat
 
 #### Reproducible installation with `renv` (optional)
 
-For an exact, one-command reproduction of the validated environment, the repository ships a [`renv`](https://rstudio.github.io/renv/) lockfile (`renv.lock`) pinning the dependency tree (including transitive dependencies) to the versions in the matrix above. All 59 packages listed in `global.R` are covered, the Classification Suite's tidymodels stack included. From the project root:
+For an exact, one-command reproduction of the validated environment, the repository ships a [`renv`](https://rstudio.github.io/renv/) lockfile (`renv.lock`) pinning the dependency tree (including transitive dependencies) to the versions in the matrix above. All 58 packages listed in `global.R` are covered, the Classification Suite's tidymodels stack included. From the project root:
 
 ```r
 install.packages("renv")   # once
@@ -428,13 +428,13 @@ Sample datasets in [sample_data/](sample_data/) let you exercise every module wi
 
 ## Testing and Reproducibility
 
-Monolith ships with a `testthat` suite of 4,460 assertions across 34 test files, covering the interpolation pipeline, cross-validation metrics, variogram fitting, the classification engine, the descriptive/correlation/PCA plot builders, metadata matching and the Governing Factors module. Where a quantity has an external or closed-form reference, the tests assert against that rather than against the app's own output: IDW against the hand-written Shepard sum, Ordinary Kriging against its exactness and pure-nugget closed forms, RK and RFK against the trend-plus-kriged-residual decomposition, VIF against `1/(1 - R²)` from an actual regression, Moran's I against a hand-built weight matrix, the classification and agreement metrics against a hand-built confusion matrix, the agronomical class bins against `terra::classify`'s own output, the PCA spectrum against the eigenvalues of the correlation and covariance matrices, Lin's CCC against a value computed independently with `DescTools`, and the plotted variogram curves against `gstat::variogramLine`. Those tests run on a frozen extract of the sample survey (`tests/testthat/fixtures/`), so their inputs never move and a changed number means the code changed; that directory's `GOLDEN_MANIFEST.md` states what a green suite does and does not establish, and how to substitute your own golden dataset without editing a single test. A separate file boots the assembled application in a headless browser through `shinytest2` and checks the shell (server initialisation, input identifiers, tab wiring, documentation drawer); it skips itself when `shinytest2` or a Chromium-based browser is unavailable. The suite runs on every push through GitHub Actions against the pinned `renv.lock` environment, on Linux and on Windows - the platform is not incidental, since one recorded value was once resolved differently by the two platforms' floating-point paths. A second, weekly workflow (`upstream.yaml`) runs the same suite against the current CRAN releases instead of the pinned ones, so a change in an upstream package that moves one of the recorded values is reported as upstream news rather than being discovered months later; it never gates a pull request. To run everything from the project root:
+Monolith ships with a `testthat` suite of 4,558 assertions across 34 test files, covering the interpolation pipeline, cross-validation metrics, variogram fitting, the classification engine, the descriptive/correlation/PCA plot builders, metadata matching and the Governing Factors module. Where a quantity has an external or closed-form reference, the tests assert against that rather than against the app's own output: IDW against the hand-written Shepard sum, Ordinary Kriging against its exactness and pure-nugget closed forms, RK and RFK against the trend-plus-kriged-residual decomposition, VIF against `1/(1 - R²)` from an actual regression, Moran's I against a hand-built weight matrix, the classification and agreement metrics against a hand-built confusion matrix, the agronomical class bins against `terra::classify`'s own output, the PCA spectrum against the eigenvalues of the correlation and covariance matrices, Lin's CCC against a value computed independently with `DescTools`, and the plotted variogram curves against `gstat::variogramLine`. Those tests run on a frozen extract of the sample survey (`tests/testthat/fixtures/`), so their inputs never move and a changed number means the code changed; that directory's `GOLDEN_MANIFEST.md` states what a green suite does and does not establish, and how to substitute your own golden dataset without editing a single test. A separate file boots the assembled application in a headless browser through `shinytest2` and checks the shell (server initialisation, input identifiers, tab wiring, documentation drawer); it skips itself when `shinytest2` or a Chromium-based browser is unavailable. The suite runs on every push through GitHub Actions against the pinned `renv.lock` environment, on Linux and on Windows - the platform is not incidental, since one recorded value was once resolved differently by the two platforms' floating-point paths. A second, weekly workflow (`upstream.yaml`) runs the same suite against the current CRAN releases instead of the pinned ones, so a change in an upstream package that moves one of the recorded values is reported as upstream news rather than being discovered months later; it never gates a pull request. To run everything from the project root:
 
 ```bash
 Rscript tests/testthat.R
 ```
 
-The first run is slow because the harness sources the full application (all 59 packages); this is expected. Scientific accuracy is treated as the project's primary invariant; changes that alter numeric results are gated on these tests.
+The first run is slow because the harness sources the full application (all 58 packages); this is expected. Scientific accuracy is treated as the project's primary invariant; changes that alter numeric results are gated on these tests.
 
 ### Freezing your own dataset as the reference
 

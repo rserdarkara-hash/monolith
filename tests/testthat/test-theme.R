@@ -265,6 +265,17 @@ test_that("controls centre their own contents", {
   expect_length(block, 1)
   expect_match(block, "display: flex !important", fixed = TRUE)
   expect_match(block, "align-items: center !important", fixed = TRUE)
+
+  # The sidebar scrolls, which clips its x axis, so an open picker menu sized
+  # to its longest label was cut off at the sidebar's edge on a narrow screen
+  # (measured in Edge at 1100 px: menu to 317 px, sidebar edge at 260 px). In
+  # the sidebar the menu keeps its control's width and labels wrap.
+  expect_match(css, ".well[role='complementary'] .bootstrap-select .dropdown-menu { max-width: 100%; }",
+               fixed = TRUE)
+  wrap <- regmatches(css, regexpr(
+    "\\.well\\[role='complementary'\\] \\.bootstrap-select \\.dropdown-menu li a \\{[^}]*\\}", css))
+  expect_length(wrap, 1)
+  expect_match(wrap, "white-space: normal", fixed = TRUE)
 })
 
 test_that("the sticky run dock reaches the bottom of the sidebar card", {

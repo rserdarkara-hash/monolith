@@ -185,9 +185,10 @@ test_that("calc_metric_spacing converts geographic coordinates to metres", {
 
 # ── measure_path_metrics (Map Viewer ruler) ────────────────────────────────
 # Two bases, deliberately: the geodesic length is the ground distance and the
-# projected length is the metric the engines work in. Neither may be quietly
-# substituted for the other, and a geographic analysis CRS must produce no
-# planar figure at all (a length in degrees is meaningless).
+# projected length is in the Target Mapping CRS, which is the engines' working
+# CRS only when the two are the same system. Neither may be quietly substituted
+# for the other, and a geographic Target Mapping CRS must produce no planar
+# figure at all (a length in degrees is meaningless).
 
 test_that("measure_path_metrics reproduces the WGS84 geodesic length", {
   # One degree of latitude along the prime meridian: 110574.389 m on WGS84

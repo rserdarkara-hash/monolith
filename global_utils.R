@@ -1588,10 +1588,11 @@ write_geotiff <- function(r, file, tags = NULL) {
 #'
 #'   - the GEODESIC length on the WGS84 ellipsoid, via terra (GeographicLib):
 #'     the ground distance, independent of any projection;
-#'   - the PLANAR length in the Target Mapping CRS: the metric every engine
-#'     actually works in (variogram lags, IDW separation distances, TPS
-#'     coordinates, grid resolution, buffer radii), so it is the number to
-#'     compare against a variogram range or a cell size.
+#'   - the PLANAR length in the Target Mapping CRS, the CRS of the exported
+#'     rasters. The engines work in the run's working CRS (a projected Input
+#'     Data CRS, or the UTM zone of a geographic one), so this figure is in the
+#'     metric of the variogram lags and the grid resolution only when the two
+#'     are the same system.
 #'
 #' The two differ by the projection's distance distortion, small at field scale
 #' (~0.003% over 2.5 km in UTM) and worth showing rather than hiding: a wide gap

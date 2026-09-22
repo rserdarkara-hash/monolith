@@ -30,25 +30,24 @@ method_has_variance <- function(method) {
 #'
 #' A formula built inside a function carries that function's whole frame as its
 #' environment, and the `terms` object a model keeps inherits it. So an RK
-#' `summary.lm` or an RFK forest returned from a worker serialized the
-#' locality's point set, prediction grid, covariate grid and kriging output
-#' along with itself, and the main session then held that frame for the
-#' displayed run and for every archived copy of it. Measured on 83 points at a
-#' 60 m cell size: `summary.lm` 15.72 MB against 0.003 MB of summary, the
-#' forest 17.60 MB against 0.46 MB of forest, and both grow with the grid.
+#' `summary.lm` returned from a worker would serialize the locality's point
+#' set, prediction grid, covariate grid and kriging output along with itself,
+#' and the main session would hold that frame for the displayed run and for
+#' every archived copy of it. Measured on 83 points at a 60 m cell size:
+#' `summary.lm` 15.72 MB against 0.003 MB of summary, growing with the grid.
+#' The RFK forest is grown through randomForest's matrix interface and has no
+#' terms object, so it needs no detaching.
 #'
-#' Only the reporting path reads these afterwards - coefficients and fit
-#' statistics for RK, `randomForest::importance()` for RFK - and neither
-#' touches the environment. The terms object itself is kept, so a model that
+#' Only the reporting path reads the summary afterwards (coefficients and fit
+#' statistics), and it does not touch the environment. The terms object itself is kept, so a model that
 #' is handed complete `newdata` still predicts. Apply it where the result
 #' crosses back to the main session, after every in-worker prediction.
 #'
 #' A fitted model can hold the frame TWICE: `$terms`, and the `terms` attribute
 #' of the model frame it kept in `$model`. Detaching only the first frees
 #' nothing from a fitted `lm` (measured: 1.532 MB before and after; 0.006 MB
-#' once both are detached). The objects this is applied to today carry one each
-#' - a `summary.lm` keeps no `$model`, and a `randomForest` keeps no model
-#' frame - but the second holder is what a bare `lm` would arrive with.
+#' once both are detached). A `summary.lm` keeps no `$model`, but the second
+#' holder is what a bare `lm` would arrive with.
 #'
 #' CK's gstat object is deliberately NOT detached: `variogram(g)` is called on
 #' the stored object to draw the cross-variogram, its frame is bounded by the
@@ -366,16 +365,22 @@ krige_covariates <- function(data, grid_p, aux_vars, lags, method_params, on_var
   n_av <- length(aux_vars)
   for(i in seq_along(aux_vars)) {
     av <- aux_vars[i]
+    # gstat builds its model frame through sp, whose data.frame conversion runs
+    # make.names() over the columns: a header such as "Fe (mg/kg)" is then "not
+    # found" even when backticked, and the IDW fallback fails the same way. Each
+    # covariate is kriged under one syntactic alias; the grid keeps its name.
+    d_av <- data[av]
+    names(d_av)[names(d_av) == av] <- ".mn_cov"
     kr_res <- tryCatch({
-      v_emp_av <- variogram(as.formula(paste0("`", av, "` ~ 1")), data, width = lags$width, cutoff = lags$cutoff)
-      fit_av <- robust_vgm_fit(v_emp_av, data[[av]])
-      res_av <- krige(as.formula(paste0("`", av, "` ~ 1")), data, grid_p, model = fit_av, debug.level = 0)
+      v_emp_av <- variogram(.mn_cov ~ 1, d_av, width = lags$width, cutoff = lags$cutoff)
+      fit_av <- robust_vgm_fit(v_emp_av, d_av$.mn_cov)
+      res_av <- krige(.mn_cov ~ 1, d_av, grid_p, model = fit_av, debug.level = 0)
       list(pred = res_av$var1.pred, warn = NULL)
     }, error = function(e) {
       warn_msg <- sprintf(" [WARN] Covariate %s kriging failed, falling back to IDW. ", av)
       idw_p <- if(!is.null(method_params$idw_p)) method_params$idw_p else 2
       idw_nmax <- if(!is.null(method_params$idw_nmax)) method_params$idw_nmax else 12
-      res_av <- idw(as.formula(paste0("`", av, "` ~ 1")), data, grid_p, nmax = idw_nmax, idp = idw_p, debug.level = 0)
+      res_av <- idw(.mn_cov ~ 1, d_av, grid_p, nmax = idw_nmax, idp = idw_p, debug.level = 0)
       list(pred = res_av$var1.pred, warn = warn_msg)
     })
     grid_aux[[av]] <- kr_res$pred
@@ -811,9 +816,7 @@ apply_kriging_pipeline <- function(engine = c("OK", "RK", "RFK"), data, target_v
         grid_aux <- krig_cov$grid_aux
         res$log_msg <- paste0(res$log_msg, krig_cov$log_msg)
       }
-      
-      form_reg <- as.formula(paste(paste0("`", target_var, "`"), "~", paste(paste0("`", aux_vars, "`"), collapse = " + ")))
-      
+
       if (engine == "RK") {
         # Same rank guard perform_kriging_loocv applies to its folds, on the
         # main fit: below (covariates + intercept) + 1 rows lm aliases
@@ -827,6 +830,7 @@ apply_kriging_pipeline <- function(engine = c("OK", "RK", "RFK"), data, target_v
                    "this locality has %d. Use fewer covariates."),
             n_coef_rk + 1L, n_coef_rk, nrow(data)))
         }
+        form_reg <- as.formula(paste(paste0("`", target_var, "`"), "~", paste(paste0("`", aux_vars, "`"), collapse = " + ")))
         lm_mod <- lm(form_reg, data = data)
         res$model_summary <- summary(lm_mod)
         
@@ -856,7 +860,19 @@ apply_kriging_pipeline <- function(engine = c("OK", "RK", "RFK"), data, target_v
         res <- .log_vgm_fold_status(res, "RK", l)
       } else if (engine == "RFK") {
         rf_ntree <- if (!is.null(method_params$rf_ntree)) method_params$rf_ntree else 200
-        rf_mod <- randomForest::randomForest(form_reg, data = data, ntree = rf_ntree, importance = TRUE, keep.inbag = TRUE)
+        # The matrix interface, not the formula: randomForest's formula method
+        # rebuilds its frame with data.frame(), whose make.names() turns a
+        # covariate such as "Fe (mg/kg)" into a name the formula cannot find.
+        # The forest is the same (same predictor matrix, same response), and
+        # it carries no formula environment.
+        # Seeded like the fold forests (CV_FOLD_SEED + fold label >= 1, so this
+        # seed is shared with none of them). On furrr's per-element stream the
+        # map depended on the locality's POSITION in the run: deselecting another
+        # locality changed this one's surface. One seed for every locality makes
+        # no two forests dependent, since each is grown on its own data.
+        rf_mod <- with_seed(CV_FOLD_SEED, randomForest::randomForest(
+          x = sf::st_drop_geometry(data)[aux_vars], y = data[[target_var]],
+          ntree = rf_ntree, importance = TRUE, keep.inbag = TRUE))
         res$rf_model <- rf_mod
         
         data$residuals <- data[[target_var]] - rf_mod$predicted
@@ -885,14 +901,15 @@ apply_kriging_pipeline <- function(engine = c("OK", "RK", "RFK"), data, target_v
         inbag_c <- if (use_ij) { im <- as.matrix(rf_mod$inbag); im - rowMeans(im) } else NULL
         for (s in seq.int(1L, n_grid, by = blk)) {
           e <- min(s + blk - 1L, n_grid)
-          pa <- predict(rf_mod, grid_aux_df[s:e, , drop = FALSE], predict.all = TRUE)
-          Mb <- pa$individual
-          # Keep the old loud failure: predict.randomForest drops rows carrying NA
-          # covariates, which used to break the length check in mutate() below.
-          if (length(pa$aggregate) != (e - s + 1L)) {
-            stop("RFK trend prediction returned ", length(pa$aggregate), " values for ",
-                 e - s + 1L, " grid cells - the covariate grid holds missing values.")
+          nd <- grid_aux_df[s:e, aux_vars, drop = FALSE]
+          # Name the cause: the matrix interface refuses missing covariates with
+          # a bare "missing values in newdata".
+          if (anyNA(nd)) {
+            stop("RFK trend prediction: the covariate grid holds missing values in ",
+                 sum(!stats::complete.cases(nd)), " of ", e - s + 1L, " grid cells.")
           }
+          pa <- predict(rf_mod, nd, predict.all = TRUE)
+          Mb <- pa$individual
           pred_mean[s:e] <- as.numeric(pa$aggregate)
           trend_var[s:e] <- if (use_ij) {
             # Calibrated trend variance: infinitesimal jackknife of the ensemble
@@ -978,16 +995,25 @@ apply_RFK <- function(data, target_var, grid_p, lags, method_params, aux_vars, l
 #' seeded from the extent heuristic rather than the primary fit.
 .ck_fit_lmc <- function(data_scaled, target_var, aux_vars, lags, ck_nmax) {
   log_msg <- ""
-  form_ok <- reformulate("1", response = target_var)
-  g <- gstat(NULL, id = target_var, formula = form_ok, data = data_scaled, nmax = ck_nmax)
-  for (av in aux_vars) {
-    g <- gstat(g, id = av, formula = as.formula(paste0("`", av, "` ~ 1")), data = data_scaled, nmax = ck_nmax)
+  # gstat reaches its model frame through sp, whose data.frame conversion runs
+  # make.names() over the columns, so a covariate such as "Fe (mg/kg)" is "not
+  # found" even when backticked. The LMC is fitted on syntactic ids
+  # (make.names, which leaves a syntactic name unchanged) over the variables it
+  # uses only; `monolith_ids` maps each id back to its column for display.
+  vars <- c(target_var, aux_vars)
+  ids <- make.names(vars, unique = TRUE)
+  d <- data_scaled[vars]
+  names(d)[match(vars, names(d))] <- ids
+  form_ok <- reformulate("1", response = ids[1])
+  g <- gstat(NULL, id = ids[1], formula = form_ok, data = d, nmax = ck_nmax)
+  for (id in ids[-1]) {
+    g <- gstat(g, id = id, formula = reformulate("1", response = id), data = d, nmax = ck_nmax)
   }
 
   vm <- variogram(g, width = lags$width, cutoff = lags$cutoff)
 
-  v_emp_ok <- variogram(form_ok, data_scaled, width = lags$width, cutoff = lags$cutoff)
-  fit_ok_init <- robust_vgm_fit(v_emp_ok, data_scaled[[target_var]])
+  v_emp_ok <- variogram(form_ok, d, width = lags$width, cutoff = lags$cutoff)
+  fit_ok_init <- robust_vgm_fit(v_emp_ok, d[[ids[1]]])
   m_type <- suggest_lmc_model(fit_ok_init)
 
   # The single `model` argument is used by gstat as the STARTING model for
@@ -1044,18 +1070,29 @@ apply_RFK <- function(data, target_var, grid_p, lags, method_params, aux_vars, l
   }
 
   fit_obj <- tryCatch(
-    fit.lmc(vm, g, vgm(var(data_scaled[[target_var]]), m_type, lmc_range, 0, kappa = lmc_kappa),
+    fit.lmc(vm, g, vgm(var(d[[ids[1]]]), m_type, lmc_range, 0, kappa = lmc_kappa),
             correct.diagonal = 1.01),
     error = function(e) structure(paste0("LMC Fit Failed: ", e$message, ". Falling back to OK."),
                                   class = "ck_lmc_error"))
   if (inherits(fit_obj, "ck_lmc_error")) {
     return(list(g = NULL, error_msg = as.character(fit_obj),
                 log_msg = paste0(log_msg, as.character(fit_obj)),
-                heuristic_seed = heuristic_seed))
+                heuristic_seed = heuristic_seed, target_id = ids[1]))
   }
+  attr(fit_obj, "monolith_ids") <- stats::setNames(vars, ids)
   list(g = fit_obj, error_msg = NULL,
        log_msg = paste0(log_msg, "\nLMC fitted with correct.diagonal = 1.01 (standard stabilization applied to every CK fit to keep the coregionalization matrices positive definite)."),
-       heuristic_seed = heuristic_seed)
+       heuristic_seed = heuristic_seed, target_id = ids[1])
+}
+
+#' The data column behind each id of a CK gstat object, named by id. A fitted
+#' LMC uses syntactic ids (.ck_fit_lmc) and records their columns in
+#' `monolith_ids`; an id without an entry is its own column.
+ck_id_columns <- function(g) {
+  ids <- names(g$data)
+  cols <- attr(g, "monolith_ids")
+  out <- if (is.null(cols)) ids else ifelse(ids %in% names(cols), cols[ids], ids)
+  stats::setNames(unname(out), ids)
 }
 
 #' How often a fold's covariate screen kept a different set than the map's, and
@@ -1146,7 +1183,7 @@ apply_CK <- function(data, target_var, grid_p, lags, method_params, aux_vars, l 
                                calc_scientific_lags(train), ck_nmax)
           if (is.null(fit_i$g)) stop(fit_i$error_msg)
           p <- predict(fit_i$g, newdata, debug.level = 0)
-          list(pred = p[[paste0(target_var, ".pred")]], var = p[[paste0(target_var, ".var")]],
+          list(pred = p[[paste0(fit_i$target_id, ".pred")]], var = p[[paste0(fit_i$target_id, ".var")]],
                meta = list(kept = kept, heuristic_seed = fit_i$heuristic_seed))
         }
         cv <- run_kriging_folds(pop, target_var, row_id, folds, fold_ck,
@@ -1163,8 +1200,8 @@ apply_CK <- function(data, target_var, grid_p, lags, method_params, aux_vars, l 
 
       res_sf_or_err <- tryCatch({
         pred_obj <- predict(g, grid_p, debug.level = 0) %>% st_as_sf()
-        pred_col <- paste0(target_var, ".pred")
-        var_col <- paste0(target_var, ".var")
+        pred_col <- paste0(lmc$target_id, ".pred")
+        var_col <- paste0(lmc$target_id, ".var")
         pred_obj %>% dplyr::rename(var1.pred = !!rlang::sym(pred_col), var1.var = !!rlang::sym(var_col))
       }, error = function(e) {
         list(error_msg = paste0("CK Prediction Failed: ", e$message, ". Falling back to OK."))

@@ -83,9 +83,9 @@ with_rng_sandbox <- function(expr) {
 # The generator is NAMED here, not inherited. set.seed() keeps whatever RNG
 # kind is in force, and a future/furrr worker runs under the L'Ecuyer-CMRG
 # stream that `seed = TRUE` installs, so a bare set.seed(12345) drew one stream
-# inside a worker and a different one in-process: the app's RFK fold forests,
-# spatial CV blocks, Jenks subsample, Moran jitter, classification tuning and
-# governing-factors draws did not reproduce what the same seed produces in a
+# inside a worker and a different one in-process: the app's RFK forests,
+# spatial CV blocks, k-means class breaks, Moran jitter, classification tuning
+# and governing-factors draws did not reproduce what the same seed produces in a
 # script or in the test suite. Naming R's defaults makes one seed mean one
 # stream everywhere. The parallel streams are untouched: .Random.seed carries
 # the kind in its first element, so restoring it on exit returns the worker to

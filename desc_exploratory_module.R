@@ -804,15 +804,18 @@ desc_exploratory_server <- function(id, data_reactive, vars_metadata_reactive,
         # The plot names the reason it cannot be computed; the table used to
         # just vanish. Show the same reason instead.
         if (is.null(res$bins)) return(desc_empty_dt(gsub("\n", " ", res$message %||% "Cross-correlogram not computable for this selection.")))
+        # Numbers stay numbers (sorting, copying); the display shows four
+        # significant digits, as every result table does.
         res_df <- data.frame(
-          Lag = round(res$bins$dist, 1),
+          Lag = res$bins$dist,
           Pairs = res$bins$np,
-          CrossCorrelation = round(res$bins$rho, 3),
-          CrossSemivariance = round(res$bins$gamma, 3)
+          CrossCorrelation = res$bins$rho,
+          CrossSemivariance = res$bins$gamma
         )
         colnames(res_df) <- c(paste0("Lag distance (", res$unit, ")"), "Pairs",
                               "Cross-correlation", "Cross-semivariance (std.)")
-        return(DT::datatable(res_df, options = list(pageLength = 10, dom = 'tip', scrollX = TRUE)))
+        return(DT::datatable(res_df, options = list(pageLength = 10, dom = 'tip', scrollX = TRUE,
+                                                    columnDefs = sig_render_defs(res_df, names(res_df)[-2]))))
       } else {
         req(input$corr_vars_multi)
         vars <- input$corr_vars_multi
@@ -902,7 +905,7 @@ desc_exploratory_server <- function(id, data_reactive, vars_metadata_reactive,
                     res_list[[length(res_list)+1]] <- data.frame(
                         Variable_1 = pair_vars[i],
                         Variable_2 = pair_vars[j],
-                        Correlation = round(unname(ct$estimate), 3),
+                        Correlation = unname(ct$estimate),
                         p_raw = p_val,
                         stringsAsFactors = FALSE
                     )
@@ -918,19 +921,20 @@ desc_exploratory_server <- function(id, data_reactive, vars_metadata_reactive,
               res_df$P_Adj <- format.pval(p.adjust(res_df$p_raw, method = "BH"), digits = 3, eps = 0.001)
               res_df$p_raw <- NULL
               colnames(res_df) <- c("Variable 1", "Variable 2", "Correlation", "P Value", "P Value (BH-adj.)")
-              return(DT::datatable(res_df, options = list(pageLength = 10, dom = 'tip', scrollX = TRUE),
+              return(DT::datatable(res_df, options = list(pageLength = 10, dom = 'tip', scrollX = TRUE,
+                                                          columnDefs = sig_render_defs(res_df, "Correlation")),
                                    caption = complete_case_note(nrow(df_clean), nrow(df))))
            }
         }
 
         cormat <- corr_matrix_reactive()
         req(cormat)
-        cormat <- round(cormat, 3)
         cormat_df <- as.data.frame(cormat)
 
         # paging off: dom = 't' shows no paging controls, so a matrix of more
         # than ten variables lost its lower rows on screen and in a copy.
-        return(DT::datatable(cormat_df, options = list(dom = 't', paging = FALSE, scrollX = TRUE),
+        return(DT::datatable(cormat_df, options = list(dom = 't', paging = FALSE, scrollX = TRUE,
+                                                       columnDefs = sig_render_defs(cormat_df, names(cormat_df), rownames = TRUE)),
                              caption = complete_case_note(nrow(df_clean), nrow(df))))
       }
       # server = FALSE: the paged cross-correlogram and pairwise tables keep
@@ -1167,16 +1171,20 @@ desc_exploratory_server <- function(id, data_reactive, vars_metadata_reactive,
        var_explained <- pca_rv$res$sdev^2 / sum(pca_rv$res$sdev^2)
        cum_var <- cumsum(var_explained)
   
+       # Unrounded: a covariance PCA of small-unit variables has eigenvalues
+       # that fixed decimals print as 0. The display formats them.
        df_res <- data.frame(
           PC = paste0("PC", 1:length(var_explained)),
-          Eigenvalue = round(pca_rv$res$sdev^2, 3),
-          Variance_Explained_Pct = round(var_explained * 100, 2),
-          Cumulative_Variance_Pct = round(cum_var * 100, 2)
+          Eigenvalue = pca_rv$res$sdev^2,
+          Variance_Explained_Pct = var_explained * 100,
+          Cumulative_Variance_Pct = cum_var * 100
        )
-  
+
        # paging off: dom = 't' shows no paging controls (components past the
        # tenth were unreachable on screen and missing from a copy)
-       DT::datatable(df_res, options = list(dom = 't', paging = FALSE, scrollX = TRUE), rownames = FALSE)
+       DT::datatable(df_res, options = list(dom = 't', paging = FALSE, scrollX = TRUE,
+                                            columnDefs = sig_render_defs(df_res, names(df_res)[-1])),
+                     rownames = FALSE)
     })
     
     register_expanded_modal(

@@ -765,13 +765,13 @@ perform_kriging_loocv <- function(pts, target_var, aux_vars, lags_func, vgm_fit_
       stop(sprintf("%d training rows cannot fit %d regression coefficients",
                    nrow(train), length(kept) + 1L))
     }
-    form_i <- as.formula(paste0("`", target_var, "` ~ ",
-                                paste(paste0("`", kept, "`"), collapse = " + ")))
     lags <- lags_func(train)
     test_cov <- sf::st_drop_geometry(krige_covariates(
       train, newdata, kept, lags, cov_params)$grid_aux)
 
     if (model_type == "lm") {
+      form_i <- as.formula(paste0("`", target_var, "` ~ ",
+                                  paste(paste0("`", kept, "`"), collapse = " + ")))
       lm_mod <- lm(form_i, data = train)
       train$residuals <- residuals(lm_mod)
       pred_trend <- predict(lm_mod, newdata = test_cov)
@@ -781,11 +781,14 @@ perform_kriging_loocv <- function(pts, target_var, aux_vars, lags_func, vgm_fit_
       # loop let earlier folds — which train on fold i's rows — decide where
       # fold i's forest started, and a held-out row moved its own prediction.
       # The seed follows the fold LABEL, not the realization, so a repeated-CV
-      # repeat still varies the partition and nothing else.
+      # repeat still varies the partition and nothing else. Matrix interface,
+      # as for the map's forest (apply_kriging_pipeline): the formula method
+      # cannot find a covariate whose name is not syntactic.
       rf_mod <- with_seed(CV_FOLD_SEED + as.integer(i),
-                          randomForest::randomForest(form_i, data = train, ntree = rf_ntree))
+                          randomForest::randomForest(x = sf::st_drop_geometry(train)[kept],
+                                                     y = train[[target_var]], ntree = rf_ntree))
       train$residuals <- train[[target_var]] - rf_mod$predicted
-      pred_trend <- predict(rf_mod, test_cov)
+      pred_trend <- predict(rf_mod, test_cov[kept])
     }
 
     v_emp <- variogram(residuals ~ 1, train, width = lags$width, cutoff = lags$cutoff)

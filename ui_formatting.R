@@ -467,6 +467,29 @@ format_sig <- function(x) {
   out
 }
 
+# Range text of the classes [b_i, b_(i+1)) that `brks` (outer ends -Inf/Inf)
+# define, at the display precision every result uses. The top class holds its
+# lower break, hence ">=".
+class_legend_labels <- function(brks) {
+  n <- length(brks) - 1L
+  if (n < 2L) return(rep("All values", max(n, 0L)))
+  inner <- brks[2:n]
+  b <- format_sig(inner)
+  # format_sig keeps whole units from 1000 up, so narrow classes of a large
+  # variable (a flat field's elevation in metres) could print two breaks alike;
+  # add significant digits until they differ.
+  d <- 5L
+  while (anyDuplicated(b) && d <= 15L) {
+    b <- trimws(formatC(inner, format = "fg", digits = d))
+    d <- d + 1L
+  }
+  vapply(seq_len(n), function(i) {
+    if (i == 1L) paste("<", b[1])
+    else if (i == n) paste("≥", b[n - 1L])
+    else paste(b[i - 1L], "-", b[i])
+  }, character(1))
+}
+
 # Legend title of a map layer, one composition for the Map Viewer and the
 # exported figure: the variable and its unit, prefixed for an uncertainty or
 # residual layer.
@@ -604,6 +627,33 @@ vgm_params_row <- function(f) {
   out
 }
 
+# One-line plot subtitle of a variogram model, read from the record the
+# Variogram Parameters card reports (vgm_params_row): what the model is (a
+# fit, a flawed fit, the heuristic stand-in when nothing could be fitted, or a
+# model the user applied), its family (with the smoothness of a Matern),
+# nugget, partial sill, the range parameter a and the practical range, which
+# is model-extrapolated where the sill lies beyond the longest lag and says
+# so. NULL for no model.
+vgm_fit_subtitle <- function(fit) {
+  p <- vgm_params_row(fit)
+  if (is.na(p$model)) return(NULL)
+  lead <- if (identical(attr(fit, "monolith_source"), "manual")) {
+    "Applied manual model: "
+  } else {
+    switch(vgm_fit_status(fit),
+           fit_failed = , heuristic_fallback = "Heuristic fallback, not fitted: ",
+           singular_selected = "Fitted (singular/non-converged): ",
+           "Fitted: ")
+  }
+  if (identical(p$model, "Nug")) return(paste0(lead, "pure nugget (Nugget: ", format_sig(p$nugget), ")"))
+  paste0(lead, p$model, if (!is.na(p$kappa)) paste0(", kappa = ", format_sig(p$kappa)),
+         " (Nugget: ", format_sig(p$nugget), ", Partial Sill: ", format_sig(p$sill - p$nugget),
+         ", Range (a): ", format_sig(p$range), ", Practical Range: ", format_sig(p$practical_range),
+         if (identical(p$sill_resolved, FALSE)) {
+           paste0(", model-extrapolated beyond the longest lag ", format_sig(p$max_lag))
+         }, ")")
+}
+
 # The Variogram Parameters cell text when the target carries no usable
 # variance: the fitted sill is then numerical noise, not an estimate.
 VGM_DEGENERATE_NOTE <- paste(
@@ -731,14 +781,31 @@ manual_vgm_slider_spec <- function(variance, max_dist, fit = NULL) {
        step_ok = sill_step >= 1e-6)
 }
 
+# Names of randomForest's regression importance measures, shared by every panel
+# and export that shows them (RFK trend forest, Governing Factors).
+RF_IMPORTANCE_LABELS <- c(
+  increase = "Increase in out-of-bag MSE",
+  scaled = "Scaled: increase / its SE (%IncMSE)",
+  purity = "IncNodePurity")
+
 # Every importance measure a randomForest recorded, one row per covariate,
-# ordered by the first. A regression forest grown with importance = TRUE stores
-# %IncMSE and IncNodePurity; without it, only IncNodePurity. Raw column names:
-# this is the numeric record behind the labelled importance plot.
+# ordered by the first. A regression forest grown with importance = TRUE
+# carries the out-of-bag permutation importance, given unscaled (the increase
+# in MSE, squared target units, which orders the covariates) and divided by its
+# standard error across trees (randomForest's %IncMSE, which grows with ntree),
+# then IncNodePurity; without it, only IncNodePurity. Raw covariate names: this
+# is the numeric record behind the labelled importance plot.
 rf_importance_df <- function(rf_mod) {
-  imp_mat <- randomForest::importance(rf_mod)
-  out <- data.frame(Variable = rownames(imp_mat), stringsAsFactors = FALSE)
-  for (cn in colnames(imp_mat)) out[[cn]] <- unname(imp_mat[, cn])
+  imp <- randomForest::importance(rf_mod, scale = FALSE)
+  out <- data.frame(Variable = rownames(imp), stringsAsFactors = FALSE)
+  if ("%IncMSE" %in% colnames(imp)) {
+    out[[RF_IMPORTANCE_LABELS[["increase"]]]] <- unname(imp[, "%IncMSE"])
+    out[[RF_IMPORTANCE_LABELS[["scaled"]]]] <-
+      unname(randomForest::importance(rf_mod, type = 1, scale = TRUE)[rownames(imp), 1])
+  }
+  if ("IncNodePurity" %in% colnames(imp)) {
+    out[[RF_IMPORTANCE_LABELS[["purity"]]]] <- unname(imp[, "IncNodePurity"])
+  }
   out <- out[order(out[[2]], decreasing = TRUE), , drop = FALSE]
   rownames(out) <- NULL
   out
@@ -832,7 +899,8 @@ rk_fit_stats <- function(lm_sum) {
 
 .rk_term_labels <- function(terms, vars_metadata) {
   unname(vapply(terms, function(tm) {
-    if (tm == "(Intercept)") "(Intercept)" else get_var_label(tm, vars_metadata)
+    # lm backquotes a term whose name is not syntactic ("`Fe (mg/kg)`").
+    if (tm == "(Intercept)") "(Intercept)" else get_var_label(gsub("^`|`$", "", tm), vars_metadata)
   }, character(1)))
 }
 
@@ -962,6 +1030,26 @@ filter_active_groups <- function(df, active_groups) {
 # wrongly treats "no predictions uploaded" as "predictions present".
 is_valid_col_ref <- function(x) {
   !is.null(x) && length(x) == 1 && !is.na(x) && nzchar(x)
+}
+
+# TRUE while the Match Scales checkbox is on screen: the sidebar is set up for
+# a comparison of predictions, or the Map Viewer shows the comparison view of a
+# run with a predicted surface. The checkbox's conditionalPanel (ui_sidebar.R)
+# states the same condition in JavaScript; change the two together.
+match_scales_shown <- function(comp_mode, value_type, has_pred, view_base) {
+  (isTRUE(comp_mode) && isTRUE(value_type %in% c("pred", "pred_ss"))) ||
+    (isTRUE(has_pred) && identical(view_base, "view_comp"))
+}
+
+# TRUE when a locality of a run failed: its processing stopped part-way (the
+# pipeline's "Error in <locality>:" line), or a surface the run asked for is
+# missing and its log reports an error. A cross-validation error under finished
+# maps is not a failure: the log and the Model Performance row report it.
+locality_run_failed <- function(res, want_pre) {
+  log <- res$log_msg %||% ""
+  if (grepl(paste0("Error in ", res$l, ":"), log, fixed = TRUE)) return(TRUE)
+  lost <- is.null(res$r_a) || (isTRUE(want_pre) && is.null(res$r_p))
+  lost && grepl("Error", log, fixed = TRUE)
 }
 
 # Per locality and surface, the covariates each mapped model used and the ones

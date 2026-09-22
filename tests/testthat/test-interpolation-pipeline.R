@@ -890,6 +890,26 @@ test_that("stored regional values belong only to their tuning key", {
   expect_equal(resolve_regional_param(list(value = 4, key = NA_character_), NA_character_, -1), -1)
 })
 
+test_that("a locality is a failed region when it lost a surface, not when only its CV failed", {
+  ok <- list(l = "Kale", r_a = "act", r_p = "pre", log_msg = "")
+  # A cross-validation error under finished maps: the log and the Model
+  # Performance row report it; the maps are there.
+  cv_err <- modifyList(ok, list(log_msg = "\nRK CV Error: the largest fold leaves 3 of 9 points"))
+  expect_false(locality_run_failed(cv_err, want_pre = TRUE))
+  # One surface's engine failed while the other mapped: still a failure.
+  pre_lost <- modifyList(ok, list(r_p = NULL, log_msg = "\nError in apply_interpolation: singular"))
+  expect_true(locality_run_failed(pre_lost, want_pre = TRUE))
+  # An Actual-only run asks for no Predicted surface.
+  expect_false(locality_run_failed(modifyList(cv_err, list(r_p = NULL)), want_pre = FALSE))
+  # The locality stopped part-way after its Actual raster was built.
+  midway <- modifyList(ok, list(log_msg = "\nError in Kale: object 'x' not found"))
+  expect_true(locality_run_failed(midway, want_pre = FALSE))
+  # No surface and no error: a data shortfall reported elsewhere, not a failure.
+  short <- list(l = "Kale", r_a = NULL, r_p = NULL,
+                log_msg = "Warning in Kale: Insufficient data points after cleaning (needed >= 3, got 2).")
+  expect_false(locality_run_failed(short, want_pre = FALSE))
+})
+
 test_that("the run record separates the two CRS and selected from used covariates", {
   # Two runs that fitted different models (a covariate dropped in one
   # locality) used to export identical records, and the record named only the
@@ -1231,6 +1251,71 @@ test_that("apply_RFK grows one forest per LOOCV fold, all at the requested ntree
   }
 })
 
+test_that("covariate names that are not syntactic give the results of syntactic ones", {
+  # gstat (through sp) and randomForest's formula method re-read column names
+  # through make.names(), so a lab header such as "Fe (mg/kg)" was "not found"
+  # even when backticked: RK and RFK lost the locality, CK fell back to OK.
+  pts <- golden_sf("full", localities = "Kale")
+  pts$v <- pts$ph
+  grid <- make_test_grid_safe(pts, res = 150)
+  lags <- calc_scientific_lags(pts)
+  mp <- list(rf_ntree = 40, ck_nmax = 15, idw_p = 2, idw_nmax = 12)
+  odd <- pts
+  names(odd)[names(odd) == "fe"] <- "Fe (mg/kg)"
+  names(odd)[names(odd) == "mg"] <- "Mg total"
+  sf::st_geometry(odd) <- "geometry"
+  aux <- c("fe", "mg", "k"); aux_odd <- c("Fe (mg/kg)", "Mg total", "k")
+
+  for (engine in c("RK", "RFK", "CK")) {
+    fn <- switch(engine, RK = apply_RK, RFK = apply_RFK, CK = apply_CK)
+    a <- suppressWarnings(fn(pts, "v", grid, lags, mp, aux))
+    b <- suppressWarnings(fn(odd, "v", grid, lags, mp, aux_odd))
+    expect_false(grepl("Falling back", b$log_msg, fixed = TRUE), info = engine)
+    expect_equal(b$res_sf$var1.pred, a$res_sf$var1.pred, tolerance = 0, info = engine)
+    expect_equal(b$res_sf$var1.var, a$res_sf$var1.var, tolerance = 0, info = engine)
+    expect_equal(unlist(b$cv_metrics), unlist(a$cv_metrics), tolerance = 0, info = engine)
+    if (engine == "RK") {
+      expect_equal(.rk_term_labels(rownames(b$model_summary$coefficients), NULL),
+                   c("(Intercept)", aux_odd))
+    }
+    if (engine == "RFK") {
+      expect_equal(rownames(randomForest::importance(b$rf_model)), aux_odd)
+    }
+    if (engine == "CK") {
+      expect_equal(unname(ck_id_columns(b$gstat_obj)), c("v", aux_odd))
+      expect_equal(unname(ck_id_columns(a$gstat_obj)), c("v", aux))
+    }
+  }
+})
+
+test_that("an RFK surface does not depend on the other localities of the run", {
+  # furrr hands element i the i-th random stream, and deselecting a locality
+  # renumbers the rest; the map's forest is seeded, so a locality's surface is
+  # the same whether it runs alone or second.
+  full <- sf::st_drop_geometry(golden_sf("full"))
+  item_of <- function(loc) {
+    d <- full[full$locality == loc, ]
+    d$v <- d$ph; d$pv <- NA_real_
+    list(l = loc, pts_data = d,
+         m_params = list(idw_p_act = 2, idw_p_pre = 2, idw_nmax = 12,
+                         tps_lambda_act = -1, tps_lambda_pre = -1,
+                         pre_fit_act = NULL, pre_fit_pre = NULL,
+                         cv_strategy = "auto", rfk_uncertainty = "jackknife",
+                         rf_ntree = 40, vif_threshold = 10))
+  }
+  run <- function(items) {
+    furrr::future_map(items, function(it) suppressWarnings(run_regional_interpolation(
+      it, "RFK", 32635, c("fe", "mg", "k"), NULL, "convex", "fixed", 200,
+      "fixed", 150, "EPSG:32635", FALSE, "actual")),
+      .options = furrr::furrr_options(seed = 12345))
+  }
+  alone <- run(list(item_of("Kale")))[[1]]
+  second <- run(list(item_of("Tavas"), item_of("Kale")))[[2]]
+  va <- terra::values(terra::unwrap(alone$r_a))
+  vb <- terra::values(terra::unwrap(second$r_a))
+  expect_equal(vb, va, tolerance = 0)
+})
+
 test_that("rf_infinitesimal_jackknife_var matches the brute-force Wager formula", {
   set.seed(1)
   n_train <- 20L; B <- 40L; n_pred <- 7L
@@ -1541,7 +1626,45 @@ test_that("with_rng_sandbox is two-sided and with_seed is reproducible", {
   expect_equal(marker, 7)
 })
 
-# ── calc_class_breaks (seeded, sampled classification breaks) ─────────────
+# ── calc_class_breaks (class breaks for the map styling) ───────────────────
+
+test_that("natural breaks are the exact minimum within-class variance partition", {
+  # Brute force over every split of the sorted values into three runs of
+  # consecutive values: the optimum Jenks natural breaks define.
+  x <- c(1.0, 1.2, 1.3, 2.9, 3.0, 3.4, 3.5, 6.0, 6.1, 6.6, 7.9, 8.0)
+  xs <- sort(x); n <- length(xs)
+  ss <- function(v) sum((v - mean(v))^2)
+  best <- NULL
+  for (i in 1:(n - 2)) for (j in (i + 1):(n - 1)) {
+    w <- ss(xs[1:i]) + ss(xs[(i + 1):j]) + ss(xs[(j + 1):n])
+    if (is.null(best) || w < best$w) best <- list(w = w, i = i, j = j)
+  }
+  expected <- c((xs[best$i] + xs[best$i + 1]) / 2, (xs[best$j] + xs[best$j + 1]) / 2)
+  expect_equal(natural_breaks(sample(x), 3), expected)
+  expect_equal(calc_class_breaks(x, 3, "jenks"), expected)
+
+  # With tied values on a class edge (a lab variable at two decimals) the
+  # [low, high) classes the map draws are the optimal classes themselves.
+  set.seed(3)
+  ph <- round(c(rnorm(60, 6.1, 0.15), rnorm(60, 7.4, 0.15)), 2)
+  b <- natural_breaks(ph, 2)
+  cls <- cut(ph, c(-Inf, b, Inf), right = FALSE, labels = FALSE)
+  within <- sum(tapply(ph, cls, ss))
+  alt <- vapply(sort(unique(ph))[-1], function(t) {
+    g <- ph >= t
+    ss(ph[g]) + ss(ph[!g])
+  }, numeric(1))
+  expect_equal(within, min(alt))
+
+  # Fewer distinct values than classes: every value is its own class, quietly.
+  expect_no_condition(nb <- natural_breaks(c(1, 1, 2, 2, 3), 5))
+  expect_equal(nb, c(1.5, 2.5))
+  # Deterministic and draws nothing: the caller's random state is untouched.
+  set.seed(77); vv <- rnorm(5000); before <- .Random.seed
+  b1 <- calc_class_breaks(vv, 5, "jenks")
+  expect_identical(.Random.seed, before)
+  expect_identical(calc_class_breaks(vv, 5, "jenks"), b1)
+})
 
 test_that("calc_class_breaks is deterministic and seed-sandboxed", {
   set.seed(999)
@@ -1552,10 +1675,9 @@ test_that("calc_class_breaks is deterministic and seed-sandboxed", {
   expect_equal(b1, b2)          # caller RNG state must not leak in
   expect_length(b1, 4)
 
-  # jenks subsampling path (n > max_n) is deterministic too
-  j1 <- calc_class_breaks(vv, 4, "jenks", max_n = 1000L)
-  j2 <- calc_class_breaks(vv, 4, "jenks", max_n = 1000L)
-  expect_equal(j1, j2)
+  # Natural breaks use every value, whatever the length.
+  j1 <- calc_class_breaks(vv, 4, "jenks")
+  expect_equal(j1, natural_breaks(vv, 4))
   expect_length(j1, 3)
   expect_true(all(j1 > min(vv) & j1 < max(vv)))
 
@@ -1570,11 +1692,11 @@ test_that("calc_class_breaks is deterministic and seed-sandboxed", {
 test_that("calc_class_breaks emits no conditions (Jenks message regression)", {
   set.seed(999)
   vv <- rnorm(20000, 50, 10)
-  # classInt's jenks signals a message() ("Use fisher instead...") that
-  # suppressWarnings alone lets escape; a stray condition unwinding through
-  # the classification_params reactive poisoned it and made Jenks styling
-  # silently fall back to the continuous palette.
+  # A stray condition unwinding through the classification_params reactive
+  # poisoned it and made Jenks styling silently fall back to the continuous
+  # palette, so neither break path may signal one.
   expect_no_condition(calc_class_breaks(vv, 4, "jenks"))
+  expect_no_condition(calc_class_breaks(c(1, 1, 2, 2, 3), 5, "jenks"))
   expect_no_condition(calc_class_breaks(vv, 4, "kmeans"))
   expect_length(calc_class_breaks(vv, 4, "jenks"), 3)
 })
@@ -1644,10 +1766,19 @@ test_that("tps_gcv_item returns a GCV curve and idw_opt_item an optimized power"
   idw_res <- idw_opt_item(list(l = "LocA", df = df), current_crs = 32633, idw_nmax_val = 12)
   expect_true(idw_res$best_f >= 0.5 && idw_res$best_f <= 5)
 
-  # small-n guards
-  small <- df[1:3, ]
-  expect_identical(tps_gcv_item(list(l = "S", df = small), 32633)$best_lam, 0)
-  expect_identical(idw_opt_item(list(l = "S", df = small), 32633, 12)$best_f, 2.0)
+  # Below OPTIMIZER_MIN_POINTS nothing is searched and nothing is returned to
+  # store: a stand-in value would override the locality's sidebar setting.
+  small <- df[1:4, ]
+  tps_small <- tps_gcv_item(list(l = "S", df = small), 32633)
+  idw_small <- idw_opt_item(list(l = "S", df = small), 32633, 12)
+  expect_null(tps_small$best_lam)
+  expect_null(idw_small$best_f)
+  expect_match(tps_small$skipped, "fewer than 5")
+  expect_match(idw_small$skipped, "fewer than 5")
+  # The guard counts DISTINCT samples: five rows on four locations are four.
+  twin <- rbind(small, small[1, ])
+  expect_false(is.null(tps_gcv_item(list(l = "T", df = twin), 32633)$skipped))
+  expect_false(is.null(idw_opt_item(list(l = "T", df = twin), 32633, 12)$skipped))
 })
 
 test_that("idw_opt_item forwards cv_strategy to the power search", {
@@ -2249,7 +2380,8 @@ test_that("class zone areas equal the areas the Area Coverage table reports", {
   ref <- as.data.frame(terra::expanse(r_class, unit = "ha", byValue = TRUE))
   ref <- ref[order(as.numeric(as.character(ref$value))), ]
 
-  expect_equal(z$area_ha, round(ref$area, 2))
+  # Unrounded: a class under 0.005 ha must not export as 0.
+  expect_equal(z$area_ha, ref$area)
   # 100 x 100 m cells, so the three classes split the grid 30/40/30. terra
   # measures on the ellipsoid rather than in grid units (expanse transforms a
   # planar CRS for accuracy), which is why these are ~30.02 rather than 30.00 -
@@ -2777,11 +2909,10 @@ test_that("calc_class_breaks reproduces the quantile and equal-interval definiti
 })
 
 test_that("the Jenks break path is pinned", {
-  # No closed form to check Jenks against, so this is a regression lock, valid
-  # only because the quantile and equal paths above establish that the slicing
-  # and the seed sandbox are right. The expected values are recorded for this
-  # golden set by make_baselines.R; if they move, classInt changed or the
-  # fixture did.
+  # No closed form to check Jenks against on real data (the brute-force test
+  # above proves the optimum on a small set), so this is a regression lock. The
+  # expected values are recorded for this golden set by make_baselines.R; if
+  # they move, Ckmeans.1d.dp changed or the fixture did.
   x <- golden_soil("full")[[golden_meta()$columns$target]]
   recorded <- golden_baseline("jenks_target_5")
   skip_if(is.null(recorded), "no baselines recorded for this golden set")
@@ -2937,7 +3068,7 @@ test_that("every pinned dispatch ships the globals its body reads", {
 
   check_dispatch("gov_module.R",
                  "seed = TRUE) %...>% (function(res) {",
-                 c("proj_root_ship", "df", "target_col", "preds", "n_perms",
+                 c("proj_root_ship", "df", "target_col", "preds",
                    "ntree_val", "shap_size_val", "cores_hint_val",
                    "cancel_file_ship"))
 
@@ -3030,11 +3161,95 @@ test_that("the pipeline's RK summary and RFK forest carry no pipeline frame", {
     item, "RFK", 32635, "aux1", NULL, "convex", "fixed", 200,
     "fixed", 60, "EPSG:32635", FALSE, "actual"))
   expect_s3_class(rfk$rf_act, "randomForest")
-  expect_identical(environmentName(attr(rfk$rf_act$terms, ".Environment")), "R_GlobalEnv")
+  # Grown through randomForest's matrix interface: no terms object, so no
+  # formula environment that could carry the pipeline frame.
+  expect_null(rfk$rf_act$terms)
   imp <- randomForest::importance(rfk$rf_act)
   expect_equal(rownames(imp), "aux1")
-  # A detached model still predicts when it is handed complete newdata.
+  # The forest still predicts when it is handed complete newdata.
   expect_true(all(is.finite(predict(rfk$rf_act, data.frame(aux1 = c(-1, 0, 1))))))
+})
+
+test_that("a projected Target Mapping CRS keeps the run's cell size", {
+  # terra::project() chooses its own cell size when the Target Mapping CRS is
+  # another system (a 30 m grid came out at 30.10 m from UTM 35N to 36N), so
+  # the exported rasters did not have the resolution the run reports.
+  set.seed(4)
+  n <- 40
+  pts_data <- data.frame(x = 500000 + runif(n, 0, 1200), y = 4400000 + runif(n, 0, 1200))
+  pts_data$v <- 10 + pts_data$x / 1000 + rnorm(n, 0, 0.5)
+  pts_data$pv <- NA_real_
+  item <- list(l = "L", pts_data = pts_data,
+               m_params = list(idw_p_act = 2, idw_p_pre = 2, idw_nmax = 12,
+                               tps_lambda_act = -1, tps_lambda_pre = -1,
+                               pre_fit_act = NULL, pre_fit_pre = NULL,
+                               cv_strategy = "auto", vif_threshold = 10))
+  run_to <- function(target) {
+    res <- suppressWarnings(run_regional_interpolation(
+      item, "IDW", 32635, character(0), NULL, "convex", "fixed", 200,
+      "fixed", 30, target, FALSE, "actual"))
+    terra::unwrap(res$r_a)
+  }
+  same <- run_to("EPSG:32635")
+  other <- run_to("EPSG:32636")
+  expect_equal(terra::res(same), c(30, 30))
+  expect_equal(terra::res(other), c(30, 30))
+  # Every locality lands on one lattice of the target CRS, so a merged
+  # surface needs no resampling.
+  expect_equal(terra::origin(other), c(0, 0), tolerance = 1e-6)
+  # A geographic target keeps terra's own choice, in degrees.
+  expect_true(terra::is.lonlat(run_to("EPSG:4326")))
+})
+
+test_that("the working CRS as target relabels the surface and keeps its values", {
+  # terra::project() onto the same system rewrote every cell at float
+  # precision to change only the CRS's spelling (a proj4 UTM zone against its
+  # EPSG code, as a geographic upload's working CRS is written).
+  r <- terra::rast(nrows = 20, ncols = 20, xmin = 500000, xmax = 500600,
+                   ymin = 4400000, ymax = 4400600,
+                   crs = "+proj=utm +zone=35 +datum=WGS84 +units=m +no_defs")
+  set.seed(3)
+  terra::values(r) <- rnorm(400, 7, 0.3)
+  out <- project_to_target(r, "EPSG:32635", 30)
+  expect_identical(terra::values(out), terra::values(r))
+  expect_identical(as.vector(terra::ext(out)), as.vector(terra::ext(r)))
+  expect_equal(terra::crs(out, describe = TRUE)$code, "32635")
+  # Another datum is another system: ETRS89 / UTM 35N is reprojected onto the
+  # run's cell size.
+  other <- project_to_target(r, "EPSG:25835", 30)
+  expect_equal(terra::crs(other, describe = TRUE)$code, "25835")
+  expect_equal(terra::res(other), c(30, 30))
+  expect_equal(terra::origin(other), c(0, 0), tolerance = 1e-6)
+})
+
+test_that("Fixed-mode localities share one lattice, so the merged surface is not resampled", {
+  # terra::merge resamples every raster whose origin differs from the first
+  # one's. Fixed-mode grids started at their own boundary's corner, so the
+  # merged surface carried interpolated values for every locality but one.
+  set.seed(8)
+  item_at <- function(l, x0, y0) {
+    d <- data.frame(x = x0 + runif(30, 0, 900), y = y0 + runif(30, 0, 900))
+    d$v <- 5 + d$x / 1e4 + rnorm(30, 0, 0.2)
+    d$pv <- NA_real_
+    list(l = l, pts_data = d,
+         m_params = list(idw_p_act = 2, idw_p_pre = 2, idw_nmax = 12,
+                         tps_lambda_act = -1, tps_lambda_pre = -1,
+                         pre_fit_act = NULL, pre_fit_pre = NULL,
+                         cv_strategy = "auto", vif_threshold = 10))
+  }
+  surface <- function(item) {
+    terra::unwrap(suppressWarnings(run_regional_interpolation(
+      item, "IDW", 32635, character(0), NULL, "convex", "fixed", 200,
+      "fixed", 30, "EPSG:32635", FALSE, "actual"))$r_a)
+  }
+  a <- surface(item_at("A", 500013.7, 4400021.3))
+  b <- surface(item_at("B", 503517.1, 4402533.9))
+  expect_equal(terra::origin(a), c(0, 0), tolerance = 1e-6)
+  expect_equal(terra::origin(b), c(0, 0), tolerance = 1e-6)
+  expect_no_warning(m <- merge_wrapped_rasters(list(a, b)))
+  # Every cell of the second locality keeps its own value in the merged surface.
+  expect_equal(terra::extract(m, terra::crds(b))[["var1.pred"]],
+               as.numeric(terra::values(b, na.rm = TRUE)))
 })
 
 test_that("the point-error surface resolves an absent IDW neighbour count", {

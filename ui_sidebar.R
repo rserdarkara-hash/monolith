@@ -42,8 +42,10 @@ ui_sidebar_panel <- sidebarPanel(width = 3,
                      # sidebar is set up for a non-comparison next run. That arm
                      # also requires the DISPLAYED run to have a prediction side:
                      # the view menu's value alone can outlive the comparison.
+                     # The server applies Match Scales only while this holds
+                     # (match_scales_shown, ui_formatting.R): change both together.
                      conditionalPanel(condition = "(input.comp_mode && ['pred', 'pred_ss'].includes(input.value_type)) || (output.disp_has_pred == 'yes' && /^view_comp/.test(input.map_view || ''))",
-                           checkboxInput("match_scales", HTML(paste0("Match Scales", info_tooltip("match_info", "Forces the map legends for Actual and Predicted data to use the same color range, for the surfaces and for their standard-error or variance maps."))), FALSE))
+                           checkboxInput("match_scales", HTML(paste0("Match Scales", info_tooltip("match_info", "Forces the map legends for Actual and Predicted data to use the same color range, for the surfaces and for their standard-error or variance maps. Under Binned or Agronomical Jenks/K-Means styling it also classifies both surfaces with one set of class breaks computed from the two together; otherwise each surface's classes come from its own values."))), FALSE))
         ))
       )
       ),
@@ -274,6 +276,11 @@ ui_sidebar_panel <- sidebarPanel(width = 3,
                 uiOutput("agro_options"),
                 uiOutput("agro_pending_note"),
                 actionButton("agro_apply", "Apply to maps and statistics", class = "btn-primary btn-block", style = "margin-bottom: 6px;")),
+            # Classes computed from the data differ between the two surfaces
+            # of a run unless Match Scales pools them (supervised limits are
+            # shared by construction). Shown where Match Scales is shown.
+            conditionalPanel(condition = "(input.color_style == 'bin' || (input.color_style == 'agro' && input.agro_method != 'limits')) && ((input.comp_mode && ['pred', 'pred_ss'].includes(input.value_type)) || (output.disp_has_pred == 'yes' && /^view_comp/.test(input.map_view || '')))",
+              helpText(HTML("<em style='color: var(--mn-text-3); font-size: 0.9em; font-style: normal;'>The Actual and Predicted maps are each classified from their own values, so their class limits can differ. Tick Match Scales (Context) for one set of limits across both.</em>"))),
             hr(),
             h5("Uncertainty Mapping"),
             # Keyed to the method of the DISPLAYED run (disp_method): the maps

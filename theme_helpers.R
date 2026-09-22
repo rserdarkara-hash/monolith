@@ -692,6 +692,14 @@ select::-ms-expand { display: none; }
   display: flex !important; width: 100% !important;
   align-items: center; justify-content: space-between;
 }
+/* An open menu grows to its longest label, and the sidebar scrolls
+   (overflow-y: auto clips its x axis too), so on a narrow screen a predictor
+   menu ran past the sidebar's edge and was cut off there. Inside the sidebar
+   the menu keeps its control's width and long labels wrap. */
+.well[role='complementary'] .bootstrap-select .dropdown-menu { max-width: 100%; }
+.well[role='complementary'] .bootstrap-select .dropdown-menu li a {
+  white-space: normal; overflow-wrap: anywhere;
+}
 
 /* checkboxes */
 .checkbox label, .radio label {

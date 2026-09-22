@@ -11,9 +11,12 @@ required_packages <- c(
   "shiny", "shinyjs", "shinyWidgets", "shinyFiles", "shinycssloaders", "DT",
   "sf", "terra", "tidyterra", "leaflet", "leaflet.extras", "ggspatial", "fields",
   "classInt", "gstat", "concaveman", "spdep", "FNN",
+  # Exact Jenks natural breaks over every raster cell (natural_breaks(),
+  # spatial_pipeline.R). Called through ::, never attached.
+  "Ckmeans.1d.dp",
   "dplyr", "tidyr", "jsonlite", "readxl", "openxlsx", "officer", "zip",
-  "ggplot2", "ggpubr", "plotly", "RColorBrewer", "viridis",
-  "patchwork", "showtext", "scales", "commonmark", "glue",
+  "ggplot2", "plotly", "RColorBrewer", "viridis",
+  "patchwork", "showtext", "scales", "commonmark",
   "randomForest", "DALEX", "yardstick", "agricolae", "mgcv",
   "parsnip", "recipes", "workflows", "tune", "rsample", "dials",
   "spatialsample", "hardhat", "ranger", "xgboost", "nnet",
@@ -118,7 +121,6 @@ library(officer)
 library(zip)
 
 library(ggplot2)
-library(ggpubr)
 library(plotly)
 library(RColorBrewer)
 library(viridis)
@@ -126,7 +128,6 @@ library(patchwork)
 library(showtext)
 library(scales)
 library(commonmark)
-library(glue)
 
 library(randomForest)
 library(DALEX)

@@ -163,7 +163,7 @@ Karacasu 220 / Altinova 355, extents from 0.9 x 3.0 km to 22.9 x 32.1 km,
 **Recording provenance** — also in `golden_baselines.rds`, as an attribute:
 the R version, the platform, the date, the GDAL/GEOS/PROJ that `sf` and `terra`
 are linked against, and the versions of the four packages
-that can move one of the recorded values (`gstat`, `sf`, `terra`, `classInt`). A recorded value means *same code + same data + same packages -> same
+that can move one of the recorded values (`gstat`, `sf`, `terra`, `Ckmeans.1d.dp`). A recorded value means *same code + same data + same packages -> same
 numbers*; the fixture freezes the data and git holds the code, so without this
 the package leg was unrecorded and a moved value could not be told apart from
 an upstream change. Every baseline assertion now carries it in its failure

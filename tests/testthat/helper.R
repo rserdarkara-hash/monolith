@@ -58,14 +58,15 @@ if (!exists(".monolith_sourced") || !isTRUE(.monolith_sourced)) {
 # mgcv hands contrasts = to model.matrix. Left alone they are the large
 # majority of the suite's warning output, which buries a genuine new one.
 #
-# Muffle those notices BY MESSAGE at the call sites that raise them, rather
+# Muffle those two notices BY MESSAGE at the call sites that raise them, rather
 # than wrapping the call in suppressWarnings(), so every other warning the
-# expression raises still reaches the reporter.
+# expression raises still reaches the reporter - a partial match in Monolith's
+# own code included.
 without_partial_match_notices <- function(expr) {
   withCallingHandlers(
     expr,
     warning = function(w) {
-      if (grepl("partial argument match", conditionMessage(w), fixed = TRUE)) {
+      if (grepl("'along' to 'along.with'|'contrasts' to 'contrasts.arg'", conditionMessage(w))) {
         invokeRestart("muffleWarning")
       }
     }
@@ -472,10 +473,10 @@ golden_baseline <- function(key) {
 # These are the packages that can actually move one of the four recorded values:
 # gstat (the empirical variogram and the kriging solve), sf and terra
 # (projection, grid construction, rasterisation, the ellipsoidal areas),
-# classInt (the Jenks breaks). Moran diagnostics are not recorded. Extend the
-# list only when a NEW baseline brings a new package in - an entry that cannot
-# move a value would report drift that means nothing.
-GOLDEN_BASELINE_PKGS <- c("gstat", "sf", "terra", "classInt")
+# Ckmeans.1d.dp (the exact Jenks natural breaks). Moran diagnostics are not
+# recorded. Extend the list only when a NEW baseline brings a new package in -
+# an entry that cannot move a value would report drift that means nothing.
+GOLDEN_BASELINE_PKGS <- c("gstat", "sf", "terra", "Ckmeans.1d.dp")
 
 #' TRUE when this session is deliberately running on unpinned package versions.
 #'
