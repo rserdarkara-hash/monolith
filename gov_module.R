@@ -369,7 +369,8 @@ gov_factors_server <- function(id, data_reactive, vars_metadata_reactive) {
 
         ggplot2::ggplot(long, ggplot2::aes(x = value, y = variable_label)) +
           ggplot2::geom_col(fill = "steelblue") +
-          ggplot2::facet_wrap(~measure, scales = "free_x") +
+          ggplot2::facet_wrap(~measure, scales = "free_x",
+                              labeller = ggplot2::label_wrap_gen(width = 20)) +
           ggplot2::labs(title = "Global Variable Importance",
                         subtitle = if (!is.null(gov_rv$res$n_used)) {
                           complete_case_note(gov_rv$res$n_used, gov_rv$res$n_total)

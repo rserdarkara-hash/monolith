@@ -197,7 +197,7 @@ build_rf_importance_plot <- function(rf_mod, title, vars_metadata = NULL) {
   ggplot(long, aes(x = Importance, y = Variable)) +
     geom_segment(aes(x = 0, xend = Importance, yend = Variable), color = "grey70", linewidth = 0.4) +
     geom_point(color = "steelblue", size = 2.5) +
-    facet_wrap(~Measure, scales = "free_x") +
+    facet_wrap(~Measure, scales = "free_x", labeller = label_wrap_gen(width = 20)) +
     labs(title = title, x = NULL, y = NULL,
          caption = if (RF_IMPORTANCE_LABELS[["scaled"]] %in% measures) {
            paste0("The scaled measure grows with the number of trees (", rf_mod$ntree,
