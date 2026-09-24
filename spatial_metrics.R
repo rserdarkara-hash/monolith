@@ -132,16 +132,71 @@ augment_metrics <- function(obs, pre) {
   return(res)
 }
 
+# Permutations behind every residual Moran p-value, and the seed they are drawn
+# under (inside with_seed, so the caller's RNG stream is untouched).
+MORAN_NSIM <- 999L
+MORAN_PERM_SEED <- 12345L
+
+#' Two-sided permutation p-value by doubling the smaller tail, with the
+#' (b + 1) / (m + 1) correction (Davison & Hinkley 1997; Phipson & Smyth 2010):
+#' the observed arrangement counts as one of the m + 1, so the p-value is never
+#' 0 and the smallest attainable value is 2 / (m + 1). NA when the observed
+#' statistic is not finite.
+#'
+#' A permuted statistic within `tol` of the observed one is a tie and counts in
+#' both tails. Two arrangements with the same exact I are summed in a different
+#' order and differ in the last bits; without the tolerance a degenerate
+#' distribution would get an arbitrary p. It is not hypothetical: the kNN graph
+#' of nine samples or fewer is complete, every arrangement then has
+#' I = -1/(n-1) exactly, and the right answer is p = 1.
+moran_perm_p <- function(obs, sim, tol = sqrt(.Machine$double.eps) * max(1, abs(obs))) {
+  if (length(obs) != 1L || !is.finite(obs)) return(NA_real_)
+  m <- length(sim)
+  upper <- (1 + sum(sim >= obs - tol)) / (m + 1)
+  lower <- (1 + sum(sim <= obs + tol)) / (m + 1)
+  min(1, 2 * min(upper, lower))
+}
+
+#' Moran cross-products z' W z of MORAN_NSIM permutations of `zc` (centred
+#' residuals), for weights given as an edge list: w[e] between zc[ei[e]] and
+#' zc[ej[e]]. The permutations are drawn under with_seed(MORAN_PERM_SEED), one
+#' sample() per permutation as spdep::moran.mc draws them, so they are its
+#' draws; centring and the sum of squares do not change under a permutation,
+#' so the caller scales these sums by its own n / (S0 * sum(zc^2)).
+#' Permutations are scored in blocks of at most `block_cells` gathered values,
+#' which bounds memory at any n.
+.moran_perm_crossprods <- function(zc, ei, ej, w, block_cells = 2e6) {
+  nsim <- MORAN_NSIM
+  b <- max(1L, as.integer(block_cells %/% max(1L, length(ei))))
+  out <- numeric(nsim)
+  with_seed(MORAN_PERM_SEED, {
+    s <- 1L
+    while (s <= nsim) {
+      e <- min(s + b - 1L, nsim)
+      z <- vapply(s:e, function(k) sample(zc), numeric(length(zc)))
+      out[s:e] <- colSums(w * z[ei, , drop = FALSE] * z[ej, , drop = FALSE])
+      s <- e + 1L
+    }
+  })
+  out
+}
+
 #' Residual Moran's I with its null expectation and significance.
 #'
 #' Returns `list(i, e_i, p)`: the statistic, its expectation under the null of
-#' no spatial autocorrelation (E[I] = -1/(n-1), identical under the normality
-#' and randomization assumptions), and a two-sided p-value. Reporting I alone
-#' is misleading, because E[I] is negative rather than zero: an I of, say,
-#' +0.01 at n = 30 sits barely above E[I] = -0.034 and is no evidence of
-#' clustering at all. Every "cannot compute" branch returns all-NA - NA here
-#' means the statistic was not computable for this point set, never "no
-#' spatial structure was found".
+#' no spatial autocorrelation (E[I] = -1/(n-1)), and a two-sided permutation
+#' p-value. Reporting I alone is misleading, because E[I] is negative rather
+#' than zero: an I of, say, +0.01 at n = 30 sits barely above E[I] = -0.034 and
+#' is no evidence of clustering at all. Every "cannot compute" branch returns
+#' all-NA - NA here means the statistic was not computable for this point set,
+#' never "no spatial structure was found".
+#'
+#' The p-value is a permutation test (MORAN_NSIM seeded permutations of the
+#' residuals over the fixed weights): exact under the randomisation null and
+#' free of any distributional assumption, where the normal approximations need
+#' Gaussian residuals (or at least the observed kurtosis) and cross-validation
+#' residuals are often heavy-tailed. spdep's own two-sided moran.mc is not used:
+#' it returns p = 0 when the observed I is the most extreme of the draws.
 calc_moran <- function(residuals, coords) {
   na_res <- list(i = NA_real_, e_i = NA_real_, p = NA_real_)
   if (is.null(residuals) || is.null(coords)) return(na_res)
@@ -197,16 +252,23 @@ calc_moran <- function(residuals, coords) {
     )
 
     lw <- spdep::nb2listw(nb, style = "W", zero.policy = TRUE)
-    
-    # alternative = "two.sided" departs from spdep's default ("greater"): this is
-    # a diagnostic, so a strongly NEGATIVE residual autocorrelation (checkerboard
-    # error pattern) is just as much a model-misspecification signal as a
-    # positive one, and we do not presuppose the direction.
-    m_res <- spdep::moran.test(residuals, lw, zero.policy = TRUE,
-                               randomisation = FALSE, alternative = "two.sided")
-    return(list(i = as.numeric(m_res$estimate[1]),
-                e_i = as.numeric(m_res$estimate[2]),
-                p = as.numeric(m_res$p.value)))
+
+    # I itself is spdep's moran(), the statistic moran.test reports. Its
+    # permutation distribution reproduces spdep::moran.mc's draws (to rounding),
+    # without moran.mc's refusal of nsim > n!, which would push every point set
+    # of six samples or fewer onto the fallback's different weights; drawing
+    # with replacement from fewer distinct arrangements than MORAN_NSIM keeps
+    # the (b + 1) / (m + 1) p-value valid. Two-sided: a strongly NEGATIVE
+    # residual autocorrelation (checkerboard error pattern) is as much a
+    # misspecification signal as a positive one.
+    cards <- spdep::card(lw$neighbours)
+    n_eff <- n - sum(cards == 0L)
+    s0 <- spdep::Szero(lw)
+    i_obs <- spdep::moran(residuals, lw, n_eff, s0, zero.policy = TRUE)$I
+    zc <- residuals - mean(residuals)
+    sims <- (n_eff / s0) * .moran_perm_crossprods(
+      zc, rep.int(seq_len(n), cards), unlist(lw$neighbours), unlist(lw$weights)) / sum(zc^2)
+    return(list(i = i_obs, e_i = -1 / (n_eff - 1), p = moran_perm_p(i_obs, sims)))
   }, error = function(e) {
     if (n > 500) return(na_res)
     dists <- as.matrix(dist(coords))
@@ -219,16 +281,15 @@ calc_moran <- function(residuals, coords) {
     row_sums <- rowSums(weights, na.rm = TRUE)
     row_sums[row_sums == 0] <- 1
     weights <- weights / row_sums
-    mean_res <- mean(residuals, na.rm = TRUE)
-    diffs <- residuals - mean_res
-    numerator <- n * sum(weights * outer(diffs, diffs), na.rm = TRUE)
-    denominator <- sum(weights, na.rm = TRUE) * sum(diffs^2, na.rm = TRUE)
-    # E[I] is a property of the null hypothesis, not of the neighbour scheme, so
-    # it is available analytically here. The p-value is NOT: this branch has no
-    # sampling distribution attached to it, and fabricating one (e.g. reusing the
-    # normality-assumption variance derived for a different weight matrix) would
-    # be worse than reporting nothing.
-    return(list(i = numerator / denominator, e_i = -1 / (n - 1), p = NA_real_))
+    s0 <- sum(weights)
+    diffs <- residuals - mean(residuals)
+    ss <- sum(diffs^2)
+    i_obs <- n * sum(weights * outer(diffs, diffs)) / (s0 * ss)
+    # E[I] is a property of the null hypothesis, not of the weights. The
+    # p-value is the kNN path's permutation test, run over THIS weight matrix.
+    edge <- which(weights != 0, arr.ind = TRUE)
+    sims <- n * .moran_perm_crossprods(diffs, edge[, 1], edge[, 2], weights[edge]) / (s0 * ss)
+    return(list(i = i_obs, e_i = -1 / (n - 1), p = moran_perm_p(i_obs, sims)))
   })
 }
 
@@ -275,7 +336,9 @@ is_coord_col <- function(x) {
 #' Every value is returned at full precision (see augment_metrics).
 #' `signed_target` is TRUE when the scored observations span zero (NRMSE (mean)
 #' and SMAPE are then NA by definition, not by failure); `block_fallback` is
-#' TRUE when a Spatial Block request fell back to random folds (make_cv_folds).
+#' TRUE when a Spatial Block request fell back to random folds (make_cv_folds);
+#' `knndm_branch` is the fold design a kNNDM request chose (knndm_folds:
+#' "random", "spatial", "fallback" or "none"), NA under any other strategy.
 perform_cv <- function(cv_obj, moran = TRUE) {
   # n = predicted pairs, n_expected = rows with an observed value; metrics use
   # the predicted pairs only, and coverage says how many rows that is.
@@ -283,7 +346,8 @@ perform_cv <- function(cv_obj, moran = TRUE) {
               nrmse_mean = NA, nrmse_sd = NA, rpd = NA, rpiq = NA, smape = NA,
               moran_i = NA, moran_e = NA, moran_p = NA, n = 0,
               n_expected = 0, coverage = NA_real_, signed_target = NA,
-              block_fallback = isTRUE(attr(cv_obj, "block_fallback")))
+              block_fallback = isTRUE(attr(cv_obj, "block_fallback")),
+              knndm_branch = attr(cv_obj, "knndm")$branch %||% NA_character_)
 
   if (is.null(cv_obj)) return(res)
 
@@ -349,7 +413,7 @@ perform_cv <- function(cv_obj, moran = TRUE) {
   if (isTRUE(moran) && !is.na(x_col) && !is.na(y_col)) {
       coords <- df[valid, c(x_col, y_col)]
       # I on its own cannot be read without its null expectation; carry E[I] and
-      # the two-sided p alongside it (p is NA on the all-pairs fallback path).
+      # the two-sided permutation p alongside it.
       mor <- calc_moran(residuals, coords)
       res$moran_i <- mor$i
       res$moran_e <- mor$e_i
@@ -435,17 +499,42 @@ compute_agreement_metrics <- function(actual, predicted,
 
 # ── Cross-validation fold planning ──────────────────────────────────────────
 # Single source of truth for the CV strategy so the fold builder
-# (make_cv_folds) and the UI label (cv_type_label) can never drift.
+# (make_cv_folds) and the UI label (applied_cv_plan, ui_formatting.R) can never
+# drift.
 #   "auto"  : LOOCV for n <= 50, seeded random 10-fold above (historical default)
 #   "loocv" : full leave-one-out regardless of n
+#   "knndm" : 10 folds matched to the map's prediction distances (kNNDM,
+#             knndm_folds below); degrades to LOOCV below CV_KNNDM_MIN_N.
 #   "block" : 10 spatially-clustered (k-means) folds; degrades to LOOCV when
 #             n is too small for the blocks to be meaningful.
 CV_BLOCK_MIN_N <- 30L
+
+# kNNDM (Linnenbrink, Mila, Ludwig & Meyer 2024). CV_KNNDM_MIN_N: the Spatial
+# Block floor, at least 3 samples per fold at k = 10. KNNDM_MAXP, the domain
+# sample, the candidate count and the gate level are the reference
+# implementation's defaults (CAST::knndm: maxp 0.5, samplesize 1000 regular,
+# nk_len 100, KS p 0.05). Up to KNNDM_EXACT_MAX samples the Ward tree is built
+# on the samples themselves (its distance matrix holds 16 MB at 2000); above it
+# on at most KNNDM_MAX_CELLS square cells of samples, which bounds the memory
+# at any n, with KNNDM_NQ_CELLS candidate cuts (the same W as 100 cuts at 20k
+# and 100k samples, three times faster).
+CV_KNNDM_MIN_N <- 30L
+KNNDM_MAXP <- 0.5
+KNNDM_DOMAIN_N <- 1000L
+KNNDM_EXACT_MAX <- 2000L
+KNNDM_MAX_CELLS <- 2000L
+KNNDM_NQ_EXACT <- 100L
+KNNDM_NQ_CELLS <- 30L
+KNNDM_KS_ALPHA <- 0.05
 
 # The one fold seed every engine uses for its reported (reference) CV run.
 # Repeated CV walks CV_FOLD_SEED + 1, + 2, ... so repeat 1 IS the reference
 # realization: turning repeats on can never move the numbers already displayed.
 CV_FOLD_SEED <- 12345L
+
+# The fold count of every k-fold plan (random, kNNDM, Spatial Block), and of
+# the random reference the CV Distance Match panel compares against.
+CV_FOLD_K <- 10L
 
 # Central authority for CV plan selection: maps (strategy, n) to a fold scheme
 # (type, fold count k, human-readable label) so every caller builds folds and
@@ -456,32 +545,48 @@ resolve_cv_plan <- function(strategy = "auto", n) {
   # hand-edited run-config upload carrying an old key would otherwise raise
   # match.arg's error inside a PSOCK worker and surface as the generic
   # "Parallel Interpolation Failed" modal.
-  if (!strategy %in% c("auto", "loocv", "block")) strategy <- "auto"
+  if (!strategy %in% c("auto", "loocv", "knndm", "block")) strategy <- "auto"
   if (is.null(n) || length(n) == 0 || is.na(n)) return(list(type = "loocv", k = NA_integer_, label = "CV"))
   if (strategy == "loocv") return(list(type = "loocv", k = n, label = "Full LOOCV"))
+  if (strategy == "knndm") {
+    if (n < CV_KNNDM_MIN_N) return(list(type = "loocv", k = n, label = paste0("LOOCV [kNNDM needs n ≥ ", CV_KNNDM_MIN_N, "]")))
+    return(list(type = "knndm", k = CV_FOLD_K, label = "kNNDM CV"))
+  }
   if (strategy == "block") {
     if (n < CV_BLOCK_MIN_N) return(list(type = "loocv", k = n, label = paste0("LOOCV [Spatial Block needs n ≥ ", CV_BLOCK_MIN_N, "]")))
-    return(list(type = "block", k = 10L, label = "Spatial Block CV"))
+    return(list(type = "block", k = CV_FOLD_K, label = "Spatial Block CV"))
   }
   # auto
-  if (n > 50) return(list(type = "random_kfold", k = 10L, label = "Random 10-fold CV"))
+  if (n > 50) return(list(type = "random_kfold", k = CV_FOLD_K, label = "Random 10-fold CV"))
   list(type = "loocv", k = n, label = "LOOCV")
 }
 
+# The seeded, balanced random k-fold: Auto's folds above 50 samples, kNNDM's
+# folds where they already match the map, and the reference of the CV
+# Distance Match panel. One expression, so the three cannot drift apart.
+cv_random_folds <- function(n, k = CV_FOLD_K, seed = CV_FOLD_SEED) {
+  with_seed(seed, sample(rep(seq_len(k), length.out = n)))
+}
+
 # Returns an integer fold-id vector of length n. `coords` is an n x 2 matrix of
-# projected (metric) coordinates, used only by Spatial Block (k-means). Seeded
-# (CV_FOLD_SEED) under a two-sided RNG sandbox so folds are reproducible and the
-# caller's .Random.seed is preserved (same convention as calc_moran). `seed` is
-# varied ONLY by repeated CV, which needs alternative fold realizations of the
-# same plan; every reported single-realization run keeps the default.
-make_cv_folds <- function(coords, strategy = "auto", n = NULL, seed = CV_FOLD_SEED) {
+# projected (metric) coordinates, used by Spatial Block (k-means) and kNNDM.
+# Seeded (CV_FOLD_SEED) under a two-sided RNG sandbox so folds are
+# reproducible and the caller's .Random.seed is preserved (same convention as
+# calc_moran). `seed` is varied ONLY by repeated CV, which needs alternative
+# fold realizations of the same plan; every reported single-realization run
+# keeps the default. `domain_xy` holds the map's prediction locations
+# (knndm_domain_points); only kNNDM reads it, and without it kNNDM returns the
+# random folds.
+make_cv_folds <- function(coords, strategy = "auto", n = NULL, seed = CV_FOLD_SEED,
+                          domain_xy = NULL) {
   if (is.null(n)) n <- nrow(coords)
   plan <- resolve_cv_plan(strategy, n)
 
-  if (plan$type == "loocv") return(seq_len(n))
-
-  with_seed(seed, {
-    if (plan$type == "block") {
+  switch(plan$type,
+    loocv = seq_len(n),
+    random_kfold = cv_random_folds(n, plan$k, seed),
+    knndm = knndm_folds(coords, domain_xy, plan$k, KNNDM_MAXP, seed),
+    block = with_seed(seed, {
       folds <- tryCatch({
         cm <- as.matrix(coords)[, 1:2, drop = FALSE]
         km <- stats::kmeans(cm, centers = plan$k, nstart = 5, iter.max = 50)
@@ -490,17 +595,339 @@ make_cv_folds <- function(coords, strategy = "auto", n = NULL, seed = CV_FOLD_SE
       # Degenerate geometry (e.g. many duplicate coordinates) can make k-means
       # fail or collapse; fall back to a seeded random k-fold rather than
       # losing CV entirely. The folds say so: they are not spatial blocks, and
-      # no metric scored on them may be reported as Spatial Block CV.
+      # no metric scored on them may be reported as Spatial Block CV. The draw
+      # continues the k-means stream, so it is not cv_random_folds().
       if (is.null(folds) || length(unique(folds)) < 2) {
         folds <- sample(rep(seq_len(plan$k), length.out = n))
         attr(folds, "block_fallback") <- TRUE
       }
       folds
-    } else {
-      # random_kfold: balanced, seeded
-      sample(rep(seq_len(plan$k), length.out = n))
+    }))
+}
+
+# ── kNNDM (k-fold nearest-neighbour distance matching) ──────────────────────
+# A cross-validation error estimates the map's error when held-out samples are
+# predicted from the distances at which the map predicts its cells (Mila et al.
+# 2022). kNNDM (Linnenbrink, Mila, Ludwig & Meyer 2024, Geosci. Model Dev.
+# 17:5897) builds the k folds whose held-out-to-training nearest-neighbour
+# distances best match the distances from the map's locations to the samples,
+# following the reference implementation (CAST::knndm, geographic space,
+# hierarchical clustering with Ward's ward.D2 linkage). Three distributions:
+#   Gj   each sample's distance to its nearest other sample,
+#   Gij  each map location's distance to its nearest sample,
+#   Gj*  each sample's distance to the nearest sample outside its fold.
+# Three app conventions (Scientific Guide 5.1): the first principal axis's sign
+# is fixed, so the folds are the same on every platform; above
+# KNNDM_EXACT_MAX samples the tree is built on square cells of samples; and
+# the random partition kNNDM would otherwise return (Auto's seeded random
+# folds; the class-stratified random k-fold in the Classification Suite) is
+# always a candidate, so the folds never match the map worse than it does.
+
+#' Wasserstein-1 distance between the empirical distributions of `a` and `b`:
+#' the integral of |F_a(t) - F_b(t)| dt over the pooled support, i.e. the area
+#' between the two cumulative curves, in the units of the data. It equals
+#' twosamples::wass_stat, which the reference implementation uses.
+cv_wasserstein1 <- function(a, b) {
+  a <- sort(a); b <- sort(b)
+  x <- sort(c(a, b)); xm <- x[-length(x)]
+  sum(abs(findInterval(xm, a) / length(a) - findInterval(xm, b) / length(b)) * diff(x))
+}
+
+#' Distance from every sample to the nearest sample outside its own fold (Gj*).
+#' With one sample per fold (LOOCV) this is the sample-to-sample
+#' nearest-neighbour distance. Co-located samples in different folds give 0.
+cv_heldout_nnd <- function(xy, folds) {
+  xy <- unname(as.matrix(xy)[, 1:2, drop = FALSE])
+  if (!anyDuplicated(folds)) return(FNN::get.knn(xy, k = 1)$nn.dist[, 1])
+  d <- numeric(nrow(xy))
+  for (f in unique(folds)) {
+    te <- folds == f
+    d[te] <- FNN::get.knnx(xy[!te, , drop = FALSE], xy[te, , drop = FALSE], k = 1)$nn.dist[, 1]
+  }
+  d
+}
+
+#' The map's locations as kNNDM reads them: a regular square lattice of about
+#' `n_target` points inside the boundary the surface is clipped to, spaced
+#' sqrt(area / n_target) and cell-centred on the boundary's bounding box. A
+#' thin or fragmented boundary that catches fewer than half of them is
+#' resampled with the spacing divided by sqrt(2), up to five times. The lattice
+#' depends on the boundary only, never on the grid's cell size, so the folds
+#' follow the boundary and buffer but not the resolution. Without a usable
+#' boundary, a regular thinning of the prediction grid `grid_xy` to at most
+#' `n_target` rows; NULL without either. KNNDM_DOMAIN_N is the reference
+#' implementation's default domain sample (1000 regular points).
+knndm_domain_points <- function(bound = NULL, grid_xy = NULL, n_target = KNNDM_DOMAIN_N) {
+  if (!is.null(bound)) {
+    pts <- tryCatch(.knndm_lattice(bound, n_target), error = function(e) NULL)
+    if (NROW(pts)) return(pts)
+  }
+  if (!is.null(grid_xy) && NROW(grid_xy) > 0) {
+    grid_xy <- as.matrix(grid_xy)
+    keep <- unique(round(seq(1, nrow(grid_xy), length.out = min(n_target, nrow(grid_xy)))))
+    return(unname(grid_xy[keep, 1:2, drop = FALSE]))
+  }
+  NULL
+}
+
+# Lattice cells tested at a time: terra marks the cells whose centre lies inside
+# the boundary, a band of lattice rows at a time, so a boundary that covers a
+# small share of its bounding box (distant point buffers) never allocates the
+# whole box at once.
+.KNNDM_LATTICE_BLOCK <- 4e6
+
+.knndm_lattice <- function(bound, n_target) {
+  geom <- sf::st_union(sf::st_geometry(bound))
+  area <- sum(as.numeric(sf::st_area(geom)))
+  if (!is.finite(area) || area <= 0) return(NULL)
+  bb <- sf::st_bbox(geom)
+  v <- terra::vect(geom)
+  s <- sqrt(area / n_target)
+  # A side shorter than the spacing carries one lattice line, at its midpoint.
+  axis_pts <- function(lo, hi) if (hi - lo <= s) (lo + hi) / 2 else seq(lo + s / 2, hi, by = s)
+  inside <- matrix(numeric(0), 0, 2)
+  for (attempt in 1:5) {
+    xs <- axis_pts(bb[["xmin"]], bb[["xmax"]])
+    ys <- axis_pts(bb[["ymin"]], bb[["ymax"]])
+    rows_per_band <- max(1L, floor(.KNNDM_LATTICE_BLOCK / length(xs)))
+    bands <- unname(split(seq_along(ys), ceiling(seq_along(ys) / rows_per_band)))
+    inside <- do.call(rbind, lapply(bands, function(i) {
+      r <- terra::rast(xmin = xs[1] - s / 2, xmax = xs[length(xs)] + s / 2,
+                       ymin = ys[min(i)] - s / 2, ymax = ys[max(i)] + s / 2,
+                       ncols = length(xs), nrows = length(i), crs = terra::crs(v))
+      terra::crds(terra::rasterize(v, r), na.rm = TRUE)
+    }))
+    if (nrow(inside) >= n_target / 2) break
+    s <- s / sqrt(2)
+  }
+  if (nrow(inside)) unname(inside[, 1:2, drop = FALSE]) else NULL
+}
+
+#' Square cells holding the samples, for the tree above KNNDM_EXACT_MAX: the
+#' finest cell size with at most `max_cells` occupied cells (bisection on the
+#' log cell size, 40 steps). Returns each sample's cell id (1..U, in order of
+#' first appearance).
+.knndm_cell_units <- function(xy, max_cells) {
+  ext <- apply(xy, 2, range)
+  span <- max(ext[2, ] - ext[1, ])
+  key_at <- function(s) floor((xy[, 1] - ext[1, 1]) / s) * 1e7 + floor((xy[, 2] - ext[1, 2]) / s)
+  lo <- log(span / 1e6); hi <- log(span + 1)
+  for (i in 1:40) {
+    mid <- (lo + hi) / 2
+    if (length(unique(key_at(exp(mid)))) > max_cells) lo <- mid else hi <- mid
+  }
+  key <- key_at(exp(hi))
+  match(key, unique(key))
+}
+
+#' Ward's tree above the cell level, from the cells' centroids `cen` and sizes
+#' `cnt`. Ward's merge cost between groups A and B, in the Lance-Williams form
+#' hclust tracks, is 2 nA nB / (nA + nB) |cA - cB|^2 (ward.D2 squares its
+#' input), so with those dissimilarities and the sizes as `members` the tree
+#' reproduces every Ward merge above the cell level (Lance & Williams 1967);
+#' plain centroid distances do not. The weights are applied to the distance
+#' vector one column at a time, so no U x U matrix is built; the vector is
+#' unclassed while it is weighted, because a sub-assignment into a classed
+#' "dist" object copies the whole vector every time.
+.knndm_cell_tree <- function(cen, cnt) {
+  U <- nrow(cen)
+  cnt <- as.numeric(cnt)
+  d <- unclass(stats::dist(cen))
+  off <- 0L
+  for (j in seq_len(U - 1L)) {
+    i <- (j + 1L):U
+    at <- off + seq_along(i)
+    d[at] <- d[at] * sqrt(2 * cnt[j] * cnt[i] / (cnt[j] + cnt[i]))
+    off <- off + length(i)
+  }
+  class(d) <- "dist"
+  stats::hclust(d, method = "ward.D2", members = cnt)
+}
+
+#' The first principal axis of the sample coordinates (centred, unscaled), its
+#' sign fixed so that its largest-magnitude loading is positive: an
+#' eigenvector's sign is arbitrary, and it decides the order in which clusters
+#' are dealt to folds.
+.knndm_pc_axis <- function(xy) {
+  pc <- stats::prcomp(xy, center = TRUE, scale. = FALSE, rank. = 1)
+  axis <- pc$rotation[, 1]
+  if (axis[which.max(abs(axis))] < 0) axis <- -axis
+  list(center = pc$center, axis = unname(axis))
+}
+
+#' The reference merge of q clusters (`cl`, ids 1..q) into k folds: clusters
+#' are ordered along the first principal axis by their centroids' scores; a
+#' cluster of at least n/k samples keeps a fold of its own (ids 1, 2, ... in
+#' that order); the others are dealt in turn, in that order, over the remaining
+#' fold ids, so a fold gathers clusters from across the locality. NULL when the
+#' large clusters leave no fold for the small ones.
+.knndm_merge <- function(xy, cl, q, k, pc_center, pc_axis) {
+  n <- nrow(xy)
+  sizes <- tabulate(cl, nbins = q)
+  cen <- rowsum(xy, cl) / sizes
+  ord <- order(drop(sweep(cen, 2, pc_center) %*% pc_axis))
+  big <- ord[sizes[ord] >= n / k]
+  small <- ord[sizes[ord] < n / k]
+  if (length(big) > k || (length(big) == k && length(small))) return(NULL)
+  fk <- rep(NA_integer_, q)
+  fk[big] <- seq_along(big)
+  rest <- setdiff(seq_len(k), seq_along(big))
+  if (length(small)) fk[small] <- rep(rest, ceiling(length(small) / length(rest)))[seq_along(small)]
+  fk[cl]
+}
+
+#' kNNDM fold assignment for the samples `xy` (n x 2, projected) against the
+#' map's locations `domain_xy`. Returns an integer fold vector with
+#' attr(, "knndm") = list(branch, q, k, W, W_random, ks_p, n_domain, units,
+#' exact). `branch`:
+#'   "random"   random folds match the map best: the one-sided KS test does
+#'              not find the map's distances larger than the sample spacing
+#'              (p >= alpha), or no cluster partition matched them better than
+#'              the random partition did; the folds are the random partition;
+#'   "spatial"  a cluster partition won (q clusters merged into k folds);
+#'   "fallback" no candidate partition was valid; the random partition;
+#'   "none"     no prediction domain; the random partition.
+#' The random partition is `random_folds` when supplied (the Classification
+#' Suite's class-stratified random k-fold), else cv_random_folds(n, k, seed),
+#' Auto's folds above 50 samples. It must hold k folds: W depends on the fold
+#' count, so only partitions into the same k are compared.
+#' The candidates are the reference implementation's (CAST) plus the random
+#' partition, which CAST considers only through the gate: kNNDM keeps the
+#' smallest W, so it never returns folds that match the map worse than the
+#' random partition it would otherwise use (author decision 2026-09-24). W
+#' belongs to one partition, so where the best cut and random folds match
+#' about equally the seed's draw decides between them. The spatial branch
+#' draws no random numbers; W is the Wasserstein-1 distance of the chosen
+#' folds' held-out distances from the map's, W_random that of the random
+#' partition.
+knndm_folds <- function(xy, domain_xy, k = CV_FOLD_K, maxp = KNNDM_MAXP, seed = CV_FOLD_SEED,
+                        exact_max = KNNDM_EXACT_MAX, max_cells = KNNDM_MAX_CELLS,
+                        nq_exact = KNNDM_NQ_EXACT, nq_cells = KNNDM_NQ_CELLS,
+                        alpha = KNNDM_KS_ALPHA, random_folds = NULL) {
+  xy <- unname(as.matrix(xy)[, 1:2, drop = FALSE]); n <- nrow(xy)
+  rnd <- if (is.null(random_folds)) cv_random_folds(n, k, seed) else as.integer(random_folds)
+  if (length(rnd) != n) stop("The random partition has ", length(rnd), " fold ids for ", n, " samples.")
+  tag <- function(folds, branch, W, W_random, q = NA_integer_, ks_p = NA_real_,
+                  units = n, exact = TRUE) {
+    folds <- as.integer(folds)
+    attr(folds, "knndm") <- list(branch = branch, q = q, k = k, W = W, W_random = W_random,
+                                 ks_p = ks_p, n_domain = if (is.null(domain_xy)) 0L else nrow(domain_xy),
+                                 units = units, exact = exact)
+    folds
+  }
+  if (is.null(domain_xy) || !nrow(domain_xy)) return(tag(rnd, "none", NA_real_, NA_real_))
+  domain_xy <- as.matrix(domain_xy)[, 1:2, drop = FALSE]
+  Gj <- FNN::get.knn(xy, k = 1)$nn.dist[, 1]
+  Gij <- FNN::get.knnx(xy, domain_xy, k = 1)$nn.dist[, 1]
+  W_rnd <- cv_wasserstein1(cv_heldout_nnd(xy, rnd), Gij)
+  # H1: the samples' spacing is stochastically smaller than the map's distance
+  # to the samples, i.e. the map predicts farther out than random folds would.
+  ks_p <- suppressWarnings(stats::ks.test(Gj, Gij, alternative = "greater")$p.value)
+  if (isTRUE(ks_p >= alpha)) return(tag(rnd, "random", W_rnd, W_rnd, ks_p = ks_p))
+
+  exact <- n <= exact_max
+  unit <- if (exact) seq_len(n) else .knndm_cell_units(xy, max_cells)
+  U <- max(unit)
+  # The published candidate set, plus the random partition: a gate that only
+  # just rejects can leave every cluster partition matching the map worse than
+  # this partition does, and the cell path cuts off the fine end of the tree,
+  # where the partitions approach random folds. A cluster partition has to beat
+  # it strictly. Balanced folds break the cap only when maxp < 1/k.
+  rnd_ok <- !any(tabulate(rnd, nbins = k) / n > maxp)
+  best <- if (rnd_ok) list(folds = rnd, W = W_rnd, q = NA_integer_) else list(folds = NULL, W = Inf, q = NA_integer_)
+  # The tree is built only when it has cuts to score: below k + 2 units (every
+  # sample in one cell, say) the random partition is the only candidate.
+  if (U - 2 >= k) {
+    hc <- if (exact) stats::hclust(stats::dist(xy), method = "ward.D2") else {
+      cnt <- tabulate(unit)
+      .knndm_cell_tree(rowsum(xy, unit) / cnt, cnt)
     }
-  })
+    pc <- .knndm_pc_axis(xy)
+    qs <- unique(as.integer(round(exp(seq(log(k), log(U - 2),
+                                          length.out = if (exact) nq_exact else nq_cells)))))
+    for (q in qs) {
+      folds <- .knndm_merge(xy, stats::cutree(hc, k = q)[unit], q, k, pc$center, pc$axis)
+      if (is.null(folds) || any(tabulate(folds, nbins = k) / n > maxp)) next
+      W <- cv_wasserstein1(cv_heldout_nnd(xy, folds), Gij)
+      # Strictly smaller: a tie keeps the smaller q, the first minimum.
+      if (W < best$W) best <- list(folds = folds, W = W, q = q)
+    }
+  }
+  if (is.null(best$folds)) return(tag(rnd, "fallback", W_rnd, W_rnd, ks_p = ks_p, units = U, exact = exact))
+  tag(best$folds, if (is.na(best$q)) "random" else "spatial", best$W, W_rnd, best$q, ks_p, U, exact)
+}
+
+#' What the CV Distance Match panel draws for one CV population: the quantiles
+#' (`probs`) of the three nearest-neighbour distance distributions - `sample`
+#' (Gj), `map` (Gij) and `cv` (Gj* under `folds`) - with W for these folds
+#' (`W_cv`) and for the random reference partition (`W_random`), in the
+#' coordinates' units (`units`, the CRS's unit symbol when known). The
+#' reference is `random_folds` when supplied (the Classification Suite's
+#' class-stratified random k-fold), else the seeded random k-fold
+#' cv_random_folds(n, k, seed); `reference` names it and `k` is its fold count.
+#' Plain data, so it crosses the future boundary cheaply. NULL without a
+#' domain, below 3 samples, when the folds do not fit the samples, or when it
+#' cannot be computed: it is a diagnostic, and never stops the
+#' cross-validation it describes.
+cv_distance_summary <- function(xy, folds, domain_xy, k = CV_FOLD_K, seed = CV_FOLD_SEED,
+                                probs = seq(0, 1, by = 0.01), units = NA_character_,
+                                random_folds = NULL, reference = NULL) {
+  if (is.null(domain_xy) || !NROW(domain_xy) || NROW(xy) < 3 || length(folds) != NROW(xy)) return(NULL)
+  tryCatch({
+    xy <- unname(as.matrix(xy)[, 1:2, drop = FALSE])
+    domain_xy <- as.matrix(domain_xy)[, 1:2, drop = FALSE]
+    rnd <- random_folds %||% cv_random_folds(nrow(xy), k, seed)
+    k_ref <- length(unique(rnd))
+    Gj <- FNN::get.knn(xy, k = 1)$nn.dist[, 1]
+    Gij <- FNN::get.knnx(xy, domain_xy, k = 1)$nn.dist[, 1]
+    Gcv <- cv_heldout_nnd(xy, folds)
+    Grnd <- cv_heldout_nnd(xy, rnd)
+    q <- function(v) unname(stats::quantile(v, probs, type = 7))
+    list(probs = probs, sample = q(Gj), map = q(Gij), cv = q(Gcv),
+         W_cv = cv_wasserstein1(Gcv, Gij), W_random = cv_wasserstein1(Grnd, Gij),
+         n = nrow(xy), n_domain = nrow(domain_xy), k = k_ref,
+         reference = reference %||% sprintf("random %d-fold", k_ref),
+         units = as.character(units %||% NA_character_)[1])
+  }, error = function(e) NULL)
+}
+
+#' The unit symbol of an sf object's coordinates ("m" for every working CRS
+#' the interpolation pipeline projects to), NA when the CRS declares none.
+crs_unit_label <- function(x) {
+  u <- tryCatch(sf::st_crs(x)$units, error = function(e) NULL)
+  if (is.character(u) && length(u) == 1 && nzchar(u)) u else NA_character_
+}
+
+#' The run-log line of a kNNDM request for one surface of locality `loc`, from
+#' knndm_folds()'s record `info`: which fold design it chose, and why. `n` is
+#' the CV population's size: below CV_KNNDM_MIN_N the plan is LOOCV and there
+#' is no record. `units` labels the distances. Formatted without
+#' ui_formatting.R, which workers do not load. NULL when there is nothing to
+#' report.
+knndm_log_line <- function(info, loc, surface, n, units = NA_character_) {
+  head <- sprintf("[CV] %s (%s): ", loc, surface)
+  if (is.null(info)) {
+    if (length(n) == 1 && isTRUE(n < CV_KNNDM_MIN_N)) {
+      return(sprintf("%skNNDM needs %d samples; LOOCV used (%d samples).", head, CV_KNNDM_MIN_N, as.integer(n)))
+    }
+    return(NULL)
+  }
+  u <- if (is.na(units)) " map units" else paste0(" ", units)
+  d <- function(x) paste0(format(signif(x, 4), trim = TRUE, drop0trailing = TRUE), u)
+  cells <- if (isFALSE(info$exact)) sprintf(" Tree built on %d cells of samples (n = %d).", info$units, as.integer(n)) else ""
+  switch(info$branch %||% "",
+    random = if (isTRUE(info$ks_p >= KNNDM_KS_ALPHA)) {
+      sprintf("%skNNDM chose random folds; the map's distances do not exceed the sample spacing (KS p = %.3f); W = %s.",
+              head, info$ks_p, d(info$W))
+    } else {
+      sprintf("%skNNDM chose random folds; they matched the map's distances better than any spatial partition; W = %s.%s",
+              head, d(info$W), cells)
+    },
+    spatial = sprintf("%skNNDM chose spatial folds (%d clusters merged into %d folds); W = %s against %s for random folds.%s",
+                      head, as.integer(info$q), as.integer(info$k), d(info$W), d(info$W_random), cells),
+    fallback = sprintf("%skNNDM found no valid spatial partition; seeded random %d-fold used.", head, as.integer(info$k)),
+    none = sprintf("%skNNDM had no prediction domain; seeded random %d-fold used.", head, as.integer(info$k)),
+    NULL)
 }
 
 # Row identity of a CV population: the row number in the uploaded table, added
@@ -510,15 +937,24 @@ CV_ROW_ID_COL <- ".mn_row_id"
 #' The cross-validation plan of one population: its row ids and one fold vector
 #' per realization, from the same make_cv_folds() call (and seeds) the engines
 #' always used, so a population's folds do not depend on which engine scores it.
-build_cv_plan <- function(pts, strategy = "auto", repeats = 1L) {
+#' `domain_xy` is the map's locations (knndm_domain_points): kNNDM folds are
+#' built against it, and `design` (cv_distance_summary, NULL without it) records
+#' how closely realization 1's folds match the map, under every strategy. A
+#' kNNDM realization 1 with spatial folds is deterministic, so the plan keeps
+#' that one realization, as for LOOCV.
+build_cv_plan <- function(pts, strategy = "auto", repeats = 1L, domain_xy = NULL) {
   n <- nrow(pts)
   row_id <- if (CV_ROW_ID_COL %in% names(pts)) as.integer(pts[[CV_ROW_ID_COL]]) else seq_len(n)
-  coords <- sf::st_coordinates(pts)
-  folds <- lapply(seq_len(cv_repeat_count(repeats, strategy, n)), function(r) {
-    make_cv_folds(coords, strategy, n, CV_FOLD_SEED + r - 1L)
-  })
+  coords <- sf::st_coordinates(pts)[, 1:2, drop = FALSE]
+  first <- make_cv_folds(coords, strategy, n, CV_FOLD_SEED, domain_xy)
+  reps <- if (identical(attr(first, "knndm")$branch, "spatial")) 1L else cv_repeat_count(repeats, strategy, n)
+  folds <- c(list(first), lapply(seq_len(reps)[-1], function(r) {
+    make_cv_folds(coords, strategy, n, CV_FOLD_SEED + r - 1L, domain_xy)
+  }))
   list(row_id = row_id, n = n, strategy = strategy,
-       label = resolve_cv_plan(strategy, n)$label, folds = folds)
+       label = resolve_cv_plan(strategy, n)$label, folds = folds,
+       design = cv_distance_summary(coords, first, domain_xy, CV_FOLD_K, CV_FOLD_SEED,
+                                    units = crs_unit_label(pts)))
 }
 
 #' Run one kriging cross-validation realization fold by fold.
@@ -582,6 +1018,7 @@ run_kriging_folds <- function(pop, target_var, row_id, folds, fold_fun,
   attr(cv, "cv_notes") <- notes
   attr(cv, "cv_fold_meta") <- fold_meta
   attr(cv, "block_fallback") <- attr(folds, "block_fallback")
+  attr(cv, "knndm") <- attr(folds, "knndm")
   cv
 }
 
@@ -593,10 +1030,12 @@ run_kriging_folds <- function(pop, target_var, row_id, folds, fold_fun,
 # CV pass per extra repeat, and it never touches the reported reference run
 # (repeat 1 keeps CV_FOLD_SEED) nor the prediction surface.
 
-# How many fold realizations to run for this point set. LOOCV plans are
-# deterministic - every "repeat" would return the identical partition - so they
-# always collapse to 1 regardless of the user's setting. Guards a nonsense
-# request (0, NA, huge) into a sane range.
+# How many fold realizations to run for this point set. Deterministic plans
+# (LOOCV, kNNDM spatial folds) would return the identical partition in every
+# "repeat": LOOCV plans always collapse to 1 here, regardless of the user's
+# setting, and a kNNDM plan whose first realization chose spatial folds is cut
+# to one by build_cv_plan / add_cv_repeats, which see the folds. Guards a
+# nonsense request (0, NA, huge) into a sane range.
 cv_repeat_count <- function(n_repeats, strategy = "auto", n = NULL) {
   if (is.null(n_repeats) || length(n_repeats) != 1) return(1L)
   n_repeats <- suppressWarnings(as.integer(n_repeats))
@@ -677,11 +1116,13 @@ summarise_cv_repeats <- function(reps) {
 
 # Main-session assembly of a run's repeated-CV report.
 #   reps_by_loc : locality -> list of CV frames (length R, or length 1 for a
-#                 locality whose plan degraded to deterministic LOOCV)
+#                 locality whose plan is deterministic: LOOCV, kNNDM spatial
+#                 folds)
 # Localities carrying a single frame are RECYCLED into every pooled repeat:
-# under LOOCV their out-of-fold predictions are identical in every realization,
-# so this is exact, and it keeps the pooled repeat rows built from the same
-# locality set as the pooled row of the main metrics table.
+# under deterministic plans (LOOCV, kNNDM spatial folds) their out-of-fold
+# predictions are identical in every realization, so this is exact, and it
+# keeps the pooled repeat rows built from the same locality set as the pooled
+# row of the main metrics table.
 build_cv_repeat_summary <- function(reps_by_loc) {
   reps_by_loc <- Filter(function(x) length(x) > 0, reps_by_loc %||% list())
   if (!length(reps_by_loc)) return(NULL)
@@ -710,11 +1151,12 @@ build_cv_repeat_summary <- function(reps_by_loc) {
 #' full selected covariate list the screen chooses from (defaults to
 #' `aux_vars`, the surface's own kept set). `folds` / `row_id` come from the
 #' run's CV plan and must align with the complete-case rows; with `folds =
-#' NULL` they are built from `cv_strategy` and `fold_seed`. Returns the common
-#' kriging CV schema (`var1.var` NA), or NULL below 3 complete-case rows.
+#' NULL` they are built from `cv_strategy`, `fold_seed` and, for kNNDM, the
+#' map's locations `cv_domain_xy`. Returns the common kriging CV schema
+#' (`var1.var` NA), or NULL below 3 complete-case rows.
 perform_kriging_loocv <- function(pts, target_var, aux_vars, lags_func, vgm_fit_func, model_type = c("lm", "rf"), l = "region", prefix = "act", rf_ntree = 200, cv_strategy = "auto", fold_seed = CV_FOLD_SEED, cov_params = list(),
                                   folds = NULL, row_id = NULL, cancel_file = NULL, progress = NULL,
-                                  candidates = NULL, vif_threshold = 10) {
+                                  candidates = NULL, vif_threshold = 10, cv_domain_xy = NULL) {
   model_type <- match.arg(model_type)
   candidates <- candidates %||% aux_vars
   pts <- pts[complete.cases(sf::st_drop_geometry(pts)[, c(target_var, aux_vars), drop=FALSE]), ]
@@ -725,7 +1167,7 @@ perform_kriging_loocv <- function(pts, target_var, aux_vars, lags_func, vgm_fit_
   # seeded from its own fold LABEL, so a repeat varies the PARTITION and
   # nothing else.
   if (is.null(folds)) {
-    folds <- make_cv_folds(sf::st_coordinates(pts), cv_strategy, n, fold_seed)
+    folds <- make_cv_folds(sf::st_coordinates(pts), cv_strategy, n, fold_seed, cv_domain_xy)
   } else if (length(folds) != n) {
     stop("The CV fold vector has ", length(folds), " entries for ", n, " complete-case samples.")
   }

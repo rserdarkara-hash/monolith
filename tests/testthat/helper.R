@@ -31,8 +31,9 @@ if (!exists(".monolith_sourced") || !isTRUE(.monolith_sourced)) {
       })
     })
 
-    # monolith.R defines validate_crs, estimate_run_duration, and the Shiny
-    # app.  Source it with shinyApp temporarily no-opped so it doesn't launch.
+    # monolith.R sources global_utils.R and ui_main.R and defines server()
+    # and the Shiny app. Source it with shinyApp temporarily no-opped so it
+    # doesn't launch.
     if (requireNamespace("shiny", quietly = TRUE)) {
       .real_shinyApp <- shiny::shinyApp
       utils::assignInNamespace("shinyApp", function(ui, server, ...) {}, "shiny")
@@ -99,6 +100,31 @@ make_test_points <- function(n = 20, target_mean = 50, seed = 42) {
     aux2 = runif(n, 0, 50)
   ))
   sf::st_as_sf(pts, coords = c("x", "y"), crs = 32633)
+}
+
+#' A heterotopic co-kriging fixture: one Gaussian random field (exponential
+#' covariance, range 400 m, unit sill) simulated at `n_cov` sample locations
+#' and on a 50 m grid over a 2 x 2 km square. Every sample measures the
+#' covariate `ec` (the field plus noise, sd 0.1); the first `n_t` also measure
+#' the target `v = 10 + 2 * field + noise` (sd 0.2). Returns `t` (the target
+#' rows), `x` (the covariate-only rows), `grid` (sf points) and `truth`, the
+#' noise-free target on the grid. Seeded, so every call returns the same field.
+make_heterotopic_ck <- function(n_cov = 300, n_t = 80, seed = 1) {
+  with_seed(seed, {
+    xy <- data.frame(x = 500000 + runif(n_cov, 0, 2000), y = 4000000 + runif(n_cov, 0, 2000))
+    grd <- expand.grid(x = 500000 + seq(25, 1975, by = 50), y = 4000000 + seq(25, 1975, by = 50))
+    sim <- gstat::gstat(formula = z ~ 1, locations = ~x + y, dummy = TRUE, beta = 0,
+                        model = gstat::vgm(1, "Exp", 400), nmax = 40)
+    z <- predict(sim, newdata = rbind(xy, grd), nsim = 1, debug.level = 0)$sim1
+    f_s <- z[seq_len(n_cov)]
+    xy$ec <- f_s + rnorm(n_cov, 0, 0.1)
+    xy$v <- NA_real_
+    xy$v[seq_len(n_t)] <- 10 + 2 * f_s[seq_len(n_t)] + rnorm(n_t, 0, 0.2)
+  })
+  pts <- sf::st_as_sf(xy, coords = c("x", "y"), crs = 32635)
+  list(t = pts[!is.na(pts$v), ], x = pts[is.na(pts$v), ],
+       grid = sf::st_as_sf(grd, coords = c("x", "y"), crs = 32635),
+       truth = 10 + 2 * z[-seq_len(n_cov)])
 }
 
 #' Create a spatially-structured sf POINT dataframe for classification tests:

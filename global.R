@@ -25,7 +25,13 @@ required_packages <- c(
   # global_utils.R) to shortlist candidate CRS by area of use. Called through
   # ::, never attached; their absence degrades Tier 3 to the zone family
   # instead of failing.
-  "DBI", "RSQLite"
+  "DBI", "RSQLite",
+  # Called through :: and never attached. Other packages above install them,
+  # but the app calls them directly, so a missing copy is named here rather
+  # than at its first call: parallelly (nested worker clusters), units (area
+  # and distance units), rlang (column symbols), htmltools (HTML escaping),
+  # tibble and viridisLite (Classification Suite frames and colour tables).
+  "parallelly", "units", "rlang", "htmltools", "tibble", "viridisLite"
 )
 
 missing_packages <- required_packages[!(required_packages %in% installed.packages()[, "Package"])]
@@ -161,14 +167,23 @@ app_version <- tryCatch(
 )
 if (is.na(app_version)) app_version <- "unknown"
 
+# The three guides of the docs drawer, rendered once per app start and served
+# to every session (server_run_config.R).
+DOCS_HTML <- lapply(c(user = "docs/user_guide.md", desc = "docs/desc_exploratory_guide.md",
+                      sci = "docs/scientific_guide.md"), function(f) {
+  HTML(commonmark::markdown_html(paste(readLines(f, warn = FALSE), collapse = "\n"),
+                                 extensions = "table"))
+})
+
 showtext_auto()
 
 addResourcePath("assets", file.path(getwd(), "assets"))
 
 # Shiny rejects any upload above its request cap (5 MB by default) before a
-# handler runs, which made the 30 MB checks on the data and metadata tables in
-# server_data_setup.R unreachable and refused ordinary boundary shapefile sets.
-# The cap covers a whole .shp set in one request; tables keep their 30 MB limit.
+# handler runs, which would leave the 30 MB checks on the data and metadata
+# tables in server_data_setup.R unreachable and refuse ordinary boundary
+# shapefile sets. The cap covers a whole .shp set in one request; tables keep
+# their 30 MB limit.
 options(shiny.maxRequestSize = 200 * 1024^2)
 
 # The test helper opts in before sourcing; setup.R runs too late to prevent
@@ -179,9 +194,9 @@ if (isTRUE(getOption("monolith_test_sequential", FALSE))) {
   # The outer pool holds one worker per CONCURRENT user-initiated async task
   # (a run, an optimizer, a classification, governing factors, the CRS
   # search), not one per core: the compute parallelism lives in the nested
-  # PSOCK clusters those tasks own. Sizing it to cores spawned a worker per
-  # core eagerly at load, and a worker that has served one interpolation sits
-  # at ~470 MB it does not give back: rm(ls()) + gc(full=TRUE) in it returns
+  # PSOCK clusters those tasks own. Sized to cores, it would spawn a worker
+  # per core eagerly at load, and a worker that has served one interpolation
+  # sits at ~470 MB it does not give back: rm(ls()) + gc(full=TRUE) in it returns
   # under a fifth, because the rest is package DLLs and the GDAL/GEOS/PROJ
   # arenas rather than R heap. Measured on 16 cores, a fully exercised pool
   # held 7.5 GB at one worker per core against 2.9 GB at six. A task beyond

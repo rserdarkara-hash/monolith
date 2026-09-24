@@ -5,12 +5,11 @@
 # parallelly::makeClusterPSOCK topology must be preserved as-is.
 
   # ── Run warnings ──────────────────────────────────────────────────────────
-  # Workers report per-locality warnings as `warn_` files. They used to be read
-  # only by the live progress poller and deleted by the completion handler, so
-  # a message explaining why five metric cells are blank was on screen for a
-  # few seconds and then gone - absent from rv$log and therefore from the
-  # exported run log too. These two closures are the one path: everything the
-  # poller shows is what the completion handler persists.
+  # Workers report per-locality warnings as `warn_` files. These two closures
+  # are the one path that reads them: everything the live progress poller
+  # shows is what the completion handler persists into rv$log and so into the
+  # exported run log, where a message explaining why metric cells are blank
+  # outlives the progress overlay.
   read_run_warnings <- function() {
     files <- list.files(path = session_progress_dir,
                         pattern = paste0("^warn_", session_id, "_.*_.*\\.txt$"),
@@ -172,7 +171,7 @@
         size = "m", easyClose = FALSE
       ))
     } else {
-      rv$proceed_run <- runif(1)
+      rv$proceed_run <- next_trigger(rv$proceed_run)
     }
   }
 
@@ -251,6 +250,23 @@
     else "Please select at least one auxiliary variable for RK/RFK/CK model generation."
   }
 
+  # A TPS or IDW run needs a usable Fixed lambda or power before it starts: it
+  # is also the value every locality without a stored value of its own runs
+  # with, and both are typed numbers.
+  fixed_param_gate <- function() {
+    msg <- if (identical(input$method, "TPS") && identical(input$tps_lambda_mode, "fixed") &&
+               !tps_fixed_ok(input$tps_lambda)) {
+      "The Fixed λ must be a number above 0 (Exact is λ = 0). The run was not started."
+    } else if (identical(input$method, "IDW") && identical(input$idw_p_mode, "fixed") &&
+               !idw_fixed_ok(input$idw_p)) {
+      sprintf("The Fixed p must be a number from 0 (equal weights) to %d. The run was not started.",
+              IDW_MAX_FINITE_POWER)
+    }
+    if (is.null(msg)) return(TRUE)
+    showNotification(msg, type = "error", duration = 10)
+    FALSE
+  }
+
   # The covariate-collinearity screen, factored out of observeEvent(input$run)
   # so the CRS gate in front of it can hand control back here after an override
   # without the screen being written twice.
@@ -289,7 +305,7 @@
        }
     }
 
-    rv$proceed_vif <- runif(1)
+    rv$proceed_vif <- next_trigger(rv$proceed_vif)
     invisible(TRUE)
   }
 
@@ -304,13 +320,13 @@
   observeEvent(input$vif_drop_btn, {
     removeModal()
     rv$vif_choice_made <- 10
-    rv$proceed_vif <- runif(1)
+    rv$proceed_vif <- next_trigger(rv$proceed_vif)
   })
 
   observeEvent(input$vif_keep_btn, {
     removeModal()
     rv$vif_choice_made <- Inf
-    rv$proceed_vif <- runif(1)
+    rv$proceed_vif <- next_trigger(rv$proceed_vif)
   })
 
   # Locality is part of the reset list because the VIF screen in
@@ -340,6 +356,7 @@
       showNotification(covariates_required_msg(), type = "error")
       return()
     }
+    if (!fixed_param_gate()) return()
 
     # Suitability of the Target Mapping CRS is asked FIRST: there is no point
     # settling a collinearity decision for a run that will not be allowed to
@@ -425,7 +442,7 @@
 
   observeEvent(input$confirm_start_run, {
     removeModal()
-    rv$proceed_run <- runif(1)
+    rv$proceed_run <- next_trigger(rv$proceed_run)
   })
 
   output$reset_archive_choice_ui <- renderUI({
@@ -504,6 +521,7 @@
       showNotification(covariates_required_msg(), type = "error")
       return()
     }
+    if (!fixed_param_gate()) return()
     if (run_uses_covariates() && length(aux_vars) > 0) {
       missing_vars <- setdiff(aux_vars, colnames(rv$user_data))
       if (length(missing_vars) > 0) {
@@ -623,8 +641,11 @@
     rv$run_counter <- rv$run_counter + 1L
     clear_raster_caches()
     method_params_list <- list(
-      "IDW" = paste0("IDW Power: ", input$idw_p, " | Nmax: ", input$idw_nmax),
-      "TPS" = paste0("TPS Lambda: ", input$tps_lambda),
+      "IDW" = paste0("IDW Power: ", param_setting_text("IDW", idw_param_value(input$idw_p_mode, input$idw_p) %||% 2),
+                     if (identical(input$idw_mode, "manual")) " (per-locality values where applied)",
+                     " | Nmax: ", input$idw_nmax),
+      "TPS" = paste0("TPS λ: ", param_setting_text("TPS", tps_param_value(input$tps_lambda_mode, input$tps_lambda)),
+                     if (identical(input$tps_mode, "manual")) " (per-locality values where applied)"),
       "OK"  = paste0("Ordinary Kriging | Variogram: ",
                      if (identical(input$vgm_mode, "manual")) "Manual (applied models only)" else "Auto-Fit"),
       "RK"  = paste0("Regression Kriging | Aux: ", paste(input$aux_vars, collapse=", ")),
@@ -644,8 +665,8 @@
     } else 1L
     if (is.na(cv_repeats_val)) cv_repeats_val <- 1L
     # Everything an archived run needs to be told apart from another one, and
-    # everything a methods section has to state. Two runs that differ only in CV
-    # strategy or in the collinearity decision used to look identical here.
+    # everything a methods section has to state, so two runs that differ only
+    # in CV strategy or in the collinearity decision are told apart here.
     eff_subset <- effective_subset(input$value_type, input$subset, names(rv$user_data))
     tuning_keys <- c(act = tuning_key(meta$actual, eff_subset),
                      pre = tuning_key(if (input$value_type == "pred_ss") meta$pred_ss else meta$pred, eff_subset))
@@ -665,8 +686,8 @@
       boundary_type = input$boundary_type,
       buffer_mode = input$buff_mode,
       buffer_dist = input$buff_dist,
-      # In the Auto modes the cell size follows each locality's boundary area
-      # and is not known until the run has built them, so the sidebar slider
+      # In the Auto modes the cell size follows each locality's boundary and
+      # samples and is not known until the run has built them, so the sidebar slider
       # (which holds the global recommendation there, not a size any grid
       # uses) must not be recorded as the resolution. The completion handler
       # below replaces this with the sizes the run actually gridded at.
@@ -681,11 +702,12 @@
       cv_strategy = input$cv_strategy %||% "auto",
       cv_repeats = cv_repeats_val,
       # What the reported metrics were measured on, and what the folds
-      # re-estimated. Two archived runs that differ only here used to look
-      # identical in this record.
+      # re-estimated, so two archived runs that differ only here are told apart
+      # in this record.
       cv_population = switch(input$method,
         "OK" = if (identical(input$cv_population, "comparable")) "Comparable (common rows)" else "Native (every measured sample)",
-        "RK" = , "RFK" = , "CK" = "Common rows (target and every covariate)",
+        "RK" = , "RFK" = "Common rows (target and every covariate)",
+        "CK" = "Native (every measured sample)",
         NA_character_),
       cv_refit = if (input$method %in% c("OK", "RK", "RFK", "CK")) "per fold" else NA_character_,
       cv_covariate_screen = if (input$method %in% c("RK", "RFK", "CK")) "per fold" else NA_character_,
@@ -749,6 +771,7 @@
     rv$cv_data_act <- list(); rv$cv_data_pre <- list()
     rv$cv_repeats_act <- NULL; rv$cv_repeats_pre <- NULL
     rv$cv_info_act <- list(); rv$cv_info_pre <- list()
+    rv$cv_design_act <- list(); rv$cv_design_pre <- list()
     rv$cv_strategy_sel <- input$cv_strategy %||% "auto"
     rv$cv_repeats_sel <- cv_repeats_val
     
@@ -781,9 +804,14 @@
     sep_fit <- isTRUE(input$sep_fit)
     vgm_mode <- input$vgm_mode
     tuning_revision <- rv$tuning_revision %||% 0L
-    idw_p_val <- input$idw_p
+    idw_p_val <- idw_param_value(input$idw_p_mode, input$idw_p) %||% 2
     idw_nmax_val <- input$idw_nmax
-    tps_lambda_val <- input$tps_lambda
+    tps_lambda_val <- tps_param_value(input$tps_lambda_mode, input$tps_lambda)
+    # Stored per-locality values apply under "Per locality" only; "All
+    # localities" runs every locality with the sidebar setting, as a variogram
+    # applied in Manual mode is used only under Manual fitting.
+    idw_per_locality <- identical(input$idw_mode, "manual")
+    tps_per_locality <- identical(input$tps_mode, "manual")
     
     update_premium_progress(35, "Organising the per-locality data chunks.", step = 1)
     
@@ -803,26 +831,35 @@
       pts_data$v <- sub_df[[actual_col]]
       # Only a run that maps a prediction side carries the uploaded prediction
       # column. pred_col is resolved from the variable's _cve/_ss column
-      # whatever the view is, so an Actual-only run used to fill pv anyway and
-      # then registered ML-prediction products (point-error surface, residual
-      # map, uploaded-prediction card) for a run that predicted nothing.
+      # whatever the view is, so without this test an Actual-only run would
+      # fill pv and register ML-prediction products (point-error surface,
+      # residual map, uploaded-prediction card) for a run that predicted
+      # nothing.
       run_uses_pred <- isTRUE(comp_mode) || !identical(val_type, "actual")
       pts_data$pv <- if (run_uses_pred && !is.null(pred_col) &&
                          pred_col %in% colnames(sub_df)) sub_df[[pred_col]] else NA
       
       pre_fit_act <- resolve_stored_vgm(rv$v_fit_list[[paste0(l, "_act")]], vgm_mode, tuning_keys[["act"]])
-      idw_p_act <- get_regional_param("IDW", l, "act", default = idw_p_val %||% 2, key = tuning_keys[["act"]])
-      tps_lambda_act <- get_regional_param("TPS", l, "act", default = tps_lambda_val, key = tuning_keys[["act"]])
+      idw_param <- function(target) {
+        if (!idw_per_locality) return(idw_p_val)
+        get_regional_param("IDW", l, target, default = idw_p_val, key = tuning_keys[[target]])
+      }
+      tps_param <- function(target) {
+        if (!tps_per_locality) return(tps_lambda_val)
+        get_regional_param("TPS", l, target, default = tps_lambda_val, key = tuning_keys[[target]])
+      }
+      idw_p_act <- idw_param("act")
+      tps_lambda_act <- tps_param("act")
       # "Fit Actual/Predicted separately" unticked: the Predicted surface reuses
       # the measured values' model - their variogram, IDW power and TPS lambda.
       # (A TPS lambda on Auto is shared in the worker: the Predicted surface
       # takes the one GCV selects for the measured values.)
       m_params <- list(
         idw_p_act = idw_p_act,
-        idw_p_pre = if (sep_fit) get_regional_param("IDW", l, "pre", default = idw_p_val %||% 2, key = tuning_keys[["pre"]]) else idw_p_act,
+        idw_p_pre = if (sep_fit) idw_param("pre") else idw_p_act,
         idw_nmax = idw_nmax_val %||% 12,
         tps_lambda_act = tps_lambda_act,
-        tps_lambda_pre = if (sep_fit) get_regional_param("TPS", l, "pre", default = tps_lambda_val, key = tuning_keys[["pre"]]) else tps_lambda_act,
+        tps_lambda_pre = if (sep_fit) tps_param("pre") else tps_lambda_act,
         pre_fit_act = pre_fit_act,
         pre_fit_pre = if (sep_fit) resolve_stored_vgm(rv$v_fit_list[[paste0(l, "_pre")]], vgm_mode, tuning_keys[["pre"]]) else pre_fit_act,
         sep_fit = sep_fit,
@@ -839,7 +876,7 @@
 
     # Snapshot the per-locality method params this run actually consumes so
     # display/export tables report them; the live tuning store holds no entry
-    # for localities that fell back to the global slider value.
+    # for localities that run with the setting for all localities.
     rv$disp$regional_params <- setNames(
       lapply(df_list, function(item) item$m_params[c("idw_p_act", "idw_p_pre", "tps_lambda_act", "tps_lambda_pre")]),
       vapply(df_list, function(item) item$l, character(1))
@@ -850,7 +887,7 @@
     # reads the Actual slot, so only that slot is consulted.
     run_targets <- if (comp_mode || val_type != "actual") c("act", "pre") else "act"
     param_targets <- if (sep_fit) run_targets else "act"
-    if (current_method %in% c("IDW", "TPS")) {
+    if ((current_method == "IDW" && idw_per_locality) || (current_method == "TPS" && tps_per_locality)) {
       store <- if (current_method == "IDW") rv$idw_factors else rv$tps_lambdas
       field <- if (current_method == "IDW") "idw_p_" else "tps_lambda_"
       for (item in df_list) for (target in param_targets) {
@@ -858,18 +895,12 @@
         if (!is.null(entry) && !identical(entry$key, tuning_keys[[target]])) {
           rv$log <- paste0(rv$log, "\n[Tuning] ", item$l, " (", target, "): the stored ", current_method,
             " value was tuned for ", entry$key %||% "another key", "; this run uses ", tuning_keys[[target]],
-            ", so the sidebar value ", format_param_val(current_method, item$m_params[[paste0(field, target)]] %||% NA),
-            " is used. Re-run the optimizer or apply a manual value for this variable.")
+            ", so the setting for all localities, ", param_setting_text(current_method, item$m_params[[paste0(field, target)]] %||% NA),
+            ", is used. Apply a per-locality value for this variable to set one.")
         }
       }
     }
 
-    # GCV curves shown for this run: only those tuned for its keys, and for the
-    # slots its surfaces consumed.
-    gcv_names <- intersect(names(rv$tps_gcv_data), as.vector(outer(locs, param_targets, paste, sep = "_")))
-    rv$disp$tps_gcv_data <- rv$tps_gcv_data[Filter(function(nm) {
-      vgm_key_matches(rv$tps_gcv_data[[nm]], tuning_keys[[if (endsWith(nm, "_act")) "act" else "pre"]])
-    }, gcv_names)]
     shp_shared <- tryCatch(shared_boundary_features(shp_bound, df_list, current_crs),
       error = function(e) {
         showNotification("Uploaded boundary sharing could not be checked; unnamed features will use the selected sidebar boundary.",
@@ -934,14 +965,14 @@
     # Everything the workers need is a plain-data list plus TOP-LEVEL
     # functions from spatial_helpers.R. The promise worker and each nested
     # worker source() that file themselves, so no function values have to be
-    # shipped as globals at all (shipping monolith-defined closures used to
-    # drag their source environments to every worker). The dispatch below
+    # shipped as globals at all (shipping monolith-defined closures would drag
+    # their source environments to every worker). The dispatch below
     # therefore PINS `globals =` to the four plain-data objects the body
     # reads. Automatic discovery would otherwise walk the whole 106-object
     # helper call graph recursively on every single run - 6 s of frozen main
     # session, measured, uncached - only to ship function values the worker's
-    # own source() defines anyway. `packages =` replaces the attachment that
-    # walk used to infer: the helper graph calls sf, gstat and dplyr
+    # own source() defines anyway. `packages =` states the attachment that walk
+    # would infer: the helper graph calls sf, gstat and dplyr
     # unqualified (the same set the nested furrr_options below declares).
     run_params <- list(
       main_wd = main_wd,
@@ -1089,10 +1120,18 @@
       for(res in res_all) {
           l <- res$l
           if (is.numeric(res$actual_res) && length(res$actual_res) == 1) grid_res_used[[l]] <- res$actual_res
+          # The engine's own record of how each surface's power or smoothing was
+          # set (selected or fixed, with the GCV curve or the CV power profile),
+          # read by Regional Parameters, the diagnostics panels and the exports.
           if (current_method == "TPS") {
             for (tgt in c("act", "pre")) {
               rv$disp$regional_params[[l]][[paste0("tps_fit_", tgt)]] <-
                 res[[paste0("tps_fit_", tgt)]] %||% list(lambda = NA_real_, eff_df = NA_real_)
+            }
+          }
+          if (current_method == "IDW") {
+            for (tgt in c("act", "pre")) {
+              rv$disp$regional_params[[l]][[paste0("idw_fit_", tgt)]] <- res[[paste0("idw_fit_", tgt)]]
             }
           }
           if(res$log_msg != "") {
@@ -1116,6 +1155,7 @@
           if(!is.null(res$cv_act)) rv$cv_metrics_act[[l]] <- res$cv_act
           if(!is.null(res$cv_obj_act)) rv$cv_data_act[[l]] <- res$cv_obj_act
           rv$cv_info_act[[l]] <- stamp_cv_population(res$cv_info_act, tuning_keys[["act"]])
+          rv$cv_design_act[[l]] <- res$cv_design_act
           if(cv_repeats_val > 1) {
             reps_act[[l]] <- res$cv_reps_act %||% Filter(Negate(is.null), list(cv_repeat_frame(res$cv_obj_act)))
           }
@@ -1146,6 +1186,7 @@
           if(!is.null(res$cv_pre)) rv$cv_metrics_pre[[l]] <- res$cv_pre
           if(!is.null(res$cv_obj_pre)) rv$cv_data_pre[[l]] <- res$cv_obj_pre
           rv$cv_info_pre[[l]] <- stamp_cv_population(res$cv_info_pre, tuning_keys[["pre"]])
+          rv$cv_design_pre[[l]] <- res$cv_design_pre
           if(cv_repeats_val > 1) {
             reps_pre[[l]] <- res$cv_reps_pre %||% Filter(Negate(is.null), list(cv_repeat_frame(res$cv_obj_pre)))
           }
@@ -1161,9 +1202,10 @@
         cov_rec <- covariate_screen_record(res_all)
         rv$run_config_summary$covariates_retained <- cov_rec$retained
         rv$run_config_summary$covariates_dropped <- cov_rec$dropped
+        if (current_method == "CK") rv$run_config_summary$ck_design <- cov_rec$design
       }
       # The cell size each locality was gridded at. In Auto modes the sidebar
-      # cannot know it before the run (it follows the boundary area), so the
+      # cannot know it before the run (it follows each boundary and its samples), so the
       # Map Viewer's resolution overlay and the run record read it from here.
       rv$disp$grid_res_used <- grid_res_used
       if (length(grid_res_used)) {
@@ -1186,7 +1228,7 @@
         if (length(reps_pre) > 0) rv$cv_repeats_pre <- build_cv_repeat_summary(reps_pre)
         if (is.null(rv$cv_repeats_act)) {
           rv$log <- paste0(rv$log, "\n[Repeated CV] No locality produced more than one fold realization",
-                           " (leave-one-out plans are deterministic); reporting single-realization metrics.")
+                           " (leave-one-out plans and kNNDM spatial folds are deterministic); reporting single-realization metrics.")
         }
       }
 
@@ -1219,10 +1261,9 @@
       register_export_item("map_actual", paste(meta$label, "- Actual Map -", m_lab), "map", rv$rast, meta$category,
                            legend = map_legend_title(meta$label, meta$unit), surface = "act")
       
-      # Uncertainty products exist for the kriging engines only. IDW's var1.var
-      # is all NA and TPS has none at all, so registering these for those
-      # methods shipped two blank rasters into the export panel (the map
-      # viewer's SE/variance views already carried this guard).
+      # Uncertainty products exist for the kriging engines only: IDW's var1.var
+      # is all NA and TPS has none, so neither registers them (the Map
+      # Viewer's SE/variance views apply the same guard).
       temp_rast_a <- terra::unwrap(rv$rast)
       if (method_has_variance(current_method) && "var1.var" %in% names(temp_rast_a)) {
         # The Map Viewer offers its SE/variance views on this flag, so the menu
@@ -1340,8 +1381,8 @@
     # before, so the figure a reader quotes for the whole run had to be
     # retyped off the screen. Pooling happens in pool_cv_sf()'s auto-UTM zone,
     # the same way the card does it.
-    pooled_cv <- function(data_list, metrics_list, label, infos) {
-      res <- perform_pooled_cv(data_list, metrics_list)
+    pooled_cv <- function(data_list, metrics_list, label, infos, pooled) {
+      res <- isolate(pooled())
       if(is.null(res)) return(NULL)
       # The pooled row's Moran reading follows the localities it pooled: the
       # block reading only where every one of them was scored under blocks.
@@ -1356,12 +1397,12 @@
                                   if (mor$mixed) ", mixed fold designs" else ""),
                            pooled_cv_population(infos[names(data_list)]), mor)
     }
-    cv_tot_a <- pooled_cv(rv$cv_data_act, rv$cv_metrics_act, "Actual Model", rv$cv_info_act)
+    cv_tot_a <- pooled_cv(rv$cv_data_act, rv$cv_metrics_act, "Actual Model", rv$cv_info_act, pooled_cv_metrics$act)
     if(!is.null(cv_tot_a)) {
       register_export_item("table_cv_total", paste(meta$label, "- Total Model CV Metrics (Actual)"), "table", cv_tot_a, meta$category)
     }
     if(comp_mode || val_type != "actual") {
-      cv_tot_p <- pooled_cv(rv$cv_data_pre, rv$cv_metrics_pre, "Predicted Model", rv$cv_info_pre)
+      cv_tot_p <- pooled_cv(rv$cv_data_pre, rv$cv_metrics_pre, "Predicted Model", rv$cv_info_pre, pooled_cv_metrics$pre)
       if(!is.null(cv_tot_p)) {
         register_export_item("table_cv_pre_total", paste(meta$label, "- Total Model CV Metrics (Predicted)"), "table", cv_tot_p, meta$category)
       }
@@ -1375,9 +1416,9 @@
 
     # Every fitted variogram of the run in one sheet, one row per
     # locality/target - the combined view of the Variogram Parameters card.
-    vgm_par_total <- vgm_params_export_df(rv$disp$v_fits)
+    vgm_par_total <- vgm_params_export_df(rv$disp$v_fits, of = disp_vgm_of())
     if(!is.null(vgm_par_total)) {
-      register_export_item("table_vgm_params_total", paste(meta$label, "- Variogram Parameters (all localities)"), "table", vgm_par_total, meta$category)
+      register_export_item("table_vgm_params_total", paste(meta$label, "-", vgm_params_title(current_method), "(all localities)"), "table", vgm_par_total, meta$category)
     }
 
     # Regional IDW power / TPS lambda for every locality of the run: the
@@ -1414,18 +1455,20 @@
       }
     }
 
-    # Class-area and class-agreement tables are NOT registered here. They exist
-    # only once the surface is classified, and the classification is normally
-    # applied after a run, so registering them at run completion caught only
-    # the case where the styling happened to be set beforehand. One observer in
-    # server_sci_analysis.R now registers both families whenever the committed
-    # classification changes, which covers this run too (rv$results_rev, bumped
-    # above, is one of its triggers).
+    # Class-area and class-agreement tables are registered by one observer in
+    # server_sci_analysis.R whenever the committed classification changes
+    # (rv$results_rev, bumped above, is one of its triggers): they exist only
+    # once the surface is classified, which normally happens after a run.
 
     for(l in locs) {
        register_locality_assets(l, meta, comp_mode, val_type, current_method)
     }
-    
+    # The registry was emptied at dispatch, so it now holds this run's items.
+    reg_types <- vapply(rv$export_registry, function(x) x$type, character(1))
+    rv$log <- paste0(rv$log, sprintf("\n[Registry] %d export items registered (%d plots, %d tables, %d maps).",
+                                     length(reg_types), sum(reg_types == "plot"), sum(reg_types == "table"),
+                                     sum(reg_types %in% c("map", "map_combined"))))
+
     # Before the completion marker, so the warnings read as part of the run
     # rather than as a footnote after it. This also clears the status files.
     persist_run_warnings()

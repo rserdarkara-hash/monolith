@@ -40,8 +40,6 @@
     current_reg <- isolate(rv$export_registry)
     current_reg[[clean_id]] <- new_item
     rv$export_registry <- current_reg
-    
-    rv$log <- paste0(rv$log, "\n[Registry] Registered ", type, ": ", label)
   }
   
   output$export_registry_ui <- renderUI({
@@ -89,15 +87,16 @@
       if (!is.null(covariate_record_text(cfg))) tagList(tags$br(), tags$span(covariate_record_text(cfg))),
       tags$br(),
       tags$span(paste0("Boundary: ", cfg$boundary_type, " | Buffer: ", if (is.null(cfg$buffer_mode) || cfg$buffer_mode == "fixed") paste0(cfg$buffer_dist, "m") else "Dynamic", " | Resolution: ", cfg$resolution, " (", res_mode_label(cfg$res_mode), ")")),
-      # Method-agnostic settings that used to be invisible here even though they
-      # change the reported numbers; the method-specific ones print only where
-      # they apply (they are NA for the other engines).
+      # Method-agnostic settings that change the reported numbers; the
+      # method-specific ones print only where they apply (they are NA for the
+      # other engines).
       tags$br(),
       tags$span(paste0(
         # An absent field means the entry predates this record (an archived run
         # restored from an older session), so nothing is asserted about it.
         if (!is.null(cfg$cv_strategy)) paste0("CV strategy: ", switch(cfg$cv_strategy,
                                                                      "loocv" = "Standard LOOCV",
+                                                                     "knndm" = "kNNDM (map-matched)",
                                                                      "block" = "Spatial Block CV",
                                                                      "Auto")) else "CV strategy: not recorded",
         if (!is.null(cfg$cv_repeats) && !is.na(cfg$cv_repeats) && cfg$cv_repeats > 1) paste0(" | Repeated CV: ", cfg$cv_repeats, " fold realizations") else "",
@@ -125,8 +124,11 @@
 
   # Reproducibility record for the CURRENT run: the same summary the run-history
   # entries store, plus the per-locality tuning actually consumed and the
-  # software versions it ran under. jsonlite is a hard dependency of shiny, so
-  # this adds no package to required_packages.
+  # versions of every package whose code computes a reported number: the
+  # engines and their fitting (sf, gstat, fields, randomForest, terra), the
+  # residual Moran test (spdep), spacing and the IDW selection kernel (FNN),
+  # class breaks (classInt, Ckmeans.1d.dp), hulls (concaveman) and area units
+  # (units).
   output$download_run_config <- downloadHandler(
     filename = function() {
       cfg <- rv$run_config_summary
@@ -136,18 +138,15 @@
     content = function(file) {
       cfg <- rv$run_config_summary
       req(cfg)
-      pkgs <- c("sf", "gstat", "fields", "randomForest", "terra")
+      pkgs <- c("sf", "gstat", "fields", "randomForest", "terra", "spdep", "FNN",
+                "classInt", "Ckmeans.1d.dp", "concaveman", "units")
       pkg_versions <- setNames(
         lapply(pkgs, function(p) tryCatch(as.character(utils::packageVersion(p)),
                                           error = function(e) NA_character_)),
         pkgs
       )
-      payload <- run_record_payload(cfg, rv$disp$regional_params, app_version, pkg_versions)
-      writeLines(
-        jsonlite::toJSON(payload, pretty = TRUE, auto_unbox = TRUE,
-                         null = "null", force = TRUE, POSIXt = "ISO8601"),
-        file
-      )
+      writeLines(run_record_json(run_record_payload(cfg, rv$disp$regional_params, app_version, pkg_versions)),
+                 file)
     }
   )
 
@@ -330,9 +329,9 @@
 
   # The preview is drawn on a canvas of the EXPORT's physical size and only
   # rasterised coarser, so its layout is the file's layout. Shrinking the canvas
-  # instead (the former behaviour) leaves point-sized text and millimetre
-  # margins competing for less room, which crowded and clipped axis labels the
-  # export had space for - worst on wide areas and on two-panel comparisons.
+  # instead would leave point-sized text and millimetre margins competing for
+  # less room, crowding and clipping axis labels the export has space for,
+  # worst on wide areas and on two-panel comparisons.
   #
   # The rasterised canvas is then fitted to the pane the browser actually
   # reports rather than to a fixed guess. A guess wider than the pane overflows
@@ -804,7 +803,9 @@
     content = function(file) {
       req(input$selected_assets, length(input$selected_assets) > 0)
       
-      temp_dir <- file.path(tempdir(), paste0("export_", as.integer(Sys.time())))
+      # A unique directory per call; a name taken from the clock would be shared
+      # by two exports started within the same second.
+      temp_dir <- tempfile("export_")
       dir.create(temp_dir, showWarnings = FALSE)
       
       withProgress(message = "Batch Exporting...", value = 0, {
@@ -861,7 +862,6 @@
           
           timestamp <- format(Sys.time(), "%Y%m%d_%H%M%S")
           ext <- export_ext_for(item, input$styler_format)
-          if(ext == "csv") ext <- "png" # Extra safety
           if (identical(input$styler_format, "gtiff") && !identical(ext, "tif")) {
             rv$log <- paste0(rv$log, "\n[Batch] ", item$label,
                              " is not a single raster surface; exported as PNG instead of GeoTIFF.")

@@ -2,6 +2,69 @@
 
 All notable changes to Monolith are documented in this file.
 
+## [1.1.4] - 2026-09-25 - kNNDM cross-validation / CV Distance Match panel / IDW Auto (CV) power over the whole family / TPS GCV range ends / Nested power and lambda selection / Heterotopic co-kriging / Pooled within-locality variograms / Variable units / Complete session configuration / Co-located sample averaging / Density-based Auto grids / Permutation Moran p-values / Full-fold classification CV
+
+### Added
+- **kNNDM cross-validation (Linnenbrink et al. 2024)** for all six engines and the Classification Suite: folds matched to the map's distances within its boundary, random where those already match (the Standard folds in the Classification Suite). Defaults unchanged.
+- **CV Distance Match panel** for every strategy: the map, held-out and sample-spacing distances with W for the run's folds and for random folds (random 10-fold; the Standard folds in the Classification Suite); exported per locality and surface.
+- **IDW Auto (CV) power selection over the whole IDW family**, from equal weights (p = 0) through powers up to 48 to the nearest-neighbour limit. Each locality's power is chosen by cross-validated RMSE under the selected CV strategy, and every CV fold re-selects it from its own training rows. A selection at either end states what it means for the map; the nearest-neighbour limit (a stepped surface) is a warning.
+- **A TPS GCV minimum at an end of its range says what it means.** At the plane end nothing lies beyond it; at the least-smoothing end the run cross-validates Exact (λ = 0) on the same folds and reports both RMSEs, with a warning when Exact predicts better.
+- **Every run records how its IDW power or TPS lambda was set.** The Scientific Analysis tab draws the TPS GCV curve and the IDW power profile of the run, and both export with their data.
+- **The IDW power profile shows how clearly the data choose the power.** Powers within one paired standard error of the best are drawn filled, and the panel, run log and exports say how many there are and whether p = 2 is among them. The selection itself is unchanged.
+- **A steep IDW power (p ≥ 24) is read like the nearest-neighbour limit**: the map is practically stepped, and the same warning is raised.
+- **Heterotopic co-kriging.** CK uses every sample location: one with a covariate but no target enters that covariate's variograms, and cross-variograms come from the locations measuring both.
+- **Total (Combined) variograms pool within localities.** The Data Structure, residual and directional variograms pool point pairs inside each locality on common lag classes (McBratney & Pringle 1999); an info icon explains the lag range.
+- **Variable units.** A Unit column in the variable list, or the unit box of the variable mapping, labels the map legends and the GeoTIFF unit tag.
+- **Published Supervised class limits.** Total N, Olsen P, NH₄OAc K/Ca/Mg and DTPA Fe/Mn/Cu/Zn open on published three-class limits when the unit matches, with the source named; K's lower limit is 200 mg kg⁻¹.
+- **Save config and Load config cover every run-defining setting**, the manual variogram models and per-locality IDW powers and TPS lambdas included; one notification lists what the loaded data could not take.
+- **Residual Variogram Parameters for RK and RFK**, marking a locality whose trend fell back to Ordinary Kriging.
+- **The co-kriging run log flags an LMC whose Gaussian or Matérn structure leaves a variable's nugget below 5% of its sill.**
+
+### Changed
+- **Standard (random k-fold) classification CV keeps the full fold count.** Each class is dealt across the folds, so a rare class sits in fewer folds; the count no longer drops to the smallest class (two folds when a class had one or two samples).
+- **TPS smoothing is Auto (GCV), Exact (λ = 0) or a typed Fixed λ; the IDW power is a typed Fixed p (0-48, 0 = equal weights) or Auto (CV).** Per-locality values apply only under the "Per locality" scope, where a note names each locality's own value and the setting the others run with.
+- **Co-located samples are averaged into one location** (each value over the rows that carry it) in every model point set, on the map and in the variogram preview; the run log counts them.
+- **Auto grids follow sampling density** (Hengl 2006): min(0.0791·√(area/samples), half the mean nearest-neighbour distance), 1-1000 m. Auto (Global) takes the finest locality size.
+- **Residual Moran p-values come from a seeded 999-permutation test**, two-sided and never 0, on the fallback weights too. The pooled Total (Combined) row is computed once per run.
+- **Covariate surfaces that cannot be kriged fall back to IDW at p = 2**, whatever the target's IDW setting.
+- **CK is scored on the OK Native population**, the same rows and folds; a covariate enters with at least 10 locations measured together with the target.
+- **The PCA guard names near-duplicate pairs (|r| > 0.95) and runs no VIF screen**; *Run PCA with these variables* continues.
+- **One label per boundary type** (Concave hull, Convex hull, Buffered, Point buffer); the engine and CV-strategy tooltips state what each engine gives and what each CV design estimates (Wadoux et al. 2021), in the Classification Suite too.
+- **The run log carries one registry line per run**, counting its plots, tables and maps.
+- **The three guides are rendered once per app start.**
+- **README figures rebuilt from the current interface** (`assets/fig1.jpg`-`fig10.jpg`, replacing `1.png`-`10.png`): all six engines on one field, each engine's fitting diagnostic, a kNNDM run's diagnostics, the four Exploratory tabs, the Classification Suite, and the light and dark themes.
+
+### Removed
+- **OPTIMIZE IDW FACTORS and OPTIMIZE TPS LAMBDA.** Each run selects its IDW power or TPS lambda itself, again inside every CV fold, so the cross-validation that scores it includes the selection.
+- **Dead code:** `agro_colors`, `rv$desc_vars_state`, `rv$pt_style_palette`, the UK method label, `cv_type_label()`, `.ck_standardize()`, the VIF-at-drop record and a CSV-to-PNG extension rewrite.
+
+### Fixed
+- **The sidebar IDW panel shows the pooled CV of a displayed IDW run only**, never another engine's metrics, and no empty box before one.
+- **OPTIMIZE ALL VARIOGRAMS leaves the displayed run's locality list and its Total (Combined) tables in place**; the analysis filter adds the tuned localities.
+- **A per-locality TPS λ keeps the value entered** (2.4e-06 or 20.2 alike), with no rounding to 0 or clamping to 1.
+- **A TPS run that falls back to IDW logs the fallback's power selection**; unseparated, its Predicted power is the measured values' selection, as in an IDW run.
+- **An unseparated Predicted surface's IDW power and TPS lambda name the measured values they were selected on**, in the IDW Power Selection panel, the run log and the Model Parameters export; the export also names a power search that was not run.
+- **The run record (.json) is written at full precision and names the IDW nearest-neighbour limit**, which was written as the string "Inf", or left its CV-profile row without a power.
+- **A typed IDW power keeps four significant digits** (2.125, not 2.12) in the run record, notifications and tables, and every Regional Parameters row uses one wording.
+- **An equal-weights IDW selection whose Max Neighbors reaches every sample says the map is one value**, the locality mean.
+- **The CK cross-variogram panel draws the empirical variogram the LMC was fitted to**, on the run's lag classes.
+- **Map popup values and locality names in the auto-fit dialog are HTML-escaped.**
+- **The run record's provenance names every package that computes a result**, spdep, FNN, classInt, Ckmeans.1d.dp, concaveman and units included; parallelly, units, rlang, htmltools, tibble and viridisLite are declared dependencies.
+- **Run triggers are counters that leave the session RNG untouched**, and temporary export and upload folders are unique per call.
+- **Applied Supervised limits classify only the variable they were applied for**; a run of another variable waits for Apply instead of being cut at the previous variable's limits.
+- **The Supervised limit boxes keep the values on screen when they are rebuilt** (a run landing, a view change) for the same variable and class count.
+- **OPTIMIZE ALL VARIOGRAMS keeps one label** before and after a fit.
+- **The sidebar's Auto-mode buffer preview is the buffer the run uses**: it is measured on the run's own point set (working CRS, co-located samples merged, the covariate-complete rows for RK and RFK), not on raw rows in the Target Mapping CRS.
+- **The RFK uncertainty option no longer claims calibration**: "Infinitesimal Jackknife" estimates the variance of the ensemble-mean prediction, and the ensemble spread measures model instability; neither is a calibrated interval.
+- **LOOCV and random folds are described as approximately unbiased for a simple random sample and conservative on a regular grid**, where a held-out point is a full grid spacing from its neighbours while map cells are closer (README, both guides, the CV-strategy tooltip).
+
+### Testing
+- **New `test-knndm.R`** checks kNNDM against its definitions, brute force and an independent merge, and the cell tree against the exact Ward tree. It also covers the engines and the driver; the classification, Moran and app-smoke tests cover the suite's folds, the Moran reading and the selector.
+- **New `test-idw-selection.R`** pins the selection kernel against `gstat::krige.cv` at every candidate (both ends of the family included), the selection against a brute-force search, the fold nesting and the two ends on constructed data; it replaces `test-idw-optimization.R`. The TPS GCV ends are tested against an independent cross-validation of exact interpolation.
+- **Replicate averaging, the density-based grid, the permutation p, the GCV record and the λ round trip in Edge** are tested against their definitions.
+- **Heterotopic CK** against gstat's own variogram on isotopic data, hand-built cross pieces, a simulated field (it beats OK and its isotopic subset), fold holdout and the collocation minimum.
+- **Pooled variograms** against a brute-force pair loop and gstat on one locality; **Save/Load** as a JSON round trip and across two Edge sessions; **reference limits** against the published table.
+
 ## [1.1.3] - 2026-09-23 - Variogram auto-fit ranking and diagnostic range / Complete run archive and lifecycle restoration / Scientific metric precision and zero-span validation / Unified Actual-Predicted engine separation / GeoTIFF metadata tags and export packaging / PCA collinearity guards and DataTables alignment / Run dispatch latency and worker pool footprint / Session memory retention / Test-suite overhaul / Column names with units or spaces / Per-surface class breaks / Exact natural breaks / Out-of-bag Governing Factors importance / Seeded RFK forest
 
 ### Fixed

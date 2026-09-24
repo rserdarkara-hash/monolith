@@ -143,13 +143,18 @@
           "Pooled residual variograms need per-locality CV to have succeeded;\n",
           "see the Run Log on this tab for the reported cause."), size = 4))
       }
-      formula_obj <- as.formula(paste(col_resid, "~ 1"))
-      df_filtered <- rv$sf[!is.na(rv$sf[[col_resid]]), ]
       # Unlike the per-locality plots (internal trend-residual variogram of
-      # the fitted model), the combined view pools CV residuals across
-      # localities, so label it as such.
-      build_variogram_ggplot(variogram(formula_obj, df_filtered),
-                             title = paste("Pooled CV Residual Variogram", title_suffix))
+      # the fitted model), the combined view pools CV residuals within
+      # localities (pooled_within_variogram), so label it as such.
+      v <- pooled_within_variogram(split(rv$sf[col_resid], rv$sf$loc), col_resid)
+      if (is.null(v)) {
+        return(sci_placeholder(sprintf("No locality has %d cross-validation residuals %s.",
+                                       POOLED_VGM_MIN_N, tolower(title_suffix)), size = 4))
+      }
+      cap <- pooled_within_caption(v)
+      build_variogram_ggplot(v, title = paste0("Pooled within-locality CV residual variogram ", title_suffix,
+                                               ": ", cap$count),
+                             subtitle = cap$note)
     } else {
       v_emp <- rv$disp$v_emps[[paste0(loc, "_", type)]]
       v_fit <- rv$disp$v_fits[[paste0(loc, "_", type)]]
@@ -158,17 +163,9 @@
           "No fitted variogram is stored for \"%s\" %s.\nThe locality failed before the variogram step; ",
           "see the Run Log on this tab."), loc, tolower(title_suffix)), size = 4))
       }
-      # RK/RFK store a RESIDUAL variogram only when their trend step ran. When
-      # it did not, apply_kriging_pipeline's OK fallback overwrites v_emp/v_fit
-      # with the variogram of the MEASURED values, so the panel must stop
-      # calling that a residual variogram. The trend object is the marker: it
-      # exists for exactly the localities whose trend step succeeded.
-      trend_obj <- if (identical(rv$disp$method, "RFK")) {
-        rv$rf_models[[paste0(loc, "_", type)]]
-      } else {
-        rv$model_summaries[[paste0(loc, "_", type)]]
-      }
-      ttl <- if ((rv$disp$method %||% "") %in% c("RK", "RFK") && is.null(trend_obj)) {
+      # A locality whose trend step failed stored the OK fallback's variogram
+      # of the measured values (disp_trend_fallback), not a residual variogram.
+      ttl <- if (disp_trend_fallback(paste0(loc, "_", type))) {
         paste("Variogram of Measured Values - Ordinary Kriging Fallback", paste0(title_suffix, ":"), loc)
       } else {
         paste("Internal Residual Variogram", paste0(title_suffix, ":"), loc)
@@ -203,7 +200,13 @@
     if (is.null(g)) {
       return(sci_placeholder("Cross-variogram is not available\n(LMC model fit failed, using Ordinary Kriging fallback.)"))
     }
-    vm <- variogram(g)
+    # The empirical variogram the LMC was fitted to, stored with the fit
+    # (.ck_fit_lmc): the run's own lag classes, and cross-variograms from the
+    # locations carrying both variables. Recomputing it from the object would
+    # re-bin with gstat's defaults and, for a heterotopic design, return the
+    # pseudo cross-variogram.
+    vm <- attr(g, "monolith_vm")
+    req(vm)
     # Panel strips carry the gstat ids (syntactic aliases of the target and
     # covariate columns, ck_id_columns); map them to the run variable's display
     # name and the covariate labels/column names per the tab's naming radio.
@@ -234,36 +237,89 @@
   # cannot report a different sill or structural dependency than this card.
   # sci_dt(NULL) is the empty state, not a NULL payload: a DT output must never
   # be handed NULL (see sci_dt() in ui_components.R).
+  # The tuning store holds variograms of the measured values; the displayed
+  # run's fits are residual variograms for RK and RFK (vgm_params_title).
+  output$vgm_params_title <- renderText({
+    paste(vgm_params_title(if (!isTRUE(sci_vgm_tuning())) rv$disp$method), "(per locality)")
+  })
   output$vgm_params_table <- DT::renderDataTable({
     loc <- input$sel_loc_stats; req(loc)
-    fits <- if (isTRUE(sci_vgm_tuning())) tuning_vgm_entries(rv$v_fit_list) else rv$disp$v_fits
-    df <- vgm_params_table_df(fits, loc)
+    tuning <- isTRUE(sci_vgm_tuning())
+    fits <- if (tuning) tuning_vgm_entries(rv$v_fit_list) else rv$disp$v_fits
+    df <- vgm_params_table_df(fits, loc, of = if (!tuning) disp_vgm_of(fits))
     # A named locality transposes to three narrow character columns and needs no
     # scrollX; the pooled listing is wide and numeric, so it keeps both.
     if (identical(loc, "Total (Combined)")) {
       # "Sill Resolved" is logical: the significant-digit renderer would turn
       # TRUE into 1.
       sci_dt(df, signif_cols = if (!is.null(df))
-        setdiff(names(df), c("Locality", "Target", "Model", "Sill Resolved")))
+        setdiff(names(df), c("Locality", "Target", "Variogram Of", "Model", "Sill Resolved")))
     } else {
       # The cells carry the sill qualifier as a tooltip span (.vgm_params_chr).
       sci_dt(df, scroll_x = FALSE, escape = FALSE)
     }
   })
+  # A named locality's transposed table has no "Variogram Of" column: the note
+  # names a column that holds the OK fallback's variogram of measured values.
+  output$vgm_params_note <- renderUI({
+    loc <- input$sel_loc_stats
+    req(loc, !identical(loc, "Total (Combined)"), !isTRUE(sci_vgm_tuning()))
+    keys <- intersect(paste0(loc, c("_act", "_pre")), names(rv$disp$v_fits))
+    fb <- keys[disp_trend_fallback(keys)]
+    if (!length(fb)) return(NULL)
+    cols <- ifelse(grepl("_act$", fb), "Actual", "Predicted")
+    tags$div(class = "mn-table-note", sprintf(paste0(
+      "%s: the %s trend model of this locality was not fitted, so the Ordinary Kriging fallback ",
+      "kriged the measured values and this is their variogram, not a residual variogram. ",
+      "The Run Log names the cause."), paste(cols, collapse = " and "), rv$disp$method))
+  })
+  # The smoothing / power selection panels read the displayed run's own fit
+  # record for the locality (rv$disp$regional_params), never the tuning store.
+  run_fit_record <- function(field, target) {
+    loc <- input$sel_loc_stats
+    if (identical(loc, "Total (Combined)")) return(NULL)
+    rv$disp$regional_params[[loc]][[paste0(field, target)]]
+  }
   build_tps_gcv_diag <- function(target) {
     loc <- input$sel_loc_stats; req(loc, identical(rv$disp$method, "TPS"))
-    tryCatch({
-      build_tps_gcv_plot(rv$disp$tps_gcv_data, loc, target)
-    }, error = function(e) {
-      sci_placeholder(paste("GCV Plot Error:\n", e$message), size = 4)
-    })
+    tryCatch(build_tps_gcv_plot(run_fit_record("tps_fit_", target), loc, target),
+             error = function(e) sci_placeholder(paste("GCV Plot Error:\n", e$message), size = 4))
   }
+  build_idw_power_diag <- function(target) {
+    loc <- input$sel_loc_stats; req(loc, identical(rv$disp$method, "IDW"))
+    tryCatch(build_idw_power_plot(run_fit_record("idw_fit_", target), loc, target),
+             error = function(e) sci_placeholder(paste("Power Plot Error:\n", e$message), size = 4))
+  }
+  selection_plot <- function(id, build) {
+    renderCachedPlot({
+      p <- build(); req(p); p
+    }, cacheKeyExpr = {
+      list(id, input$sel_loc_stats, rv$results_rev, rv$disp$method, rv$disp$regional_params)
+    }, cache = "session")
+  }
+  output$tps_gcv_plot_act <- selection_plot("tps_gcv_act", function() build_tps_gcv_diag("act"))
+  output$tps_gcv_plot_pre <- selection_plot("tps_gcv_pre", function() build_tps_gcv_diag("pre"))
+  output$idw_power_plot_act <- selection_plot("idw_power_act", function() build_idw_power_diag("act"))
+  output$idw_power_plot_pre <- selection_plot("idw_power_pre", function() build_idw_power_diag("pre"))
 
-  output$tps_gcv_plot_act <- renderCachedPlot({
-    p <- build_tps_gcv_diag("act"); req(p); p
+  # CV Distance Match: the displayed run's own distance record for the
+  # selected locality (every strategy, every engine), with a Predicted facet
+  # when the run mapped one. Each locality's folds are matched to its own map,
+  # so the pooled selection has nothing to draw.
+  build_cv_distance_diag <- function() {
+    loc <- input$sel_loc_stats; req(loc, rv$disp)
+    if (identical(loc, "Total (Combined)")) {
+      return(sci_placeholder("Select a locality: each locality's folds are matched to its own map."))
+    }
+    designs <- Filter(Negate(is.null), list(
+      Actual = rv$cv_design_act[[loc]],
+      Predicted = if (isTRUE(rv$has_predictions)) rv$cv_design_pre[[loc]]))
+    build_cv_distance_plot(if (length(designs)) designs, title = paste("CV Distance Match:", loc))
+  }
+  output$cv_distance_plot <- renderCachedPlot({
+    p <- build_cv_distance_diag(); req(p); p
   }, cacheKeyExpr = {
-    # The run's own snapshot of the curves tuned for its keys.
-    list("tps_gcv_act", input$sel_loc_stats, rv$results_rev, rv$disp$method, rv$disp$tps_gcv_data)
+    list("cv_distance", input$sel_loc_stats, rv$results_rev, isTRUE(rv$has_predictions))
   }, cache = "session")
 
   build_obs_pred_plot <- function(df, title, x_lab = "Observed", y_lab = "Predicted") {
@@ -337,11 +393,6 @@
 
   output$resid_vgm_plot_pre <- render_resid_plot(reactive(rv$cv_data_pre), "(Predicted Map)", build_resid_vgm_pre)
 
-  output$tps_gcv_plot_pre <- renderCachedPlot({
-    p <- build_tps_gcv_diag("pre"); req(p); p
-  }, cacheKeyExpr = {
-    list("tps_gcv_pre", input$sel_loc_stats, rv$results_rev, rv$disp$method, rv$disp$tps_gcv_data)
-  }, cache = "session")
 
   # ── Directional variogram (anisotropy diagnostic) ────────────────────────
   # Computed lazily in the main session from the displayed run's points, so a
@@ -411,17 +462,29 @@
       "measured values"
     }
 
-    vd <- calc_directional_variogram(pts, value_col)
+    # The Total pools each locality's cones (pooled_within_directional): no
+    # pair joins two localities.
+    total <- identical(loc, "Total (Combined)")
+    vd <- if (total) {
+      pooled_within_directional(split(pts[value_col], pts$loc), value_col)
+    } else {
+      calc_directional_variogram(pts, value_col)
+    }
     if (is.null(vd)) {
       return(sci_placeholder(paste0("Not enough point pairs for a directional variogram.\n",
                                     "Four directions need appreciably more points than one omnidirectional curve.")))
     }
+    cap <- if (total) pooled_within_caption(vd)
     build_directional_variogram_ggplot(
       vd,
-      title = paste0("Directional Variogram (", what, "): ", loc),
-      subtitle = paste0("Bearings clockwise from north, 22.5° half-angle cones. ",
-                        "Curves separating by range indicate anisotropy; ",
-                        "the engines remain omnidirectional."))
+      title = if (total) {
+        paste0("Pooled within-locality directional variogram (", what, "): ", cap$count)
+      } else {
+        paste0("Directional Variogram (", what, "): ", loc)
+      },
+      subtitle = paste(c(paste0("Bearings clockwise from north, 22.5° half-angle cones. ",
+                                "Curves separating by range indicate anisotropy; ",
+                                "the engines remain omnidirectional."), cap$note), collapse = "\n"))
   }
 
   output$directional_vgm_plot <- renderCachedPlot({
@@ -469,8 +532,11 @@
   register_sci_plot("rf_importance_plot_pre", "RF Variable Importance (Predicted)", function() build_rf_imp_diag("pre"))
   register_sci_plot("ck_variogram_plot_act", "Cross-Variogram (Actual)", function() build_ck_diag("act"))
   register_sci_plot("ck_variogram_plot_pred", "Cross-Variogram (Predicted)", function() build_ck_diag("pre"))
-  register_sci_plot("tps_gcv_plot_act", "TPS GCV Diagnostics (Actual)", function() build_tps_gcv_diag("act"))
-  register_sci_plot("tps_gcv_plot_pre", "TPS GCV Diagnostics (Predicted)", function() build_tps_gcv_diag("pre"))
+  register_sci_plot("tps_gcv_plot_act", "TPS Smoothing Selection (GCV, Actual)", function() build_tps_gcv_diag("act"))
+  register_sci_plot("tps_gcv_plot_pre", "TPS Smoothing Selection (GCV, Predicted)", function() build_tps_gcv_diag("pre"))
+  register_sci_plot("idw_power_plot_act", "IDW Power Selection (Actual)", function() build_idw_power_diag("act"))
+  register_sci_plot("idw_power_plot_pre", "IDW Power Selection (Predicted)", function() build_idw_power_diag("pre"))
+  register_sci_plot("cv_distance_plot", "CV Distance Match", build_cv_distance_diag)
   register_sci_plot("obs_pred_plot_act", "Observed vs Predicted (Actual)", function() build_obs_pred_diag("act"))
   register_sci_plot("obs_pred_plot_pre", "Observed vs Predicted (Predicted Map)", function() build_obs_pred_diag("pre"))
   register_sci_plot("resid_vgm_plot_act", "Residual Variogram (Actual)", build_resid_vgm_act)
@@ -739,6 +805,7 @@
     strat <- rv$cv_strategy_sel %||% "auto"
     label <- switch(strat,
       "loocv" = "Standard LOOCV (full leave-one-out)",
+      "knndm" = "kNNDM (map-matched 10-fold; LOOCV below n = 30)",
       "block" = "Spatial Block CV (10 k-means folds; LOOCV below n=30)",
       "Auto (LOOCV for n ≤ 50, random 10-fold above)")
     # The pooled row's variance-explained scores are measured against the POOLED
@@ -762,18 +829,43 @@
     }
     # What each fold re-estimates. Every kriging engine refits from its own
     # training samples, so the held-out sample contributes its coordinates and
-    # nothing else; the remaining reuse is IDW's distance power and a FIXED TPS
-    # lambda, both selected once on the full point set. rv$disp records the
-    # method, not whether the power/lambda was tuned or typed, so the IDW/TPS
-    # wording stays conditional - the reader knows which button they pressed.
+    # nothing else. IDW and TPS re-select a power or lambda set to Auto the same
+    # way, and use a fixed one as set; the run's fit records say which.
     method_now <- rv$disp$method %||% ""
+    fit_modes <- function(field) {
+      modes <- unlist(lapply(rv$disp$regional_params, function(p) {
+        vapply(paste0(field, c("act", "pre")), function(nm) {
+          f <- p[[nm]]
+          if (is.list(f) && is.character(f$mode)) f$mode else NA_character_
+        }, character(1))
+      }))
+      unique(modes[!is.na(modes)])
+    }
     reuse_txt <- switch(
       method_now,
       "OK" = " refits its variogram from each fold's training samples; the held-out sample contributes its coordinates only.",
       "CK" = " re-screens its covariates, re-standardizes them and refits the linear model of coregionalization in each fold.",
       "RK" = , "RFK" = " re-screens its covariates, re-interpolates them at the held-out samples, and refits the trend and the residual variogram in each fold.",
-      "IDW" = " re-solves each fold with one distance power. If that power came from OPTIMIZE IDW FACTORS it was selected on the full point set, so the held-out point contributed to it, unlike the kriging engines, which refit inside every fold; a power you typed yourself carries no such reuse. See Scientific Guide §5.",
-      "TPS" = " re-fits its spline inside every fold, but a fixed lambda - typed into the slider or taken from OPTIMIZE TPS LAMBDA - is reused unchanged in every fold and was selected on the full point set, unlike the kriging engines, which refit inside every fold. Auto (GCV) re-selects lambda inside each fold and carries no such reuse. See Scientific Guide §5.",
+      "IDW" = {
+        m <- fit_modes("idw_fit_")
+        if (identical(m, "cv")) {
+          " re-selects its distance power (Auto (CV)) from each fold's training samples before predicting the held-out samples. Scientific Guide \u00a74.2."
+        } else if (!"cv" %in% m) {
+          " predicts every fold with the fixed distance power, which was set, not selected on these data. Scientific Guide \u00a74.2."
+        } else {
+          " re-selects its distance power from each fold's training samples where it is on Auto (CV), and uses the fixed power elsewhere. Scientific Guide \u00a74.2."
+        }
+      },
+      "TPS" = {
+        m <- fit_modes("tps_fit_")
+        if (identical(m, "gcv")) {
+          " re-fits its spline and re-selects lambda by GCV from each fold's training samples. Scientific Guide \u00a74.3."
+        } else if (!"gcv" %in% m) {
+          " re-fits its spline in each fold with the fixed lambda, which was set, not selected on these data. Scientific Guide \u00a74.3."
+        } else {
+          " re-fits its spline in each fold, re-selecting lambda by GCV where it is on Auto (GCV) and keeping the fixed lambda elsewhere. Scientific Guide \u00a74.3."
+        }
+      },
       NULL
     )
     infos <- c(rv$cv_info_act, if (isTRUE(rv$has_predictions)) rv$cv_info_pre)
@@ -870,8 +962,9 @@
   #   n/a1  the metric does not apply to this target: mean- and
   #         percentage-normalised errors have no interpretation where the
   #         observed values span zero.
-  #   NA†   not reported under Spatial Block CV, where Moran's reference
-  #         distribution does not hold.
+  #   NA†   not reported under a contiguous fold design (Spatial Block CV,
+  #         kNNDM spatial folds), where Moran's reference distribution does
+  #         not hold.
   metrics_rows <- reactive({
     req(input$sel_loc_stats)
     loc <- input$sel_loc_stats
@@ -895,7 +988,9 @@
                                                         "moran_i", "moran_p"))])
     na_marker <- '<span title="Not computable (see Run Log)">NA*</span>'
     na_scale <- '<span title="Not reported: the observed values span zero (see the note under the table)">n/a¹</span>'
-    na_block <- '<span title="Not reported under Spatial Block CV (see the note under the table)">NA†</span>'
+    na_block <- function(mor) {
+      sprintf('<span title="Not reported under %s (see the note under the table)">NA†</span>', mor$design)
+    }
 
     # The Source cell states WHAT was scored, not only how: the fold plan, the
     # cross-validation population, how many of the expected samples got a
@@ -926,16 +1021,16 @@
               htmltools::htmlEscape(txt))
     }
 
-    row_spec <- function(cv_list, data_list, label, info_list) {
+    row_spec <- function(cv_list, data_list, label, info_list, pooled) {
       markers <- character(0)
       if (loc == "Total (Combined)") {
-        # Pool in the auto-UTM zone of the combined centroid: pooled Moran's I
-        # uses these coordinates, and EPSG:3857 distances are inflated by
-        # 1/cos(latitude). perform_cv/.cv_to_df extract x/y from the geometry.
-        res <- perform_pooled_cv(data_list, cv_list)
+        # Pooled in the auto-UTM zone of the combined centroid (pool_cv_sf):
+        # pooled Moran's I uses these coordinates, and EPSG:3857 distances are
+        # inflated by 1/cos(latitude). Computed once per run (pooled_cv_metrics).
+        res <- pooled()
         # The pooled row mixes localities that need not share a fold design, so
-        # its Moran reading is the block one only when every pooled locality
-        # resolved to blocks.
+        # its Moran reading is the contiguous one only when every pooled
+        # locality resolved to the same contiguous design.
         types <- vapply(names(data_list), function(l) {
           applied_cv_plan(nrow(data_list[[l]]), strat, cv_list[[l]])$type
         }, character(1))
@@ -950,14 +1045,15 @@
         n_obs <- if (!is.null(data_list[[loc]])) nrow(data_list[[loc]]) else NA
         # The APPLIED plan, not the requested strategy: a locality below
         # CV_BLOCK_MIN_N was scored by LOOCV, and a failed k-means clustering
-        # left random folds. Neither may be reported as Spatial Block CV.
+        # left random folds. Neither may be reported as Spatial Block CV. A
+        # kNNDM request reports the design it chose (random or spatial folds).
         plan <- applied_cv_plan(n_obs, strat, res)
         mor <- moran_reading(plan$type)
         src_label <- if (!is.null(res)) {
           source_cell(label, plan$label, res, info_list[[loc]])
         } else {
-          # An all-NA row used to be labelled plain "(CV)", indistinguishable
-          # from a computed one; say that CV did not produce metrics here.
+          # An all-NA row says that CV produced no metrics here; a plain "(CV)"
+          # label would be indistinguishable from a computed row.
           paste0(label, " (CV unavailable - see Run Log)")
         }
       }
@@ -984,8 +1080,8 @@
         markers <- c(markers, "na"); na_marker
       } else if (mor$block) {
         markers <- c(markers, "block")
-        sprintf('<span title="Block-CV residual clustering: these residuals inherit the fold geometry and a shared extrapolation condition within each withheld block. E[I] = -1/(n-1) = %s">%s†</span>',
-                if (is.na(moran_e)) "NA" else format_sig(moran_e), format_sig(moran_i))
+        sprintf('<span title="%s: these residuals inherit the fold geometry and a shared extrapolation condition within each withheld group of samples. E[I] = -1/(n-1) = %s">%s†</span>',
+                mor$label, if (is.na(moran_e)) "NA" else format_sig(moran_e), format_sig(moran_i))
       } else {
         # The null expectation rides along as a per-row tooltip: I is centred on
         # E[I] = -1/(n-1), not on 0, so an I marginally above zero is not
@@ -994,7 +1090,7 @@
                 if (is.na(moran_e)) "NA" else format_sig(moran_e), format_sig(moran_i))
       }
       p_cell <- if (!mor$report_p && !is.na(moran_i)) {
-        markers <- c(markers, "block"); na_block
+        markers <- c(markers, "block"); na_block(mor)
       } else if (is.na(moran_p)) {
         markers <- c(markers, "na"); na_marker
       } else {
@@ -1017,19 +1113,23 @@
            markers = unique(markers))
     }
 
-    specs <- list(row_spec(rv$cv_metrics_act, rv$cv_data_act, "Actual Model", rv$cv_info_act))
+    specs <- list(row_spec(rv$cv_metrics_act, rv$cv_data_act, "Actual Model", rv$cv_info_act,
+                            pooled_cv_metrics$act))
     if (isTRUE(rv$has_predictions)) {
       specs <- c(specs, list(row_spec(rv$cv_metrics_pre, rv$cv_data_pre,
-                                      "Predicted Model", rv$cv_info_pre)))
+                                      "Predicted Model", rv$cv_info_pre,
+                                      pooled_cv_metrics$pre)))
     }
     df <- do.call(rbind, lapply(specs, `[[`, "df"))
-    # The column heading can only carry one reading, so it takes the block one
-    # only when every row in the table was scored under blocks; otherwise the
-    # block rows are marked in their own cells.
-    block_all <- all(vapply(specs, `[[`, logical(1), "block"))
-    if (block_all) names(df)[names(df) == "Moran's I"] <- "Block-CV residual clustering"
+    # The column heading can only carry one reading, so it takes the
+    # contiguous-design one only when every row in the table was scored under
+    # the same contiguous design; otherwise those rows are marked in their own
+    # cells.
+    labels <- unique(vapply(specs, `[[`, character(1), "label"))
+    block_all <- all(vapply(specs, `[[`, logical(1), "block")) && length(labels) == 1
+    if (block_all) names(df)[names(df) == "Moran's I"] <- labels
 
-    list(df = df, num_cols = num_cols, block_all = block_all,
+    list(df = df, num_cols = num_cols,
          markers = unique(unlist(lapply(specs, `[[`, "markers"))))
   })
 
@@ -1216,7 +1316,7 @@
   # area expanse, kappa, ...) finishes. Rendering them in the run-completion
   # flush makes the tab current the moment it is opened. Plots stay
   # suspended: hidden plots re-render on reveal anyway (client sizing).
-  for (out_id in c("vgm_params_table", "regional_params_table", "metrics_table",
+  for (out_id in c("vgm_params_table", "vgm_params_title", "vgm_params_note", "regional_params_table", "metrics_table",
                    "metrics_table_notes", "cv_repeats_notes", "uploaded_metrics_notes",
                    "cv_strategy_badge", "cv_repeats_table",
                    "stats_table_total", "stats_table_loc",
@@ -1295,8 +1395,8 @@
       return("No interpolated surface yet. Run an interpolation first.")
     if (!isTRUE(input$color_style %in% c("agro", "bin")))
       return("Class zones exist only under Agronomical or Binned map styling. Switch Map Styling in the sidebar (Agronomical also needs Apply to maps and statistics).")
-    if (identical(input$color_style, "agro") && is.null(agro_applied()))
-      return("Agronomical classes are not applied yet. Press Apply to maps and statistics under Map Styling in the sidebar.")
+    if (identical(input$color_style, "agro") && is.null(agro_applied_now()))
+      return("Agronomical classes are not applied to this variable yet. Press Apply to maps and statistics under Map Styling in the sidebar.")
     if (identical(map_view_base(), "view_resid"))
       return("The residual view is not classified. Switch the Map Viewer to Actual, Predicted or Comparison to export its class zones.")
     if (map_view_layer() %in% c("se", "var") && isTRUE(rv$disp$has_variance))

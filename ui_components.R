@@ -4,32 +4,25 @@
 # Sourced via ui_helpers.R.
 
 
-tuning_ui <- function(id, label, 
-                      global_slider_id, manual_slider_id, 
-                      global_slider_args, manual_slider_args, 
-                      optimize_btn_label = paste("OPTIMIZE", label),
-                      manual_btn_label = paste("Apply Manual", label),
-                      top_extra_ui = NULL,
-                      extra_ui = NULL) {
-  
+#' Sidebar panel of an engine parameter (IDW power, TPS smoothing) with a
+#' scope switch: one setting for all localities (`global_ui`), or a value per
+#' locality and target (`manual_ui` plus an Apply button). The switch keeps
+#' the input id `<id>_mode` with values "auto" / "manual", which the server
+#' reads. `label` names the parameter in the switch's title. Under Per locality
+#' the `<id>_m_note` output says which localities have a value of their own and
+#' what the others run with: the All localities setting, whose control is
+#' hidden there.
+tuning_ui <- function(id, label, global_ui, manual_ui, manual_btn_label,
+                      top_extra_ui = NULL, extra_ui = NULL) {
   content <- tagList(
-    radioButtons(paste0(id, "_mode"), "Fitting Mode", 
-                 choices = c("Auto-Fit" = "auto", "Manual" = "manual"), inline = TRUE),
-    
     top_extra_ui,
-    
-    conditionalPanel(
-      condition = sprintf("input.%s_mode == 'auto'", id),
-      actionButton(paste0("opt_", id), optimize_btn_label, class = "btn-default btn-block"),
-      uiOutput(paste0(id, "_opt_panel")),
-      do.call(sliderInput, c(list(inputId = global_slider_id), global_slider_args))
-    ),
-    
+    radioButtons(paste0(id, "_mode"), paste(label, "applies to"),
+                 choices = c("All localities" = "auto", "Per locality" = "manual"), inline = TRUE),
+    conditionalPanel(condition = sprintf("input.%s_mode == 'auto'", id), global_ui),
     conditionalPanel(
       condition = sprintf("input.%s_mode == 'manual'", id),
       div(class = "mn-subsection",
-          h5("Manual Tuning"),
-          selectInput(paste0(id, "_m_loc"), "Locality to Tune", choices = NULL),
+          selectInput(paste0(id, "_m_loc"), "Locality", choices = NULL),
           # Offered only when the Predicted surface gets its own parameter
           # ("Fit Actual/Predicted separately"); otherwise it reuses the Actual one.
           conditionalPanel(
@@ -37,14 +30,14 @@ tuning_ui <- function(id, label,
               radioButtons(paste0(id, "_m_target"), "Target",
                            choices = c("Actual" = "act", "Predicted" = "pre"), inline = TRUE)
           ),
-          do.call(sliderInput, c(list(inputId = manual_slider_id), manual_slider_args)),
+          uiOutput(paste0(id, "_m_note")),
+          manual_ui,
           actionButton(paste0("apply_", id, "_manual"), manual_btn_label, class = "btn-default btn-block")
       )
     ),
-    
     extra_ui
   )
-  
+
   div(class = "mn-subsection", content)
 }
 
@@ -195,7 +188,7 @@ map_ruler_popup_html <- function(res) {
 }
 
 # Header row (title + PNG download + expand-to-modal buttons) above a plot
-# output. Server side pairs with register_sci_plot() in monolith.R, which
+# output. Server side pairs with register_sci_plot() in server_map_viewer.R, which
 # wires <id>_expand (modal) and <id>_dl (300-dpi PNG) to the same builder
 # closure that feeds the in-page cached plot.
 #
@@ -460,9 +453,8 @@ sci_table <- function(id, title = NULL, ..., title_tag = h5, label = NULL,
 }
 
 # Unified results-card container: one plain surface with a hairline border.
-# Cards used to carry a coloured left bar to tell them apart; the title does
-# that, and a bar of colour per card competed with the class-break and
-# residual palettes the cards contain.
+# The title tells cards apart; a bar of colour per card would compete with the
+# class-break and residual palettes the cards contain.
 sci_card <- function(title, subtitle, ...) {
   div(class = "sci-card",
       div(class = "sci-card-head",
@@ -489,9 +481,10 @@ sci_metric_tooltips <- function() {
     "RPD (Prec)" = "Ratio of Performance to Deviation: SD(observed) / RMSE. Chemometrics convention: > 2 good, 1.4-2 fair, < 1.4 poor.",
     "RPIQ" = "Ratio of Performance to Interquartile distance: IQR(observed) / RMSE. The RPD analogue for skewed distributions, where the SD is a poor spread measure. Higher is better.",
     "SMAPE (%)" = "Symmetric Mean Absolute Percentage Error: scale-free accuracy; 0% is perfect. n/a¹ when the observed values span zero, where a single sign disagreement contributes the maximum term however small both values are.",
-    "Moran's I" = "Spatial autocorrelation of the CV residuals (symmetric 8-nearest-neighbour weights). Read it against its null expectation E[I] = -1/(n-1) (shown per row on hover), not against 0. A clearly higher value is consistent with spatial structure the prediction procedure did not capture; it is not by itself an instruction to change engine. A value near E[I] is not proof of a clean model either: random folds leave each held-out point's neighbours in training, which can mask residual structure. Rows scored under Spatial Block CV are marked † and read differently (see the note under the table). NA* = the statistic could not be computed for this point set.",
+    "Moran's I" = "Spatial autocorrelation of the CV residuals (symmetric 8-nearest-neighbour weights). Read it against its null expectation E[I] = -1/(n-1) (shown per row on hover), not against 0. A clearly higher value is consistent with spatial structure the prediction procedure did not capture; it is not by itself an instruction to change engine. A value near E[I] is not proof of a clean model either: random folds leave each held-out point's neighbours in training, which can mask residual structure. Rows scored under Spatial Block CV or kNNDM spatial folds are marked † and read differently (see the note under the table). NA* = the statistic could not be computed for this point set.",
     "Block-CV residual clustering" = "Moran's I of the pooled out-of-fold residuals under Spatial Block CV. Those residuals inherit the fold geometry and a shared extrapolation condition within each withheld block, so this statistic measures clustering of block-CV errors; fold geometry and shared extrapolation error confound it, and it cannot on its own diagnose a missing spatial trend. Its p-value is not reported.",
-    "Moran p" = "Two-sided significance of Moran's I under the normality assumption (spdep::moran.test). Small p = the residual autocorrelation is unlikely under the no-structure null. NA† under Spatial Block CV, where that reference distribution does not hold. NA* where no sampling distribution is available (the all-pairs fallback weighting) or where Moran's I itself could not be computed."
+    "Spatial-fold residual clustering" = "Moran's I of the pooled out-of-fold residuals under kNNDM spatial folds. Each fold withholds whole groups of neighbouring samples, so those residuals inherit the fold geometry and a shared prediction condition within each group: this statistic measures clustering of the spatial-fold errors, fold geometry confounds it, and it cannot on its own diagnose a missing spatial trend. Its p-value is not reported.",
+    "Moran p" = "Two-sided permutation p-value of Moran's I (999 seeded permutations; the smallest attainable value is 0.002). Small p = residual autocorrelation unlikely under spatial randomness. NA† under Spatial Block CV and kNNDM spatial folds, where residuals held out in whole groups are not exchangeable, so the permutation null does not describe them. NA* where Moran's I itself could not be computed."
   )
 }
 build_rk_trend_ui <- function(lm_sum, dt_id, raw_id) {
@@ -722,9 +715,9 @@ info_tooltip <- function(id, text) {
     `data-placement` = "auto",
     `data-trigger` = "focus",
     # Attached to <body>, not to the icon's own parent. Left where Bootstrap
-    # puts it by default, the panel inherits its parent's clipping: every
-    # tooltip in the sidebar (a scroll container) and in the map/plot cards was
-    # cut off at the container edge.
+    # puts it by default, the panel would inherit its parent's clipping, and
+    # every tooltip in the sidebar (a scroll container) and in the map/plot
+    # cards would be cut off at the container edge.
     `data-container` = "body",
     `data-content` = content_html,
     `data-html` = "true",
@@ -738,6 +731,20 @@ info_tooltip <- function(id, text) {
     icon("info-circle")
   )
 }
+
+# What the Total (Combined) view of a variogram card draws, and why its lag
+# axis ends where it does (pooled_within_variogram, spatial_vgm.R). Built at
+# call time: spatial_vgm.R, which defines POOLED_VGM_MIN_N, is sourced after
+# the UI helpers.
+pooled_vgm_note <- function() {
+  paste0("Total (Combined) pools the point pairs inside each locality; no pair joins two localities. ",
+         "The lag axis stops at the half-diagonal of the smallest locality with at least ", POOLED_VGM_MIN_N,
+         " located values, so every locality contributes over the whole axis. One small locality therefore ",
+         "shortens the curve for all; select a locality to see its own lag range.")
+}
+
+# The info icon of a variogram card that also draws the Total (Combined) view.
+pooled_vgm_info <- function(id) info_tooltip(id, pooled_vgm_note())
 
 
 # One-line statement of the sample a matrix-valued panel was estimated on.
@@ -780,11 +787,12 @@ METRIC_MARKER_NOTES <- c(
   scale = paste("n/a¹ Not reported for targets whose observed values span zero.",
                 "Mean- and percentage-normalised errors have no interpretation on a",
                 "signed or centred scale. NRMSE (SD) is reported instead."),
-  block = paste("† Under Spatial Block CV the pooled out-of-fold residuals inherit the",
-                "spatial fold geometry and a shared extrapolation condition within each",
-                "withheld block, so this statistic measures clustering of block-CV errors",
-                "and its usual reference distribution does not hold: the p-value is not",
-                "reported, and the value cannot on its own diagnose a missing spatial trend."),
+  block = paste("† Under Spatial Block CV and kNNDM spatial folds the pooled out-of-fold",
+                "residuals inherit the spatial fold geometry and a shared extrapolation",
+                "condition within each withheld group of samples, so this statistic measures",
+                "clustering of those errors and its usual reference distribution does not",
+                "hold: the p-value is not reported, and the value cannot on its own diagnose",
+                "a missing spatial trend."),
   na    = paste("NA* Not computable for this point set (see the Run Log); it does not mean",
                 "the quantity is zero or that no structure was found.")
 )

@@ -2,8 +2,8 @@
 # wrapper), consumed by ui_main.R inside sidebarLayout().
 ui_sidebar_panel <- sidebarPanel(width = 3,
       # The suite tabs are matched on their value= ids (tab_desc / tab_classif),
-      # never on their titles - the titles carry the "5."/"6." numbering and are
-      # free to be reworded without touching these conditions.
+      # never on their titles, so a title can be reworded without touching these
+      # conditions.
       # Neither suite reads the Context selections - the Exploratory module is
       # handed the raw dataset and picks its own variables, and Classification
       # configures target/predictors in its own panel - so the section is only
@@ -36,7 +36,7 @@ ui_sidebar_panel <- sidebarPanel(width = 3,
                        checkboxInput("comp_mode", HTML(paste0("Comparison Mode", info_tooltip("comp_mode", "Splits the viewer to compare the Actual (observed) map against the map of your uploaded ML predictions. Useful for visual validation."))), FALSE),
                        # Every prediction or residual view kriges a predicted
                        # surface, so this governs it with or without Comparison Mode.
-                       checkboxInput("sep_fit", HTML(paste0("Fit Actual/Predicted Separately", info_tooltip("sep_fit_info", "Checked (recommended): the Predicted surface gets its own model - its own variogram under Ordinary Kriging, its own power under IDW, its own lambda under TPS. Unchecked: it reuses the model fitted to the measured values - the Actual variogram (the run's own Actual fit under Auto-Fit, the applied Actual model under Manual), the Actual power, and the Actual lambda (on Auto, the one GCV selects for the measured values) - and tuning and optimization offer the Actual target only. RK, RFK and CK always fit each surface on its own."))), TRUE)
+                       checkboxInput("sep_fit", HTML(paste0("Fit Actual/Predicted Separately", info_tooltip("sep_fit_info", "Checked (recommended): the Predicted surface gets its own model - its own variogram under Ordinary Kriging, its own power under IDW, its own lambda under TPS. Unchecked: it reuses the model fitted to the measured values - the Actual variogram (the run's own Actual fit under Auto-Fit, the applied Actual model under Manual), the Actual power, and the Actual lambda (on Auto, the one GCV selects for the measured values) - and per-locality values are set for the Actual target only. RK, RFK and CK always fit each surface on its own."))), TRUE)
                      ),          # Also shown while the Map Viewer displays a comparison, so the
                      # option stays reachable for the maps it styles after the
                      # sidebar is set up for a non-comparison next run. That arm
@@ -55,7 +55,7 @@ ui_sidebar_panel <- sidebarPanel(width = 3,
           tags$details(class = "sidebar-section", `data-key` = "engine", open = NA,
             tags$summary(h4("Spatial Engine")),
             div(
-            div(class = "mn-seg-grid", shinyWidgets::radioGroupButtons("method", HTML(paste0("Interpolation", info_tooltip("method_info", "Cross-validation strategy is selectable below. It governs the reported Model Performance metrics only, never the prediction surface. Folds use a fixed seed (12345) for reproducibility. See Scientific Guide Section 5 for details."))),
+            div(class = "mn-seg-grid", shinyWidgets::radioGroupButtons("method", HTML(paste0("Interpolation", info_tooltip("method_info", "Ordinary kriging: the target's spatial autocorrelation through a fitted variogram; gives a kriging variance. Regression kriging: a linear trend on the covariates plus kriging of its residuals; its variance adds the trend's to the residual kriging variance. Random forest kriging: a random-forest trend plus kriging of its out-of-bag residuals; its variance adds the forest's to the residual kriging variance. Co-kriging: the target together with its covariates through a linear model of coregionalization; gives a co-kriging variance. IDW: a distance-weighted mean of the nearest samples; no variance. Thin plate spline: a smoothing spline surface; no variance. See Scientific Guide Section 1."))),
                         choices = c("Ordinary kriging" = "OK",
                                     "Regression kriging" = "RK",
                                     "Random forest kriging" = "RFK",
@@ -68,31 +68,33 @@ ui_sidebar_panel <- sidebarPanel(width = 3,
               helpText(HTML("<em style='color: var(--mn-text-3); font-size: 0.9em; font-style: normal;'>The neighbourhood is a modelling choice, not just a speed setting: it controls how local the stationarity assumption is.</em>"))
             ),
             shinyWidgets::radioGroupButtons("cv_strategy",
-              HTML(paste0("Cross-Validation Strategy", info_tooltip("cv_strategy_info", "How held-out folds are formed for the reported performance metrics. It does not change the interpolated map, except that the IDW power optimizer tunes under this same strategy, so re-running it after a change can store a different power. Auto (Default): LOOCV for n ≤ 50, seeded random 10-fold above. Standard LOOCV: full leave-one-out, the most rigorous and the most expensive, because OK, CK, RK and RFK all refit their model in every fold: on a 355-sample locality with two covariates, roughly 50 s (OK), 100 s (CK), 110 s (RK) and 135 s (RFK). Spatial Block CV: 10 spatially-clustered (k-means) folds that hold out contiguous regions to curb the optimistic bias random folds suffer under spatial autocorrelation; recommended for DSM-style validation. Below n=30 it degrades to LOOCV. At 10 folds the refit costs about half a second per locality (OK), 1.3 s (CK) and 0.4 s (RK/RFK)."))),
-              choices = c("Auto (Default)" = "auto", "Standard LOOCV" = "loocv", "Spatial Block CV" = "block"),
+              HTML(paste0("Cross-Validation Strategy", info_tooltip("cv_strategy_info", "How held-out folds are formed for the reported performance metrics. It does not change the interpolated map, except that IDW Auto (CV) selects its power under this strategy. Folds are reproducible (fixed seed 12345).<br><br><b>Auto (Default):</b> LOOCV for n ≤ 50, seeded random 10-fold above. LOOCV and random folds estimate the accuracy of interpolation within the sampled domain, approximately without bias for a simple random sample and conservatively for a regular grid, where a held-out point is a full grid spacing from its neighbours.<br><br><b>kNNDM (Map-Matched):</b> builds 10 folds so that each held-out sample is about as far from its training samples as the map's cells are from the samples (Linnenbrink et al. 2024). It adapts to how the data were sampled: evenly spread samples get ordinary random folds, while clustered samples, transects, or a boundary that reaches beyond the samples get spatially grouped folds. The metrics then describe the error of this map over this boundary, without having to choose between random folds (optimistic for clustered samples) and blocks (pessimistic for evenly spread ones). It is deterministic, costs about the same as 10-fold CV, and uses LOOCV below n = 30.<br><br><b>Standard LOOCV:</b> leave-one-out at any sample size. The most expensive, because OK, CK, RK and RFK refit their model in every fold: on a 355-sample locality with two covariates, roughly 50 s (OK), 100 s (CK), 110 s (RK) and 135 s (RFK).<br><br><b>Spatial Block CV:</b> 10 spatially clustered (k-means) folds that hold out contiguous regions, so it estimates accuracy away from the sampled clusters (transfer to unsampled areas), which is pessimistic for a map within the sampled field. Below n = 30 it degrades to LOOCV. At 10 folds the refit costs about half a second per locality (OK), 1.3 s (CK) and 0.4 s (RK/RFK).<br><br>The <b>CV Distance Match</b> panel shows how closely any strategy's folds match the map. Scientific Guide Section 5."))),
+              choices = c("Auto (Default)" = "auto", "kNNDM (Map-Matched)" = "knndm",
+                          "Standard LOOCV" = "loocv", "Spatial Block CV" = "block"),
               selected = "auto", size = "sm", direction = "vertical", justified = TRUE),
 
             conditionalPanel(condition = "['OK', 'RK', 'RFK', 'CK'].includes(input.method)",
               helpText(HTML("<em style='color: var(--mn-text-3); font-size: 0.9em; font-style: normal;'>Each fold refits the model from its own training samples. Scientific Guide §5.</em>"))
             ),
 
-            # Which samples Ordinary Kriging is cross-validated on. RK, RFK and
-            # CK can only use the covariate-complete rows, so comparing OK with
-            # them on OK's larger sample is comparing two experiments.
+            # Which samples Ordinary Kriging is cross-validated on. RK and RFK
+            # can only use the covariate-complete rows, so comparing OK with
+            # them on OK's larger sample is comparing two experiments. CK is
+            # scored on the Native population.
             conditionalPanel(condition = "input.method == 'OK'",
               shinyWidgets::radioGroupButtons("cv_population",
-                HTML(paste0("CV Population", info_tooltip("cv_population_info", "Which samples Ordinary Kriging is cross-validated on. Native (default): every sample with a measured target value. Comparable: only the samples that also have every selected auxiliary variable, deduplicated and folded exactly as RK, RFK and CK use them, so the metrics of the four engines describe the same experiment. OK is TRAINED AND SCORED on those samples under Comparable; the map always uses every sample either way. The CV population ID shown in the Model Performance hover and written to the metrics export confirms that two runs on the same uploaded table scored the same rows in the same folds."))),
+                HTML(paste0("CV Population", info_tooltip("cv_population_info", "Which samples Ordinary Kriging is cross-validated on. Native (default): every sample with a measured target value; Co-Kriging is scored on these same samples. Comparable: only the samples that also have every selected auxiliary variable, deduplicated and folded exactly as RK and RFK use them, so the metrics of the three engines describe the same experiment. OK is TRAINED AND SCORED on those samples under Comparable; the map always uses every sample either way. The CV population ID shown in the Model Performance hover and written to the metrics export confirms that two runs on the same uploaded table scored the same rows in the same folds."))),
                 choices = c("Native" = "native", "Comparable" = "comparable"),
                 selected = "native", size = "sm", justified = TRUE)
             ),
 
             # Repeated CV. Hidden under Standard LOOCV, whose folds are
-            # deterministic (every "repeat" is the same partition); under Auto
-            # it still collapses to a single realization for any locality with
-            # n <= 50, which the run log reports.
+            # deterministic (every "repeat" is the same partition). A locality
+            # still keeps a single realization where its plan is deterministic
+            # (Auto at n <= 50, kNNDM spatial folds), which the run log reports.
             conditionalPanel(condition = "input.cv_strategy != 'loocv'",
               checkboxInput("cv_repeat_on",
-                HTML(paste0("Repeated CV (fold-realization stability)", info_tooltip("cv_repeat_info", "OFF (default): metrics come from ONE fold assignment (fixed seed 12345), which is reproducible and keeps method comparisons paired. ON: the cross-validation is re-run under additional fold assignments (seeds 12346, 12347, ...) and an extra table reports each metric as mean ± SD across realizations, so you can see whether a difference between two methods is larger than the split-to-split noise. The reported single-realization numbers and the interpolated map are IDENTICAL either way - realization 1 is the reference run. Cost: one extra full cross-validation per repeat, and every kriging engine refits its model in each fold, so 5 repeats is roughly 5x the CV time. Each RFK fold draws its forest from its own seed, so a repeat varies the partition and nothing else. Leave-one-out plans are deterministic and are never repeated."))),
+                HTML(paste0("Repeated CV (fold-realization stability)", info_tooltip("cv_repeat_info", "OFF (default): metrics come from ONE fold assignment (fixed seed 12345), which is reproducible and keeps method comparisons paired. ON: the cross-validation is re-run under additional fold assignments (seeds 12346, 12347, ...) and an extra table reports each metric as mean ± SD across realizations, so you can see whether a difference between two methods is larger than the split-to-split noise. The reported single-realization numbers and the interpolated map are IDENTICAL either way - realization 1 is the reference run. Cost: one extra full cross-validation per repeat, and every kriging engine refits its model in each fold, so 5 repeats is roughly 5x the CV time. Each RFK fold draws its forest from its own seed, so a repeat varies the partition and nothing else. Leave-one-out plans, and kNNDM plans that group samples spatially, are deterministic and are never repeated."))),
                 value = FALSE),
               conditionalPanel(condition = "input.cv_repeat_on == true",
                 selectInput("cv_repeat_n", "Fold realizations:",
@@ -104,8 +106,8 @@ ui_sidebar_panel <- sidebarPanel(width = 3,
 
             conditionalPanel(condition = "input.method == 'RFK'",
               radioButtons("rfk_uncertainty",
-                HTML(paste0("RFK Uncertainty Method", info_tooltip("rfk_unc_info", "Controls ONLY the RFK uncertainty (variance) map, never the prediction surface, and never the reported metrics. Infinitesimal Jackknife (default, calibrated; Wager et al. 2014): the random-forest analogue of the regression standard error, a better-calibrated variance of the ensemble mean, slightly slower to compute. Ensemble spread (fast): the between-tree variance of the forest; a stability heuristic that understates true predictive uncertainty. See Scientific Guide Section 7.3."))),
-                choices = c("Infinitesimal Jackknife (calibrated)" = "jackknife", "Ensemble spread (fast)" = "spread"),
+                HTML(paste0("RFK Uncertainty Method", info_tooltip("rfk_unc_info", "Controls ONLY the RFK uncertainty (variance) map, never the prediction surface, and never the reported metrics. Infinitesimal Jackknife (default; Wager et al. 2014): the random-forest analogue of the regression standard error, an estimate of the sampling variance of the forest's ensemble-mean prediction, slightly slower to compute. Ensemble spread (fast): the between-tree variance of the forest, a measure of where the model is least stable rather than a predictive variance. Neither is a calibrated interval. See Scientific Guide Section 7.3."))),
+                choices = c("Infinitesimal Jackknife" = "jackknife", "Ensemble spread (fast)" = "spread"),
                 selected = "jackknife")
             ),
 
@@ -142,7 +144,7 @@ ui_sidebar_panel <- sidebarPanel(width = 3,
             conditionalPanel(condition = "['OK', 'RK', 'RFK', 'CK'].includes(input.method)",
               shinyWidgets::radioGroupButtons("vgm_mode", HTML(paste0("Fitting Mode", info_tooltip("vgm_mode_info", "Auto-Fit runs always fit their own variogram. OPTIMIZE ALL VARIOGRAMS previews that fit for the selected variable, data subset and localities. Manual uses only models saved with Apply manual model for the current variable and subset; other localities fit their own variogram."))), choices = c("Auto-Fit" = "auto", "Manual" = "manual"), size = "sm", justified = TRUE),
               conditionalPanel(condition = "input.vgm_mode == 'auto'",
-                actionButton("auto_fit", "Optimize all variograms", class = "btn-default btn-block", style="margin-bottom:10px;")
+                actionButton("auto_fit", "OPTIMIZE ALL VARIOGRAMS", class = "btn-default btn-block", style="margin-bottom:10px;")
               ),
               conditionalPanel(condition = "input.vgm_mode == 'manual'",
                 div(class = "mn-subsection",
@@ -160,7 +162,7 @@ ui_sidebar_panel <- sidebarPanel(width = 3,
                     # it is only meaningful for OK. RK/RFK model the residual
                     # variogram after the trend is removed and CK fits an LMC;
                     # imposing a value-scale model on either would be wrong, so
-                    # they refit - which used to happen silently.
+                    # they refit, and the note below says so.
                     conditionalPanel(condition = "['RK', 'RFK', 'CK'].includes(input.method)",
                       tags$p(class = "mn-note-warn",
                              tags$b("Not used by the selected method. "),
@@ -170,42 +172,64 @@ ui_sidebar_panel <- sidebarPanel(width = 3,
               )
             ),
             
+            # Power and smoothing are set for all localities or per locality.
+            # Auto (CV) and Auto (GCV) are selected inside the run, and again
+            # inside every CV fold; the stored per-locality values use the
+            # encoding the server writes (-1 Auto, 0 exact TPS or equal-weight
+            # IDW, > 0 fixed). A Fixed p is typed over the range Auto (CV)
+            # searches (0 to IDW_MAX_FINITE_POWER), so a power Auto selects can
+            # be fixed as it is.
             conditionalPanel(condition = "input.method == 'IDW'",
                 tuning_ui(
-                    id = "idw", label = "IDW FACTORS",
-                    global_slider_id = "idw_p", manual_slider_id = "idw_m_p",
-                    global_slider_args = list(label = "Global IDW Power (p)", min = 0.5, max = 5, value = 2, step = 0.1),
-                    manual_slider_args = list(label = "Power (p)", min = 0.5, max = 5, value = 2, step = 0.1),
-                    optimize_btn_label = "OPTIMIZE IDW FACTORS",
-                    manual_btn_label = "Apply Manual Power",
-                    top_extra_ui = sliderInput("idw_nmax", HTML(paste0("Max Neighbors", info_tooltip("idw_nmax_info", "Limits the IDW calculation to the closest N points. This prevents distant, unrelated data from distorting local predictions. Select this BEFORE optimizing."))), min = 4, max = 50, value = 12, ticks = FALSE),
-                    extra_ui = div(style="background-color: var(--mn-surface-2); border: 1px solid var(--mn-line); border-radius: 4px; padding: 10px; color: var(--mn-text);", tableOutput("idw_metrics_table"))
+                    id = "idw", label = "Power (p)",
+                    global_ui = tagList(
+                        radioButtons("idw_p_mode", "Power (p)",
+                                     choices = c("Fixed p" = "fixed", "Auto (CV)" = "cv"),
+                                     selected = "fixed", inline = TRUE),
+                        conditionalPanel(condition = "input.idw_p_mode == 'fixed'",
+                            numericInput("idw_p", sprintf("Fixed p (0 to %d; 0 = equal weights)", IDW_MAX_FINITE_POWER),
+                                         value = 2, min = 0, max = IDW_MAX_FINITE_POWER, step = "any")),
+                        conditionalPanel(condition = "input.idw_p_mode == 'cv'",
+                            helpText(sprintf(paste0("Each locality's power is chosen under the Cross-Validation Strategy from the ",
+                                                    "whole IDW family: equal weights (p = 0), powers up to %d, and the ",
+                                                    "nearest-neighbour limit. Every CV fold re-selects it from its own training rows."),
+                                             IDW_MAX_FINITE_POWER)))
+                    ),
+                    manual_ui = tagList(
+                        radioButtons("idw_m_mode", "Power (p)",
+                                     choices = c("Fixed p" = "fixed", "Auto (CV)" = "cv"),
+                                     selected = "fixed", inline = TRUE),
+                        conditionalPanel(condition = "input.idw_m_mode == 'fixed'",
+                            numericInput("idw_m_p", sprintf("Fixed p (0 to %d; 0 = equal weights)", IDW_MAX_FINITE_POWER),
+                                         value = 2, min = 0, max = IDW_MAX_FINITE_POWER, step = "any"))
+                    ),
+                    manual_btn_label = "Apply per-locality power",
+                    top_extra_ui = sliderInput("idw_nmax", HTML(paste0("Max Neighbors", info_tooltip("idw_nmax_info", "Limits the IDW calculation to the closest N points. This prevents distant, unrelated data from distorting local predictions. Auto (CV) selects the power at this neighbourhood."))), min = 4, max = 50, value = 12, ticks = FALSE),
+                    extra_ui = uiOutput("idw_metrics_ui")
                 )
             ),
-            
+
             conditionalPanel(condition = "input.method == 'TPS'",
                 tuning_ui(
-                    id = "tps", label = "TPS LAMBDA",
-                    global_slider_id = "tps_lambda", manual_slider_id = "tps_m_lambda",
-                    global_slider_args = list(label = "Global Smoothing (Lambda)", min = -1, max = 1, value = -1, step = 0.001),
-                    manual_slider_args = list(label = "Lambda", min = -1, max = 1, value = -1, step = 0.001),
-                    optimize_btn_label = "OPTIMIZE TPS LAMBDA",
-                    manual_btn_label = "Apply Manual Lambda",
-                    extra_ui = tagList(
-                        conditionalPanel(condition = "input.tps_mode == 'auto'",
-                            div(style = "display: flex; gap: 6px; margin-bottom: 6px;",
-                                actionButton("tps_preset_auto", "Set Auto (GCV)", class = "btn-default btn-xs", style = "flex: 1;"),
-                                actionButton("tps_preset_exact", "Set Exact (0)", class = "btn-default btn-xs", style = "flex: 1;")
-                            )
-                        ),
-                        conditionalPanel(condition = "input.tps_mode == 'manual'",
-                            div(style = "display: flex; gap: 6px; margin-bottom: 6px;",
-                                actionButton("tps_m_preset_auto", "Set Auto (GCV)", class = "btn-default btn-xs", style = "flex: 1;"),
-                                actionButton("tps_m_preset_exact", "Set Exact (0)", class = "btn-default btn-xs", style = "flex: 1;")
-                            )
-                        ),
-                        p(style="font-size: 0.8em; opacity: 0.8;", "Lambda < 0: Auto (GCV Optimization); Lambda = 0: Exact interpolation; Lambda > 0: Manual Smoothing.")
-                    )
+                    id = "tps", label = "Smoothing (λ)",
+                    global_ui = tagList(
+                        radioButtons("tps_lambda_mode", "Smoothing (λ)",
+                                     choices = c("Auto (GCV)" = "gcv", "Exact (λ = 0)" = "exact", "Fixed λ" = "fixed"),
+                                     selected = "gcv"),
+                        # step = "any": a numeric step would make the browser
+                        # flag a GCV-scale value such as 2.4e-06 as invalid.
+                        conditionalPanel(condition = "input.tps_lambda_mode == 'fixed'",
+                            numericInput("tps_lambda", "Fixed λ", value = 0.001, min = 0, step = "any"))
+                    ),
+                    manual_ui = tagList(
+                        radioButtons("tps_m_mode", "Smoothing (λ)",
+                                     choices = c("Auto (GCV)" = "gcv", "Exact (λ = 0)" = "exact", "Fixed λ" = "fixed"),
+                                     selected = "gcv"),
+                        conditionalPanel(condition = "input.tps_m_mode == 'fixed'",
+                            numericInput("tps_m_lambda", "Fixed λ", value = 0.001, min = 0, step = "any"))
+                    ),
+                    manual_btn_label = "Apply per-locality λ",
+                    extra_ui = helpText("λ acts on coordinates scaled to the unit box; GCV typically selects 1e-6–1e-1. Each run's fitted λ and effective degrees of freedom are listed under Regional Parameters.")
                 )
             ),
             
@@ -216,7 +240,7 @@ ui_sidebar_panel <- sidebarPanel(width = 3,
           tags$details(class = "sidebar-section", `data-key` = "domain", open = NA,
             tags$summary(h4("Domain & Grid")),
             div(
-            div(class = "mn-seg-grid", shinyWidgets::radioGroupButtons("boundary_type", HTML(paste0("Boundary Type", info_tooltip("bound", "Defines how the interpolation surface is cropped. Convex hull wraps points tightly; Buffered adds padding."))), 
+            div(class = "mn-seg-grid", shinyWidgets::radioGroupButtons("boundary_type", HTML(paste0("Boundary Type", info_tooltip("bound", "How the interpolation surface is cropped around each locality's samples. Concave hull: follows the sample outline tightly. Convex hull: the smallest convex polygon around the samples. Buffered: the concave hull padded by the buffer distance. Point buffer: a disc around each sample."))),
                         choices = c("Concave hull" = "concave",
                                     "Convex hull" = "convex",
                                     "Buffered" = "wrapped",
@@ -228,11 +252,11 @@ ui_sidebar_panel <- sidebarPanel(width = 3,
                              choices = c("Auto (Dynamic)" = "dynamic", "Fixed (Manual)" = "fixed"), selected = "dynamic", size = "sm", justified = TRUE)
               ),
               conditionalPanel(condition = "input.boundary_type == 'strict' || (input.boundary_type == 'wrapped' && input.buff_mode == 'fixed')",
-                numericInput("buff_dist", HTML(paste0("Buffer Distance (m)", info_tooltip("buff_dist_info", "Sets the spatial buffer distance. For Strict Point mode, this acts as the fixed radius around each point."))), value = 250, min = 0)
+                numericInput("buff_dist", HTML(paste0("Buffer Distance (m)", info_tooltip("buff_dist_info", "The buffer distance. For Point buffer, it is the radius of the disc around each sample."))), value = 250, min = 0)
               )
             ),
             
-            shinyWidgets::radioGroupButtons("res_mode", HTML(paste0("Resolution Logic", info_tooltip("res", "Auto (Per Locality): each locality gets its own square cell size from its boundary area (about 100,000 cells, limited to 5-1000 m). Auto (Global): every locality gets the Auto size of the largest boundary, on one shared grid lattice. Both follow area, not sampling density, so a cell can come out much finer than the locality's own sample spacing. Fixed: the cell size you set. The sizes a run used are listed by the Map Viewer's resolution overlay."))),
+            shinyWidgets::radioGroupButtons("res_mode", HTML(paste0("Resolution Logic", info_tooltip("res", "Auto (Per Locality): each locality's cell size follows its sampling density (Hengl 2006): 0.0791 × √(boundary area / samples), never coarser than half the mean nearest-neighbour distance, limited to 1–1000 m. Auto (Global): every locality uses the finest of those sizes, on one shared lattice. Fixed: the size you set. The Map Viewer's resolution overlay lists the sizes a run used."))),
                          choices = c("Auto (Per Locality)" = "local", "Auto (Global)" = "global", "Fixed" = "fixed"),
                          size = "sm", direction = "vertical", justified = TRUE),
             conditionalPanel(condition = "input.res_mode == 'fixed'",

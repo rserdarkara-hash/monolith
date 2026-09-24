@@ -6,10 +6,9 @@ source("ui_main.R")        # assembles `ui` from ui_sidebar.R + ui_main_tabs.R
 
 # The server body is sliced into sequentially sourced chunks that share ONE
 # evaluation environment via source(local = TRUE): `rv`, session_state and all
-# helper closures remain visible across every chunk, exactly as in the former
-# inline body. The files are sourced in the ORIGINAL physical order of the
-# monolithic server function - do not reorder them, and do not wrap any chunk
-# in moduleServer(): later chunks rely on names defined in earlier ones.
+# helper closures remain visible across every chunk. The files are sourced in a
+# fixed order - do not reorder them, and do not wrap any chunk in
+# moduleServer(): later chunks rely on names defined in earlier ones.
 server <- function(input, output, session) {
 
   # A. Core setup: session dirs, raster caches, diagnostics closures,
@@ -34,8 +33,8 @@ server <- function(input, output, session) {
   #    locality/covariate selectors.
   source("server_run_config.R", local = TRUE)
 
-  # F. Geostatistical tuning: TPS lambda / IDW power optimization, variogram
-  #    manual tuning and the expert auto-fit loop.
+  # F. Model tuning: per-locality IDW power / TPS lambda values, variogram
+  #    manual tuning and the expert variogram auto-fit.
   source("server_model_tuning.R", local = TRUE)
 
   # G. Execution engine: run estimates, archive/VIF gates and the

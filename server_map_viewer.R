@@ -33,16 +33,16 @@
   })
 
   output$loc_res_table <- renderTable({
-    req(rv$loc_resolutions)
-    res_list <- rv$loc_resolutions
+    req(rv$loc_buffer_res)
+    res_list <- rv$loc_buffer_res
     if(length(res_list) == 0) return(NULL)
     
     show_buffer <- input$boundary_type %in% c("wrapped", "strict")
     res_mode_val <- input$res_mode %||% "local"
     manual_res_val <- input$grid_res %||% 50
     
-    # In Auto modes the cell size follows the boundary area and is only known
-    # once the run has built the boundaries; the Map Viewer's resolution
+    # In Auto modes the cell size follows each boundary and its samples and is
+    # only known once the run has built the boundaries; the Map Viewer's resolution
     # overlay lists the sizes a run used.
     df <- data.frame(
       Locality = names(res_list),
@@ -56,30 +56,24 @@
       method_val <- input$method %||% "OK"
       fixed_dist <- input$buff_dist %||% 250
       
-      df$`Buffer (m)` <- sapply(res_list, function(x) {
-        if (res_mode_val == "fixed") {
-          base_res <- manual_res_val
-        } else {
-          if (!is.numeric(x)) return("-")
-          base_res <- x
+      # The run's own rule (dynamic_buffer_dist) on the run's own basis: the
+      # slider in Fixed mode, else the locality's rv$loc_buffer_res.
+      df$`Buffer (m)` <- vapply(res_list, function(x) {
+        if (!(buff_mode_val == "dynamic" && input$boundary_type == "wrapped")) {
+          return(paste0(fixed_dist, " m"))
         }
-        
-        if (buff_mode_val == "dynamic" && input$boundary_type == "wrapped") {
-          val <- get_buffer_multiplier(method_val) * base_res
-          val <- max(5, min(2000, val))
-          paste0(round(val, 1), " m")
-        } else {
-          paste0(fixed_dist, " m")
-        }
-      })
+        base_res <- if (res_mode_val == "fixed") manual_res_val else x
+        if (!isTRUE(is.finite(base_res))) return("-")
+        paste0(round(dynamic_buffer_dist(method_val, base_res), 1), " m")
+      }, character(1))
     }
     df
   }, striped = TRUE, hover = TRUE, bordered = TRUE, width = "100%")
 
-  # Live advisory for a Strict Measured buffer that is narrower than half the
+  # Live advisory for a Point buffer that is narrower than half the
   # grid cell diagonal, which drops the cells of isolated samples (see
   # strict_buffer_gap, spatial_pipeline.R). Shown for Fixed resolution only:
-  # in Auto modes the run derives the cell size from the boundary areas, so a
+  # in Auto modes the run derives the cell size from the boundaries it builds, so a
   # pre-run figure here would be a guess. Those modes are covered by the
   # authoritative run-time warning instead.
   output$strict_buffer_note <- renderUI({
@@ -453,7 +447,7 @@
         clearGroup("styled_points") %>%
         clearGroup("styled_labels") %>%
         removeControl("styled_points_legend")
-      # Same rule as the old draw_map: no styled points on the residual
+      # Same rule as draw_map: no styled points on the residual
       # comparison maps (resid_raster / resid_points views)
       eligible <- map_id == "main_map" || !is_resid
       if (eligible && !is.null(pts_view)) {
@@ -945,13 +939,9 @@
    # ── SA diagnostics build closures ────────────────────────────────────────
    # Every Scientific Analysis plot card shares ONE ggplot builder between its
    # in-page cached render, the expand modal (static + interactive plotly) and
-   # the 300-dpi PNG download. Variogram panels are ggplot rebuilds of the
-   # former lattice plots (same empirical values and fitted lines via
-   # variogramLine; presentation only).
-   sci_placeholder <- function(msg, size = 5) {
-     ggplot() + annotate("text", x = 4, y = 4, label = msg, size = size, color = "grey40") + theme_void()
-   }
-
+   # the 300-dpi PNG download. Variogram panels draw the empirical values and
+   # the fitted line (variogramLine); an empty card draws sci_placeholder()
+   # (ui_plotting.R).
    register_sci_plot <- function(id, title, build_fn) {
      register_expanded_modal(input, output, session,
        btn_id = paste0(id, "_expand"), mode_id = paste0(id, "_mode"),
@@ -990,46 +980,41 @@
        if (isTRUE(sci_vgm_tuning())) {
          return(sci_placeholder("Select a locality to inspect its stored variogram for the current variable and data subset."))
        }
-       if (target == "act") {
-         # rv$sf is the display set: it keeps samples without a measured value
-         # (gstat refuses a missing response) and sits in the Target Mapping
-         # CRS, which may be geographic.
-         pts_sf <- if(!is.null(rv$sf)) {
-           validate_and_project_sf(rv$sf[!is.na(rv$sf$v), ])
-         } else {
-           req(rv$user_data, rv$mapping$x, rv$mapping$y, rv$mapping$crs)
-           act_col <- meta$actual
-           req(act_col %in% colnames(rv$user_data))
-           df_clean <- rv$user_data %>%
-             dplyr::select(x = !!sym(rv$mapping$x), y = !!sym(rv$mapping$y), v = !!sym(act_col)) %>%
-             na.omit()
-           req(nrow(df_clean) >= 3)
-           validate_and_project_sf(sf::st_as_sf(df_clean, coords = c("x", "y"), crs = rv$mapping$crs))
-         }
-         req(pts_sf, nrow(pts_sf) >= 3)
-         return(build_variogram_ggplot(gstat::variogram(v ~ 1, pts_sf),
-                                       title = paste("Global Variogram (Actual):", sci_disp_label(meta))))
-       }
-       pred_col <- if(identical(meta$value_type, "pred_ss")) meta$pred_ss else meta$pred
-       pts_sf <- if(!is.null(rv$sf) && "pv" %in% colnames(rv$sf)) {
-         pv_rows <- rv$sf[!is.na(rv$sf$pv), ]
-         if (nrow(pv_rows) < 3) NULL else validate_and_project_sf(pv_rows)
-       } else if(!is.null(pred_col) && pred_col %in% colnames(rv$user_data)) {
-         req(rv$user_data, rv$mapping$x, rv$mapping$y, rv$mapping$crs)
-         df_clean <- rv$user_data %>%
-           dplyr::select(x = !!sym(rv$mapping$x), y = !!sym(rv$mapping$y), pv = !!sym(pred_col)) %>%
-           na.omit()
-         if(nrow(df_clean) < 3) NULL else {
-           validate_and_project_sf(sf::st_as_sf(df_clean, coords = c("x", "y"), crs = rv$mapping$crs))
-         }
+       # Pooled within localities (pooled_within_variogram): no pair joins two
+       # localities. rv$sf is the display set, one locality per `loc`; before
+       # the displayed run's points exist, the uploaded rows of the Total's
+       # localities stand in.
+       col <- if (target == "act") "v" else "pv"
+       pts_list <- if (!is.null(rv$sf) && col %in% colnames(rv$sf)) {
+         split(rv$sf[col], rv$sf$loc)
        } else {
-         NULL
+         src <- if (target == "act") meta$actual else if (identical(meta$value_type, "pred_ss")) meta$pred_ss else meta$pred
+         req(rv$user_data, rv$mapping$x, rv$mapping$y, rv$mapping$crs, rv$mapping$loc)
+         if (is.null(src) || !src %in% colnames(rv$user_data)) NULL else {
+           d <- rv$user_data[rv$user_data[[rv$mapping$loc]] %in% rv$loc_names, , drop = FALSE]
+           d <- data.frame(x = d[[rv$mapping$x]], y = d[[rv$mapping$y]], val = d[[src]],
+                           loc = d[[rv$mapping$loc]])
+           d <- d[is.finite(d$x) & is.finite(d$y), , drop = FALSE]
+           names(d)[3] <- col
+           split(sf::st_as_sf(d[c("x", "y", col)], coords = c("x", "y"), crs = rv$mapping$crs), d$loc)
+         }
        }
-       if (is.null(pts_sf) || !("pv" %in% colnames(pts_sf))) {
-         return(sci_placeholder("Predicted data structure is not available.\nPlease run spatial interpolation first."))
+       if (!length(pts_list)) {
+         return(sci_placeholder(if (target == "act") {
+           "The measured column of this variable is not in the uploaded data."
+         } else {
+           "Predicted data structure is not available.\nPlease run spatial interpolation first."
+         }))
        }
-       return(build_variogram_ggplot(gstat::variogram(pv ~ 1, pts_sf),
-                                     title = paste("Global Variogram (Predicted):", sci_disp_label(meta))))
+       v <- pooled_within_variogram(pts_list, col)
+       if (is.null(v)) {
+         return(sci_placeholder(sprintf("No locality has %d located %s values.", POOLED_VGM_MIN_N,
+                                        if (target == "act") "measured" else "prediction")))
+       }
+       cap <- pooled_within_caption(v)
+       return(build_variogram_ggplot(v, title = paste0("Pooled within-locality variogram (", tgt_label, "): ",
+                                                       sci_disp_label(meta), ", ", cap$count),
+                                     subtitle = cap$note))
      }
 
      if (isTRUE(sci_vgm_tuning())) {

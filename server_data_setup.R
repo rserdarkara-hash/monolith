@@ -56,10 +56,9 @@
     
     cols <- colnames(df)
     # Whole-name matching (pick_coord_column, ui_formatting.R) on the same token
-    # lists is_coord_col() uses: six other call sites already moved to that
-    # policy, this one kept substring matching and pre-selected columns like
-    # Longevity_index or Lateral_flow as X or Y. NULL when nothing matches
-    # leaves the first column selected, exactly as the old NA did.
+    # lists is_coord_col() uses; substring matching would pre-select columns
+    # like Longevity_index or Lateral_flow as X or Y. NULL when nothing matches
+    # leaves the first column selected.
     updateSelectInput(session, "map_x", choices = cols, selected = pick_coord_column(cols, "x"))
     updateSelectInput(session, "map_y", choices = cols, selected = pick_coord_column(cols, "y"))
     loc_guess <- grep("loc|site|farm|id|group", cols, ignore.case=TRUE, value=TRUE)[1]
@@ -74,7 +73,7 @@
         p_ss  <- detect_pred_column(col, num_cols, "ss")
         new_vars[[length(new_vars) + 1]] <- list(
           actual = col, pred = p_cve, pred_ss = p_ss, label = col, category = "Uploaded Data",
-          palette = get_default_palette(col, "Uploaded Data", col)
+          unit = "", palette = get_default_palette(col, "Uploaded Data", col)
         )
       }
     }
@@ -149,7 +148,9 @@
 
   observeEvent(input$user_shp, {
     req(input$user_shp)
-    temp_dir <- file.path(tempdir(), paste0("shp_upload_", as.integer(Sys.time())))
+    # One directory per upload: a name taken from the clock would let a second
+    # upload within the same second mix its files with the first one's.
+    temp_dir <- tempfile("shp_upload_")
     dir.create(temp_dir, showWarnings = FALSE, recursive = TRUE)
     session$onSessionEnded(function() { unlink(temp_dir, recursive = TRUE) })
     
@@ -411,7 +412,7 @@
     # This observer re-fires on every upload and on every boundary shapefile,
     # so it must not revert a CRS the user set deliberately - picking a datum
     # sibling of the identified code (EPSG:25833 where the scoring reports
-    # EPSG:32633) is a defensible choice, and it used to be silently undone.
+    # EPSG:32633) is a defensible choice that must not be silently undone.
     if (crs_user_chose("map_crs")) return()
     # A boundary upload re-runs this observer; when it confirms the CRS already
     # in place there is nothing new to announce.
@@ -751,12 +752,12 @@
   observeEvent(input$crs_selection, {
     req(input$crs_selection)
 
-    # The metric-axis rule used to raise its own toast here. It is now one of
-    # the states of output$crs_target_note below, because it is not independent
-    # of the suitability verdict: a State Plane zone in US survey feet sits
-    # inside its own area of use with k ~ 1, so a suitability verdict of "ok"
-    # in one channel would have announced that a refused CRS suits the area
-    # while the other channel refused it. One readout, one verdict.
+    # The metric-axis rule raises no toast of its own: it is one of the states
+    # of output$crs_target_note below, because it is not independent of the
+    # suitability verdict. A State Plane zone in US survey feet sits inside its
+    # own area of use with k ~ 1, so a suitability verdict of "ok" in one
+    # channel would announce that a refused CRS suits the area while the other
+    # channel refused it. One readout, one verdict.
 
     # In fixed mode the user chose the value deliberately, so only refresh the
     # slider frame; in auto modes the suggestion observer overwrites the value
@@ -773,13 +774,11 @@
   # ONE persistent readout under the selectors, not a toast, and it always
   # names the CRS that IS right for the data.
   #
-  # Three separate toasts used to carry this (identification, metric axis,
-  # suitability); they could queue together, they vanished after 20 seconds,
-  # and none of them prescribed anything. A user whose data was in Brandenburg
-  # with the target left on UTM 35N was handed a bounding box in decimal
-  # degrees and left to work out that the answer was EPSG:32633 - which the app
-  # can derive from the data's own longitude, and had in fact already derived
-  # for the Input Data CRS.
+  # Separate toasts (identification, metric axis, suitability) would queue
+  # together, vanish after 20 seconds and prescribe nothing: a user whose data
+  # lies in Brandenburg with the target left on UTM 35N needs to be told
+  # EPSG:32633, which the app derives from the data's own longitude as it does
+  # for the Input Data CRS, not a bounding box in decimal degrees.
   #
   # crs_target_suitability() is the same judgement the run gate enforces
   # (server_execution.R), so the two can never state different rules. Silent
@@ -855,10 +854,10 @@
         rec = offer(), why = crs_measure_detail))
     }
 
-    # A geographic target is legitimate and used to be answered with silence,
-    # which taught the wrong lesson: users learned that EPSG:4326 makes the
-    # warning go away, not that the pipeline picks the metric grid itself
-    # (run_regional_interpolation(), spatial_pipeline.R). Say so.
+    # A geographic target is legitimate, and silence would teach the wrong
+    # lesson: that EPSG:4326 makes the warning go away, not that the pipeline
+    # picks the metric grid itself (run_regional_interpolation(),
+    # spatial_pipeline.R). Say so.
     if (isTRUE(sf::st_is_longlat(co))) {
       return(crs_target_note_box(
         "info",
@@ -902,23 +901,17 @@
     set_target_crs(paste0("EPSG:", code))
   })
 
+  # The dataset-wide cell-size suggestion that prefills the Fixed slider
+  # (Scientific Guide 2.1), written in the Auto modes only: in Fixed mode the
+  # slider holds the user's own value.
   observeEvent(list(rv$user_data, input$map_x, input$map_y, input$map_crs, input$crs_selection, input$locality, input$res_mode), {
     req(rv$user_data, input$map_x, input$map_y, input$map_crs, input$crs_selection, input$locality, input$res_mode)
+    if (input$res_mode == "fixed") return()
     if (!(input$map_x %in% colnames(rv$user_data) && input$map_y %in% colnames(rv$user_data))) return()
-    
+
     df_raw <- rv$user_data %>% select(x = !!sym(input$map_x), y = !!sym(input$map_y), loc = !!sym(input$map_loc)) %>% na.omit()
 
     locs_scope <- resolve_selected_localities(input$locality, df_raw, "loc")
-
-    if (input$res_mode == "fixed") {
-      # No suggestion to compute, but the per-locality list still has to track
-      # the current selection so the sidebar table and map overlay stay in sync.
-      fixed_val <- input$grid_res %||% 50
-      temp_res <- list()
-      for (l in locs_scope) temp_res[[l]] <- fixed_val
-      rv$loc_resolutions <- temp_res
-      return()
-    }
 
     df <- if (input$res_mode == "global") df_raw else df_raw %>% filter(loc %in% locs_scope)
     
@@ -947,27 +940,40 @@
     final_rec <- max(1, min(500, round(final_rec, 1)))
 
     updateSliderInput(session, "grid_res", value = final_rec)
+  })
 
-    # Both Auto modes: each locality's half mean nearest-neighbour spacing, the
-    # quantity the run's dynamic buffer scales with. The cell size itself is
-    # set at run time from the boundary area, so it is not stored here.
-    temp_res <- list()
-    for (l in locs_scope) {
-        sub_df <- df_raw %>% filter(loc == l)
-        if (nrow(sub_df) < 2) next
-
-        sub_pts <- tryCatch(st_as_sf(sub_df, coords=c("x","y"), crs=input$map_crs) %>% st_transform(input$crs_selection), error=function(e) { showNotification(paste("Projection failed for subset:", e$message), type = "error"); NULL })
-        if(is.null(sub_pts)) next
-
-        if (nrow(sub_pts) > 1) {
-             l_res <- calc_metric_spacing(sub_pts)$mean_nn * 0.5
-        } else l_res <- final_rec
-
-        l_res <- max(1, min(5000, l_res))
-
-        temp_res[[l]] <- l_res
+  # Per locality, the resolution the Auto-mode dynamic buffer scales with, for
+  # the sidebar's "Grid and buffer for the next run" table. Built as the run
+  # builds it, from the run's own inputs: .locality_points (projected to the
+  # working CRS, co-located samples merged, the covariate-complete rows for
+  # RK/RFK) and locality_buffer_res(). NA where the run would skip the
+  # locality or its points cannot be built yet. Fixed mode does not read it:
+  # the buffer then scales with the slider.
+  observeEvent(list(rv$user_data, rv$mapping, input$locality, input$method, input$aux_vars,
+                    input$value_type, input$subset), {
+    req(rv$user_data, input$locality)
+    ud <- rv$user_data
+    m <- rv$mapping
+    cols_ok <- all(vapply(list(m$x, m$y, m$loc), function(col) {
+      is_valid_col_ref(col) && col %in% names(ud)
+    }, logical(1)))
+    if (!cols_ok || !isTruthy(m$crs)) {
+      rv$loc_buffer_res <- list()
+      return()
     }
-    rv$loc_resolutions <- temp_res
+    locs <- resolve_selected_localities(input$locality, ud, m$loc)
+    eff_subset <- effective_subset(input$value_type, input$subset, names(ud))
+    method <- input$method %||% "OK"
+    rv$loc_buffer_res <- stats::setNames(lapply(locs, function(l) {
+      pts_data <- run_locality_rows(ud, m$loc, l, eff_subset)
+      pts_data$x <- pts_data[[m$x]]
+      pts_data$y <- pts_data[[m$y]]
+      # The display set does not depend on the CV population, so no m_params.
+      pp <- tryCatch(.locality_points(l, pts_data, m$crs, method, input$aux_vars, list()),
+                     error = function(e) NULL)
+      if (!isTRUE(pp$ok)) return(NA_real_)
+      locality_buffer_res(pp$pts, "local", NA_real_)
+    }), locs)
   })
 
   observeEvent(input$meta_file, {
@@ -1044,19 +1050,24 @@
           def_p_ss  <- get_map_val(t, "pred_ss") %||% detect_pred_column(t, num_cols, "ss")  %||% "None"
           def_l     <- get_map_val(t, "label")    %||% t
           def_c     <- get_map_val(t, "category") %||% "Uploaded Data"
-          
+          def_u     <- get_map_val(t, "unit")     %||% ""
+
           if(is.na(def_p_cve)) def_p_cve <- "None"
           if(is.na(def_p_ss)) def_p_ss <- "None"
           if(is.na(def_l)) def_l <- t
           if(is.na(def_c)) def_c <- "Uploaded Data"
-          
-          div(style="border-bottom: 1px solid rgba(0,0,0,0.08); padding: 10px 0; margin-bottom: 10px;",
+
+          div(style="border-bottom: 1px solid var(--mn-line); padding: 10px 0; margin-bottom: 10px;",
             fluidRow(
               column(2, tags$b(t)),
-              column(3, selectInput(paste0("pair_pred_cve_", i), "Best Pred (_cve)", choices = c("None", num_cols), selected = def_p_cve)),
-              column(3, selectInput(paste0("pair_pred_ss_", i),  "Split Pred (_ss)", choices = c("None", num_cols), selected = def_p_ss)),
+              column(2, selectInput(paste0("pair_pred_cve_", i), "Best Pred (_cve)", choices = c("None", num_cols), selected = def_p_cve)),
+              column(2, selectInput(paste0("pair_pred_ss_", i),  "Split Pred (_ss)", choices = c("None", num_cols), selected = def_p_ss)),
               column(2, textInput(paste0("pair_label_", i), "Label", value = def_l)),
-              column(2, textInput(paste0("pair_cat_", i), "Category", value = def_c))
+              column(2, textInput(paste0("pair_cat_", i), "Category", value = def_c)),
+              # The unit the values are recorded in: map legends, the GeoTIFF
+              # MONOLITH_UNIT tag and the supervised class limits read it.
+              column(2, textInput(paste0("pair_unit_", i), "Unit", value = def_u,
+                                  placeholder = "e.g. mg/kg"))
             )
           )
         }),
@@ -1090,13 +1101,17 @@
       
       raw_lab <- input[[paste0("pair_label_", i)]]
       lab_val <- if (is.null(raw_lab) || is.na(raw_lab) || raw_lab == "") targets[i] else raw_lab
-      
+
+      raw_unit <- input[[paste0("pair_unit_", i)]]
+      unit_val <- if (is.null(raw_unit) || is.na(raw_unit)) "" else trimws(raw_unit)
+
       new_vars[[length(new_vars) + 1]] <- list(
         actual = targets[i],
         pred = if (is.null(p_cve) || is.na(p_cve) || p_cve == "None") NULL else p_cve,
         pred_ss = if (is.null(p_ss) || is.na(p_ss) || p_ss == "None") NULL else p_ss,
         label = lab_val,
         category = cat_val,
+        unit = unit_val,
         palette = get_default_palette(targets[i], cat_val, lab_val)
       )
     }
@@ -1122,10 +1137,10 @@
   }
 
   # The CRS is deliberately NOT required here. Gating the column mapping behind
-  # it left rv$mapping$x/y NULL for as long as the (defaultless) Input Data CRS
-  # was unset, which is the state every user is in right after an upload - and
-  # every downstream req() on those names then aborted in silence, taking the
-  # landing-position caption and the Run button with it.
+  # it would leave rv$mapping$x/y NULL for as long as the (defaultless) Input
+  # Data CRS is unset, which is the state every user is in right after an
+  # upload, and every downstream req() on those names would abort in silence,
+  # taking the landing-position caption and the Run button with it.
   observeEvent(list(input$map_x, input$map_y, input$map_loc, input$map_crs), {
     req(input$map_x, input$map_y, input$map_loc)
     rv$mapping$x <- input$map_x

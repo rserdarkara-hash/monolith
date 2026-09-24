@@ -19,7 +19,7 @@ ui_main_tabs <- mainPanel(width = 9,
                              # and the pairs it produces are still edited in step 4.
                              div(class = "setup-upload-field",
                                  fileInput("meta_file",
-                                           HTML(paste0("Variable List (Optional)", info_tooltip("meta_file_info", "A second table giving your columns readable labels, units, categories and their Actual/Predicted pairs. Headers containing 'label' or 'name' supply the labels shown on every map and report; headers containing 'cat' or 'group' file the variables into folders. Without one the pairs are auto-detected from the column names. Either way they are listed for review and editing under Variable Mapping & Verification, at the foot of this tab."))),
+                                           HTML(paste0("Variable List (Optional)", info_tooltip("meta_file_info", "A second table giving your columns readable labels, units, categories and their Actual/Predicted pairs. Headers containing 'label' or 'name' supply the labels shown on every map and report; headers containing 'cat' or 'group' file the variables into folders; a 'Unit' or 'Units' header supplies the units shown in map legends. Without one the pairs are auto-detected from the column names. Either way they are listed for review and editing under Variable Mapping & Verification, at the foot of this tab."))),
                                            accept = c(".xlsx", ".xls", ".csv"))
                              )
                          ),
@@ -27,7 +27,7 @@ ui_main_tabs <- mainPanel(width = 9,
                              div(class = "setup-optional-text",
                                  div(class = "setup-optional-title", "Boundary shapefile"),
                                  p(class = "setup-optional-sub",
-                                   "Optional — the built-in hulls (convex, concave, strict, wrapped) cover most cases and are configured in the sidebar once your dataset is loaded. To use your own, select the .shp, .shx, .dbf and .prj files together."),
+                                   "Optional: the built-in boundary types (Concave hull, Convex hull, Buffered, Point buffer) cover most cases and are set in the sidebar once your dataset is loaded. To use your own, select the .shp, .shx, .dbf and .prj files together."),
                                  uiOutput("shp_boundary_note")
                              ),
                              fileInput("user_shp", "Boundary shapefile", multiple = TRUE,
@@ -254,15 +254,20 @@ ui_main_tabs <- mainPanel(width = 9,
                             tags$b("Variogram tuning. "),
                             "The panels below describe the variograms you are fitting. The last interpolation run used an engine with no variogram of its own, so its result cards are held back until you run the analysis again; the maps from that run are untouched.")
                    ),
-                   # Warnings the workers raised during the run. They used to
-                   # live only in the progress overlay, which is gone the
-                   # moment the maps are revealed, so the explanation for a
-                   # blank metric cell had to be hunted for in the run log.
+                   # Warnings the workers raised during the run, kept here:
+                   # the progress overlay that shows them is gone once the
+                   # maps are revealed.
                    uiOutput("run_warnings_card"),
                             sci_card("Spatial Interpolation Statistics",
                               "Model-specific diagnostics and performance metrics (RMSE, R²).",
-                              conditionalPanel(condition = "output.disp_method == 'OK'",
-                                sci_table("vgm_params_table", "Variogram Parameters (per locality)"),
+                              # CK's LMC has its own cross-variogram panel.
+                              conditionalPanel(condition = "['OK', 'RK', 'RFK'].includes(output.disp_method)",
+                                sci_table("vgm_params_table", textOutput("vgm_params_title", inline = TRUE),
+                                  label = "Variogram Parameters",
+                                  content = tagList(
+                                    div(class = "table-container", DT::dataTableOutput("vgm_params_table")),
+                                    uiOutput("vgm_params_note")
+                                  )),
                                 hr()
                               ),
                               conditionalPanel(condition = "['IDW', 'TPS'].includes(output.disp_method)",
@@ -281,11 +286,18 @@ ui_main_tabs <- mainPanel(width = 9,
                               conditionalPanel(condition = "output.has_cv_repeats === true",
                                 hr(),
                                 sci_table("cv_repeats_table", label = "Fold-Realization Stability",
-                                  title = HTML(paste0("Fold-Realization Stability", info_tooltip("cv_repeats_info", "Repeated cross-validation: the same model re-scored under alternative fold assignments (the partition is the only thing that changes). Cells are mean ± SD across realizations. Treat the SD as the resolution of the comparison: two methods whose metrics differ by less than this are separated by fold luck, not skill. Leave-one-out folds are deterministic and never repeat. Moran's I is reported for realization 1 only, in the table above."))),
+                                  title = HTML(paste0("Fold-Realization Stability", info_tooltip("cv_repeats_info", "Repeated cross-validation: the same model re-scored under alternative fold assignments (the partition is the only thing that changes). Cells are mean ± SD across realizations. Treat the SD as the resolution of the comparison: two methods whose metrics differ by less than this are separated by fold luck, not skill. Leave-one-out plans, and kNNDM plans that group samples spatially, are deterministic and are never repeated. Moran's I is reported for realization 1 only, in the table above."))),
                                   content = tagList(
                                     div(class = "table-container", DT::dataTableOutput("cv_repeats_table")),
                                     uiOutput("cv_repeats_notes")
                                   ))
+                              ),
+                              # How closely the folds' held-out distances match
+                              # the map's, under every strategy and engine.
+                              conditionalPanel(condition = "output.disp_method && output.disp_method != ''",
+                                hr(),
+                                sci_plot_card("cv_distance_plot", "CV Distance Match",
+                                              info = info_tooltip("cv_distance_info", "Three distance distributions for the selected locality, as cumulative curves. Map cells → nearest sample: how far the map predicts from the data. Held-out → nearest training sample: how far this run's cross-validation predicted. Sample → nearest other sample: the sampling density. The closer the held-out curve lies to the map curve, the better the reported metrics describe this map's accuracy: a held-out curve to the left means they are optimistic for this map, to the right pessimistic. W is the area between those two curves (Wasserstein distance, in map units), shown for this run's folds and for random 10-fold; kNNDM chooses its folds to make it small. Scientific Guide Section 5.1."))
                               )
                             ),
                             div(id = "prediction_performance_ui",
@@ -337,37 +349,41 @@ ui_main_tabs <- mainPanel(width = 9,
                             ),
                             conditionalPanel(condition = "output.sci_diag_method == 'OK' || output.sci_vgm_tuning == 'yes'",
                               class = "sci-vgm-block",
-                              sci_plot_card("vgm_plot_main", "Actual Data Structure"),
+                              sci_plot_card("vgm_plot_main", "Actual Data Structure", info = pooled_vgm_info("vgm_main_total")),
                               div(id = "predicted_data_structure_ui",
-                                sci_plot_card("vgm_plot_pred", "Predicted Data Structure")
+                                sci_plot_card("vgm_plot_pred", "Predicted Data Structure", info = pooled_vgm_info("vgm_pred_total"))
                               )
                             ),
                             conditionalPanel(condition = "output.sci_diag_method == 'RK'",
                                h4("Linear Trend Performance (Actual)"), uiOutput("model_summary_ui_act"),
                                div(id = "rk_pred_ui", h4("Linear Trend Performance (Predicted)"), uiOutput("model_summary_ui_pre")),
                                hr(),
-                               sci_plot_card("rk_internal_vgm_act", "Internal Residual Variogram (Actual)"),
-                               div(id = "rk_internal_vgm_pre_ui", sci_plot_card("rk_internal_vgm_pre", "Internal Residual Variogram (Predicted)"))
+                               sci_plot_card("rk_internal_vgm_act", "Internal Residual Variogram (Actual)", info = pooled_vgm_info("rk_int_vgm_act")),
+                               div(id = "rk_internal_vgm_pre_ui", sci_plot_card("rk_internal_vgm_pre", "Internal Residual Variogram (Predicted)", info = pooled_vgm_info("rk_int_vgm_pre")))
                              ),
                             conditionalPanel(condition = "output.sci_diag_method == 'RFK'",
                                sci_plot_card("rf_importance_plot_act", "RF Variable Importance (Actual)"),
                                div(id = "rfk_pred_ui", sci_plot_card("rf_importance_plot_pre", "RF Variable Importance (Predicted)")),
                                hr(),
-                               sci_plot_card("rfk_internal_vgm_act", "Internal Residual Variogram (Actual)"),
-                               div(id = "rfk_internal_vgm_pre_ui", sci_plot_card("rfk_internal_vgm_pre", "Internal Residual Variogram (Predicted)"))
+                               sci_plot_card("rfk_internal_vgm_act", "Internal Residual Variogram (Actual)", info = pooled_vgm_info("rfk_int_vgm_act")),
+                               div(id = "rfk_internal_vgm_pre_ui", sci_plot_card("rfk_internal_vgm_pre", "Internal Residual Variogram (Predicted)", info = pooled_vgm_info("rfk_int_vgm_pre")))
                              ),
                             conditionalPanel(condition = "output.sci_diag_method == 'CK'",
                                sci_plot_card("ck_variogram_plot_act", "Cross-Variogram (Actual)"),
                                div(id = "ck_pred_ui", sci_plot_card("ck_variogram_plot_pred", "Cross-Variogram (Predicted)"))
                              ),
                             conditionalPanel(condition = "output.sci_diag_method == 'TPS'",
-                               sci_plot_card("tps_gcv_plot_act", "TPS GCV Diagnostics (Actual)"),
-                               div(id = "tps_pred_ui", sci_plot_card("tps_gcv_plot_pre", "TPS GCV Diagnostics (Predicted)"))
+                               sci_plot_card("tps_gcv_plot_act", "TPS Smoothing Selection (GCV, Actual)"),
+                               div(id = "tps_pred_ui", sci_plot_card("tps_gcv_plot_pre", "TPS Smoothing Selection (GCV, Predicted)"))
                              ),
-                            conditionalPanel(condition = "!['OK', 'RK', 'RFK', 'CK', 'TPS'].includes(output.sci_diag_method) && output.sci_vgm_tuning != 'yes'",
+                            conditionalPanel(condition = "output.sci_diag_method == 'IDW'",
+                               sci_plot_card("idw_power_plot_act", "IDW Power Selection (Actual)"),
+                               div(id = "idw_pred_ui", sci_plot_card("idw_power_plot_pre", "IDW Power Selection (Predicted)"))
+                             ),
+                            conditionalPanel(condition = "!['OK', 'RK', 'RFK', 'CK', 'TPS', 'IDW'].includes(output.sci_diag_method) && output.sci_vgm_tuning != 'yes'",
                               div(style="padding: 20px; text-align: center; color: var(--mn-text-2);",
                                   h4("Diagnostic Mode Active"),
-                                  p("Detailed spatial diagnostics are currently optimized for Kriging and TPS."))
+                                  p("The model diagnostics of a run appear here once it has finished."))
                             ),
                             # Anisotropy is a property of the sampled field, not
                             # of the engine, so this card is shown for every
@@ -389,9 +405,8 @@ ui_main_tabs <- mainPanel(width = 9,
                                                                     "Model residuals (CV)" = "resid"),
                                                         selected = "v", size = "sm"))
                                ),
-                               sci_plot_card("directional_vgm_plot",
-                                 tags$span("Directional Variogram (Anisotropy Check)",
-                                   info_tooltip("dir_vgm", "Semivariance computed separately within four angular cones (bearings measured clockwise from north). If the four curves reach their sill at clearly different distances, the spatial structure is directional (anisotropic) and a single omnidirectional range under-describes it. The switches above choose the point set: the measured values or an uploaded ML prediction column, and for either one the values themselves or that surface's cross-validation residuals. Diagnostic only: every interpolation engine in this app is omnidirectional, so nothing on the map changes because of what you read here.")),
+                               sci_plot_card("directional_vgm_plot", "Directional Variogram (Anisotropy Check)",
+                                 info = info_tooltip("dir_vgm", "Semivariance computed separately within four angular cones (bearings measured clockwise from north). If the four curves reach their sill at clearly different distances, the spatial structure is directional (anisotropic) and a single omnidirectional range under-describes it. The switches above choose the point set: the measured values or an uploaded ML prediction column, and for either one the values themselves or that surface's cross-validation residuals. Diagnostic only: every interpolation engine in this app is omnidirectional, so nothing on the map changes because of what you read here. On Total (Combined) each direction is pooled within localities, and the lag axis stops at the half-diagonal of the smallest eligible locality, as on the other variogram cards."),
                                  height = "330px")
                             ),
                             div(id = "validation_diagnostics_act_ui",
@@ -399,7 +414,8 @@ ui_main_tabs <- mainPanel(width = 9,
                                h4("Validation Diagnostics (Actual)"),
                                fluidRow(
                                  column(6, sci_plot_card("obs_pred_plot_act", "Observed vs Predicted", height = "300px")),
-                                 column(6, sci_plot_card("resid_vgm_plot_act", "Residual Variogram", height = "300px"))
+                                 column(6, sci_plot_card("resid_vgm_plot_act", "Residual Variogram", height = "300px",
+                                                          info = pooled_vgm_info("resid_vgm_act")))
                                )
                             ),
                             conditionalPanel(condition = "output.disp_has_pred == 'yes'",
@@ -408,7 +424,8 @@ ui_main_tabs <- mainPanel(width = 9,
                                 h4("Validation Diagnostics (Predicted)"),
                                 fluidRow(
                                   column(6, sci_plot_card("obs_pred_plot_pre", "Observed vs Predicted", height = "300px")),
-                                  column(6, sci_plot_card("resid_vgm_plot_pre", "Residual Variogram", height = "300px"))
+                                  column(6, sci_plot_card("resid_vgm_plot_pre", "Residual Variogram", height = "300px",
+                                                           info = pooled_vgm_info("resid_vgm_pre")))
                                 )
                               )
                             )

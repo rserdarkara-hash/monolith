@@ -1,9 +1,9 @@
 # test-moran.R — tests for calc_moran.
 #
 # calc_moran returns list(i, e_i, p): the statistic, its null expectation
-# E[I] = -1/(n-1), and a two-sided p-value (NA on the all-pairs fallback path,
-# which carries no sampling distribution). Every "cannot compute" branch returns
-# all-NA — NA never means "no spatial structure".
+# E[I] = -1/(n-1), and a two-sided permutation p-value (MORAN_NSIM seeded
+# permutations, doubled smaller tail, (b + 1) / (m + 1)). Every "cannot compute"
+# branch returns all-NA — NA never means "no spatial structure".
 
 expect_moran_all_na <- function(m) {
   expect_named(m, c("i", "e_i", "p"))
@@ -69,8 +69,9 @@ test_that("calc_moran reports the null expectation and a two-sided p-value", {
   # I must not be read against zero.
   expect_equal(m$e_i, -1 / (n - 1))
   expect_false(is.na(m$i))
-  # spdep path: a real p-value from moran.test
+  # kNN path: a permutation p-value, never 0
   expect_false(is.na(m$p))
+  expect_gte(m$p, 2 / (MORAN_NSIM + 1))
   expect_gte(m$p, 0)
   expect_lte(m$p, 1)
 })
@@ -161,12 +162,72 @@ test_that("calc_moran agrees with spdep on the graph it builds", {
   nb <- suppressWarnings(
     spdep::knn2nb(spdep::knearneigh(co, k = 8L), sym = TRUE))
   lw <- spdep::nb2listw(nb, style = "W", zero.policy = TRUE)
-  ref <- spdep::moran.test(z, lw, zero.policy = TRUE, randomisation = FALSE,
-                           alternative = "two.sided")
+  ref <- spdep::moran.test(z, lw, zero.policy = TRUE, randomisation = FALSE)
+  # spdep's own Monte Carlo draws, one-sided so that it reports no p of its own
+  # that could be read in place of the one computed below.
+  mc <- with_seed(12345, spdep::moran.mc(z, lw, nsim = 999, zero.policy = TRUE,
+                                        alternative = "greater"))
+  sim <- mc$res[1:999]
+  obs <- as.numeric(mc$statistic)
+  # The doubled smaller tail, with the observed arrangement counted in both
+  # (Davison & Hinkley 1997; Phipson & Smyth 2010).
+  p_hand <- min(1, 2 * min((1 + sum(sim >= obs)) / 1000, (1 + sum(sim <= obs)) / 1000))
 
   got <- calc_moran(z, co)
   expect_equal(got$i, as.numeric(ref$estimate[1]), tolerance = 1e-12)
-  expect_equal(got$p, ref$p.value, tolerance = 1e-12)
+  expect_equal(got$p, p_hand)
+})
+
+test_that("the permutation p is reproducible and leaves the caller's RNG alone", {
+  pts <- golden_sf("tiny")
+  co <- sf::st_coordinates(pts)
+  z <- residuals(lm(ph ~ v82, data = sf::st_drop_geometry(pts)))
+
+  set.seed(1); m1 <- calc_moran(z, co)
+  set.seed(2); m2 <- calc_moran(z, co)
+  expect_identical(m1, m2)
+
+  set.seed(123); expected_draw <- runif(1)
+  set.seed(123); invisible(calc_moran(z, co)); actual_draw <- runif(1)
+  expect_identical(actual_draw, expected_draw)
+})
+
+test_that("a statistic every arrangement shares gets p = 1, not a rounding accident", {
+  # Nine samples: the symmetric 8-NN graph is complete, and with row-standardised
+  # equal weights every arrangement of the residuals has I = -1/(n-1) exactly.
+  # The permuted values differ from the observed one only in their last bits.
+  set.seed(11)
+  co <- cbind(runif(9, 0, 1000), runif(9, 0, 1000))
+  got <- calc_moran(rnorm(9), co)
+  expect_equal(got$i, -1 / 8, tolerance = 1e-12)
+  expect_identical(got$p, 1)
+})
+
+test_that("the all-pairs fallback reports the same permutation test on its own weights", {
+  pts <- golden_sf("tiny")
+  co <- sf::st_coordinates(pts)
+  z <- residuals(lm(ph ~ v82, data = sf::st_drop_geometry(pts)))
+  n <- length(z)
+
+  local_mocked_bindings(knearneigh = function(...) stop("forced failure"), .package = "spdep")
+  got <- calc_moran(z, co)
+
+  # Independent reference: row-standardised inverse-distance weights over every
+  # pair, the statistic of Moran (1950), 999 permutations drawn under the same
+  # seed in a plain loop.
+  W <- 1 / as.matrix(dist(co))
+  diag(W) <- 0
+  W <- W / rowSums(W)
+  zc <- z - mean(z)
+  stat <- function(v) (n / sum(W)) * as.numeric(t(v) %*% W %*% v) / sum(zc^2)
+  obs <- stat(zc)
+  sim <- numeric(999)
+  with_seed(12345, for (k in 1:999) sim[k] <- stat(sample(zc)))
+  p_ref <- min(1, 2 * min((1 + sum(sim >= obs)) / 1000, (1 + sum(sim <= obs)) / 1000))
+
+  expect_equal(got$i, obs, tolerance = 1e-10)
+  expect_equal(got$e_i, -1 / (n - 1))
+  expect_equal(got$p, p_ref)
 })
 
 test_that("structure raises I above E[I] and shuffling collapses it back", {
@@ -176,7 +237,9 @@ test_that("structure raises I above E[I] and shuffling collapses it back", {
   grad <- co[, 1] * 1e-3 + co[, 2] * 1e-3
   got <- calc_moran(grad, co)
   expect_gt(got$i, 0.5)
-  expect_lt(got$p, 0.05)
+  # No permutation comes near a planar field, so p is the smallest value the
+  # test can attain, 2 / (999 + 1), and never 0.
+  expect_identical(got$p, 2 / 1000)
 
   # The same values at shuffled locations carry no spatial structure, so I must
   # fall back toward its null expectation. Asserted relative to the structured
@@ -224,6 +287,32 @@ test_that("the block-CV reading follows the applied plan, not the requested stra
   expect_equal(fell_back$type, "random_kfold")
   expect_match(fell_back$label, "Spatial Block clustering failed")
   expect_false(moran_reading(fell_back$type)$block)
+})
+
+test_that("kNNDM spatial folds are read like blocks, and kNNDM random folds the ordinary way", {
+  # A kNNDM spatial fold withholds whole groups of neighbouring samples, the
+  # condition that voids the permutation null under Spatial Block CV.
+  sp <- moran_reading(applied_cv_plan(100, "knndm", list(knndm_branch = "spatial"))$type)
+  expect_true(sp$block)
+  expect_false(sp$report_p)
+  expect_equal(sp$label, "Spatial-fold residual clustering")
+  rnd <- moran_reading(applied_cv_plan(100, "knndm", list(knndm_branch = "random"))$type)
+  expect_false(rnd$block)
+  expect_true(rnd$report_p)
+  expect_equal(rnd$label, "Moran's I")
+
+  # The footnote and the header tooltips name both contiguous designs.
+  expect_match(METRIC_MARKER_NOTES[["block"]], "Spatial Block CV and kNNDM spatial folds", fixed = TRUE)
+  tips <- sci_metric_tooltips()
+  expect_true("Spatial-fold residual clustering" %in% names(tips))
+  expect_match(tips[["Moran p"]], "kNNDM spatial folds", fixed = TRUE)
+
+  # The export withholds the p-value and says what the statistic measures.
+  row <- cv_metrics_export_df(list(moran_i = 0.2, moran_e = -0.02, moran_p = 0.01, n = 50,
+                                   n_expected = 50, coverage = 1),
+                              "Actual Model", "kNNDM CV [spatial folds]", NULL, sp)
+  expect_true(is.na(row[["Moran p"]]))
+  expect_match(row[["Moran Context"]], "spatial-fold residual clustering", fixed = TRUE)
 })
 
 test_that("a pooled row reads as block only when every locality was one", {

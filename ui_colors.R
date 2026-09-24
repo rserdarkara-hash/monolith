@@ -2,8 +2,6 @@
 # functions + static constants; no reactivity). Sourced via ui_helpers.R.
 
 
-agro_colors <- c("#E69F00", "#F0E442", "#009E73") # Orange, Yellow, Green
-
 get_agro_colors <- function(n) {
   if (n == 2) {
     c("#E69F00", "#009E73")
@@ -83,30 +81,93 @@ apply_desc_palette <- function(p, pal, continuous = FALSE) {
     discrete_scale("colour", palette = pal_fn)
 }
 
-nutrient_limits <- list(
-  TN = c(0.05, 0.10), P = c(8, 25), K = c(150, 300), Ca = c(1428, 2857),
-  Mg = c(80, 160), Fe = c(4, 6), Mn = c(1.2, 3.5), Cu = c(0.3, 0.8), Zn = c(1, 3)
+# Reference limits prefilled for Agronomical > Supervised styling with three
+# classes: Low below `limits[1]`, Moderate from `limits[1]` up to `limits[2]`,
+# High from `limits[2]` up, each class holding its lower limit (the map and
+# the agreement table classify with right = FALSE). `pattern` recognises the
+# nutrient in a column name, in list order. The DTPA micronutrient classes are
+# local limits (Çokuysal & Erbaş 2004) on the DTPA soil test of Lindsay &
+# Norvell (1978), who publish single critical levels rather than classes.
+# Scientific Guide section 9.4.1 lists the full references.
+DTPA_LOCAL_SOURCE <- "local limits of Çokuysal & Erbaş (2004) on the DTPA test of Lindsay & Norvell (1978)"
+NUTRIENT_REFERENCE <- list(
+  TN = list(pattern = "\\bTN\\b|NITROGEN", method = "Total N", unit = "%",
+            limits = c(0.05, 0.10), source = "Çokuysal & Erbaş (2004)"),
+  P  = list(pattern = "\\bP\\b|PHOSPHORUS|OLSEN", method = "Olsen P", unit = "mg kg⁻¹",
+            limits = c(8, 25), source = "Yüksel & Ekinci (2019)"),
+  K  = list(pattern = "\\bK\\b|POTASSIUM", method = "NH₄OAc K", unit = "mg kg⁻¹",
+            limits = c(200, 300), source = "Çokuysal & Erbaş (2004)"),
+  Ca = list(pattern = "\\bCA\\b|CALCIUM", method = "NH₄OAc Ca", unit = "mg kg⁻¹",
+            limits = c(1428, 2857), source = "Çokuysal & Erbaş (2004)"),
+  Mg = list(pattern = "\\bMG\\b|MAGNESIUM", method = "NH₄OAc Mg", unit = "mg kg⁻¹",
+            limits = c(80, 160), source = "Çokuysal & Erbaş (2004)"),
+  Fe = list(pattern = "\\bFE\\b|IRON", method = "DTPA Fe", unit = "mg kg⁻¹",
+            limits = c(4, 6), source = DTPA_LOCAL_SOURCE),
+  Mn = list(pattern = "\\bMN\\b|MANGANESE", method = "DTPA Mn", unit = "mg kg⁻¹",
+            limits = c(1.2, 3.5), source = DTPA_LOCAL_SOURCE),
+  Cu = list(pattern = "\\bCU\\b|COPPER", method = "DTPA Cu", unit = "mg kg⁻¹",
+            limits = c(0.3, 0.8), source = DTPA_LOCAL_SOURCE),
+  Zn = list(pattern = "\\bZN\\b|ZINC", method = "DTPA Zn", unit = "mg kg⁻¹",
+            limits = c(1, 3), source = DTPA_LOCAL_SOURCE)
 )
 
 get_nut_key <- function(v) {
   v_up <- toupper(as.character(v))
   if (length(v_up) == 0 || is.na(v_up) || v_up == "") return(NULL)
-  
-  patterns <- c(
-    TN = "\\bTN\\b|NITROGEN",
-    P  = "\\bP\\b|PHOSPHORUS|OLSEN",
-    K  = "\\bK\\b|POTASSIUM",
-    Ca = "\\bCA\\b|CALCIUM",
-    Mg = "\\bMG\\b|MAGNESIUM",
-    Fe = "\\bFE\\b|IRON",
-    Mn = "\\bMN\\b|MANGANESE",
-    Cu = "\\bCU\\b|COPPER",
-    Zn = "\\bZN\\b|ZINC"
-  )
-  
-  matches <- sapply(patterns, function(pat) grepl(pat, v_up))
-  if (any(matches)) return(names(patterns)[which(matches)[1]])
-  return(NULL)
+  matches <- vapply(NUTRIENT_REFERENCE, function(r) grepl(r$pattern, v_up), logical(1))
+  if (any(matches)) return(names(NUTRIENT_REFERENCE)[which(matches)[1]])
+  NULL
+}
+
+# Units the reference limits accept as their own, compared after .unit_key():
+# lower case, no spaces, dots, carets or middle dots, superscripts and the
+# micro sign written out.
+UNIT_EQUIVALENTS <- list(
+  mg_per_kg = c("mg/kg", "mgkg-1", "ppm", "ug/g", "ugg-1"),
+  percent = c("%", "percent", "pct")
+)
+.unit_key <- function(u) {
+  u <- as.character(u %||% "")[1]
+  if (is.na(u)) u <- ""
+  u <- tolower(trimws(u))
+  u <- gsub("⁻", "-", u)
+  u <- gsub("¹", "1", u)
+  u <- gsub("[µμ]", "u", u)
+  gsub("[[:space:].·^]", "", u)
+}
+
+#' How a variable's recorded unit relates to a reference unit: "empty" (none
+#' recorded), "equivalent" (the same unit under another spelling, e.g. ppm for
+#' mg kg⁻¹) or "different".
+reference_unit_status <- function(var_unit, ref_unit) {
+  if (!nzchar(.unit_key(var_unit))) return("empty")
+  family <- function(u) {
+    hit <- names(UNIT_EQUIVALENTS)[vapply(UNIT_EQUIVALENTS, function(e) .unit_key(u) %in% e, logical(1))]
+    if (length(hit)) hit[1] else paste0("other:", .unit_key(u))
+  }
+  if (identical(family(var_unit), family(ref_unit))) "equivalent" else "different"
+}
+
+#' The limits the Supervised boxes open with for one variable and class count.
+#' The reference limits (NUTRIENT_REFERENCE) apply at three classes when the
+#' variable's unit is theirs or not recorded; otherwise the k - 1
+#' equal-probability quantiles of `values` (type 7) are offered, which describe
+#' the data and carry no agronomic meaning. Returns `limits`, `source`
+#' ("reference" or "quantile"), the registry entry `ref` (NULL without one) and
+#' `unit_status`.
+class_limit_defaults <- function(var_id, unit, n_classes, values) {
+  key <- get_nut_key(var_id)
+  ref <- if (!is.null(key)) NUTRIENT_REFERENCE[[key]]
+  k <- as.integer(n_classes)
+  status <- if (!is.null(ref)) reference_unit_status(unit, ref$unit) else NA_character_
+  if (!is.null(ref) && isTRUE(k == 3L) && status %in% c("empty", "equivalent")) {
+    return(list(limits = ref$limits, source = "reference", ref = ref, unit_status = status))
+  }
+  v <- values[is.finite(values)]
+  q <- if (length(v) && isTRUE(k >= 2L)) {
+    stats::quantile(v, probs = seq_len(k - 1L) / k, type = 7, names = FALSE)
+  } else rep(NA_real_, max(k - 1L, 0L))
+  list(limits = q, source = "quantile", ref = ref, unit_status = status)
 }
 
 get_default_palette <- function(var_name, category = "Soil", label = NULL) {

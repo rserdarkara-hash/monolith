@@ -1,8 +1,8 @@
 ![Monolith: Spatial Analysis Dashboard](assets/banner.png)
 
-# Monolith Spatial Analysis Dashboard (v1.1.3)
+# Monolith Spatial Analysis Dashboard (v1.1.4)
 
-[![Version](https://img.shields.io/badge/version-1.1.3-6f42c1)](#)
+[![Version](https://img.shields.io/badge/version-1.1.4-6f42c1)](#)
 [![R](https://img.shields.io/badge/R-%E2%89%A5%204.5.0-276DC3?logo=r&logoColor=white)](https://cran.r-project.org/)
 [![Shiny](https://img.shields.io/badge/built%20with-Shiny-1f77b4)](https://shiny.posit.co/)
 [![Tests](https://github.com/rserdarkara-hash/monolith/actions/workflows/tests.yaml/badge.svg)](https://github.com/rserdarkara-hash/monolith/actions/workflows/tests.yaml)
@@ -83,7 +83,7 @@ flowchart TD
 
 **Data Setup:** Upload the sample table, optionally a variable list and a boundary shapefile, map the X and Y columns, declare the coordinate reference system, and confirm the mapping. The mini-map coloured by locality is the check that coordinates and CRS are right before anything is modelled.
 
-**Sidebar and Map Viewer:** The sidebar holds the entire run configuration in two sections, **1. Context** (locality, data subset, variable category, variable, primary view) and **2. Spatial Engine** (method, auxiliary variables, boundary type, resolution, fitting mode and tuning). Polygons drawn on the map define regions or assign localities. **Run Interpolation** dispatches the job to background workers: the header reports the stage and per-locality progress, the run can be cancelled, and the finished surfaces are inspected here through the view switcher (actual, predicted, comparison, residual, and for a kriging run the standard-error and variance map of each surface). The sidebar of the dashboard configures the **next** run only. A completed run keeps the display context it was dispatched with.
+**Sidebar and Map Viewer:** The sidebar holds the entire run configuration in five sections: **Context** (locality, data subset, variable category, variable, primary view), **Spatial Engine** (method, cross-validation design, auxiliary variables, fitting mode and tuning), **Domain & Grid** (boundary type, buffer, resolution), **Map Styling**, and **Session** (save and load the configuration). Polygons drawn on the map define regions or assign localities. **Run Interpolation** dispatches the job to background workers: the header reports the stage and per-locality progress, the run can be cancelled, and the finished surfaces are inspected here through the view switcher (actual, predicted, comparison, residual, and for a kriging run the standard-error and variance map of each surface). The sidebar of the dashboard configures the **next** run only. A completed run keeps the display context it was dispatched with.
 
 **Scientific Analysis and Summary:** What the finished run produced for judging it: fitted variograms and per-locality parameters, cross-validation metrics under the applied CV strategy, observed-versus-predicted scatter for interpolated surfaces, the directional variogram diagnostic, Regression Kriging trend coefficients, class area coverage, descriptive statistics for the area interpolated, the run log and more.
 
@@ -100,7 +100,7 @@ flowchart TD
 
 * **Projected-CRS enforcement:** All interpolation runs in a projected (metric) CRS, and every grid-resolution recommendation is expressed in metres even when the analysis CRS is geographic (degree-based). For degree CRSs, nearest-neighbor distances and extents are measured via a Web Mercator projection corrected by cos(latitude), so degrees are never silently treated as metres. CRS strings are validated before any projection is attempted.
 
-* **Grid resolution and sample support, stated apart:** The suggested grid spacing is half the mean nearest-neighbour distance of your samples, and the dynamic boundary buffer scales with that same spacing, so padding never claims coverage the sampling does not support. An Auto run grid follows a different quantity, each locality's mapped area (about 100,000 cells inside the boundary, clamped to 5-1000 m), and can therefore come out much finer than the suggestion; **Auto (Global)** gives every locality the largest boundary's size on one shared lattice, and the size each locality was gridded at is reported after the run. Fixed resolution is the cell size you set yourself.
+* **Grid resolution and sample support, stated apart:** The suggested grid spacing is half the mean nearest-neighbour distance of your samples, and the dynamic boundary buffer scales with that same spacing, so padding never claims coverage the sampling does not support. An Auto run grid follows each locality's sampling density (Hengl 2006: 0.0791 × √(area / samples), about 160 cells per sample, never coarser than that half-spacing, limited to 1-1000 m); **Auto (Global)** gives every locality the finest of those sizes on one shared lattice, and the size each locality was gridded at is reported after the run. Fixed resolution is the cell size you set yourself.
 
 * **Extrapolation control:** A dynamic buffering engine scales boundary padding to the selected method and resolution, and a **Point buffer** boundary type disables buffering entirely so coverage is not over-claimed far beyond sample support. In the Classification Suite, predictions are confined to per-locality boundaries and never extend into unsampled corridors between localities.
 
@@ -108,9 +108,9 @@ flowchart TD
 
 * **Variogram fitting:** Auto-Fit compares four theoretical models across multiple starting ranges and selects the best eligible converged fit by weighted least-squares error. A range extending beyond the sampled lag window does not invalidate the fit; instead, Monolith flags weakly resolved range or sill estimates, while singular fits and heuristic fallbacks are used only when stronger fits are unavailable.
 
-* **Multicollinearity gate (shared across modules):** A single VIF plus pairwise-correlation engine guards every covariate-driven method. Regression Kriging and Random Forest Kriging auto-drop covariates with VIF > 10 before fitting; the pre-run auxiliary-variable screen (covariate-assisted runs) and the Classification Suite flag collinear covariates (method-aware: VIF > 5 for Random Forest, VIF > 10 otherwise) and prompt you to drop or keep them; and the PCA module halts outright when any pair exceeds r > 0.95, requiring an explicit override, to protect the loading vectors from distortion.
+* **Multicollinearity gate (shared across modules):** A single VIF plus pairwise-correlation engine guards every covariate-driven method. Before a Regression Kriging, Random Forest Kriging or Co-Kriging run, covariates above VIF 10 within the selected localities are named and you drop them or keep them all, and every cross-validation fold applies the same rule to its own training samples; the Classification Suite flags collinear covariates the same way (VIF > 5 for its Random Forest, VIF > 10 otherwise). Before a PCA, pairs of variables correlated above |r| = 0.95 are named, because a near-duplicate pair weights one direction twice in the components, and the PCA runs once you remove one of each pair or confirm the selection.
 
-* **Spatial cross-validation:** Spatial Block CV (k-means folds) is offered and recommended under spatial autocorrelation so error estimates are not optimistically biased by autocorrelated train/test leakage; it falls back to LOOCV below the minimum fold size. Classification uses spatially aware resampling, and synthetic oversampling (SMOTE) is deliberately not offered because fabricated points would break the spatial-CV leakage guarantee and invent autocorrelation structure.
+* **Cross-validation that says what it measures:** LOOCV and random folds keep each held-out point's neighbours in the training data, as the map does, and estimate the accuracy of interpolation within the sampled area, approximately without bias for a simple random sample (Wadoux et al. 2021) and conservatively for a regular grid, where a held-out point is a full grid spacing from its neighbours. Spatial Block CV (k-means folds) holds out contiguous regions and estimates accuracy away from the sampled clusters, the question for transfer to unsampled ground (Roberts et al. 2017; Ploton et al. 2020); it falls back to LOOCV below the minimum fold size. kNNDM matches the folds to the map's own prediction distances inside its boundary (Linnenbrink et al. 2024): random folds where they already match, spatially grouped folds where the map predicts farther from the samples, and the CV Distance Match panel shows how closely any design's folds match the map. Classification uses spatially aware resampling, and synthetic oversampling (SMOTE) is deliberately not offered because fabricated points would break the spatial-CV leakage guarantee and invent autocorrelation structure.
 
 * **Classification scope adequacy:** Before a classification run, the scoped data are checked for sufficient sample size and per-class counts. Under-powered scopes (too few rows, or classes below the per-class minimum) raise a named warning identifying the offending classes and their counts, so unreliable rare-class results are surfaced rather than presented as trustworthy.
 
@@ -123,39 +123,39 @@ Deterministic and geostatistical interpolation models for continuous and classif
 - Inverse Distance Weighting (IDW),
 - Thin Plate Splines (TPS),
 - Ordinary Kriging (OK),
-- Co-Kriging (CK),
+- Co-Kriging (CK), heterotopic: a covariate also enters from locations where the target was not measured, such as a dense conductivity survey beside fewer laboratory samples,
 - Regression Kriging (RK),
 - Random Forest Kriging (RFK).
 
-![Three renderings of one IDW phosphorus surface in the Map Viewer](assets/1.png)
+![The Map Viewer with an Ordinary Kriging phosphorus surface, and IDW, TPS-class and standard-error panels beneath](assets/fig1.jpg)
 
-*Figure 1. One IDW surface of soil phosphorus, rendered three ways in the Map Viewer: two continuous palettes and, on the right, the same surface binned into user-defined agronomic classes.*
+*Figure 1. The Map Viewer on one locality (soil phosphorus, 355 samples): an Ordinary Kriging surface in the main view; beneath it, the same variable by IDW with its power chosen by cross-validation, by Thin Plate Spline binned into three agronomic classes at supervised limits, and the Ordinary Kriging standard-error surface with the sample points.*
 
-![The same field interpolated by four different engines](assets/2.png)
+![One field interpolated by all six engines](assets/fig2.jpg)
 
-*Figure 2. Electrical conductivity over one field under four engines (Thin Plate Spline, Ordinary Kriging, IDW, Random Forest Kriging). The method is a sidebar choice, so the comparison costs one re-run and no reconfiguration.*
+*Figure 2. One 21-sample field (electrical conductivity) under all six engines: IDW, Thin Plate Spline, Ordinary Kriging, Co-Kriging, Regression Kriging and Random Forest Kriging. A Buffered boundary carries each surface 50 m beyond the samples (about half their mean spacing), and each panel keeps its own legend range, so compare patterns rather than colours across panels. The method is a sidebar choice, so the comparison costs one re-run and no reconfiguration.*
 
 ### Automated and Manual Optimization of Model Fittings
 
-Automated least-squares fitting of four variogram models, Generalized Cross-Validation (GCV) for TPS, and cross-validated power optimization for IDW (folds built by the same authority as the reported metrics, so the search follows the selected cross-validation strategy). Interactive variogram fitting and manual tuning overrides are available for expert calibration. Once an interpolation run completes, each result is instantly available for batch export.
+Automated least-squares fitting of four variogram models, Generalized Cross-Validation (GCV) for the TPS smoothing and cross-validated selection of the IDW power (under the selected cross-validation strategy), each made inside the run and repeated inside every cross-validation fold, so the reported metrics include the selection. Fixed values can be set for all localities or per locality, and interactive variogram fitting serves expert calibration. Once an interpolation run completes, each result is instantly available for batch export.
 
-![Manual variogram tuning panel and the TPS GCV curve](assets/3.png)
+![Each engine's fitting diagnostic on one dataset](assets/fig3.jpg)
 
-*Figure 3. Fitting controls. Left and top: manual variogram tuning (model family, nugget, partial sill, range) against the empirical semivariance cloud, with a live SSE readout and the auto-fit switch. Bottom: the Generalized Cross-Validation curve behind the TPS smoothing search, with its minimum marking the selected lambda.*
+*Figure 3. How each engine fits, on one dataset (potassium, 79 samples). Ordinary Kriging: manual variogram tuning (model, nugget, partial sill, range) drawn dashed over the automatic fit and scored by the same weighted SSE. IDW: the cross-validated RMSE of every candidate power, from equal weights to the nearest-neighbour limit, with the selected power marked. Thin Plate Spline: the GCV curve and its minimum. Regression Kriging: the trend's fit statistics and coefficient table. Random Forest Kriging: covariate importance by three measures. Co-Kriging: the direct and cross-variograms of the fitted linear model of coregionalisation.*
 
 ### Model Diagnostics and Validation
 
-Evaluate models with a selectable cross-validation strategy: Auto (LOOCV for n ≤ 50, seeded random 10-fold above), full Leave-One-Out, or Spatial Block CV (k-means folds, recommended under spatial autocorrelation). Every run reports the same thirteen-column panel, so two methods are always compared on identical quantities: RMSE, NRMSE (mean, %), NRMSE (SD), MAE, R² in both its correlation and its Nash-Sutcliffe (traditional) form, Bias (ME), Lin's CCC, RPD, RPIQ, SMAPE (%), and Moran's I of the cross-validation residuals with its two-sided p-value, the statistic carrying its null expectation E[I] = −1/(n − 1) on hover. The applied strategy is stated above the table, and multi-locality runs offer a pooled Total (Combined) row with a note that its R² and NSE are measured against the pooled mean. An optional repeated cross-validation re-runs the folds under 3, 5 or 10 alternative assignments and reports each metric as mean ± SD, so the spread contributed by the fold split can be read alongside the difference between two methods.
+Evaluate models with a selectable cross-validation strategy: Auto (LOOCV for n ≤ 50, seeded random 10-fold above), kNNDM (ten folds matched to the map's own prediction distances; Linnenbrink et al. 2024), full Leave-One-Out, or Spatial Block CV (k-means folds, for accuracy away from the sampled clusters). Every run reports the same thirteen-column panel, so two methods are always compared on identical quantities: RMSE, NRMSE (mean, %), NRMSE (SD), MAE, R² in both its correlation and its Nash-Sutcliffe (traditional) form, Bias (ME), Lin's CCC, RPD, RPIQ, SMAPE (%), and Moran's I of the cross-validation residuals with its two-sided permutation p-value, the statistic carrying its null expectation E[I] = −1/(n − 1) on hover. The applied strategy is stated above the table, and multi-locality runs offer a pooled Total (Combined) row with a note that its R² and NSE are measured against the pooled mean. An optional repeated cross-validation re-runs the folds under 3, 5 or 10 alternative assignments and reports each metric as mean ± SD, so the spread contributed by the fold split can be read alongside the difference between two methods.
 
 A **directional variogram** panel recomputes semivariance within four angular cones (0°/45°/90°/135° from north) on the measured values, on an uploaded ML prediction column, or on the cross-validation residuals of either surface, so directional structure can be checked instead of assumed. It is diagnostic only: every engine in the app is omnidirectional, and nothing on the map changes because of what the panel shows.
 
-![Model performance table, observed-versus-predicted scatter, variance surface and directional variogram](assets/4.png)
+![Model performance table, diagnostic plots and a standard-error surface from one run](assets/fig4.jpg)
 
-*Figure 4. The diagnostic panel of a completed run. Left: the Model Performance table, headed by the cross-validation strategy that produced it and the pooled-mean caveat that applies to Total (Combined), above the observed-versus-predicted scatter with the 1:1 line (red, dashed) against the fitted regression (blue). Right: the kriging variance surface with the sample points overlaid, the directional variogram in four bearing cones, and the fitted residual variogram.*
+*Figure 4. The diagnostics of one Random Forest Kriging run (two localities, kNNDM cross-validation, Buffered boundary), shown for one locality. Top: the Model Performance table under the strategy that produced it, with the note on why the residual-clustering p-value is not reported under spatial folds. Left: observed against predicted with the 1:1 line (red, dashed) and the fitted regression (blue); the residual variogram; the CV Distance Match, where the held-out distances follow the map's own prediction distances (W, the area between the curves, for these folds and for random 10-fold); and the directional variogram in four bearing cones. Right: the standard-error surface with the sample points.*
 
 ### Uncertainty and Confidence Mapping
 
-The kriging engines return a prediction variance alongside the prediction, and Monolith maps it: variance and standard-error surfaces are produced for the runs and registered for export next to the interpolation maps. For Regression and Random Forest Kriging the reported uncertainty combines the trend and residual components (RFK estimates the forest term by infinitesimal jackknife), so it is not the residual kriging variance on its own. A variance surface is shown top right in Figure 4, where the lowest values track the sample points.
+The kriging engines return a prediction variance alongside the prediction, and Monolith maps it: variance and standard-error surfaces are produced for the runs and registered for export next to the interpolation maps. For Regression and Random Forest Kriging the reported uncertainty combines the trend and residual components (RFK estimates the forest term by infinitesimal jackknife), so it is not the residual kriging variance on its own. Standard-error surfaces appear at the bottom right of Figure 1 (Ordinary Kriging, lowest beside the samples) and on the right of Figure 4 (Random Forest Kriging).
 
 ### Unified Interpolation Export Registry
 
@@ -163,25 +163,25 @@ Compile session assets into a centralized registry. Use the integrated WYSIWYG S
 
 Results also leave as data, not only as pictures. Any single-raster surface (Actual, Predicted, Delta, interpolated point errors, and the variance and standard-error surfaces) exports as a **GeoTIFF** in the run's projected analysis CRS, with kriging surfaces written as multi-band files carrying prediction and variance. Each band stores its real statistics (minimum, maximum, mean, standard deviation, valid share), and the file names its run in metadata tags inside the `.tif`: `MONOLITH_VARIABLE`, `MONOLITH_UNIT`, `MONOLITH_PRODUCT`, `MONOLITH_METHOD`, `MONOLITH_LOCALITY`, `MONOLITH_RUN_ID`, `MONOLITH_APP_VERSION`, `MONOLITH_TARGET_CRS` and `MONOLITH_CREATED`. The displayed **binned class zones export as a GIS vector layer**, one dissolved polygon per class with its break limits and its area in hectares, in Shapefile, GeoJSON, KML or GeoPackage; polygons drawn on the map export the same four ways. The Classification Suite writes its class, probability and entropy surfaces as GeoTIFFs; the class raster downloads as a zip holding `predicted_class.tif`, its `predicted_class.tif.aux.xml` (the class names GIS software reads beside the file) and `predicted_class_legend.csv` (`ID,class`). A run's configuration downloads separately as JSON, recording the settings the run actually consumed together with the R and package versions behind it.
 
-![Session export registry beside the WYSIWYG figure styler](assets/6.png)
+![The session export registry and run history with the Export Styler open over them](assets/fig5.jpg)
 
-*Figure 5. The session registry lists every map, table and plot a run produced, each tagged with its type and timestamp. The styler previews a selected item at export typography, so what is written to file is what the preview shows.*
+*Figure 5. The session registry lists every map, table and plot a run produced, each tagged with its type and timestamp, above the Run History Archive. The Export Styler opens over it and previews the selected item at export typography, so what is written to file is what the preview shows.*
 
 ### Descriptive and Exploratory Suite
 
 Understand your dataset through simultaneous descriptive, correlation, and principal component analyses, with results generated instantly and visualized using the grouping and categorization options of your choice. The correlation panel includes a **spatial cross-correlogram**, which bins point pairs by ground distance rather than by row order and shows the distance over which two variables genuinely co-vary, the co-regionalisation Co-Kriging exploits. An additional Governing Factors module computes variable importance and effects via Random Forest models with ALE, PDP, and per-observation SHAP analyses, implemented as a decoupled module for performance and modularity.
 
-![Nine panels from the descriptive, correlation, PCA and governing-factors tabs](assets/5.png)
+![Nine panels from the descriptive, correlation, PCA and governing-factors tabs](assets/fig6.jpg)
 
-*Figure 6. Panels drawn from the four tabs of the suite: distribution and ridge plots by group, a sina plot and ANOVA boxplot carrying compact-letter significance groupings, a fitted XYZ surface, a correlation network and correlogram, a PCA biplot, and Random Forest global importance from the Governing Factors module.*
+*Figure 6. The suite on the whole sample set (1,035 samples, seven localities). Top: clay by locality with Tukey HSD compact letters, potassium against clay with a linear fit per locality, and the empirical cumulative distribution of SOM. Middle: a correlogram of sixteen soil variables, the correlation network above |r| = 0.3, and the spatial cross-correlogram of clay and potassium within one locality. Bottom: a PCA biplot, and the Random Forest importance of potassium's governing factors with the SHAP dependence of the leading one.*
 
 ### Classification Suite
 
 Predictive multiclass classification of categorical field states (e.g., soil/management zones) from co-sampled covariates, distinct from the spatial engine's continuous-to-zone binning. Multinomial, Random Forest, and XGBoost learners share a common preprocessing recipe and spatially aware cross-validation, with per-class accuracy, entropy-based uncertainty mapping, and learner-aware collinearity diagnostics.
 
-![Classification suite configuration panel and its four result maps](assets/10.png)
+![Classification suite setup panel, result maps, importance and CV Distance Match](assets/fig7.jpg)
 
-*Figure 7. The Classification Suite: target and class definition, covariate selection, spatial scope with a live in-scope point count, learner, cross-validation strategy and tuning depth on the left; predicted class map, entropy uncertainty surface, per-class probability map and permutation importance on the right.*
+*Figure 7. The Classification Suite on potassium binned into three quantile classes over one locality (Random Forest, kNNDM cross-validation). Left: target and class definition, covariates, spatial scope with a live in-scope point count, learner, cross-validation strategy and tuning depth. Right: the predicted class map, the entropy uncertainty surface and a class-probability map, each with scale bar, north arrow and the samples; the out-of-fold permutation importance; and the CV Distance Match of the folds.*
 
 ### Regions, Run Control and Reproducibility
 
@@ -193,9 +193,9 @@ Predictive multiclass classification of categorical field states (e.g., soil/man
 
 Monolith provides a fully responsive interface with dark/light themes, interactive figures that can be expanded for detailed numerical examination, and accessible data details on maps and graphs for visual audits of hotspots.
 
-![Expanded interactive plot beside a map point-details popup](assets/7.png)
+![The Map Viewer in the light and dark themes with a point-details popup, beside an expanded interactive plot](assets/fig8.jpg)
 
-*Figure 8. Interactive inspection. Left: a descriptive plot opened in its expanded, hover-and-zoom view. Right: a classified surface with the point-details popup listing every measured variable at the clicked sample, grouped by variable category.*
+*Figure 8. Theming and interactive inspection. Left: one Map Viewer state in the light and the dark theme, split along the diagonal, with the point-details popup listing the measured variables at the clicked sample by category. Right: a descriptive plot in its expanded interactive view, with a hover readout.*
 
 
 ### Mapping Machine Learning Predictions of Variables and Interpreting Spatial Resonance of Prediction Errors
@@ -206,9 +206,9 @@ Monolith provides a fully responsive interface with dark/light themes, interacti
 
 Monolith generates side-by-side "Actual" and "Predicted" surfaces. By matching the color scales, you can instantly verify if the model captures the true variation in the field or just smooths the data.
 
-![Measured and predicted potassium surfaces, continuous and classified](assets/8.png)
+![Measured and predicted potassium surfaces, continuous and classified](assets/fig9.jpg)
 
-*Figure 9. Measured against machine-learning-predicted potassium, continuous (top, IDW) and binned into shared agronomic classes (bottom, Thin Plate Spline). The class version is directly comparable when both surfaces are cut at the same limits: supervised limits always are, and **Match Scales** gives Jenks, K-Means and Binned classes one set of breaks computed from both surfaces; for the continuous version, **Match Scales** forces one colour range across the pair.*
+*Figure 9. Measured against machine-learning-predicted potassium (Thin Plate Spline), continuous on one colour range (top) and binned at the same supervised class limits (bottom). The class version is directly comparable when both surfaces are cut at the same limits: supervised limits always are, and **Match Scales** gives Jenks, K-Means and Binned classes one set of breaks computed from both surfaces; for the continuous version, **Match Scales** forces one colour range across the pair.*
 
 
 **2. Residual Diagnostics**
@@ -219,7 +219,7 @@ To understand the spatial structure of model errors, Monolith provides two diagn
 
 *Point residuals (local model failure):* the prediction error at each sampling point, drawn as discrete markers on a zero-centred diverging scale and additionally interpolated into an error surface for export, mapping where the model fails to capture local variation.
 
-![Interpolated delta surface and point residual markers](assets/9.png)
+![Interpolated delta surface and point residual markers](assets/fig10.jpg)
 
 *Figure 10. The two residual diagnostics for the same pair of measured and predicted potassium surfaces. Left: the interpolated delta between the measured and predicted surfaces. Right: the residual at each sample point on a zero-centred diverging scale, where blue and red mark under- and over-prediction and clusters of same-signed points indicate spatially structured error.*
 
@@ -253,13 +253,13 @@ Two equally valid ways to obtain Monolith:
 
 ### 3. Package Dependencies
 
-Monolith depends on **58 packages** for its spatial engine, statistical analytics, and user interface, all pinned in `renv.lock` (see [Reproducible installation](#reproducible-installation-with-renv-optional)): 57 from CRAN, and `leaflet.extras` from its GitHub repository at a pinned commit.
+Monolith depends on **64 packages** for its spatial engine, statistical analytics, and user interface, all pinned in `renv.lock` (see [Reproducible installation](#reproducible-installation-with-renv-optional)): 63 from CRAN, and `leaflet.extras` from its GitHub repository at a pinned commit.
 
 > **Deciding to install the dependencies:** `global.R` checks the suite at startup, names anything missing, and offers two routes rather than installing on its own:
 
 > **To use the app, take the first:** `install.packages()` with the current CRAN releases, which arrive as pre-built binaries in a few minutes and need no compiler.
 
-> **To reproduce the recorded test values of Section 9, take the second:** `renv::restore()`, which installs the exact versions in `renv.lock`. Any of those that CRAN has since superseded build from source, which takes longer and needs a C/C++/Fortran toolchain (RTools on Windows). The pinned versions matter for reproducing the test baselines (or the baselines that you will create with your own data; see the section below `Freezing your own dataset as the reference`), not for analysing the data. Nothing is installed without your explicit confirmation.
+> **To reproduce the recorded test values of [Testing and Reproducibility](#testing-and-reproducibility), take the second:** `renv::restore()`, which installs the exact versions in `renv.lock`. Any of those that CRAN has since superseded build from source, which takes longer and needs a C/C++/Fortran toolchain (RTools on Windows). The pinned versions matter for reproducing the test baselines (or the baselines that you will create with your own data; see the section below `Freezing your own dataset as the reference`), not for analysing the data. Nothing is installed without your explicit confirmation.
 
 The full dependency suite, grouped by function:
 
@@ -273,9 +273,10 @@ The full dependency suite, grouped by function:
 | **Classification (tidymodels)** | `parsnip`, `recipes`, `workflows`, `tune`, `rsample`, `dials`, `spatialsample`, `hardhat`, `ranger`, `xgboost`, `nnet` |
 | **Parallelization / Async** | `future`, `furrr`, `promises` |
 | **CRS catalogue** | `DBI`, `RSQLite` |
+| **Called directly, not attached** | `parallelly`, `units`, `rlang`, `htmltools`, `tibble`, `viridisLite` |
 
 <details>
-<summary><strong>Tested version matrix</strong>: the exact package versions Monolith 1.1.3 is developed and validated against (click to expand)</summary>
+<summary><strong>Tested version matrix</strong>: the exact package versions Monolith 1.1.4 is developed and validated against (click to expand)</summary>
 
 <br>
 
@@ -302,7 +303,9 @@ Newer CRAN releases are expected to work; if you encounter an inconsistency, mat
 | `workflows` | 1.3.0 | `tune` | 2.1.0 | `rsample` | 1.3.2 |
 | `dials` | 1.4.4 | `spatialsample` | 0.6.1 | `hardhat` | 1.4.3 |
 | `ranger` | 0.18.0 | `xgboost` | 3.2.1.1 | `nnet` | 7.3-21 |
-| `RSQLite` | 3.53.3 |  |  |  |  |
+| `RSQLite` | 3.53.3 | `parallelly` | 1.48.0 | `units` | 1.0-1 |
+| `rlang` | 1.3.0 | `htmltools` | 0.5.9 | `tibble` | 3.3.1 |
+| `viridisLite` | 0.4.3 |  |  |  |  |
 
 **Runtime environment:** R 4.5.2 (ucrt) · GDAL 3.12.1 · GEOS 3.14.1 · PROJ 9.7.1 · Windows 11 (also runs on macOS and Linux).
 
@@ -310,7 +313,7 @@ Newer CRAN releases are expected to work; if you encounter an inconsistency, mat
 
 #### Reproducible installation with `renv` (optional)
 
-For an exact, one-command reproduction of the validated environment, the repository ships a [`renv`](https://rstudio.github.io/renv/) lockfile (`renv.lock`) pinning the dependency tree (including transitive dependencies) to the versions in the matrix above. All 58 packages listed in `global.R` are covered, the Classification Suite's tidymodels stack included. From the project root:
+For an exact, one-command reproduction of the validated environment, the repository ships a [`renv`](https://rstudio.github.io/renv/) lockfile (`renv.lock`) pinning the dependency tree (including transitive dependencies) to the versions in the matrix above. All 64 packages listed in `global.R` are covered, the Classification Suite's tidymodels stack included. From the project root:
 
 ```r
 install.packages("renv")   # once
@@ -355,7 +358,7 @@ monolith/
 ├── server_map_interactions.R         # Draw tools, popups & point styling
 ├── server_data_setup.R               # Upload, CRS parsing & variable mapping
 ├── server_run_config.R               # Display context, config persistence & selectors
-├── server_model_tuning.R             # TPS/IDW optimization & variogram tuning
+├── server_model_tuning.R             # Per-locality IDW/TPS values & variogram tuning
 ├── server_execution.R                # Parallel interpolation pipeline (future/furrr)
 ├── server_map_viewer.R               # Leaflet map rendering & proxy overlays
 ├── server_sci_analysis.R             # Diagnostics, metrics & results tables
@@ -388,7 +391,7 @@ monolith/
 ├── DESCRIPTION                       # Package metadata; the version the app reads at startup
 ├── renv.lock                         # Pinned dependency tree for renv::restore()
 ├── CITATION.cff                      # Machine-readable citation metadata
-├── README.MD                         # This document
+├── README.md                         # This document
 ├── CHANGELOG.md                      # Version history of notable changes
 ├── CONTRIBUTING.md                   # Contribution rules: architecture, testing, baselines
 └── LICENSE                           # GPL-3.0 license
@@ -428,13 +431,13 @@ Sample datasets in [sample_data/](sample_data/) let you exercise every module wi
 
 ## Testing and Reproducibility
 
-Monolith ships with a `testthat` suite of 4,558 assertions across 34 test files, covering the interpolation pipeline, cross-validation metrics, variogram fitting, the classification engine, the descriptive/correlation/PCA plot builders, metadata matching and the Governing Factors module. Where a quantity has an external or closed-form reference, the tests assert against that rather than against the app's own output: IDW against the hand-written Shepard sum, Ordinary Kriging against its exactness and pure-nugget closed forms, RK and RFK against the trend-plus-kriged-residual decomposition, VIF against `1/(1 - R²)` from an actual regression, Moran's I against a hand-built weight matrix, the classification and agreement metrics against a hand-built confusion matrix, the agronomical class bins against `terra::classify`'s own output, the PCA spectrum against the eigenvalues of the correlation and covariance matrices, Lin's CCC against a value computed independently with `DescTools`, and the plotted variogram curves against `gstat::variogramLine`. Those tests run on a frozen extract of the sample survey (`tests/testthat/fixtures/`), so their inputs never move and a changed number means the code changed; that directory's `GOLDEN_MANIFEST.md` states what a green suite does and does not establish, and how to substitute your own golden dataset without editing a single test. A separate file boots the assembled application in a headless browser through `shinytest2` and checks the shell (server initialisation, input identifiers, tab wiring, documentation drawer); it skips itself when `shinytest2` or a Chromium-based browser is unavailable. The suite runs on every push through GitHub Actions against the pinned `renv.lock` environment, on Linux and on Windows - the platform is not incidental, since one recorded value was once resolved differently by the two platforms' floating-point paths. A second, weekly workflow (`upstream.yaml`) runs the same suite against the current CRAN releases instead of the pinned ones, so a change in an upstream package that moves one of the recorded values is reported as upstream news rather than being discovered months later; it never gates a pull request. To run everything from the project root:
+Monolith ships with a `testthat` suite of 5,439 assertions across 35 test files, covering the interpolation pipeline, cross-validation metrics, variogram fitting, the classification engine, the descriptive/correlation/PCA plot builders, metadata matching and the Governing Factors module. Where a quantity has an external or closed-form reference, the tests assert against that rather than against the app's own output: IDW against the hand-written Shepard sum, Ordinary Kriging against its exactness and pure-nugget closed forms, RK and RFK against the trend-plus-kriged-residual decomposition, VIF against `1/(1 - R²)` from an actual regression, Moran's I against a hand-built weight matrix, the classification and agreement metrics against a hand-built confusion matrix, the agronomical class bins against `terra::classify`'s own output, the PCA spectrum against the eigenvalues of the correlation and covariance matrices, Lin's CCC against a value computed independently with `DescTools`, and the plotted variogram curves against `gstat::variogramLine`. Those tests run on a frozen extract of the sample survey (`tests/testthat/fixtures/`), so their inputs never move and a changed number means the code changed; that directory's `GOLDEN_MANIFEST.md` states what a green suite does and does not establish, and how to substitute your own golden dataset without editing a single test. A separate file boots the assembled application in a headless browser through `shinytest2` and checks the shell (server initialisation, input identifiers, tab wiring, documentation drawer); it skips itself when `shinytest2` or a Chromium-based browser is unavailable. The suite runs on every push through GitHub Actions against the pinned `renv.lock` environment, on Linux and on Windows - the platform is not incidental, since one recorded value was once resolved differently by the two platforms' floating-point paths. A second, weekly workflow (`upstream.yaml`) runs the same suite against the current CRAN releases instead of the pinned ones, so a change in an upstream package that moves one of the recorded values is reported as upstream news rather than being discovered months later; it never gates a pull request. To run everything from the project root:
 
 ```bash
 Rscript tests/testthat.R
 ```
 
-The first run is slow because the harness sources the full application (all 58 packages); this is expected. Scientific accuracy is treated as the project's primary invariant; changes that alter numeric results are gated on these tests.
+The first run is slow because the harness sources the full application (all 64 packages); this is expected. Scientific accuracy is treated as the project's primary invariant; changes that alter numeric results are gated on these tests.
 
 ### Freezing your own dataset as the reference
 
@@ -473,7 +476,7 @@ Stating what the application does not do is part of using it correctly:
 
 ## Development and AI Assistance
 
-Monolith was built with AI-assisted development tools and is disclosed here in the interest of scientific transparency: the codebase was initially structured as a Shiny App with **Antigravity CLI** (Google DeepMind), then systematically audited, refined and upgraded with **Claude Code (Fable 5; Anthropic)** and **Codex (GPT Astra; OpenAI)**, covering debugging, performance optimization, maintenance of function flows, and user interface/experience modifications.
+Monolith was built with AI-assisted development tools and is disclosed here in the interest of scientific transparency: the codebase was initially structured as a Shiny App with **Antigravity CLI** (Google DeepMind), then systematically audited, refined and upgraded with **Claude Code (models Fable and Opus; Anthropic)** and **Codex (model GPT Astra; OpenAI)**, covering debugging, performance optimization, maintenance of function flows, and user interface/experience modifications.
 
 Human oversight remained central throughout: all methodological choices, model formulations, interpolation engines, variogram fitting, cross-validation metrics, mathematical implementations, and scientific decisions were specified, reviewed, and validated by the author. Numeric behavior is guarded by the `testthat` suite described [above](#testing-and-reproducibility), and any change that alters numeric results is treated as a scientific decision requiring explicit justification. Responsibility for the correctness of the software rests with the author, not the tools. This disclosure mirrors the statement in the associated publication.
 
@@ -488,7 +491,7 @@ Human oversight remained central throughout: all methodological choices, model f
   title     = {Monolith: A Spatial Analysis Dashboard for Geostatistical Modeling and Mapping},
   author    = {Kara, R. Serdar},
   year      = {2026},
-  version   = {1.1.3},
+  version   = {1.1.4},
   doi       = {10.5281/zenodo.21130951},
   publisher = {Zenodo},
   url       = {https://github.com/rserdarkara-hash/monolith},

@@ -1,7 +1,8 @@
 # spatial_kriging.R - interpolation engines and their shared plumbing:
 # apply_OK/RK/RFK/CK/IDW/TPS via apply_kriging_pipeline/apply_interpolation,
 # VIF gating (check_vif, detect_multicollinearity_engine), krige_covariates,
-# optimize_idw_p, rf_infinitesimal_jackknife_var, prediction sanitizers.
+# the IDW power selection (select_idw_power, idw_kernel_predict),
+# rf_infinitesimal_jackknife_var, prediction sanitizers.
 # Sourced via spatial_helpers.R.
 
 #' Which engines produce a genuine prediction variance?
@@ -49,10 +50,10 @@ method_has_variance <- function(method) {
 #' once both are detached). A `summary.lm` keeps no `$model`, but the second
 #' holder is what a bare `lm` would arrive with.
 #'
-#' CK's gstat object is deliberately NOT detached: `variogram(g)` is called on
-#' the stored object to draw the cross-variogram, its frame is bounded by the
-#' point set the object holds anyway, and it measured 0.16 MB on the same
-#' fixture.
+#' CK's gstat object is not passed through here: its formulas' frame holds the
+#' rows the object already carries as data (0.16 MB on the same fixture), and
+#' the cross-variogram panel draws the empirical variogram stored with the fit
+#' (`monolith_vm`), not a recomputation from the object.
 detach_model_frame <- function(model) {
   if (is.null(model)) return(model)
   if (!is.null(model$terms)) attr(model$terms, ".Environment") <- globalenv()
@@ -62,43 +63,134 @@ detach_model_frame <- function(model) {
   model
 }
 
-# The power search uses the SAME fold authority as every reported CV
-# (make_cv_folds / resolve_cv_plan), so the power that builds the surface and
-# the metrics that score it share one validation design. It matters most under
-# Spatial Block CV: a random split leaves each held-out point's near neighbours
-# in the training set, which favours a steeper decay, so a power tuned on
-# random folds is optimistic for the blocked estimate the table reports.
-# make_cv_folds seeds itself under a two-sided RNG sandbox, so no local
-# set.seed and no outer with_rng_sandbox are needed here; krige.cv with an
-# explicit nfold vector draws nothing. One fold vector is shared across all
-# candidate powers, so the comparison stays paired.
-optimize_idw_p <- function(pts, target_var, nmax = 12, cv_strategy = "auto") {
-  # An explicit NULL overrides the default above, and the optimizer observer
-  # ships `input$idw_nmax` straight through: a slider that has not rendered
-  # yet (the sidebar section collapsed, or the method just switched to IDW)
-  # reached gstat as nmax = NULL and failed the whole optimization with
-  # "argument is of length zero". The run path applies `%||% 12` before the
-  # dispatch and apply_IDW applies it again; this is the one entry point that
-  # had no such guard.
-  nmax <- nmax %||% 12
-  factors <- seq(0.5, 5.0, by = 0.5)
-  form <- as.formula(paste0("`", target_var, "` ~ 1"))
-  n <- nrow(pts)
+# ── IDW power selection (Auto (CV)) ─────────────────────────────────────────
+# The powers the selection searches cover the whole IDW family, so no optimum
+# can lie outside them. p = 0 gives each of the Max Neighbors nearest samples
+# the same weight (their plain mean, the family's lower end); steps of 0.25 run
+# to 6 and coarser ones to IDW_MAX_FINITE_POWER; Inf stands for the
+# nearest-neighbour limit (p -> Inf: every location takes its nearest sample's
+# value), the family's upper end. Below IDW_SELECT_MIN_N distinct samples a CV
+# power search is not an estimate, and the IDW default p = 2 is used instead.
+# From IDW_STEEP_POWER up, a sample 10% farther than the nearest keeps under a
+# ninth of the nearest's weight ((1/1.1)^24 = 0.10): the map is practically the
+# stepped nearest-neighbour surface, and a selection there is read like the
+# limit.
+IDW_MAX_FINITE_POWER <- 48
+IDW_POWER_GRID <- c(seq(0, 6, by = 0.25), 7, 8, 9, 10, 12, 14, 16, 20, 24, 32, IDW_MAX_FINITE_POWER, Inf)
+IDW_SELECT_MIN_N <- 5L
+IDW_STEEP_POWER <- 24
 
-  fold_assign <- make_cv_folds(sf::st_coordinates(pts), cv_strategy, n, CV_FOLD_SEED)
+#' Exact IDW predictions at `test_xy` for every power in `powers` at once: the
+#' k = min(nmax, n_train) nearest training samples (FNN::get.knnx) weighted by
+#' d^-p. A test location at distance 0 from a sample takes that sample's value,
+#' as gstat does. Returns an n_test x length(powers) matrix. It reproduces
+#' gstat's IDW cross-validation (test-idw-selection.R) and is the power
+#' selection device only: every map and every reported prediction comes from
+#' gstat::idw() (idw_gstat). Equidistant neighbours on a lattice may be ranked
+#' differently from gstat, which can only move a near-tied selection.
+idw_kernel_predict <- function(train_xy, train_v, test_xy, powers, nmax) {
+  nn <- FNN::get.knnx(train_xy, test_xy, k = min(nmax, nrow(train_xy)))
+  idw_weighted(nn$nn.dist, matrix(train_v[nn$nn.index], nrow = nrow(test_xy)), powers)
+}
 
-  rmses <- vapply(factors, function(f) {
-    cv <- tryCatch(
-      krige.cv(form, pts, nmax = nmax, set = list(idp = f),
-               nfold = fold_assign, debug.level = 0),
-      error = function(e) NULL)
-    if (is.null(cv)) return(Inf)
-    val <- sqrt(mean(cv$residual^2, na.rm = TRUE))
-    if (is.finite(val)) val else Inf
-  }, numeric(1))
+# The inverse-distance average of neighbour values `nv` at distances `d` (one
+# row per prediction location, nearest first), one column per power. Weights
+# are taken relative to the nearest neighbour, (d1 / d)^p: the same normalised
+# weights as d^-p, free of overflow and underflow at the steep end of the grid.
+# p = Inf is the nearest neighbour's value.
+idw_weighted <- function(d, nv, powers) {
+  rel <- d[, 1] / d
+  out <- vapply(powers, function(p) {
+    if (is.infinite(p)) return(nv[, 1])
+    w <- rel^p
+    rowSums(w * nv) / rowSums(w)
+  }, numeric(nrow(d)))
+  out <- matrix(out, nrow = nrow(d))
+  hit <- d[, 1] == 0
+  if (any(hit)) out[hit, ] <- nv[hit, 1]
+  out
+}
 
-  best_idx <- which.min(rmses)
-  if (length(best_idx) > 0 && is.finite(rmses[best_idx])) factors[best_idx] else 2.0
+#' gstat's IDW at power `p` over the `nmax` nearest samples, the engine every
+#' IDW map and reported prediction comes from; the nearest-neighbour limit
+#' (p = Inf) is gstat's IDW over the single nearest sample.
+idw_gstat <- function(formula, data, newdata, nmax, p) {
+  if (is.infinite(p)) return(gstat::idw(formula, data, newdata, nmax = 1, debug.level = 0))
+  gstat::idw(formula, data, newdata, nmax = nmax, idp = p, debug.level = 0)
+}
+
+#' Which end of the IDW family a power is: "equal_weights" (p = 0, the plain
+#' mean of the Max Neighbors nearest samples), "nearest_neighbour" (the
+#' p -> Inf limit), NULL for every power between.
+idw_power_limit <- function(p) {
+  if (length(p) != 1 || is.na(p)) return(NULL)
+  if (p == 0) "equal_weights" else if (is.infinite(p)) "nearest_neighbour"
+}
+
+#' A power as the run log and the panels name it: "p = 2", "equal weights
+#' (p = 0)", "the nearest-neighbour limit (p → ∞)".
+idw_power_text <- function(p) {
+  switch(idw_power_limit(p) %||% "power",
+         equal_weights = "equal weights (p = 0)",
+         nearest_neighbour = "the nearest-neighbour limit (p → ∞)",
+         paste0("p = ", format_power(p)))
+}
+
+#' Cross-validated IDW predictions of every row under the fold vector `folds`,
+#' one column per power (n x length(powers)). Leave-one-out folds take the
+#' neighbours of every row in one search (FNN::get.knn excludes the row
+#' itself), which is what makes a nested leave-one-out selection affordable.
+idw_cv_predictions <- function(xy, v, folds, powers, nmax) {
+  n <- nrow(xy)
+  if (!anyDuplicated(folds)) {
+    nn <- FNN::get.knn(xy, k = min(nmax, n - 1L))
+    return(idw_weighted(nn$nn.dist, matrix(v[nn$nn.index], nrow = n), powers))
+  }
+  pred <- matrix(NA_real_, n, length(powers))
+  for (f in unique(folds)) {
+    te <- which(folds == f)
+    pred[te, ] <- idw_kernel_predict(xy[-te, , drop = FALSE], v[-te],
+                                     xy[te, , drop = FALSE], powers, nmax)
+  }
+  pred
+}
+
+#' Pooled cross-validation RMSE of every power on one fold vector, and whether
+#' the data separate it from the best (the first minimum): `within_se` is TRUE
+#' when its mean squared error exceeds the best's by no more than one standard
+#' error of the per-sample squared-error differences on the same folds (a
+#' paired comparison). That standard error treats the samples as independent,
+#' so under spatially correlated errors it is too small, and more powers are
+#' indistinguishable than marked. The flag reports; it selects nothing.
+idw_cv_profile <- function(xy, v, folds, powers, nmax) {
+  e2 <- (idw_cv_predictions(xy, v, folds, powers, nmax) - v)^2
+  mse <- colMeans(e2)
+  d <- e2 - e2[, which.min(mse)]
+  se <- apply(d, 2, stats::sd) / sqrt(nrow(e2))
+  data.frame(p = powers, rmse = sqrt(mse), within_se = colMeans(d) <= se)
+}
+
+#' The power a row set selects: folds from make_cv_folds() under `strategy`
+#' (the run's own fold authority, seeded inside its RNG sandbox; kNNDM matches
+#' this row set's folds to the map's locations `domain_xy`), or `folds` when
+#' the caller already holds that very vector, the pooled CV RMSE of every
+#' power on that one fold vector (idw_cv_profile, with which powers the data
+#' do not separate from the best), and the first minimum (the smallest power
+#' among ties). `limit` names a selection at an end of the family
+#' (idw_power_limit): the grid spans the whole family, so an end is a finding
+#' about the data, never a truncated search. Below IDW_SELECT_MIN_N rows, or on
+#' a target without usable variance (every power predicts it alike), nothing
+#' is searched: p = 2 and `skipped` names the reason.
+select_idw_power <- function(xy, v, strategy, nmax, seed = CV_FOLD_SEED, powers = IDW_POWER_GRID,
+                             domain_xy = NULL, folds = NULL) {
+  n <- nrow(xy)
+  skip <- if (n < IDW_SELECT_MIN_N) {
+    sprintf("%d sample%s, fewer than %d", n, if (n == 1L) "" else "s", IDW_SELECT_MIN_N)
+  } else if (.is_degenerate_covariate(v)) "the values carry no usable variance"
+  if (!is.null(skip)) return(list(p = 2, profile = NULL, limit = NULL, skipped = skip))
+  prof <- idw_cv_profile(xy, v, folds %||% make_cv_folds(xy, strategy, n, seed, domain_xy), powers, nmax)
+  p <- powers[which.min(prof$rmse)]
+  list(p = p, profile = prof, limit = idw_power_limit(p), skipped = NULL)
 }
 
 # "Constant" is a relative property, not an absolute one. An absolute variance
@@ -124,9 +216,7 @@ optimize_idw_p <- function(pts, target_var, nmax = 12, cv_strategy = "auto") {
 #' with |r| > `pairwise_threshold`, drops degenerate (constant) covariates, then
 #' drops the highest-VIF covariate one at a time while any VIF exceeds
 #' `vif_threshold` (`Inf` = keep all). Returns `list(has_collinearity, pairs,
-#' kept, dropped, dropped_constant, dropped_vif, vif_at_drop)`; `vif_at_drop`
-#' is each VIF-dropped covariate's VIF at the step it was removed (Inf where the
-#' correlation matrix was singular, so no finite VIF exists).
+#' kept, dropped, dropped_constant, dropped_vif)`.
 detect_multicollinearity_engine <- function(df, vars = NULL, vif_threshold = 10, pairwise_threshold = 0.95) {
   # sf's geometry column is sticky under `[ , ]`, so an sf input would carry an
   # sfc into the degenerate scan (is.finite() on an sfc errors) and, if it ever
@@ -148,7 +238,6 @@ detect_multicollinearity_engine <- function(df, vars = NULL, vif_threshold = 10,
   # Two DIFFERENT reasons to drop a covariate share the `dropped` vector, and
   # consumers were labelling all of them "High VIF". Track them apart.
   dropped_constant <- character(0)
-  vif_at_drop <- numeric(0)
 
   # One degenerate scan shared by the pairwise report and the zero-var prune
   # below (kept is not modified in between).
@@ -249,7 +338,6 @@ detect_multicollinearity_engine <- function(df, vars = NULL, vif_threshold = 10,
           sort(pair, decreasing = TRUE, method = "radix")[1]
         }
         dropped <- c(dropped, var_to_drop)
-        vif_at_drop[[var_to_drop]] <- Inf
         kept <- setdiff(kept, var_to_drop)
         next
       }
@@ -258,7 +346,6 @@ detect_multicollinearity_engine <- function(df, vars = NULL, vif_threshold = 10,
       if (max_vif > vif_threshold) {
         var_to_drop <- names(vif_vals)[which.max(vif_vals)]
         dropped <- c(dropped, var_to_drop)
-        vif_at_drop[[var_to_drop]] <- max_vif
         kept <- setdiff(kept, var_to_drop)
       } else {
         break
@@ -274,8 +361,7 @@ detect_multicollinearity_engine <- function(df, vars = NULL, vif_threshold = 10,
     # components let callers report the actual reason.
     dropped = dropped,
     dropped_constant = dropped_constant,
-    dropped_vif = setdiff(dropped, dropped_constant),
-    vif_at_drop = vif_at_drop
+    dropped_vif = setdiff(dropped, dropped_constant)
   ))
 }
 
@@ -465,6 +551,14 @@ add_cv_repeats <- function(res, cv_fun, method_params, n_data, label,
                            l = "region", prefix = "act") {
   reps <- cv_repeat_count(method_params$cv_repeats, method_params$cv_strategy, n_data)
   if (reps < 2 || is.null(res$cv_obj)) return(res)
+  # kNNDM spatial folds draw no random numbers: every realization would repeat
+  # the reference partition, so the locality keeps one, as under LOOCV.
+  if (identical(attr(res$cv_obj, "knndm")$branch, "spatial")) {
+    res$log_msg <- paste0(res$log_msg, "\n[Repeated CV] ", label, ", ", l, " (",
+                          if (identical(prefix, "pre")) "Predicted" else "Actual",
+                          "): kNNDM spatial folds are deterministic; one realization.")
+    return(res)
+  }
 
   frames <- vector("list", reps)
   frames[[1]] <- cv_repeat_frame(res$cv_obj)
@@ -483,7 +577,7 @@ add_cv_repeats <- function(res, cv_fun, method_params, n_data, label,
     frames[[r]] <- tryCatch(cv_repeat_frame(cv_fun(CV_FOLD_SEED + r - 1L)),
                             error = function(e) NULL)
     # 55 -> 90: keeps the per-locality progress bar moving through the repeats
-    # instead of parking it where the single-realization run used to finish.
+    # instead of parking it where the single-realization run finishes.
     update_progress_file(l, prefix, 55 + round(35 * (r / reps)), 100)
   }
 
@@ -507,7 +601,8 @@ run_cv_with_repeats <- function(res, cv_fun, method_params, n_data, label,
 
 #' The CV population and fold plan a kriging engine scores: the run's
 #' (`method_params$cv_data` / `cv_plan`) when supplied, else the engine's own
-#' data folded by build_cv_plan().
+#' data folded by build_cv_plan() against the map's locations
+#' (`method_params$cv_domain_xy`).
 .engine_cv_plan <- function(method_params, data) {
   pop <- method_params$cv_data %||% data
   # A supplied population can be smaller than the surface's own point set (OK
@@ -518,7 +613,8 @@ run_cv_with_repeats <- function(res, cv_fun, method_params, n_data, label,
     stop("the cross-validation population holds fewer than 3 samples (", nrow(pop), ")")
   }
   plan <- method_params$cv_plan %||%
-    build_cv_plan(pop, method_params$cv_strategy, method_params$cv_repeats)
+    build_cv_plan(pop, method_params$cv_strategy, method_params$cv_repeats,
+                  method_params$cv_domain_xy)
   if (!isTRUE(plan$n == nrow(pop))) {
     stop("CV plan population size (", plan$n, ") does not match the CV population (",
          nrow(pop), " rows).")
@@ -530,8 +626,10 @@ run_cv_with_repeats <- function(res, cv_fun, method_params, n_data, label,
 #' progress)` returns one realization's CV object. Realization r (seed
 #' CV_FOLD_SEED + r - 1, the run_cv_with_repeats contract) takes the plan's
 #' r-th fold vector; a plan error surfaces as a CV error, never an engine fallback.
+#' `res$cv_design` is the plan's distance match (cv_distance_summary).
 .run_kriging_cv <- function(res, cv_one, method_params, data, label, l, prefix) {
   cvp <- tryCatch(.engine_cv_plan(method_params, data), error = function(e) e)
+  res$cv_design <- if (!inherits(cvp, "error")) cvp$plan$design
   cv_fun <- function(seed) {
     if (inherits(cvp, "error")) stop(conditionMessage(cvp))
     r <- seed - CV_FOLD_SEED + 1L
@@ -569,9 +667,10 @@ sanitize_spatial_predictions <- function(res_sf) {
 # Infinitesimal-jackknife variance of a random-forest ensemble-MEAN prediction
 # (Wager, Hastie & Efron 2014), with the Monte-Carlo bias correction. This is
 # the random-forest analogue of RK's lm `se.fit^2`: the sampling variance of the
-# estimated mean surface, a better-calibrated trend-uncertainty term than the
-# raw between-tree spread (which understates predictive uncertainty). It changes
-# ONLY the RFK uncertainty (var1.var) surface, never the prediction (var1.pred).
+# estimated mean surface. The raw between-tree spread is a different quantity
+# (model instability) with no guaranteed ordering against it, and neither
+# establishes interval calibration (scientific_guide 7.3). It changes ONLY the
+# RFK uncertainty (var1.var) surface, never the prediction (var1.pred).
 #   pred_individual : n_pred x B matrix of per-tree predictions (predict.all$individual)
 #   inbag           : n_train x B matrix of in-bag counts (randomForest keep.inbag = TRUE)
 # Returns a length-n_pred variance vector, negatives (from the bias correction)
@@ -854,7 +953,8 @@ apply_kriging_pipeline <- function(engine = c("OK", "RK", "RFK"), data, target_v
                                 cov_params = method_params$cov_params %||% method_params,
                                 folds = folds, row_id = row_id,
                                 cancel_file = method_params$cancel_file, progress = progress,
-                                candidates = candidates, vif_threshold = vif_threshold)
+                                candidates = candidates, vif_threshold = vif_threshold,
+                                cv_domain_xy = method_params$cv_domain_xy)
         }
         res <- .run_kriging_cv(res, cv_rk, method_params, data, "RK", l, prefix)
         res <- .log_vgm_fold_status(res, "RK", l)
@@ -912,12 +1012,12 @@ apply_kriging_pipeline <- function(engine = c("OK", "RK", "RFK"), data, target_v
           Mb <- pa$individual
           pred_mean[s:e] <- as.numeric(pa$aggregate)
           trend_var[s:e] <- if (use_ij) {
-            # Calibrated trend variance: infinitesimal jackknife of the ensemble
-            # mean (Wager et al. 2014): the RF analogue of RK's lm se.fit^2.
+            # Trend variance: infinitesimal jackknife of the ensemble mean
+            # (Wager et al. 2014), the RF analogue of RK's lm se.fit^2.
             rf_infinitesimal_jackknife_var(Mb, rf_mod$inbag, inbag_centred = inbag_c)
           } else {
-            # Ensemble spread (between-tree variance): fast stability heuristic
-            # that understates predictive uncertainty (scientific_guide 7.3).
+            # Ensemble spread (between-tree variance): a fast model-instability
+            # measure, not a predictive variance (scientific_guide 7.3).
             rowSums((Mb - rowMeans(Mb))^2) / (ncol(Mb) - 1)
           }
           rm(pa, Mb)
@@ -935,7 +1035,8 @@ apply_kriging_pipeline <- function(engine = c("OK", "RK", "RFK"), data, target_v
                                 cov_params = method_params$cov_params %||% method_params,
                                 folds = folds, row_id = row_id,
                                 cancel_file = method_params$cancel_file, progress = progress,
-                                candidates = candidates, vif_threshold = vif_threshold)
+                                candidates = candidates, vif_threshold = vif_threshold,
+                                cv_domain_xy = method_params$cv_domain_xy)
         }
         res <- .run_kriging_cv(res, cv_rfk, method_params, data, "RFK", l, prefix)
         res <- .log_vgm_fold_status(res, "RFK", l)
@@ -976,24 +1077,61 @@ apply_RFK <- function(data, target_var, grid_p, lags, method_params, aux_vars, l
   apply_kriging_pipeline("RFK", data, target_var, grid_p, lags, method_params, aux_vars, l, prefix, vif_threshold)
 }
 
-#' Centre and scale each covariate on the rows it is handed, so the LMC's
-#' cross-variograms live on a comparable scale. The map standardizes from the
-#' surface's own rows and every CV fold from its own training rows, so a
-#' held-out row never contributes to the centring that predicts it.
-#' as.numeric: scale() returns an n x 1 MATRIX, and assigning that into an sf
-#' column leaves a matrix-valued column that propagates through
-#' variogram()/fit.lmc() and confuses any later dplyr verb on the object.
-.ck_standardize <- function(df, aux_vars) {
-  for (av in aux_vars) df[[av]] <- as.numeric(scale(df[[av]]))
-  df
+#' Co-kriging needs a covariate measured together with the target at this many
+#' locations before their cross-variogram can be estimated, the minimum the
+#' directional variogram applies too. A covariate below it is dropped for the
+#' surface (apply_CK); CV folds do not re-apply the rule.
+CK_MIN_COLLOCATED <- 10L
+
+#' The rows of one co-kriging data set that carry every covariate in
+#' `candidates`, target rows first. The covariate screen runs on them: it
+#' involves the covariates only, whether or not a row carries the target.
+.ck_screen_rows <- function(target_rows, extra_rows, candidates) {
+  rows <- sf::st_drop_geometry(target_rows)[candidates]
+  if (!is.null(extra_rows) && nrow(extra_rows) > 0) {
+    rows <- rbind(rows, sf::st_drop_geometry(extra_rows)[candidates])
+  }
+  rows[stats::complete.cases(rows), , drop = FALSE]
 }
 
-#' Build and fit the co-kriging LMC on one set of already standardized rows.
-#' The map and every CV fold call it, so a fold refits exactly what the map
-#' fitted, from its own rows. Returns `g` (the fitted gstat object, NULL on
-#' failure), `error_msg`, the run-log text and whether the shared range was
-#' seeded from the extent heuristic rather than the primary fit.
-.ck_fit_lmc <- function(data_scaled, target_var, aux_vars, lags, ck_nmax) {
+#' The constant/VIF covariate screen of a co-kriging data set
+#' (screen_covariates on .ck_screen_rows). Fewer than three rows carrying every
+#' candidate hold no estimable correlation, so the candidates then pass
+#' unscreened, flagged `unscreened`.
+.ck_screen <- function(target_rows, extra_rows, candidates, vif_threshold) {
+  scr <- .ck_screen_rows(target_rows, extra_rows, candidates)
+  if (length(candidates) > 1 && nrow(scr) < 3) {
+    return(list(kept = candidates, dropped = character(0), dropped_constant = character(0),
+                dropped_vif = character(0), unscreened = TRUE))
+  }
+  screen_covariates(scr, candidates, vif_threshold)
+}
+
+#' Build and fit the co-kriging LMC from the target rows (`target_rows`: every
+#' location with a measured target) and the covariate-only rows (`extra_rows`:
+#' locations without the target that measure a covariate; NULL or empty on
+#' isotopic data). The map and every CV fold call it, so a fold refits exactly
+#' what the map fitted, from its own rows.
+#'
+#' Each variable is a gstat id with its own data: the target on the target
+#' rows, each covariate on every row that measures it, standardized on those
+#' rows. All empirical variograms use the primary's lags. A direct variogram is
+#' computed on its variable's own rows; a cross-variogram on the rows carrying
+#' BOTH variables, as an isotopic two-variable variogram. gstat's own
+#' cross-variogram of ids with different locations is the pseudo
+#' cross-variogram, which contains half the squared difference of the two
+#' means (Papritz, Künsch & Webster 1993); with the target on its raw scale and
+#' the covariates standardized, that offset would dominate it, so it is never
+#' computed (variogram(g, pseudo = 0) also crashes R). On isotopic data every
+#' piece equals the variogram gstat computes for the whole object.
+#'
+#' Returns `g` (the fitted gstat object, NULL on failure) carrying
+#' `monolith_ids` (id -> column) and `monolith_vm` (the empirical variogram the
+#' LMC was fitted to), `error_msg`, the run-log text, whether the shared range
+#' was seeded from the extent heuristic, the target's id, `counts` (per
+#' covariate: rows measuring it, and how many of those carry the target) and
+#' `design` ("isotopic" or "heterotopic").
+.ck_fit_lmc <- function(target_rows, extra_rows, target_var, aux_vars, lags, ck_nmax) {
   log_msg <- ""
   # gstat reaches its model frame through sp, whose data.frame conversion runs
   # make.names() over the columns, so a covariate such as "Fe (mg/kg)" is "not
@@ -1002,50 +1140,68 @@ apply_RFK <- function(data, target_var, grid_p, lags, method_params, aux_vars, l
   # uses only; `monolith_ids` maps each id back to its column for display.
   vars <- c(target_var, aux_vars)
   ids <- make.names(vars, unique = TRUE)
-  d <- data_scaled[vars]
-  names(d)[match(vars, names(d))] <- ids
-  form_ok <- reformulate("1", response = ids[1])
-  g <- gstat(NULL, id = ids[1], formula = form_ok, data = d, nmax = ck_nmax)
-  for (id in ids[-1]) {
-    g <- gstat(g, id = id, formula = reformulate("1", response = id), data = d, nmax = ck_nmax)
+  rows <- target_rows[vars]
+  if (!is.null(extra_rows) && nrow(extra_rows) > 0) rows <- rbind(rows, extra_rows[vars])
+  # Each covariate centred and scaled on the rows that measure it (scale()
+  # skips NA), so the cross-variograms live on a comparable scale and a CV
+  # fold, handed its own training rows, standardizes from those alone.
+  # as.numeric: scale() returns an n x 1 matrix.
+  for (av in aux_vars) rows[[av]] <- as.numeric(scale(rows[[av]]))
+  names(rows)[match(vars, names(rows))] <- ids
+  has <- lapply(ids, function(id) !is.na(rows[[id]]))
+  own <- function(k) rows[has[[k]], ids[k]]
+  counts <- vapply(seq_along(aux_vars) + 1L, function(k) {
+    c(n = sum(has[[k]]), collocated = sum(has[[k]] & has[[1]]))
+  }, numeric(2))
+  colnames(counts) <- aux_vars
+  n_t <- nrow(target_rows)
+  design <- if (all(counts["n", ] == n_t) && all(counts["collocated", ] == n_t)) "isotopic" else "heterotopic"
+
+  # One empirical variogram - direct (one id) or cross (two ids, the pair
+  # only) - on the rows in `mask`, through gstat's default method on plain
+  # values and coordinates: the computation variogram(g) runs for each id
+  # pair, without the sp conversion and CRS queries a gstat object costs on
+  # every call (profiled: most of a fit's time with a separate object per
+  # piece).
+  xy <- sf::st_coordinates(rows)
+  projected <- !isTRUE(sf::st_is_longlat(rows))
+  emp <- function(ks, mask) {
+    y <- stats::setNames(lapply(ks, function(k) rows[[ids[k]]][mask]), ids[ks])
+    loc <- rep(list(xy[mask, , drop = FALSE]), length(ks))
+    X <- rep(list(matrix(1, sum(mask), 1)), length(ks))
+    variogram(y, loc, X, width = lags$width, cutoff = lags$cutoff,
+              cross = if (length(ks) > 1) "ONLY" else TRUE, projected = projected)
   }
 
-  vm <- variogram(g, width = lags$width, cutoff = lags$cutoff)
-
-  v_emp_ok <- variogram(form_ok, d, width = lags$width, cutoff = lags$cutoff)
-  fit_ok_init <- robust_vgm_fit(v_emp_ok, d[[ids[1]]])
+  v_emp_ok <- emp(1L, has[[1]])
+  fit_ok_init <- robust_vgm_fit(v_emp_ok, own(1)[[ids[1]]])
   m_type <- suggest_lmc_model(fit_ok_init)
 
   # The single `model` argument is used by gstat as the STARTING model for
-  # every direct and cross variogram (fit.lmc copies it over each id), so this
-  # seeds the standardized covariate variograms — whose sills are 1.0 by
-  # construction — with the target's raw variance, which can be many orders of
-  # magnitude larger. That looks like a bug and was reported as one, but it is
-  # inert here and must not be "fixed" by rescaling the seed: fit.lmc calls
-  # fit.variogram with fit.ranges = FALSE, and with the range and model type
-  # held fixed the variogram is LINEAR in its sill parameters, so the weighted
-  # least-squares solve has a closed-form optimum that does not depend on the
-  # starting sill. Verified 2026-07-20: starting sills spanning 1e-6 to 1e12
-  # on the same empirical variogram all return a bit-identical fitted sill,
-  # and per-id seeding from each variogram's own empirical plateau reproduces
-  # the current fitted LMC exactly (target variances up to 3.5e8, 3
-  # covariates). The starting values would matter immediately if fit.ranges
-  # were ever set TRUE — the same probe then spread the fitted sill over
-  # 1.0 to 3179 with no-convergence warnings — so scale the seeds per id at
-  # the same time as any such change.
+  # every direct and cross variogram (fit.lmc copies it over each id), so it
+  # seeds the standardized covariate variograms, whose sills are 1.0 by
+  # construction, with the target's raw variance, which can be many orders of
+  # magnitude larger. That is inert and must not be "fixed" by rescaling the
+  # seed: fit.lmc calls fit.variogram with fit.ranges = FALSE, and with the
+  # range and model type held fixed the variogram is LINEAR in its sill
+  # parameters, so the weighted least-squares solve has a closed-form optimum
+  # that does not depend on the starting sill. Verified 2026-07-20: starting
+  # sills spanning 1e-6 to 1e12 on the same empirical variogram all return a
+  # bit-identical fitted sill, and per-id seeding from each variogram's own
+  # empirical plateau reproduces the fitted LMC exactly (target variances up to
+  # 3.5e8, 3 covariates). The starting values would matter immediately if
+  # fit.ranges were ever set TRUE (the same probe then spread the fitted sill
+  # over 1.0 to 3179 with no-convergence warnings), so scale the seeds per id
+  # at the same time as any such change.
   # The LMC needs ONE range shared by every direct and cross variogram, which
-  # is why fit.lmc's fit.ranges = FALSE default is correct and stays. But that
-  # is exactly what makes the SEED range the FINAL range: unlike the seed sill
-  # (see the note above) it is not inert - verified, the fitted LMC reports the
-  # seed value back on every id. The seed was lags$cutoff / 2, i.e. a quarter
-  # of the bounding-box diagonal, a geometric heuristic unrelated to the data,
-  # while the range weighted least squares fitted to the primary variable was
-  # already in hand as fit_ok_init$range[2] and thrown away apart from its
-  # model family. Measured on a short-range fixture (fitted a = 243 m against
-  # the heuristic's 685 m): the CK surface moved by up to 18% of the field's
-  # standard deviation. Fall back to the old heuristic only when the primary
-  # fit is itself a heuristic (is_fallback) or its range is unusable, so a CK
-  # run is never worse informed than it was.
+  # is why fit.lmc's fit.ranges = FALSE default is correct. That makes the SEED
+  # range the FINAL range (verified: the fitted LMC reports the seed back on
+  # every id), so it is the range weighted least squares fitted to the primary
+  # variable, fit_ok_init$range[2]: a geometric heuristic in its place moved a
+  # short-range CK surface by up to 18% of the field's standard deviation
+  # (fitted a = 243 m against the heuristic's 685 m). The extent heuristic
+  # (cutoff / 2, a quarter of the bounding-box diagonal) is used only when the
+  # primary fit is itself a heuristic (is_fallback) or its range is unusable.
   lmc_range <- suppressWarnings(as.numeric(fit_ok_init$range[2])[1])
   # gstat's `a` only means a ground distance once the FAMILY and, for Matern,
   # the smoothness are fixed. vgm() defaults kappa to 0.5 while robust_vgm_fit
@@ -1069,20 +1225,82 @@ apply_RFK <- function(data, target_var, grid_p, lags, method_params, aux_vars, l
       signif(lmc_range, 4), "); fit.lmc fits sills only.")
   }
 
-  fit_obj <- tryCatch(
-    fit.lmc(vm, g, vgm(var(d[[ids[1]]]), m_type, lmc_range, 0, kappa = lmc_kappa),
-            correct.diagonal = 1.01),
-    error = function(e) structure(paste0("LMC Fit Failed: ", e$message, ". Falling back to OK."),
-                                  class = "ck_lmc_error"))
+  # A cross-variogram from the rows carrying both variables, as the isotopic
+  # two-variable variogram of those rows; their direct variograms come from
+  # each variable's own rows.
+  cross_piece <- function(a, b) {
+    both <- has[[a]] & has[[b]]
+    if (sum(both) < 2) {
+      stop("no two locations carry both ", vars[a], " and ", vars[b],
+           ", so their cross-variogram cannot be estimated")
+    }
+    emp(c(a, b), both)
+  }
+  # The pieces in the order and form variogram(g) gives a gstat object (ids
+  # in reverse; for each id, its cross-variograms with the ids before it, then
+  # its own direct variogram), so fit.lmc finds every name and an isotopic data
+  # set reproduces variogram(g) exactly.
+  assemble_vm <- function() {
+    parts <- list(); nm <- character(0); direct <- logical(0)
+    for (a in rev(seq_along(ids))) for (b in seq_len(a)) {
+      p <- if (a == b) {
+        if (a == 1L) v_emp_ok else emp(a, has[[a]])
+      } else cross_piece(b, a)
+      piece <- if (a == b) ids[a] else paste(ids[b], ids[a], sep = ".")
+      if (is.null(p) || nrow(p) == 0) {
+        stop("the variogram ", piece, " has no point pairs within the lag cutoff")
+      }
+      parts[[length(parts) + 1L]] <- as.data.frame(p)[c("np", "dist", "gamma", "dir.hor", "dir.ver")]
+      nm <- c(nm, rep(piece, nrow(p)))
+      direct <- c(direct, a == b)
+    }
+    vm <- do.call(rbind, parts)
+    vm$id <- factor(nm, levels = unique(nm))
+    row.names(vm) <- NULL
+    class(vm) <- c("gstatVariogram", "data.frame")
+    attr(vm, "direct") <- data.frame(id = unique(nm), is.direct = direct)
+    for (a in c("boundaries", "pseudo", "what")) attr(vm, a) <- attr(v_emp_ok, a)
+    vm
+  }
+
+  fit_obj <- tryCatch({
+    vm <- assemble_vm()
+    g <- NULL
+    for (k in seq_along(ids)) {
+      g <- gstat(g, id = ids[k], formula = reformulate("1", response = ids[k]),
+                 data = own(k), nmax = ck_nmax)
+    }
+    fit <- fit.lmc(vm, g, vgm(var(own(1)[[ids[1]]]), m_type, lmc_range, 0, kappa = lmc_kappa),
+                   correct.diagonal = 1.01)
+    attr(fit, "monolith_vm") <- vm
+    fit
+  }, error = function(e) structure(paste0("LMC Fit Failed: ", e$message, ". Falling back to OK."),
+                                   class = "ck_lmc_error"))
   if (inherits(fit_obj, "ck_lmc_error")) {
     return(list(g = NULL, error_msg = as.character(fit_obj),
                 log_msg = paste0(log_msg, as.character(fit_obj)),
-                heuristic_seed = heuristic_seed, target_id = ids[1]))
+                heuristic_seed = heuristic_seed, target_id = ids[1],
+                counts = counts, design = design))
   }
   attr(fit_obj, "monolith_ids") <- stats::setNames(vars, ids)
   list(g = fit_obj, error_msg = NULL,
        log_msg = paste0(log_msg, "\nLMC fitted with correct.diagonal = 1.01 (standard stabilization applied to every CK fit to keep the coregionalization matrices positive definite)."),
-       heuristic_seed = heuristic_seed, target_id = ids[1])
+       heuristic_seed = heuristic_seed, target_id = ids[1],
+       counts = counts, design = design)
+}
+
+#' The run-log line naming a co-kriging surface's design: per covariate, the
+#' locations measuring it and how many of them carry the target.
+.ck_design_log <- function(lmc, l, surface, n_target) {
+  if (identical(lmc$design, "isotopic")) {
+    return(sprintf("\n[CK] %s (%s): isotopic design (n = %d).", l, surface, n_target))
+  }
+  per <- vapply(colnames(lmc$counts), function(av) {
+    sprintf("%s: n = %d (%d collocated)", av, as.integer(lmc$counts["n", av]),
+            as.integer(lmc$counts["collocated", av]))
+  }, character(1))
+  sprintf("\n[CK] %s (%s): heterotopic design: target n = %d; %s.", l, surface, n_target,
+          paste(per, collapse = "; "))
 }
 
 #' The data column behind each id of a CK gstat object, named by id. A fitted
@@ -1108,62 +1326,86 @@ ck_id_columns <- function(g) {
 }
 
 # Co-Kriging: predict the target jointly with its auxiliary variables through a
-# linear model of coregionalization (LMC). Covariates are standardized first so
-# the cross-variograms live on a comparable scale; the LMC is stabilized with
-# correct.diagonal = 1.01 to keep the coregionalization matrices positive
-# definite, and the whole fit falls back to Ordinary Kriging if it fails.
+# linear model of coregionalization (LMC). `data` holds the target rows (every
+# location with a measured target); `method_params$ck_extra` the covariate-only
+# rows (locations without the target that measure a selected covariate), which
+# enter the covariates' data only (heterotopic design; empty = isotopic).
+# Covariates are standardized on their own rows so the cross-variograms live on
+# a comparable scale (.ck_fit_lmc); the LMC is stabilized with
+# correct.diagonal = 1.01, and the whole fit falls back to Ordinary Kriging if
+# it fails.
 apply_CK <- function(data, target_var, grid_p, lags, method_params, aux_vars, l = "region", prefix = "act", vif_threshold = 10) {
   res <- init_interpolation_res()
 
   update_progress_file(l, prefix, 10, 100)
-  
+
   # Search neighbourhood for the whole co-kriging system. This is a modelling
   # parameter (it sets how local the stationarity assumption is), not a pure
-  # speed knob, so it is user-selectable; 15 is the documented default and the
-  # historical hardcoded value.
+  # speed knob, so it is user-selectable; 15 is the documented default.
   ck_nmax <- if (!is.null(method_params$ck_nmax) && is.finite(method_params$ck_nmax)) method_params$ck_nmax else 15
+  extra <- method_params$ck_extra
+  surface <- if (identical(prefix, "pre")) "Predicted" else "Actual"
 
   ck_res <- tryCatch({
-    # The same multicollinearity gate RK/RFK apply, and CK needs it at least as
-    # badly: the LMC fits a direct variogram per covariate PLUS every cross
-    # variogram, so collinear covariates make the coregionalization matrices
-    # near-singular and fit.lmc() fails — which lands the run in the silent OK
-    # fallback below. Without this, the user's "Auto-Drop and Continue" answer
-    # to the collinearity modal was a no-op for CK.
-    # run_regional_interpolation resolves the gate up front on this exact point
-    # set and passes the survivors as method_params$aux_kept; recompute only
-    # when apply_CK is called directly.
-    # The full selected set: every CV fold re-screens THIS list on its own
-    # training rows, so the screen is never decided with the held-out row's
-    # measured covariates in hand.
-    candidates <- aux_vars
-    if (length(aux_vars) > 1) {
-      vif_res <- .resolve_aux_gate(data, aux_vars, method_params, vif_threshold)
+    # A cross-variogram with the target needs the covariate measured at target
+    # locations: below CK_MIN_COLLOCATED of them it cannot be estimated, so
+    # the covariate is dropped here, before the collinearity screen decides
+    # among the rest. The folds screen THIS candidate list on their own
+    # training rows and do not re-apply the rule.
+    colloc <- vapply(aux_vars, function(av) sum(!is.na(data[[av]])), integer(1))
+    short <- aux_vars[colloc < CK_MIN_COLLOCATED]
+    if (length(short)) {
+      res$log_msg <- paste0(res$log_msg, "\n[CK] ", l, " (", surface, "): dropped ",
+        paste0(short, " (", colloc[short], " collocated)", collapse = ", "),
+        "; a cross-variogram needs the covariate measured with the target at ",
+        CK_MIN_COLLOCATED, " or more locations.")
+    }
+    candidates <- setdiff(aux_vars, short)
+    if (length(candidates) == 1 &&
+        .is_degenerate_covariate(c(data[[candidates]], if (!is.null(extra)) extra[[candidates]]))) {
+      write_warning_file(l, prefix, paste0("Covariate '", candidates, "' is (near-)constant in this ",
+                                           "locality, so Co-Kriging receives no covariate information from it."))
+    }
+    # The same multicollinearity screen RK/RFK apply, and the LMC needs it at
+    # least as badly: collinear covariates make the coregionalization matrices
+    # near-singular and fit.lmc() fails into the Ordinary Kriging fallback. It
+    # runs on the locations carrying every candidate, covariate-only ones
+    # included (.ck_screen).
+    kept <- candidates
+    if (length(candidates) > 1) {
+      vif_res <- .ck_screen(data, extra, candidates, vif_threshold)
+      if (isTRUE(vif_res$unscreened)) {
+        res$log_msg <- paste0(res$log_msg, "\n[CK] ", l, " (", surface, "): fewer than 3 locations ",
+                              "carry every covariate, so the covariates were not screened for collinearity.")
+      }
       if (length(vif_res$dropped) > 0) {
         res$log_msg <- paste0(res$log_msg, .vif_drop_log(vif_res))
-        aux_vars <- vif_res$kept
+        kept <- vif_res$kept
       }
     }
     # For the run record, as in apply_kriging_pipeline.
-    res$aux_used <- aux_vars
-    res$aux_dropped <- setdiff(candidates, aux_vars)
-    # CK does not die on an empty set the way RK does — gstat() with only the
-    # primary variable still fits (verified: fit.lmc succeeds on a single
-    # variable) and returns ordinary kriging under a 15-point neighbourhood,
-    # labelled and logged as Co-Kriging. Co-kriging with no secondary variable
-    # is not co-kriging, so send it to the named OK fallback instead of
-    # shipping a mislabelled surface.
-    if (length(aux_vars) == 0) {
-      stop("The covariate screen removed every covariate for this surface ",
-           "(constant and/or collinear within this locality), so Co-Kriging ",
-           "has no secondary variable left. Select different covariates, or ",
-           "answer \"Keep All\" in the collinearity dialog.")
+    res$aux_used <- kept
+    res$aux_dropped <- setdiff(aux_vars, kept)
+    # gstat() with only the primary variable still fits (fit.lmc succeeds on a
+    # single variable) and would return ordinary kriging under a 15-point
+    # neighbourhood labelled Co-Kriging. Co-kriging with no secondary variable
+    # is not co-kriging, so the named OK fallback takes over instead.
+    if (length(kept) == 0) {
+      stop(if (length(candidates) == 0) {
+        paste0("No selected covariate is measured with the target at ", CK_MIN_COLLOCATED,
+               " or more locations, so Co-Kriging has no secondary variable.")
+      } else {
+        paste0("The covariate screen removed every covariate for this surface ",
+               "(constant and/or collinear within this locality), so Co-Kriging ",
+               "has no secondary variable left. Select different covariates, or ",
+               "answer \"Keep All\" in the collinearity dialog.")
+      })
     }
 
-    # Same standardization and LMC fit the folds run, on this surface's rows.
-    data_scaled <- .ck_standardize(data, aux_vars)
-    lmc <- .ck_fit_lmc(data_scaled, target_var, aux_vars, lags, ck_nmax)
-    res$log_msg <- paste0(res$log_msg, lmc$log_msg)
+    # Same data assembly, standardization and LMC fit the folds run.
+    lmc <- .ck_fit_lmc(data, extra, target_var, kept, lags, ck_nmax)
+    res$ck_design <- lmc$design
+    res$log_msg <- paste0(res$log_msg, .ck_design_log(lmc, l, surface, nrow(data)), lmc$log_msg)
     g <- lmc$g
     if (is.null(g)) {
       write_warning_file(l, prefix, "LMC model fit failed, using Ordinary Kriging fallback.")
@@ -1171,24 +1413,36 @@ apply_CK <- function(data, target_var, grid_p, lags, method_params, aux_vars, l 
 
     if(!is.null(g)) {
       res$gstat_obj <- g
+      # A smooth structure (Gaussian, or Matern nu >= 1) with a negligible
+      # nugget makes the kriging matrices near-singular, the more so the denser
+      # the data (Posa 1989); dense covariate-only rows are exactly where
+      # co-kriging gains, so the condition is named.
+      smooth <- names(Filter(function(m) isTRUE(vgm_smooth_nugget_share(m) < VGM_SMOOTH_NUGGET_WARN_SHARE),
+                             g$model[names(g$data)]))
+      if (length(smooth)) {
+        res$log_msg <- paste0(res$log_msg, "\n[CK] ", l, " (", surface, "): the LMC's ",
+          as.character(g$model[[1]]$model[2]), " structure has a nugget below 5% of the sill for ",
+          paste(ck_id_columns(g)[smooth], collapse = ", "),
+          "; such a system can be ill-conditioned, the more so with dense covariate data. ",
+          "Compare its cross-validation with the other engines' before relying on the map.")
+      }
       # Every fold re-screens the covariates, re-standardizes and refits the
-      # LMC on its own training rows, and the held-out rows contribute their
-      # coordinates only: covariates here are co-sampled lab measurements, so
-      # the map has none at its prediction locations either.
+      # LMC on its training rows plus the covariate-only rows. A held-out
+      # location loses its target AND its collocated covariate values and
+      # contributes its coordinates only, as a grid cell does.
       cv_ck <- function(pop, folds, row_id, progress) {
         fold_ck <- function(train, newdata, i) {
-          kept <- screen_covariates(train, candidates, vif_threshold)$kept
-          if (!length(kept)) stop("the covariate screen removed every covariate in this fold")
-          fit_i <- .ck_fit_lmc(.ck_standardize(train, kept), target_var, kept,
-                               calc_scientific_lags(train), ck_nmax)
+          kept_i <- .ck_screen(train, extra, candidates, vif_threshold)$kept
+          if (!length(kept_i)) stop("the covariate screen removed every covariate in this fold")
+          fit_i <- .ck_fit_lmc(train, extra, target_var, kept_i, calc_scientific_lags(train), ck_nmax)
           if (is.null(fit_i$g)) stop(fit_i$error_msg)
           p <- predict(fit_i$g, newdata, debug.level = 0)
           list(pred = p[[paste0(fit_i$target_id, ".pred")]], var = p[[paste0(fit_i$target_id, ".var")]],
-               meta = list(kept = kept, heuristic_seed = fit_i$heuristic_seed))
+               meta = list(kept = kept_i, heuristic_seed = fit_i$heuristic_seed))
         }
         cv <- run_kriging_folds(pop, target_var, row_id, folds, fold_ck,
                                 method_params$cancel_file, progress)
-        attr(cv, "cv_screen") <- .fold_screen_summary(cv, aux_vars)
+        attr(cv, "cv_screen") <- .fold_screen_summary(cv, kept)
         cv
       }
       res <- .run_kriging_cv(res, cv_ck, method_params, data, "CK", l, prefix)
@@ -1240,34 +1494,252 @@ apply_CK <- function(data, target_var, grid_p, lags, method_params, aux_vars, l 
   return(res)
 }
 
-#' Inverse distance weighting with power `idw_p` (default 2) over the `idw_nmax`
-#' nearest samples (default 12). Deterministic: `res_sf` carries no usable
-#' variance.
+#' Inverse distance weighting over the `idw_nmax` nearest samples (default
+#' 12). `idw_p` >= 0 is a fixed power (0 = equal weights); NULL, NA or negative
+#' is Auto (CV): the map uses the power select_idw_power() picks on all rows,
+#' and every CV fold re-selects it from its own training rows (inner folds
+#' under the same strategy), so the reported CV includes the selection step.
+#' With `method_params$idw_select_col` set (an unseparated Predicted surface)
+#' the selection reads that column, the measured values, on the rows that
+#' carry it. `res$idw_fit` records the mode, the map power (Inf = the
+#' nearest-neighbour limit), its CV-RMSE profile, the end of the family it
+#' reached if any (`limit`), the fold powers of realization 1 and, under Auto
+#' (CV), whose values the power was selected on (`select_source`: "own" or
+#' "measured"). Under kNNDM every fold set, the nested ones included, is
+#' matched to the map's locations `method_params$cv_domain_xy`; `res$cv_design`
+#' is the distance match of the reference folds.
+#' Deterministic: `res_sf` carries no usable variance.
 apply_IDW <- function(data, target_var, grid_p, method_params, l = "region", prefix = "act") {
   res <- init_interpolation_res()
-  
+
   update_progress_file(l, prefix, 20, 100)
   form_ok <- reformulate("1", response = target_var)
-  # run_regional_interpolation always populates these, but the engine is
-  # publicly callable and apply_TPS's fallback relies on that invariant holding
-  # (see the comment there); default to the same values krige_covariates uses.
+  # run_regional_interpolation always populates idw_nmax; the engine is
+  # publicly callable and apply_TPS's fallback relies on it, so it resolves
+  # the same default as the point-error surface.
   idw_nmax <- method_params$idw_nmax %||% 12
-  idw_p <- method_params$idw_p %||% 2
+  idw_p <- method_params$idw_p
+  auto_p <- is.null(idw_p) || is.na(idw_p) || idw_p < 0
   coords_idw <- sf::st_coordinates(data)
+  domain_xy <- method_params$cv_domain_xy
+  sel_col <- method_params$idw_select_col
+  on_measured <- auto_p && !is.null(sel_col) && sel_col %in% names(data)
+  sel_v <- if (on_measured) data[[sel_col]] else data[[target_var]]
+  select_on <- function(rows, folds = NULL) {
+    rows <- rows[is.finite(sel_v[rows])]
+    select_idw_power(coords_idw[rows, , drop = FALSE], sel_v[rows],
+                     method_params$cv_strategy, idw_nmax, domain_xy = domain_xy, folds = folds)
+  }
+  # The reference CV's folds. Where every row carries the values the power is
+  # selected on, the map's selection folds the same rows under the same seed,
+  # so it takes these (under kNNDM, one fold search serves both).
+  ref_folds <- NULL
+  sel <- if (auto_p) {
+    if (all(is.finite(sel_v))) {
+      ref_folds <- make_cv_folds(coords_idw, method_params$cv_strategy, nrow(data), CV_FOLD_SEED, domain_xy)
+    }
+    select_on(seq_len(nrow(data)), ref_folds)
+  }
+  map_p <- if (auto_p) sel$p else idw_p
+
   cv_idw <- function(seed) {
-    folds <- make_cv_folds(coords_idw, method_params$cv_strategy, nrow(data), seed)
-    cv <- krige.cv(form_ok, data, nmax = idw_nmax, set = list(idp = idw_p),
-                   nfold = folds, debug.level = 0)
+    folds <- if (seed == CV_FOLD_SEED && !is.null(ref_folds)) ref_folds else
+      make_cv_folds(coords_idw, method_params$cv_strategy, nrow(data), seed, domain_xy)
+    if (seed == CV_FOLD_SEED) ref_folds <<- folds
+    if (!auto_p) {
+      cv <- krige.cv(form_ok, data, nmax = idw_nmax, set = list(idp = idw_p),
+                     nfold = folds, debug.level = 0)
+    } else {
+      # Nested: each fold selects its power from its own training rows before
+      # gstat predicts its held-out rows, so no held-out value reaches the power
+      # that predicts it. The object keeps krige.cv's columns and class.
+      ids <- sort(unique(folds))
+      pred <- rep(NA_real_, nrow(data))
+      fold_p <- stats::setNames(numeric(length(ids)), ids)
+      for (j in seq_along(ids)) {
+        te <- which(folds == ids[j])
+        fold_p[j] <- select_on(setdiff(seq_len(nrow(data)), te))$p
+        pred[te] <- idw_gstat(form_ok, data[-te, ], data[te, ], idw_nmax, fold_p[j])$var1.pred
+      }
+      obs <- data[[target_var]]
+      cv <- sf::st_sf(var1.pred = pred, var1.var = NA_real_, observed = obs,
+                      residual = obs - pred, zscore = NA_real_, fold = as.integer(folds),
+                      geometry = sf::st_geometry(data))
+      attr(cv, "fold_power") <- fold_p
+    }
     attr(cv, "block_fallback") <- attr(folds, "block_fallback")
+    attr(cv, "knndm") <- attr(folds, "knndm")
     cv
   }
   res <- run_cv_with_repeats(res, cv_idw, method_params, nrow(data), "IDW", l, prefix)
+  res$cv_design <- cv_distance_summary(coords_idw, ref_folds, domain_xy, units = crs_unit_label(data))
 
-  res$res_sf <- idw(form_ok, data, grid_p, nmax = idw_nmax, idp = idw_p, debug.level = 0)
+  # `nmax`: the neighbours an equal-weights map averages (fewer where the
+  # locality has fewer samples), and `n_samples` the samples the map is drawn
+  # from, for the notes that name them.
+  res$idw_fit <- list(mode = if (auto_p) "cv" else "fixed", p = map_p,
+                      profile = sel$profile, limit = sel$limit,
+                      skipped = sel$skipped, fold_p = attr(res$cv_obj, "fold_power"),
+                      nmax = min(idw_nmax, nrow(data)), n_samples = nrow(data),
+                      select_source = if (auto_p) (if (on_measured) "measured" else "own"))
+  if (auto_p) res <- .log_idw_selection(res, l, prefix)
+
+  res$res_sf <- idw_gstat(form_ok, data, grid_p, idw_nmax, map_p)
   res$res_sf <- sanitize_spatial_predictions(res$res_sf)
-  
+
   update_progress_file(l, prefix, 100, 100)
   return(res)
+}
+
+# Run-log lines of an Auto (CV) power selection: the map power, the spread of
+# the fold powers, how well the data separate the powers (idw_flatness_note)
+# and, for a selection at an end of the family or at a steep power, what it
+# means and what is left to adjust (idw_limit_note). A practically stepped map
+# (idw_stepped: the nearest-neighbour limit, or a power from IDW_STEEP_POWER
+# up) is also a warning on both channels (progress panel and a [WARN] run-log
+# line): it should not go unnoticed.
+.log_idw_selection <- function(res, l, prefix) {
+  fit <- res$idw_fit
+  surface <- if (identical(prefix, "pre")) "Predicted" else "Actual"
+  head <- sprintf("[IDW] %s (%s): Auto (CV)", l, surface)
+  if (!is.null(fit$skipped)) {
+    res$log_msg <- paste0(res$log_msg, "\n", head, " not searched (", fit$skipped, "); p = 2.")
+    return(res)
+  }
+  fp <- fit$fold_p
+  folds_txt <- if (length(fp)) {
+    sprintf("; folds selected p = %s [%s–%s]", format_power(stats::median(fp)),
+            format_power(min(fp)), format_power(max(fp)))
+  } else ""
+  rows_txt <- if (identical(fit$select_source, "measured")) " on the measured values of all rows" else " on all rows"
+  res$log_msg <- paste0(res$log_msg, "\n", head, " selected ", idw_power_text(fit$p),
+                        rows_txt, folds_txt, ".")
+  flat <- idw_flatness_note(fit$profile, fit$p)
+  if (!is.null(flat)) res$log_msg <- paste0(res$log_msg, "\n", head, ": ", flat)
+  note <- idw_limit_note(fit$limit, fit$nmax, fit[["n_samples"]], fit$p)
+  if (idw_stepped(fit$p)) {
+    msg <- sprintf("%s (%s): %s", l, surface, note)
+    write_warning_file(l, prefix, msg)
+    res$log_msg <- paste0(res$log_msg, "\n[WARN] ", msg)
+  } else if (!is.null(note)) {
+    res$log_msg <- paste0(res$log_msg, "\n", head, ": ", note)
+  }
+  res
+}
+
+#' Whether a power's map is practically the stepped nearest-neighbour surface:
+#' the limit itself, or a power from IDW_STEEP_POWER up.
+idw_stepped <- function(p) length(p) == 1 && isTRUE(p >= IDW_STEEP_POWER)
+
+#' How well the data separate the powers of an Auto (CV) profile
+#' (idw_cv_profile's `within_se`): how many are within one standard error of
+#' the best and, unless the selection is p = 2, whether p = 2 is among them.
+#' One sentence for the run log and the IDW Power Selection panel; NULL
+#' without the flag.
+idw_flatness_note <- function(profile, p) {
+  w <- profile$within_se
+  if (is.null(w) || !length(w) || anyNA(w)) return(NULL)
+  total <- length(w)
+  if (sum(w) <= 1) {
+    return(sprintf("None of the other %d powers is within one standard error of the selected one.", total - 1L))
+  }
+  txt <- sprintf("%d of %d powers are within one standard error of the best", sum(w), total)
+  two <- which(profile$p == 2)
+  if (length(two) != 1 || isTRUE(p == 2)) return(paste0(txt, "."))
+  if (w[two]) {
+    paste0(txt, ", p = 2 among them: on these folds the data do not distinguish p = 2 from ",
+           idw_power_text(p), ".")
+  } else {
+    paste0(txt, "; p = 2 is not among them.")
+  }
+}
+
+#' What an Auto (CV) selection at an end of the IDW family, or at a steep
+#' power (idw_stepped), means and what is left to adjust: one sentence pair for
+#' the run log and the IDW Power Selection panel. NULL for a power between.
+#' `n`, the samples the map is drawn from, tells an equal-weights map over
+#' every sample (one value) from a local mean.
+idw_limit_note <- function(limit, nmax, n = NULL, p = NULL) {
+  if (identical(limit, "equal_weights")) {
+    if (is.numeric(nmax) && is.numeric(n) && isTRUE(nmax >= n)) {
+      return(sprintf(paste0(
+        "Equal weights (p = 0) predicted the held-out samples best, and Max Neighbors reaches all %d samples, ",
+        "so the map is one value, their mean: at this sample spacing, weighting by distance does not help. ",
+        "A smaller Max Neighbors gives a local mean, and Ordinary Kriging models such short-range variation ",
+        "as a nugget."), n))
+    }
+    return(sprintf(paste0(
+      "Equal weights (p = 0) predicted the held-out samples best, so the map is the mean of the %s nearest ",
+      "samples: at this sample spacing, weighting by distance does not help. Max Neighbors now sets the ",
+      "smoothing, and Ordinary Kriging models such short-range variation as a nugget."), nmax))
+  }
+  if (identical(limit, "nearest_neighbour")) {
+    return(paste0(
+      "Auto (CV) selected the nearest-neighbour limit (p → ∞): every location takes the value of its ",
+      "nearest sample, a stepped (Thiessen) surface. Ordinary Kriging or TPS give a continuous surface ",
+      "that honours the same short-range continuity."))
+  }
+  if (idw_stepped(p)) {
+    return(sprintf(paste0(
+      "Auto (CV) selected %s: a sample 10%% farther than the nearest keeps under a ninth of the nearest's ",
+      "weight, so the map is practically the stepped nearest-neighbour (Thiessen) surface. Ordinary ",
+      "Kriging or TPS give a continuous surface that honours the same short-range continuity."),
+      idw_power_text(p)))
+  }
+  NULL
+}
+
+# A power as the log, the panels and the run record print it: four significant
+# digits (the app's display rule), no trailing zeros (2, 2.25, 0.25, 2.125);
+# the nearest-neighbour limit prints as ∞.
+format_power <- function(p) {
+  vapply(p, function(x) if (is.infinite(x)) "∞" else format(signif(x, 4), trim = TRUE, drop0trailing = TRUE),
+         character(1), USE.NAMES = FALSE)
+}
+
+# The GCV curve of a fields::Tps fit as the panel draws it and the export
+# writes it: lambda against the GCV score, over the grid's positive lambdas
+# with a finite score. NULL without a grid.
+tps_gcv_table <- function(grid) {
+  if (is.null(grid) || !NROW(grid)) return(NULL)
+  df <- data.frame(lambda = as.numeric(grid[, 1]), gcv = as.numeric(grid[, 3]))
+  df <- df[df$lambda > 0 & is.finite(df$gcv), , drop = FALSE]
+  rownames(df) <- NULL
+  if (nrow(df)) df else NULL
+}
+
+#' Which end of the spline family GCV's minimum sits at on fields' lambda grid
+#' (tps_gcv_table): "plane", the largest lambda, whose effective df is ~3, the
+#' least-squares plane and the family's smoothest member, with nothing beyond
+#' it; "interpolation", the smallest lambda, the least smoothing GCV
+#' evaluates, beyond which lies exact interpolation (lambda = 0), which GCV
+#' cannot score (0/0). NULL for a minimum inside the grid.
+tps_gcv_end <- function(gcv) {
+  if (is.null(gcv) || nrow(gcv) < 3) return(NULL)
+  lam <- gcv$lambda[which.min(gcv$gcv)]
+  if (lam == max(gcv$lambda)) "plane" else if (lam == min(gcv$lambda)) "interpolation"
+}
+
+#' What a GCV minimum at the least-smoothing end of fields' grid means, with
+#' the run's cross-validation of exact interpolation on the same folds beside
+#' this run's (`fit$exact_cv_rmse`, `fit$run_cv_rmse`, NA when either could
+#' not score every sample): one note for the run log and the TPS Smoothing
+#' Selection panel. Worker-side, so it formats without ui_formatting.R.
+tps_interpolation_end_note <- function(fit, n) {
+  num <- function(x) format(signif(x, 4), trim = TRUE, drop0trailing = TRUE)
+  gcv <- if (identical(fit$gcv_source, "measured")) "GCV on the measured values" else "GCV"
+  head <- sprintf(paste0("%s chose the least smoothing it can evaluate (effective df %.1f of %d samples); ",
+                         "exact interpolation (λ = 0), the other end of the spline family, lies beyond it ",
+                         "and GCV cannot score it."), gcv, fit$eff_df, n)
+  ex <- fit$exact_cv_rmse
+  run <- fit$run_cv_rmse
+  if (!isTRUE(is.finite(ex)) || !isTRUE(is.finite(run))) {
+    return(paste(head, "The two could not be compared at every sample of these folds; set Smoothing (λ) to Exact (λ = 0) and run again to compare them."))
+  }
+  paste0(head, " On the same folds it cross-validates at RMSE ", num(ex), " against ", num(run),
+         " for this run: ",
+         if (ex < run) "exact interpolation predicts the held-out samples better; select Exact (λ = 0) under Smoothing (λ)."
+         else "this run's smoothing predicts them better.")
 }
 
 #' Thin plate spline (fields::Tps) on coordinates scaled to the unit box.
@@ -1275,8 +1747,13 @@ apply_IDW <- function(data, target_var, grid_p, method_params, l = "region", pre
 #' exactly, a positive value fixes it; CV folds refit under the same rule. With
 #' `method_params$tps_gcv_col` set (an unseparated Predicted surface), a GCV
 #' lambda is the one GCV selects for THAT column (the measured values) on the
-#' same rows, in the map fit and in every fold. Any failure falls back to
-#' apply_IDW() with a named warning.
+#' same rows, in the map fit and in every fold. `res$tps_fit` records the mode,
+#' the fitted lambda and effective df and, under Auto (GCV), the GCV curve of
+#' the fit that set lambda, the end of the family its minimum reached if any
+#' (`gcv_end`, tps_gcv_end) and, at the least-smoothing end, exact
+#' interpolation's cross-validation beside this run's. Any failure falls back
+#' to apply_IDW() with a named warning; the fallback's `idw_fit` and log travel
+#' with it.
 apply_TPS <- function(data, target_var, grid_p, method_params, l = "region", prefix = "act") {
   res <- init_interpolation_res()
 
@@ -1297,25 +1774,49 @@ apply_TPS <- function(data, target_var, grid_p, method_params, l = "region", pre
     gcv_on <- if (auto_lam && !is.null(gcv_col) && gcv_col %in% names(data)) data[[gcv_col]] else NULL
     # Fits the spline on the given rows. Both axes already share one scale;
     # per-axis scaling would introduce anisotropy determined by the sample
-    # bounding box.
-    fit_tps <- function(rows) {
+    # bounding box. On the measured values' GCV, the GCV grid of that selecting
+    # fit rides along as an attribute (read once, for the map fit's record).
+    # give.warnings = FALSE: fields prints its own note when GCV's minimum sits
+    # at an end of its lambda grid; the run reports that end itself
+    # (tps_gcv_end), with what it means.
+    fit_tps <- function(rows, lam = if (auto_lam) NULL else tps_lam) {
       x <- pts_sc[rows, , drop = FALSE]
       y <- data[[target_var]][rows]
-      if (!auto_lam) return(fields::Tps(x, y, lambda = tps_lam, scale.type = "unscaled"))
-      if (is.null(gcv_on)) return(fields::Tps(x, y, scale.type = "unscaled"))
+      if (!is.null(lam)) return(fields::Tps(x, y, lambda = lam, scale.type = "unscaled", give.warnings = FALSE))
+      if (is.null(gcv_on)) return(fields::Tps(x, y, scale.type = "unscaled", give.warnings = FALSE))
       m <- is.finite(gcv_on[rows])
-      lam <- fields::Tps(x[m, , drop = FALSE], gcv_on[rows][m], scale.type = "unscaled")$lambda
-      fields::Tps(x, y, lambda = lam, scale.type = "unscaled")
+      sel <- fields::Tps(x[m, , drop = FALSE], gcv_on[rows][m], scale.type = "unscaled", give.warnings = FALSE)
+      mod <- fields::Tps(x, y, lambda = sel$lambda, scale.type = "unscaled", give.warnings = FALSE)
+      attr(mod, "gcv_grid") <- sel$gcv.grid
+      mod
     }
 
     gr_raw <- st_coordinates(grid_p)
     gr_sc <- cbind((gr_raw[,1]-xm)/max_range, (gr_raw[,2]-ym)/max_range)
     mod <- fit_tps(seq_len(nrow(pts_sc)))
-    res$tps_fit <- list(lambda = as.numeric(mod$lambda), eff_df = as.numeric(mod$eff.df))
+    # The run's own record of how lambda was set: under Auto (GCV) the GCV
+    # grid of the fit that selected it (the curve the Scientific Analysis panel
+    # draws), with whose values it was computed on.
+    gcv_grid <- if (auto_lam) (if (is.null(gcv_on)) mod$gcv.grid else attr(mod, "gcv_grid"))
+    gcv_tab <- tps_gcv_table(gcv_grid)
+    res$tps_fit <- list(
+      mode = if (auto_lam) "gcv" else if (tps_lam == 0) "exact" else "fixed",
+      lambda = as.numeric(mod$lambda), eff_df = as.numeric(mod$eff.df),
+      gcv = gcv_tab,
+      gcv_source = if (auto_lam) (if (is.null(gcv_on)) "own" else "measured"),
+      gcv_end = tps_gcv_end(gcv_tab))
     if (isTRUE(res$tps_fit$eff_df < 3.5)) {
       mode <- if (!auto_lam) "Fixed lambda" else if (!is.null(gcv_on)) "GCV on the measured values" else "GCV"
-      msg <- sprintf("%s produced a near-planar TPS surface (effective df %.2f; a plane has df 3). The map is dominated by a linear trend.",
-                     mode, res$tps_fit$eff_df)
+      msg <- if (identical(res$tps_fit$gcv_end, "plane")) {
+        # The smoothest end of the family: nothing lies beyond it to search.
+        sprintf(paste0("%s chose the smoothest end of the spline family, the least-squares plane ",
+                       "(effective df %.2f; a plane has df 3), and nothing lies beyond it to search: at ",
+                       "this sampling the data show no spatial structure beyond a linear trend, and the ",
+                       "map is that trend."), mode, res$tps_fit$eff_df)
+      } else {
+        sprintf("%s produced a near-planar TPS surface (effective df %.2f; a plane has df 3). The map is dominated by a linear trend.",
+                mode, res$tps_fit$eff_df)
+      }
       write_warning_file(l, prefix, msg)
       res$log_msg <- paste0(res$log_msg, "\n", msg)
     }
@@ -1324,14 +1825,21 @@ apply_TPS <- function(data, target_var, grid_p, method_params, l = "region", pre
     n_pts <- nrow(data)
     update_progress_file(l, prefix, 40, 100)
     # make_cv_folds seeds itself and restores the caller's RNG; LOOCV collapses
-    # to one point per fold, so a single loop covers every strategy.
-    tps_cv <- function(seed) {
-      tps_folds <- make_cv_folds(raw_pts, method_params$cv_strategy, n_pts, seed)
+    # to one point per fold, so a single loop covers every strategy. `...`
+    # reaches fit_tps: lam = 0 cross-validates exact interpolation on the same
+    # folds, which are the reference realization's, kept rather than rebuilt
+    # (a kNNDM fold search is not free).
+    domain_xy <- method_params$cv_domain_xy
+    ref_folds <- NULL
+    tps_cv <- function(seed, ...) {
+      tps_folds <- if (seed == CV_FOLD_SEED && !is.null(ref_folds)) ref_folds else
+        make_cv_folds(raw_pts, method_params$cv_strategy, n_pts, seed, domain_xy)
+      if (seed == CV_FOLD_SEED) ref_folds <<- tps_folds
       cv_vals <- rep(NA_real_, n_pts)
       for (i in sort(unique(tps_folds))) {
         test_idx <- which(tps_folds == i)
         tmp_mod <- tryCatch({
-          fit_tps(setdiff(seq_len(n_pts), test_idx))
+          fit_tps(setdiff(seq_len(n_pts), test_idx), ...)
         }, error = function(e) NULL)
 
         if (!is.null(tmp_mod)) {
@@ -1346,13 +1854,34 @@ apply_TPS <- function(data, target_var, grid_p, method_params, l = "region", pre
         coords = c("x", "y"), crs = sf::st_crs(data), remove = FALSE
       )
       attr(cv, "block_fallback") <- attr(tps_folds, "block_fallback")
+      attr(cv, "knndm") <- attr(tps_folds, "knndm")
       cv
     }
 
     cv_res <- tps_cv(CV_FOLD_SEED)
     res$cv_obj <- cv_res
     res$cv_metrics <- perform_cv(cv_res)
+    res$cv_design <- cv_distance_summary(raw_pts, ref_folds, domain_xy, units = crs_unit_label(data))
     res <- add_cv_repeats(res, tps_cv, method_params, n_pts, "TPS", l, prefix)
+
+    # GCV's minimum at its least-smoothing end: exact interpolation lies
+    # beyond it, where GCV is 0/0, so the run cross-validates it on the same
+    # folds and sets it beside this run's figure. Both are compared only when
+    # both scored every sample.
+    if (identical(res$tps_fit$gcv_end, "interpolation")) {
+      ex <- tryCatch(perform_cv(tps_cv(CV_FOLD_SEED, lam = 0), moran = FALSE), error = function(e) NULL)
+      both <- !is.null(ex) && isTRUE(ex$coverage == 1) && isTRUE(res$cv_metrics$coverage == 1)
+      res$tps_fit$exact_cv_rmse <- if (both) ex$rmse else NA_real_
+      res$tps_fit$run_cv_rmse <- if (both) res$cv_metrics$rmse else NA_real_
+      surface <- if (identical(prefix, "pre")) "Predicted" else "Actual"
+      msg <- sprintf("%s (%s): %s", l, surface, tps_interpolation_end_note(res$tps_fit, n_pts))
+      if (isTRUE(res$tps_fit$exact_cv_rmse < res$tps_fit$run_cv_rmse)) {
+        write_warning_file(l, prefix, msg)
+        res$log_msg <- paste0(res$log_msg, "\n[WARN] ", msg)
+      } else {
+        res$log_msg <- paste0(res$log_msg, "\n[TPS] ", msg)
+      }
+    }
 
     grid_p %>% mutate(var1.pred = as.vector(p_v))
   }, error = function(e) {
@@ -1366,17 +1895,22 @@ apply_TPS <- function(data, target_var, grid_p, method_params, l = "region", pre
     fb <- apply_IDW(data, target_var, grid_p, method_params, l, prefix)
     out <- fb$res_sf
     attr(out, "tps_fallback") <- list(cv_obj = fb$cv_obj, cv_metrics = fb$cv_metrics,
-                                      cv_obj_reps = fb$cv_obj_reps, err = e$message)
+                                      cv_obj_reps = fb$cv_obj_reps, idw_fit = fb$idw_fit,
+                                      cv_design = fb$cv_design,
+                                      log = fb$log_msg, err = e$message)
     out
   })
 
   fb <- attr(res$res_sf, "tps_fallback")
   if (!is.null(fb)) {
     res$tps_fit <- NULL
+    res$idw_fit <- fb$idw_fit
     res$cv_obj <- fb$cv_obj
     res$cv_metrics <- fb$cv_metrics
     res$cv_obj_reps <- fb$cv_obj_reps
-    res$log_msg <- paste0(res$log_msg, "\nTPS failed: ", fb$err, ". Falling back to IDW.")
+    res["cv_design"] <- list(fb$cv_design)
+    # The fallback's own log (its IDW power selection, a failed CV) follows.
+    res$log_msg <- paste0(res$log_msg, "\nTPS failed: ", fb$err, ". Falling back to IDW.", fb$log)
     attr(res$res_sf, "tps_fallback") <- NULL
   }
 
@@ -1388,8 +1922,14 @@ apply_TPS <- function(data, target_var, grid_p, method_params, l = "region", pre
 
 #' Dispatch to the engine named by `method` (OK, RK, RFK, CK, IDW, TPS). An
 #' engine error comes back as a result list with NULL `res_sf` and the message
-#' in `log_msg`, never as a condition.
+#' in `log_msg`, never as a condition. Without `method_params$cv_domain_xy`
+#' (run_regional_interpolation passes the boundary's lattice) the map's
+#' locations are a regular thinning of `grid_p` (knndm_domain_points).
 apply_interpolation <- function(data, target_var, method, grid_p, aux_vars, lags, method_params, l, prefix, vif_threshold = 10) {
+  if (is.null(method_params$cv_domain_xy)) {
+    method_params$cv_domain_xy <- tryCatch(knndm_domain_points(grid_xy = sf::st_coordinates(grid_p)),
+                                           error = function(e) NULL)
+  }
   res <- tryCatch({
     if(method == "OK") {
       apply_OK(data, target_var, grid_p, lags, method_params, l, prefix)
@@ -1405,10 +1945,10 @@ apply_interpolation <- function(data, target_var, method, grid_p, aux_vars, lags
       apply_TPS(data, target_var, grid_p, method_params, l, prefix)
     } else if(method %in% c("RK", "RFK", "CK")) {
       # Reached only when a covariate-driven engine was selected with no
-      # covariates: every branch above tests `length(aux_vars) > 0`, so control
-      # used to fall through to the "unknown method" stop() and told the user
-      # RK was an unrecognised method. The UI path guards this, but the engine
-      # is publicly callable.
+      # covariates: every branch above tests `length(aux_vars) > 0`, and the
+      # "unknown method" stop() below would tell the user RK was an
+      # unrecognised method. The UI path guards this, but the engine is
+      # publicly callable.
       stop(method, " requires at least one auxiliary covariate; none were supplied ",
            "(or all were removed by the covariate-completeness filter).")
     } else {

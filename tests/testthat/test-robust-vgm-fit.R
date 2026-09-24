@@ -722,6 +722,98 @@ test_that("build_directional_variogram_ggplot labels bearings with compass names
   expect_null(build_directional_variogram_ggplot(data.frame(dist = 1, gamma = 1)))
 })
 
+# ── Pooled within-locality variograms ("Total (Combined)") ────────────────
+
+pooled_locality <- function(n, x0, mu = 0, seed = 1) {
+  with_seed(seed, sf::st_as_sf(data.frame(x = x0 + runif(n, 0, 1500), y = 4e6 + runif(n, 0, 1200),
+                                          v = mu + rnorm(n)),
+                               coords = c("x", "y"), crs = 32635))
+}
+
+# The classical estimator by hand over the pairs of each locality, on classes
+# (b_k, b_k+1].
+brute_within_variogram <- function(pts_list, b) {
+  pairs <- do.call(rbind, lapply(pts_list, function(p) {
+    d <- as.matrix(stats::dist(sf::st_coordinates(p)))
+    sv <- outer(p$v, p$v, "-")^2 / 2
+    lt <- lower.tri(d)
+    data.frame(bin = findInterval(d[lt], b, left.open = TRUE), d = d[lt], g = sv[lt])
+  }))
+  pairs <- pairs[pairs$bin >= 1 & pairs$bin < length(b), ]
+  data.frame(np = as.numeric(tapply(pairs$d, pairs$bin, length)),
+             dist = as.numeric(tapply(pairs$d, pairs$bin, mean)),
+             gamma = as.numeric(tapply(pairs$g, pairs$bin, mean)))
+}
+
+test_that("the pooled within-locality variogram is the classical estimator over within-locality pairs", {
+  # Localities 50 km apart, then two sharing one area with means 6 apart: in
+  # the second layout a pair across localities falls inside the lag range and
+  # would add (6^2)/2 to its class.
+  for (layout in list(c(500000, 550000), c(500000, 500000))) {
+    pl <- list(A = pooled_locality(40, layout[1], seed = 1),
+               B = pooled_locality(55, layout[2], mu = 6, seed = 2))
+    pv <- pooled_within_variogram(pl, "v")
+    half_diag <- vapply(pl, function(p) {
+      bb <- sf::st_bbox(p)
+      sqrt((bb$xmax - bb$xmin)^2 + (bb$ymax - bb$ymin)^2) / 2
+    }, numeric(1))
+    b <- seq(0, min(half_diag), length.out = 16)
+    expect_equal(attr(pv, "boundaries"), b)
+    ref <- brute_within_variogram(pl, b)
+    expect_equal(pv$np, ref$np)
+    expect_equal(pv$dist, ref$dist, tolerance = 1e-12)
+    expect_equal(pv$gamma, ref$gamma, tolerance = 1e-12)
+    expect_identical(attr(pv, "localities"), c("A", "B"))
+    expect_length(attr(pv, "excluded"), 0)
+  }
+  # In the shared area every class of all points mixes in cross pairs, whose
+  # expected semivariance is (6^2 + 2)/2 = 19 against 1 within a locality.
+  every <- gstat::variogram(v ~ 1, rbind(pl$A, pl$B), boundaries = b)
+  expect_lt(sum(pv$np), sum(every$np))
+  expect_lt(mean(pv$gamma), 2)
+  expect_gt(min(every$gamma), 3)
+})
+
+test_that("a pooled variogram of one locality is gstat's variogram on the same classes", {
+  a <- pooled_locality(40, 500000)
+  one <- pooled_within_variogram(list(A = a), "v")
+  ref <- gstat::variogram(v ~ 1, a, boundaries = attr(one, "boundaries"))
+  expect_identical(one$np, ref$np)
+  expect_equal(one$dist, ref$dist, tolerance = 1e-12)
+  expect_equal(one$gamma, ref$gamma, tolerance = 1e-12)
+  expect_equal(attr(one, "within"), a$v - mean(a$v))
+  fit <- robust_vgm_fit(one, attr(one, "within"))
+  expect_s3_class(fit, "variogramModel")
+})
+
+test_that("a locality below the minimum is left out of the pooled variogram and named", {
+  pl <- list(A = pooled_locality(40, 500000, seed = 1), B = pooled_locality(55, 550000, seed = 2),
+             C = pooled_locality(POOLED_VGM_MIN_N - 1L, 600000, seed = 3), D = NULL)
+  pv <- pooled_within_variogram(pl, "v")
+  expect_identical(attr(pv, "localities"), c("A", "B"))
+  expect_identical(attr(pv, "excluded"), c("C", "D"))
+  kept <- pooled_within_variogram(pl[c("A", "B")], "v")
+  expect_identical(pv$np, kept$np)
+  expect_identical(pv$gamma, kept$gamma)
+  cap <- pooled_within_caption(pv)
+  expect_identical(cap$count, "2 localities")
+  expect_identical(cap$note, sprintf("Left out (fewer than %d located values): C, D", POOLED_VGM_MIN_N))
+  expect_null(pooled_within_caption(pooled_within_variogram(pl["A"], "v"))$note)
+  expect_null(pooled_within_variogram(pl[c("C", "D")], "v"))
+})
+
+test_that("the pooled directional cones partition the pooled omnidirectional pairs", {
+  pl <- list(A = pooled_locality(90, 500000, seed = 1), B = pooled_locality(110, 550000, seed = 2))
+  omni <- pooled_within_variogram(pl, "v")
+  dv <- pooled_within_directional(pl, "v")
+  expect_equal(sort(unique(dv$dir.hor)), c(0, 45, 90, 135))
+  b <- attr(omni, "boundaries")
+  per_class <- tapply(dv$np, findInterval(dv$dist, b, left.open = TRUE), sum)
+  expect_equal(as.numeric(per_class), omni$np)
+  expect_identical(attr(dv, "localities"), c("A", "B"))
+  expect_s3_class(build_directional_variogram_ggplot(dv, title = "T"), "ggplot")
+})
+
 test_that("the practical-range factor is the 95 % correlation-decay solution", {
   # The practical range is where the correlation has decayed to 0.05. Each
   # factor below is that solution for its family, re-derived here rather than
@@ -1013,4 +1105,26 @@ test_that("vgm_params_table_df transposes a named locality and pools the total",
   expect_equal(mat$Actual[1], "Mat (kappa = 1.5)")
 
   expect_null(vgm_params_table_df(fits, "Missing"))
+})
+
+test_that("a residual-kriging listing says what each variogram describes", {
+  fits <- list(
+    A_act = gstat::vgm(psill = 0.6, model = "Sph", range = 300, nugget = 0.4),
+    B_act = gstat::vgm(psill = 1.0, model = "Gau", range = 200, nugget = 0.0),
+    B_pre = gstat::vgm(psill = 0.9, model = "Exp", range = 500, nugget = 0.1)
+  )
+  of <- c(A_act = VGM_OF_RESIDUALS, B_act = VGM_OF_FALLBACK, B_pre = VGM_OF_RESIDUALS)
+  out <- vgm_params_export_df(fits, of = of)
+  expect_identical(names(out)[1:4], c("Locality", "Target", "Variogram Of", "Model"))
+  expect_identical(out$`Variogram Of`, unname(of))
+  # The same rows as the plain listing, which has no such column.
+  expect_identical(out[setdiff(names(out), "Variogram Of")], vgm_params_export_df(fits))
+  expect_identical(vgm_params_export_df(fits, locs = "B", of = of)$`Variogram Of`,
+                   c(VGM_OF_FALLBACK, VGM_OF_RESIDUALS))
+  expect_identical(vgm_params_table_df(fits, "Total (Combined)", of = of), out)
+
+  expect_identical(vgm_params_title("RK"), "Residual Variogram Parameters")
+  expect_identical(vgm_params_title("RFK"), "Residual Variogram Parameters")
+  expect_identical(vgm_params_title("OK"), "Variogram Parameters")
+  expect_identical(vgm_params_title(NULL), "Variogram Parameters")
 })

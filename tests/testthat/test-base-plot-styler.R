@@ -613,6 +613,14 @@ test_that("write_geotiff writes real band statistics and the supplied tags", {
   expect_null(tags$MONOLITH_UNIT)
 })
 
+test_that("a unit set on the variable reaches the GeoTIFF's MONOLITH_UNIT tag", {
+  r <- terra::unwrap(make_test_wrapped_raster())
+  f <- tempfile(fileext = ".tif")
+  on.exit(unlink(c(f, paste0(f, ".aux.xml"))), add = TRUE)
+  write_geotiff(r, f, tags = c(MONOLITH_VARIABLE = "Potassium", MONOLITH_UNIT = "mg/kg"))
+  expect_equal(geotiff_info(f)$metadata[[1]]$MONOLITH_UNIT, "mg/kg")
+})
+
 test_that("write_geotiff still writes the raster when the tagging pass fails", {
   # A GDAL build without the translate utility must cost the tags, never the file.
   r <- terra::unwrap(make_test_wrapped_raster())

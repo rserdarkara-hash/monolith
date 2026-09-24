@@ -350,3 +350,17 @@ test_that("the distinction survives every colour-by mode", {
   expect_true(all(c("A", "B", "C") %in% labs))
   expect_identical(labs[length(labs)], MISSING_VALUE_POINT_LABEL)
 })
+
+test_that("point pop-up rows escape markup in labels and values", {
+  # Labels come from the variable list and values from the uploaded table:
+  # either can carry text a browser would read as markup.
+  row <- popup_value_row("<b>K</b> (mg/kg)", "<b>high</b>")
+  expect_false(grepl("<b>", row, fixed = TRUE))
+  expect_match(row, "&lt;b&gt;K&lt;/b&gt; (mg/kg)", fixed = TRUE)
+  expect_match(row, "&lt;b&gt;high&lt;/b&gt;", fixed = TRUE)
+  # Numbers keep the four-significant-digit display every result uses.
+  expect_match(popup_value_row("pH", 7.123456), ">7.123<", fixed = TRUE)
+  expect_match(popup_value_row("pH", NULL), ">N/A<", fixed = TRUE)
+  grp <- popup_group_row("Soil & <Water>")
+  expect_match(grp, "Soil &amp; &lt;Water&gt;", fixed = TRUE)
+})

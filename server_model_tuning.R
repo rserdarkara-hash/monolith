@@ -1,33 +1,24 @@
-# server_model_tuning.R (sourced with local = TRUE inside server) - TPS lambda
-# and IDW power optimization, manual variogram tuning, expert auto-fit.
-# CRITICAL: the three optimizer buttons dispatch through run_optimizer_async
-# below; every reactive they need must be read into a plain value BEFORE the
-# call, and every state write must happen in the on_success handler.
+# server_model_tuning.R (sourced with local = TRUE inside server) - per-locality
+# IDW power and TPS lambda values, manual variogram tuning, and the expert
+# variogram auto-fit (OPTIMIZE ALL VARIOGRAMS).
+# CRITICAL: the auto-fit dispatches through run_optimizer_async below; every
+# reactive it needs must be read into a plain value BEFORE the call, and every
+# state write must happen in the on_success handler.
 
-# --- Shared async dispatcher for the three optimizer buttons ---------------
-# All three used to call furrr::future_map() straight from the observer.
-# future_map resolves its futures before returning, so the main R process sat
-# in value() until the last locality finished: no tab switch, no plot, no
-# other session event, and withProgress could not advance because the flush
-# never happened. They now use the same promise topology as the run pipeline
-# (server_execution.R) and the gov/classification modules.
+# --- Async dispatcher for the variogram auto-fit ----------------------------
+# The promise topology is the run pipeline's (server_execution.R), so the main
+# R process keeps serving the session while the localities are fitted.
 #
 # The nested escalation is NOT decoration. A future_promise body runs inside a
 # PSOCK worker, where future downgrades the nested plan to sequential
 # (nbrOfWorkers() == 1), so a bare future_map in there would walk the
-# localities one at a time - trading the freeze for an N-fold longer wait.
-# Cores are counted HERE in the main session (availableCores() inside a worker
-# reports 1), shipped as plain data, and the cluster is owned explicitly so
-# the finally block returns the reused promise worker to single-threaded
-# state. Numerics are plan-independent: furrr's fixed seed assigns one
-# L'Ecuyer stream per job whatever the topology, and none of the three workers
-# draws from the stream it is handed (optimize_idw_p builds its folds through
-# make_cv_folds, which is seeded inside a two-sided RNG sandbox, krige.cv with
-# an explicit nfold vector draws nothing, fields::Tps and fit.variogram are
-# deterministic).
+# localities one at a time. Cores are counted HERE in the main session
+# (availableCores() inside a worker reports 1), shipped as plain data, and the
+# cluster is owned explicitly so the finally block returns the reused promise
+# worker to single-threaded state. Numerics are plan-independent: furrr's fixed
+# seed assigns one L'Ecuyer stream per job whatever the topology, and
+# fit.variogram draws nothing from it.
 optimizer_button_labels <- list(
-  opt_idw = "OPTIMIZE IDW FACTORS",
-  opt_tps = "OPTIMIZE TPS LAMBDA",
   auto_fit = "OPTIMIZE ALL VARIOGRAMS"
 )
 
@@ -69,18 +60,10 @@ run_optimizer_async <- function(
     error = function(e) 1L
   )
 
-  # A TPS GCV search takes about 0.2 s per locality, less than a nested PSOCK
-  # cluster costs to start (measured 1.7 s serial against 3.4 s on 7 workers),
-  # so TPS stays asynchronous without a second worker layer. IDW, at about 4 s
-  # per locality, gains from one.
-  if (identical(worker_name, "tps_gcv_item")) {
-    nested_workers <- 1L
+  nested_workers <- if (length(jobs) > 1L) {
+    max(1L, min(cores_hint - 1L, length(jobs)))
   } else {
-    nested_workers <- if (length(jobs) > 1L) {
-      max(1L, min(cores_hint - 1L, length(jobs)))
-    } else {
-      1L
-    }
+    1L
   }
 
   rv$opt_running <- TRUE
@@ -138,7 +121,7 @@ run_optimizer_async <- function(
           options(mc.cores = old_mc_cores)
           # Stop the cluster FIRST, and let neither step's failure cancel the
           # other. Switching the plan away from an unhealthy cluster can itself
-          # throw, which used to leave the session on the dead cluster even
+          # throw, which would leave the session on the dead cluster even
           # though stopCluster had run - the exact state the reset at the top
           # of this body has to undo on the next task.
           if (!is.null(nested_cl)) {
@@ -203,208 +186,6 @@ run_optimizer_async <- function(
   invisible(NULL)
 }
 
-# Localities an optimizer skipped for too few distinct samples
-# (OPTIMIZER_MIN_POINTS): nothing was stored for them, so the sidebar setting
-# applies. Named in the run log and in one notification per optimization.
-note_optimizer_skips <- function(res_list, jobs, engine) {
-  idx <- which(vapply(res_list, function(r) !is.null(r$skipped), logical(1)))
-  if (length(idx) == 0) return(invisible(NULL))
-  lines <- vapply(idx, function(i) {
-    paste0(jobs[[i]]$l, " (", jobs[[i]]$target, "): ", res_list[[i]]$skipped)
-  }, character(1))
-  rv$log <- paste0(rv$log, "\n[Tuning] ", engine, " optimizer skipped ",
-                   paste(lines, collapse = "; "), ".")
-  showNotification(
-    paste0(engine, " optimizer: ", length(idx), " locality/target pair(s) have fewer than ",
-           OPTIMIZER_MIN_POINTS, " distinct samples. Nothing was stored for them, so the ",
-           "sidebar setting applies (details in the run log)."),
-    type = "warning", duration = 10)
-  invisible(NULL)
-}
-
-# --- TPS Optimization ---
-# Lambda presets: the 0.001-step slider makes the special values -1 (Auto)
-# and 0 (exact interpolation) hard to hit by dragging.
-observeEvent(
-  input$tps_preset_auto,
-  updateSliderInput(session, "tps_lambda", value = -1)
-)
-observeEvent(
-  input$tps_preset_exact,
-  updateSliderInput(session, "tps_lambda", value = 0)
-)
-observeEvent(
-  input$tps_m_preset_auto,
-  updateSliderInput(session, "tps_m_lambda", value = -1)
-)
-observeEvent(
-  input$tps_m_preset_exact,
-  updateSliderInput(session, "tps_m_lambda", value = 0)
-)
-
-tps_opt_vals <- reactiveVal(NULL)
-observeEvent(input$opt_tps, {
-  req(rv$user_data, input$var_id, input$method == "TPS", rv$mapping$crs)
-  locs <- resolve_selected_localities(
-    input$locality,
-    rv$user_data,
-    rv$mapping$loc
-  )
-  meta <- get_current_meta()
-  req(meta)
-
-  # Unticked "Fit Actual/Predicted separately": the Predicted surface reuses
-  # the measured values' parameter, so only the Actual target is searched.
-  targets <- if ((input$comp_mode || input$value_type != "actual") && isTRUE(input$sep_fit)) {
-    c("act", "pre")
-  } else {
-    "act"
-  }
-
-  # Plain values captured BEFORE dispatch (no rv$/input$ may be read inside
-  # the promise or its handlers). The act/pre loop is FLATTENED into one jobs
-  # list so a single map covers both surfaces - two chained promises would be
-  # the only alternative - and each job carries its own `target`, because the
-  # observer's loop binding is long gone by the time the handler runs.
-  current_crs <- rv$mapping$crs
-  user_data <- rv$user_data
-  loc_col <- rv$mapping$loc
-  x_col <- rv$mapping$x
-  y_col <- rv$mapping$y
-  value_type <- input$value_type
-  eff_subset <- effective_subset(value_type, input$subset, names(user_data))
-  keys <- c(act = tuning_key(meta$actual, eff_subset),
-            pre = tuning_key(if (value_type == "pred_ss") meta$pred_ss else meta$pred, eff_subset))
-
-  jobs <- unlist(
-    lapply(targets, function(tg) {
-      val_col <- if (tg == "act") {
-        meta$actual
-      } else if (value_type == "pred_ss") {
-        meta$pred_ss
-      } else {
-        meta$pred
-      }
-      if (is.null(val_col) || !(val_col %in% colnames(user_data))) {
-        return(NULL)
-      }
-      lapply(locs, function(l) {
-        sub_df <- run_locality_rows(user_data, loc_col, l, eff_subset) %>%
-          select(x = !!sym(x_col), y = !!sym(y_col), v = !!sym(val_col)) %>%
-          na.omit()
-        list(l = l, target = tg, key = keys[[tg]], df = sub_df)
-      })
-    }),
-    recursive = FALSE
-  )
-  req(length(jobs) > 0)
-
-  rv$tps_gcv_data <- list()
-
-  run_optimizer_async(
-    btn_id = "opt_tps",
-    jobs = jobs,
-    worker_name = "tps_gcv_item",
-    worker_args = list(current_crs = current_crs),
-    packages = c("sf", "fields"),
-    busy_msg = "Optimizing TPS lambda per region in the background; the dashboard stays usable.",
-    on_success = function(res_list) {
-      note_optimizer_skips(res_list, jobs, "TPS")
-      for (i in seq_along(res_list)) {
-        res <- res_list[[i]]
-        l <- jobs[[i]]$l
-        target <- jobs[[i]]$target
-        if (!is.null(res$skipped)) next
-        if (!is.null(res$err)) {
-          rv$log <- paste0(rv$log, "\nTPS Opt Error (", l, "): ", res$err)
-          showNotification(
-            paste("TPS Optimization failed for", l, "- using fallback lambda."),
-            type = "warning"
-          )
-        } else {
-          set_regional_param("TPS", l, target, res$best_lam, jobs[[i]]$key)
-          if (!is.null(res$gcv_data)) {
-            attr(res$gcv_data, "monolith_key") <- jobs[[i]]$key
-            rv$tps_gcv_data[[paste0(l, "_", target)]] <- res$gcv_data
-          }
-        }
-      }
-
-      all_best <- sapply(locs, function(l) get_regional_param("TPS", l, "act", key = keys[["act"]]))
-      # A locality whose optimization failed never had set_regional_param
-      # called, so get_regional_param returns the -1 Auto sentinel — not a
-      # lambda. Keep sentinels out of the slider mean (one failure would drag
-      # it negative and silently flip the global default to Auto).
-      # Per-locality stored values still win at dispatch; this only sets the
-      # fallback slider position.
-      ok_best <- all_best[is.finite(all_best) & all_best >= 0]
-      if (length(ok_best) > 0) {
-        updateSliderInput(session, "tps_lambda", value = mean(ok_best))
-      }
-
-      tps_opt_vals(list(locs = locs, targets = targets, keys = keys))
-      showNotification(
-        "TPS Optimization Complete. Per-region Lambdas stored.",
-        type = "message"
-      )
-    }
-  )
-})
-
-# Shared builder for the per-locality optimization summary panels (TPS
-# lambdas / IDW power factors) - same table, different engine and format.
-render_opt_summary_panel <- function(engine, vals_reactive, fmt, heading) {
-  renderUI({
-    res <- vals_reactive()
-    if (is.null(res)) {
-      return(NULL)
-    }
-
-    # The prediction column only exists when the run actually optimized a
-    # predicted target; without one every cell was "N/A", so the column is
-    # dropped rather than printed empty.
-    has_pre <- "pre" %in% res$targets
-    # Values stored for this optimization's keys only; a failed locality or a
-    # value since replaced for another key shows N/A, never the sidebar value.
-    stored_cell <- function(l, target) {
-      val <- get_regional_param(engine, l, target, default = NA_real_, key = res$keys[[target]])
-      tags$td(if (is.na(val)) "N/A" else sprintf(fmt, val))
-    }
-
-    rows <- lapply(res$locs, function(l) {
-      cells <- list(tags$td(l), stored_cell(l, "act"))
-      if (has_pre) {
-        cells <- c(cells, list(stored_cell(l, "pre")))
-      }
-      do.call(tags$tr, cells)
-    })
-
-    headers <- list(tags$th("Locality"), tags$th("Actual"))
-    if (has_pre) {
-      headers <- c(headers, list(tags$th("Predicted")))
-    }
-
-    div(
-      style = "margin-top: 10px; padding: 10px; background-color: var(--mn-surface-2); color: var(--mn-text-2); border: 1px solid var(--mn-line); border-radius: 4px; font-size: 0.8em;",
-      h5(paste0(heading, " for ", res$keys[["act"]], ":")),
-      tags$table(
-        class = "table table-condensed table-bordered",
-        style = "background-color: var(--mn-surface); color: var(--mn-text);",
-        tags$thead(do.call(tags$tr, headers)),
-        tags$tbody(rows)
-      )
-    )
-  })
-}
-
-output$tps_opt_panel <- render_opt_summary_panel(
-  "TPS",
-  tps_opt_vals,
-  "%.6f",
-  "Optimization Summary (Best Lambdas)"
-)
-
-idw_opt_vals <- reactiveVal(NULL)
 # Tuning values describe one table and one coordinate/locality mapping. Any
 # write to rv$mapping invalidates this observer (variable metadata included),
 # so the handler compares the values that define the data before clearing.
@@ -415,159 +196,33 @@ observeEvent(list(rv$user_data, rv$mapping), {
   if (identical(sig, tuning_data_sig)) return()
   tuning_data_sig <<- sig
   if (first) return()
-  stores <- c("v_fit_list", "v_emp_list", "idw_factors", "tps_lambdas", "tps_gcv_data")
+  stores <- c("v_fit_list", "v_emp_list", "idw_factors", "tps_lambdas")
   had_values <- any(vapply(stores, function(nm) length(rv[[nm]]) > 0L, logical(1)))
   for (nm in stores) rv[[nm]] <- list()
   rv$tuning_revision <- (rv$tuning_revision %||% 0L) + 1L
   rv$vgm_preview <- FALSE
-  idw_opt_vals(NULL)
-  tps_opt_vals(NULL)
   if (had_values) showNotification("Stored tuning values cleared because the data or coordinate/locality mapping changed.", type = "message")
 })
-observeEvent(input$opt_idw, {
-  req(
-    rv$user_data,
-    input$var_id,
-    input$method == "IDW",
-    input$locality,
-    rv$mapping$crs
-  )
-
-  locs <- resolve_selected_localities(
-    input$locality,
-    rv$user_data,
-    rv$mapping$loc
-  )
-  meta <- get_current_meta()
-  req(meta)
-
-  # Unticked "Fit Actual/Predicted separately": the Predicted surface reuses
-  # the measured values' parameter, so only the Actual target is searched.
-  targets <- if ((input$comp_mode || input$value_type != "actual") && isTRUE(input$sep_fit)) {
-    c("act", "pre")
-  } else {
-    "act"
-  }
-
-  # See the TPS observer: plain values only, act/pre flattened into one jobs
-  # list, `target` carried per job.
-  current_crs <- rv$mapping$crs
-  idw_nmax_val <- input$idw_nmax
-  # The power search shares the run's fold authority, so the strategy the
-  # user selected has to be captured here (plain value) and shipped to the
-  # worker like every other parameter.
-  cv_strategy_val <- input$cv_strategy %||% "auto"
-  user_data <- rv$user_data
-  loc_col <- rv$mapping$loc
-  x_col <- rv$mapping$x
-  y_col <- rv$mapping$y
-  value_type <- input$value_type
-  eff_subset <- effective_subset(value_type, input$subset, names(user_data))
-  keys <- c(act = tuning_key(meta$actual, eff_subset),
-            pre = tuning_key(if (value_type == "pred_ss") meta$pred_ss else meta$pred, eff_subset))
-
-  jobs <- unlist(
-    lapply(targets, function(tg) {
-      val_col <- if (tg == "act") {
-        meta$actual
-      } else if (value_type == "pred_ss") {
-        meta$pred_ss
-      } else {
-        meta$pred
-      }
-      if (is.null(val_col) || !(val_col %in% colnames(user_data))) {
-        return(NULL)
-      }
-      lapply(locs, function(l) {
-        sub_df <- run_locality_rows(user_data, loc_col, l, eff_subset) %>%
-          select(x = !!sym(x_col), y = !!sym(y_col), v = !!sym(val_col)) %>%
-          na.omit()
-        list(l = l, target = tg, key = keys[[tg]], df = sub_df)
-      })
-    }),
-    recursive = FALSE
-  )
-  req(length(jobs) > 0)
-
-  run_optimizer_async(
-    btn_id = "opt_idw",
-    jobs = jobs,
-    worker_name = "idw_opt_item",
-    worker_args = list(
-      current_crs = current_crs,
-      idw_nmax_val = idw_nmax_val,
-      cv_strategy = cv_strategy_val
-    ),
-    packages = c("sf", "gstat"),
-    busy_msg = "Calculating optimal IDW factors per region in the background; the dashboard stays usable.",
-    on_success = function(res_list) {
-      note_optimizer_skips(res_list, jobs, "IDW")
-      for (i in seq_along(res_list)) {
-        if (!is.null(res_list[[i]]$skipped)) next
-        set_regional_param(
-          "IDW",
-          jobs[[i]]$l,
-          jobs[[i]]$target,
-          res_list[[i]]$best_f,
-          jobs[[i]]$key
-        )
-      }
-
-      # Powers stored for this run's key only: a skipped locality keeps the
-      # sidebar power and must not pull the slider towards it.
-      all_best <- sapply(locs, function(l) get_regional_param("IDW", l, "act", default = NA_real_, key = keys[["act"]]))
-      ok_best <- all_best[is.finite(all_best)]
-      if (length(ok_best) > 0) {
-        updateSliderInput(session, "idw_p", value = mean(ok_best))
-      }
-
-      idw_opt_vals(list(locs = locs, targets = targets, keys = keys))
-      showNotification(
-        paste("IDW Optimization Complete for:", paste(locs, collapse = ", ")),
-        type = "message",
-        duration = 5
-      )
-    }
-  )
+# The pooled cross-validation of the DISPLAYED run, shown only when that run
+# is an IDW run (idw_panel_metrics): the panel sits under the next run's IDW
+# settings, and another engine's figures must never appear there. The box is
+# drawn only around such a table, so the panel carries no empty frame before
+# an IDW run is on screen.
+output$idw_metrics_ui <- renderUI({
+  req(idw_panel_metrics(rv$disp$method, rv$cv_metrics_act))
+  div(style = "background-color: var(--mn-surface-2); border: 1px solid var(--mn-line); border-radius: 4px; padding: 10px; color: var(--mn-text);",
+      tableOutput("idw_metrics_table"))
 })
-
-output$idw_opt_panel <- render_opt_summary_panel(
-  "IDW",
-  idw_opt_vals,
-  "%.1f",
-  "Optimization Summary (Best Factors)"
-)
-
 output$idw_metrics_table <- renderTable({
-  req(input$method == "IDW", rv$cv_metrics_act)
-  m_act <- rv$cv_metrics_act
-  if (length(m_act) == 0) {
-    return(NULL)
-  }
-
-  ns <- sapply(m_act, function(x) x$n %||% 0)
-  rmses <- sapply(m_act, function(x) x$rmse %||% NA)
-  mes <- sapply(m_act, function(x) x$me %||% NA)
-  # A locality with fewer than 2 predicted pairs has no RMSE to weight.
-  ns[!is.finite(rmses)] <- 0
-
-  total_n <- sum(ns, na.rm = TRUE)
-  if (total_n == 0) {
-    return(NULL)
-  }
-
-  avg_rmse <- sqrt(sum(ns * rmses^2, na.rm = TRUE) / total_n)
-  avg_me <- sum(ns * mes, na.rm = TRUE) / total_n
-
-  data.frame(
-    Metric = c("Mean CV RMSE (Pooled)", "Mean Bias (ME)"),
-    Value = format_sig(c(avg_rmse, avg_me))
-  )
-})
-# Last choice set pushed to each tuning-locality selector: the old code
-# compared the choices against the current SELECTION, which never matches
-# with 2+ localities, so every trigger re-issued the update and reset the
-# user's pick back to the first locality.
+  out <- idw_panel_metrics(rv$disp$method, rv$cv_metrics_act)
+  req(out)
+  out$Value <- format_sig(out$Value)
+  out
+}, caption = "Displayed IDW run (pooled CV)", caption.placement = "top")
+# Last choice set pushed to each tuning-locality selector. The update is
+# re-issued only when the choice set changes: compared against the current
+# SELECTION instead, it would never match with 2+ localities, and every trigger
+# would reset the user's pick to the first locality.
 tuning_selector_choices <- list()
 observeEvent(list(input$locality, rv$user_data, rv$mapping$loc), {
   req(input$locality, rv$user_data, rv$mapping$loc)
@@ -699,7 +354,7 @@ observeEvent(
       error = function(e) NULL
     )
     req(pts)
-    pts <- pts[!duplicated(round(sf::st_coordinates(pts), 2)), ]
+    pts <- merge_colocated(pts)
     bb <- sf::st_bbox(pts)
     stored <- rv$v_fit_list[[paste0(loc, "_", target)]]
     if (!vgm_key_matches(stored, current_tuning_keys()[[target]])) stored <- NULL
@@ -766,6 +421,13 @@ observeEvent(input$apply_manual, {
   }
 })
 
+# Per-locality IDW power and TPS lambda. The store holds the encoded value the
+# engine reads (-1 Auto; 0 exact TPS or equal-weights IDW; else fixed;
+# get_regional_param / set_regional_param) and the panel shows it as a mode
+# plus a value, prefilled from the locality's stored value, else from the
+# setting for all localities. A stored value is always valid, so an NA is a
+# Fixed setting for all localities left without a valid number (the run
+# refuses it): it prefills the mode only.
 observeEvent(
   list(input$idw_mode, input$idw_m_loc, input$comp_mode, input$idw_m_target,
        input$sep_fit, input$value_type, input$var_id, input$subset),
@@ -773,9 +435,12 @@ observeEvent(
     req(input$idw_mode == "manual", input$idw_m_loc)
     loc <- input$idw_m_loc
     target <- manual_param_target(input$comp_mode, input$value_type, input$idw_m_target, input$sep_fit)
-    val <- get_regional_param("IDW", loc, target, default = input$idw_p,
+    val <- get_regional_param("IDW", loc, target,
+                              default = idw_param_value(input$idw_p_mode, input$idw_p),
                               key = current_tuning_keys()[[target]])
-    updateSliderInput(session, "idw_m_p", value = val)
+    mode <- if (is.na(val)) input$idw_p_mode else param_value_mode("IDW", val)
+    updateRadioButtons(session, "idw_m_mode", selected = mode)
+    if (identical(mode, "fixed") && !is.na(val)) updateNumericInput(session, "idw_m_p", value = val)
   }
 )
 
@@ -785,11 +450,15 @@ observeEvent(input$apply_idw_manual, {
   target <- manual_param_target(input$comp_mode, input$value_type, input$idw_m_target, input$sep_fit)
   key <- current_tuning_keys()[[target]]
   req(!is.na(key))
-  set_regional_param("IDW", loc, target, input$idw_m_p, key)
-  showNotification(
-    paste("Manual IDW Power applied to", loc, "(", target, ":", key, ")"),
-    type = "message"
-  )
+  if (identical(input$idw_m_mode, "fixed") && !idw_fixed_ok(input$idw_m_p)) {
+    showNotification(sprintf("A fixed IDW power must be a number from 0 (equal weights) to %d; nothing was stored.",
+                             IDW_MAX_FINITE_POWER), type = "error")
+    return()
+  }
+  val <- idw_param_value(input$idw_m_mode, input$idw_m_p)
+  set_regional_param("IDW", loc, target, val, key)
+  showNotification(paste0("IDW power for ", loc, " (", target, ": ", key, "): ",
+                          param_setting_text("IDW", val), "."), type = "message")
 })
 
 observeEvent(
@@ -799,9 +468,12 @@ observeEvent(
     req(input$tps_mode == "manual", input$tps_m_loc)
     loc <- input$tps_m_loc
     target <- manual_param_target(input$comp_mode, input$value_type, input$tps_m_target, input$sep_fit)
-    val <- get_regional_param("TPS", loc, target, default = input$tps_lambda,
+    val <- get_regional_param("TPS", loc, target,
+                              default = tps_param_value(input$tps_lambda_mode, input$tps_lambda),
                               key = current_tuning_keys()[[target]])
-    updateSliderInput(session, "tps_m_lambda", value = val)
+    mode <- if (is.na(val)) input$tps_lambda_mode else param_value_mode("TPS", val)
+    updateRadioButtons(session, "tps_m_mode", selected = mode)
+    if (identical(mode, "fixed") && !is.na(val)) updateNumericInput(session, "tps_m_lambda", value = val)
   }
 )
 
@@ -811,11 +483,49 @@ observeEvent(input$apply_tps_manual, {
   target <- manual_param_target(input$comp_mode, input$value_type, input$tps_m_target, input$sep_fit)
   key <- current_tuning_keys()[[target]]
   req(!is.na(key))
-  set_regional_param("TPS", loc, target, input$tps_m_lambda, key)
-  showNotification(
-    paste("Manual TPS Lambda applied to", loc, "(", target, ":", key, ")"),
-    type = "message"
-  )
+  if (identical(input$tps_m_mode, "fixed") && !tps_fixed_ok(input$tps_m_lambda)) {
+    showNotification("A fixed λ must be a number above 0 (Exact is λ = 0); nothing was stored.", type = "error")
+    return()
+  }
+  val <- tps_param_value(input$tps_m_mode, input$tps_m_lambda)
+  set_regional_param("TPS", loc, target, val, key)
+  showNotification(paste0("TPS λ for ", loc, " (", target, ": ", key, "): ",
+                          param_setting_text("TPS", val), "."), type = "message")
+})
+
+# The note under a Per locality panel (per_locality_note): which localities
+# have a value of their own for the tuned variable and data subset, and the
+# setting the others run with. That setting lives in the All localities
+# control, which is hidden while Per locality is selected, and the panel's
+# controls start from it for a locality without a value, so without the note a
+# prefilled control reads like a stored value.
+per_locality_note_ui <- function(type, store, target_switch, selected, global_text) {
+  req(rv$user_data)
+  target <- manual_param_target(input$comp_mode, input$value_type, target_switch, input$sep_fit)
+  locs <- resolve_selected_localities(input$locality, rv$user_data, rv$mapping$loc)
+  req(length(locs) > 0)
+  lines <- per_locality_note(type, store, target, locs, current_tuning_keys()[[target]],
+                             global_text, selected)
+  tags$small(style = "display: block; color: var(--mn-text-3); margin: 0 0 8px 0;",
+             HTML(paste(htmltools::htmlEscape(lines), collapse = "<br>")))
+}
+output$idw_m_note <- renderUI({
+  req(identical(input$idw_mode, "manual"))
+  global <- if (identical(input$idw_p_mode, "fixed") && !idw_fixed_ok(input$idw_p)) {
+    "Fixed p, which has no valid value yet (the run will not start)"
+  } else {
+    param_setting_text("IDW", idw_param_value(input$idw_p_mode, input$idw_p) %||% 2)
+  }
+  per_locality_note_ui("IDW", rv$idw_factors, input$idw_m_target, input$idw_m_loc, global)
+})
+output$tps_m_note <- renderUI({
+  req(identical(input$tps_mode, "manual"))
+  global <- if (identical(input$tps_lambda_mode, "fixed") && !tps_fixed_ok(input$tps_lambda)) {
+    "Fixed λ, which has no valid value yet (the run will not start)"
+  } else {
+    param_setting_text("TPS", tps_param_value(input$tps_lambda_mode, input$tps_lambda))
+  }
+  per_locality_note_ui("TPS", rv$tps_lambdas, input$tps_m_target, input$tps_m_loc, global)
 })
 
 observeEvent(input$auto_fit, {
@@ -827,14 +537,11 @@ observeEvent(input$auto_fit, {
   )
   meta <- get_current_meta()
   req(meta)
-  rv$loc_names <- locs # Ensure selectors update
 
-  # No flattening here: autofit_vgm_item already handles BOTH surfaces per
-  # locality, so the job list is one entry per locality exactly as before and
-  # the L'Ecuyer stream assignment is untouched. Everything else follows the
-  # TPS/IDW pattern - plain values captured before dispatch, including
-  # want_pre, which the diagnostics modal used to read from input$ after the
-  # work had finished.
+  # autofit_vgm_item fits BOTH surfaces of a locality, so the job list holds
+  # one entry per locality. Every reactive the worker and the diagnostics
+  # modal need, want_pre included, is read into a plain value here, before
+  # dispatch.
   current_crs <- rv$mapping$crs
   user_data <- rv$user_data
   loc_col <- rv$mapping$loc
@@ -897,7 +604,7 @@ observeEvent(input$auto_fit, {
         r <- results[[l]]
         txt <- paste0(
           "<b>",
-          l,
+          htmltools::htmlEscape(l),
           "</b>: Actual: ",
           r$act_mod,
           " (SSE: ",

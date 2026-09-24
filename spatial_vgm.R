@@ -281,6 +281,105 @@ calc_directional_variogram <- function(pts_sf, value_col, lags = NULL,
   as.data.frame(out)
 }
 
+#' A locality enters a pooled within-locality variogram with at least this many
+#' distinct located values (the directional-variogram minimum).
+POOLED_VGM_MIN_N <- 10L
+
+#' The per-locality point sets of a pooled within-locality variogram, and their
+#' common lag classes. Each locality keeps its finite `value_col` values
+#' (renamed `.mn_val`), is projected on its own (validate_and_project_sf) and
+#' has its co-located samples merged; it is eligible with at least `min_n`
+#' locations. The classes are the lags of the eligible locality with the
+#' smallest cutoff (calc_scientific_lags), so every locality spans the whole
+#' lag range. `pts_list` is named by locality; a NULL entry is a locality with
+#' no values. NULL when no locality is eligible.
+.pooled_within_prep <- function(pts_list, value_col, min_n) {
+  prepared <- lapply(pts_list, function(p) {
+    if (!inherits(p, "sf") || !value_col %in% names(p)) return(NULL)
+    p <- p[is.finite(p[[value_col]]), value_col]
+    if (nrow(p) == 0) return(NULL)
+    p <- tryCatch(merge_colocated(validate_and_project_sf(p)), error = function(e) NULL)
+    if (is.null(p)) return(NULL)
+    names(p)[names(p) == value_col] <- ".mn_val"
+    p
+  })
+  n <- vapply(prepared, function(d) if (is.null(d)) 0L else nrow(d), integer(1))
+  ok <- names(prepared)[n >= min_n]
+  if (!length(ok)) return(NULL)
+  lags <- lapply(prepared[ok], calc_scientific_lags)
+  lg <- lags[[which.min(vapply(lags, `[[`, numeric(1), "cutoff"))]]
+  n_bins <- max(1L, as.integer(round(lg$cutoff / lg$width)))
+  list(pts = prepared[ok], lags = lg,
+       boundaries = seq(0, lg$cutoff, length.out = n_bins + 1L),
+       localities = ok, excluded = setdiff(names(pts_list), ok))
+}
+
+#' Pool per-locality empirical variograms computed on the same lag classes:
+#' per class (and direction), the pair-weighted mean semivariance and distance
+#' over the localities, i.e. the classical estimator over the union of their
+#' within-locality pairs. A row's class is read off its mean distance, which
+#' lies inside the class it was binned in (gstat's classes are (b_k, b_k+1]).
+.pool_vgm_classes <- function(per, boundaries) {
+  rows <- do.call(rbind, lapply(per, function(v) {
+    if (is.null(v) || nrow(v) == 0) return(NULL)
+    v <- as.data.frame(v)
+    bin <- findInterval(v$dist, boundaries, left.open = TRUE)
+    data.frame(bin = pmin(pmax(bin, 1L), length(boundaries) - 1L), dir = v$dir.hor,
+               np = v$np, dist = v$dist, gamma = v$gamma)
+  }))
+  if (is.null(rows) || nrow(rows) == 0) return(NULL)
+  key <- paste(rows$dir, rows$bin)
+  w <- rows$np / stats::ave(rows$np, key, FUN = sum)
+  agg <- stats::aggregate(cbind(np = rows$np, dist = w * rows$dist, gamma = w * rows$gamma),
+                          by = list(dir = rows$dir, bin = rows$bin), FUN = sum)
+  agg <- agg[order(agg$dir, agg$bin), , drop = FALSE]
+  data.frame(np = agg$np, dist = agg$dist, gamma = agg$gamma, dir.hor = agg$dir, dir.ver = 0,
+             id = factor(rep("var1", nrow(agg))))
+}
+
+#' The pooled within-locality variogram of `value_col` over the named list of
+#' locality point sets `pts_list`: the classical (Matheron) estimator over the
+#' union of WITHIN-locality point pairs on common lag classes,
+#' gamma(h_k) = sum_l N_l(h_k) gamma_l(h_k) / sum_l N_l(h_k), at the
+#' pair-weighted mean distance (the average variogram of McBratney & Pringle
+#' 1999). No pair joins two localities. A gstatVariogram, carrying the
+#' localities used (`localities`), those left out (`excluded`) and the values
+#' used, each centred on its locality's mean (`within`: the data whose
+#' variance the pooled sill estimates, for robust_vgm_fit()); NULL when no
+#' locality has `min_n` located values.
+pooled_within_variogram <- function(pts_list, value_col, min_n = POOLED_VGM_MIN_N) {
+  prep <- .pooled_within_prep(pts_list, value_col, min_n)
+  if (is.null(prep)) return(NULL)
+  per <- lapply(prep$pts, function(d) gstat::variogram(.mn_val ~ 1, d, boundaries = prep$boundaries))
+  out <- .pool_vgm_classes(per, prep$boundaries)
+  if (is.null(out)) return(NULL)
+  class(out) <- c("gstatVariogram", "data.frame")
+  attr(out, "direct") <- data.frame(id = "var1", is.direct = TRUE)
+  attr(out, "boundaries") <- prep$boundaries
+  attr(out, "pseudo") <- 0
+  attr(out, "what") <- "semivariance"
+  attr(out, "localities") <- prep$localities
+  attr(out, "excluded") <- prep$excluded
+  attr(out, "within") <- unlist(lapply(prep$pts, function(d) d$.mn_val - mean(d$.mn_val)),
+                                use.names = FALSE)
+  out
+}
+
+#' The directional twin of pooled_within_variogram(): each locality's four-cone
+#' variogram (calc_directional_variogram) on the common lag classes, pooled per
+#' cone. Same shape as calc_directional_variogram()'s result, with the same
+#' `localities` / `excluded` attributes.
+pooled_within_directional <- function(pts_list, value_col, min_n = POOLED_VGM_MIN_N) {
+  prep <- .pooled_within_prep(pts_list, value_col, min_n)
+  if (is.null(prep)) return(NULL)
+  per <- lapply(prep$pts, function(d) calc_directional_variogram(d, ".mn_val", lags = prep$lags, min_n = min_n))
+  out <- .pool_vgm_classes(per, prep$boundaries)
+  if (is.null(out)) return(NULL)
+  attr(out, "localities") <- prep$localities
+  attr(out, "excluded") <- prep$excluded
+  out
+}
+
 # Strips the environments gstat attaches to fitted variogram objects (formula
 # environment, call attribute) so fits can cross future/worker boundaries
 # without dragging their creation environment along.

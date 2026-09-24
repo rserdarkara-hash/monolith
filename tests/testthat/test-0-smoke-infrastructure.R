@@ -107,3 +107,18 @@ test_that("Shiny's upload cap admits every per-file limit the handlers enforce",
   expect_gt(length(mb), 0)
   expect_gte(getOption("shiny.maxRequestSize"), max(mb) * 1024^2)
 })
+
+test_that("run triggers are counters and draw nothing from the session RNG", {
+  expect_identical(next_trigger(NULL), 1L)
+  expect_identical(next_trigger(1L), 2L)
+  expect_identical(next_trigger(41), 42L)
+  set.seed(9); ref <- runif(1)
+  set.seed(9); invisible(next_trigger(NULL)); expect_identical(runif(1), ref)
+  # No server chunk fires a trigger by drawing a random number: a draw there
+  # moves the RNG state every later unseeded call in the session starts from.
+  root <- file.path(testthat::test_path(), "..", "..")
+  for (f in list.files(root, pattern = "^server_.*[.]R$", full.names = TRUE)) {
+    src <- readLines(f, warn = FALSE)
+    expect_false(any(grepl("<- *runif[(]", src)), info = basename(f))
+  }
+})

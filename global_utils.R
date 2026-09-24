@@ -37,6 +37,12 @@ manual_param_target <- function(comp_mode, value_type, switch_value, sep_fit = T
   if (has_pred && isTRUE(sep_fit) && identical(switch_value, "pre")) "pre" else "act"
 }
 
+# The next value of a reactiveValues trigger (rv$proceed_run, rv$proceed_vif):
+# an integer counter, so firing a trigger never draws from the session's RNG.
+next_trigger <- function(x) {
+  if (is.numeric(x) && length(x) == 1 && is.finite(x)) as.integer(x) + 1L else 1L
+}
+
 .cv_hash8 <- function(s) {
   substr(unname(tools::md5sum(bytes = charToRaw(enc2utf8(s)))), 1, 8)
 }
@@ -121,13 +127,13 @@ status_file_parts <- function(path, session_id, kind = "warn") {
        label = paste0(locality, suffix))
 }
 
-#' Location of the run-duration history log. It used to be built RELATIVE to the
-#' process working directory, so the file landed wherever the app happened to be
-#' started from (silently unwritable on a read-only deployment, and shared
-#' between concurrent sessions). It now lives in the user's per-application data
+#' Location of the run-duration history log: the user's per-application data
 #' directory, overridable through `monolith_history_dir` - the same option
 #' pattern `update_progress_file` uses for `monolith_progress_dir`, so tests can
-#' redirect it without touching the real one.
+#' redirect it without touching the real one. A path relative to the process
+#' working directory would land wherever the app happened to be started from
+#' (silently unwritable on a read-only deployment, and shared between
+#' concurrent sessions).
 #' Concurrent multi-session appends are unsynchronised (no file lock): the
 #' primary deployment is a single-user desktop app, and a torn append only costs
 #' one ETA record, so the risk is tolerated rather than engineered away.
@@ -183,11 +189,11 @@ estimate_run_duration <- function(loc_sample_counts, method, comp_mode, cores) {
   history_data <- NULL
   
   if (file.exists(history_file)) {
-    # The whole block is the tryCatch VALUE. The error handler used to run
-    # `history_data <- NULL`, which assigns into the handler's own frame and
-    # leaves the outer binding untouched: a throw partway through the filters
-    # (e.g. an old run_history.csv with no cores_used column) left the
-    # partially-filtered frame in place and the ETA lm was fitted on it.
+    # The whole block is the tryCatch VALUE. A handler running
+    # `history_data <- NULL` would assign into its own frame and leave the
+    # outer binding untouched, so a throw partway through the filters (e.g. an
+    # old run_history.csv with no cores_used column) would leave the
+    # partially-filtered frame in place for the ETA lm.
     history_data <- tryCatch({
       hd <- read.csv(history_file)
       hd <- hd[hd$method == method, ]
@@ -925,8 +931,8 @@ crs_candidate_shortlist <- function(x, y, lon = NULL, lat = NULL, area_text = NU
 }
 
 # -- Target Mapping CRS suitability -----------------------------------------
-# The run gate used to ask one question of the Target Mapping CRS: is its axis
-# unit the metre? That is necessary and nowhere near sufficient. Web Mercator's
+# A metre axis unit is necessary for the Target Mapping CRS and nowhere near
+# sufficient. Web Mercator's
 # axis unit IS the metre, and at 52 deg N it reports every distance 64% too
 # long; a UTM zone two zones away is metric too, and 1.07% too long. Grid
 # resolution, buffer radius, variogram ranges, exported cell size and the
@@ -1015,8 +1021,9 @@ crs_area_of_use <- function(crs) {
 #' distance work. The gate judges the larger |k - 1|.
 #'
 #' @param lon,lat Positions in degrees; the worst case over them is returned.
-#' @param arc_deg Half-arc in degrees. 0.001 deg is about 111 m, short enough
-#'   that k is the POINT scale factor rather than a finite-distance average.
+#' @param arc_deg Arc length in degrees, centred on each position (+/- arc_deg
+#'   / 2). 0.001 deg is about 111 m along a meridian, short enough that k is
+#'   the POINT scale factor rather than a finite-distance average.
 #' @return list(k, dev, parallel, meridian, lon, lat) at the worst position, or
 #'   NULL for a geographic CRS (no linear scale to speak of) and whenever the
 #'   projection cannot be evaluated. Callers treat NULL as "do not block".
@@ -1104,8 +1111,9 @@ crs_sample_positions <- function(df, x_col, y_col, crs) {
 #' UTM zone itself - the same exemption validate_crs(require_metric) makes.
 #'
 #' Thresholds. 0.1% is the practical floor for spatial analysis: a UTM zone
-#' holds |k - 1| below 0.04% across its own 6 deg of longitude, so anything
-#' worse means the CRS does not belong to the region. 1% is where the error
+#' holds |k - 1| below 0.1% across its own 6 deg of longitude (0.04% on its
+#' central meridian, just under 0.1% at the zone edge on the equator), so
+#' anything worse means the CRS does not belong to the region. 1% is where the error
 #' exceeds any plausible tolerance - a 250 m buffer becomes 252.5 m, a
 #' variogram range is misreported by the same factor - and is refused, subject
 #' to an explicit override. Falling outside the declared area of use WARNS but
@@ -1187,9 +1195,9 @@ crs_measure_detail <- paste(
 #' The Target Mapping CRS this data should be measured in.
 #'
 #' crs_target_suitability() says a CRS is wrong; this says which one is right.
-#' Diagnosing without prescribing was the whole defect it repairs: the app can
-#' derive the answer from the data's own longitude, and used to hand the user a
-#' bounding box in decimal degrees to compare against instead.
+#' Diagnosing without prescribing would hand the user a bounding box in
+#' decimal degrees to compare against, when the app can derive the answer from
+#' the data's own longitude.
 #'
 #' A longitude fixes the UTM zone exactly - the same arithmetic
 #' crs_zone_candidates() encodes - so the answer needs no catalogue and no
@@ -1234,10 +1242,6 @@ crs_recommend_target <- function(lon, lat) {
        dev = if (is.null(k_res)) NA_real_ else k_res$dev)
 }
 
-# Two selectors, two lists. Web Mercator is a legitimate INPUT CRS - data
-# really does arrive in it - but never an analysis one: at 52 deg N it inflates
-# every distance by 64%, so it is not offered as a Target, and the suitability
-# gate refuses it if it is typed in anyway.
 #' How an uploaded boundary relates to the samples: how many fall inside the
 #' polygons the pipeline will use (a point/line layer's convex hull, via
 #' shp_boundary_polygons()) and, when none do, how far the boundary is from
@@ -1281,6 +1285,10 @@ utm_crs_choices <- local({
   c(n, s)
 })
 
+# Two selectors, two lists. Web Mercator is a legitimate INPUT CRS - data
+# really does arrive in it - but never an analysis one: at 52 deg N it inflates
+# every distance by 64%, so it is not offered as a Target, and the suitability
+# gate refuses it if it is typed in anyway.
 common_crs_input <- c(
   "WGS 84 (EPSG:4326)" = "EPSG:4326",
   "S-JTSK / Krovak East North (EPSG:5514)" = "EPSG:5514",
@@ -1492,13 +1500,31 @@ styler_format_ext <- function(fmt) {
 
 #' The Download Run Configuration record: the run configuration, the
 #' per-locality tuning the run's method consumed, and provenance. An IDW run
-#' lists its powers and a TPS run its lambdas (with each fitted lambda and
-#' effective df); the kriging engines consume neither, so none is written.
+#' lists its power settings and fits (map power, CV power profile, fold
+#' powers), a TPS run its lambda settings and fits (fitted lambda, effective df,
+#' GCV curve); the kriging engines consume neither, so none is written.
+#' JSON has no infinity, so an IDW fit's powers are written as numbers where
+#' finite and every power is also named (idw_power_text): the nearest-neighbour
+#' limit is a name, never a number or a dropped field. A kNNDM run records the
+#' settings its folds were built with (`cv_knndm`) beside its repeat count.
 run_record_payload <- function(cfg, regional_params, app_version, pkg_versions) {
-  keep <- switch(cfg$method %||% "", IDW = "^idw_p_", TPS = "^tps_", NULL)
+  keep <- switch(cfg$method %||% "", IDW = "^idw_", TPS = "^tps_", NULL)
+  if (identical(cfg$cv_strategy, "knndm")) {
+    settings <- list(cv_knndm = list(
+      k = CV_FOLD_K, maxp = KNNDM_MAXP, min_n = CV_KNNDM_MIN_N,
+      domain_points = KNNDM_DOMAIN_N, exact_max = KNNDM_EXACT_MAX,
+      max_cells = KNNDM_MAX_CELLS, candidates_exact = KNNDM_NQ_EXACT,
+      candidates_cells = KNNDM_NQ_CELLS, ks_alpha = KNNDM_KS_ALPHA))
+    at <- match("cv_repeats", names(cfg))
+    cfg <- append(cfg, settings, after = if (is.na(at)) length(cfg) else at)
+  }
   out <- list(config = cfg)
   if (!is.null(keep)) {
-    out$regional_params <- lapply(regional_params, function(p) p[grepl(keep, names(p))])
+    out$regional_params <- lapply(regional_params, function(p) {
+      p <- p[grepl(keep, names(p))]
+      for (nm in grep("^idw_fit_", names(p), value = TRUE)) p[[nm]] <- idw_fit_record(p[[nm]])
+      p
+    })
   }
   out$provenance <- list(
     app_version = cfg$app_version %||% app_version,
@@ -1508,6 +1534,40 @@ run_record_payload <- function(cfg, regional_params, app_version, pkg_versions) 
     packages = pkg_versions
   )
   out
+}
+
+# An IDW fit record as the JSON run record writes it: the map power, each
+# candidate of the CV profile and each fold power as a number where finite
+# (the nearest-neighbour limit leaves it out) beside its name.
+idw_fit_record <- function(fit) {
+  if (!is.list(fit)) return(fit)
+  num <- function(p) ifelse(is.finite(p), p, NA_real_)
+  name <- function(p) vapply(p, idw_power_text, character(1), USE.NAMES = FALSE)
+  # [[ ]], not $: `$p` partially matches `profile` on a record without p.
+  p <- fit[["p"]]
+  if (length(p) == 1) {
+    fit$selected <- name(p)
+    fit["p"] <- list(if (is.finite(p)) p else NULL)
+  }
+  if (NROW(fit$profile)) {
+    prof <- data.frame(candidate = name(fit$profile$p), p = num(fit$profile$p), cv_rmse = fit$profile$rmse)
+    # Added only when recorded: a named NULL argument makes data.frame() fail.
+    if (!is.null(fit$profile$within_se)) prof$within_se <- fit$profile$within_se
+    fit$profile <- prof
+  }
+  if (length(fit$fold_p)) {
+    fit$fold_p <- data.frame(fold = names(fit$fold_p) %||% as.character(seq_along(fit$fold_p)),
+                             p = num(unname(fit$fold_p)), selected = name(fit$fold_p))
+  }
+  fit
+}
+
+#' The run record as the JSON text Download Run Configuration writes, at full
+#' precision: jsonlite's default keeps 4 decimal places, which wrote a GCV score
+#' of 0.000505 as 0.0005 and cut every RMSE of the record.
+run_record_json <- function(payload) {
+  jsonlite::toJSON(payload, pretty = TRUE, auto_unbox = TRUE, digits = NA,
+                   null = "null", force = TRUE, POSIXt = "ISO8601")
 }
 
 #' Why a JSON file handed to Load Config cannot be loaded, or NULL when it is a
@@ -1521,6 +1581,109 @@ session_config_refusal <- function(cfg) {
   sprintf(paste0("This file is a run record (Download Run Configuration, Monolith %s), not a ",
                  "session configuration: it documents a finished run and cannot be loaded. ",
                  "Load a file saved with DOWNLOAD CONFIGURATION FILE instead."), ver)
+}
+
+#' Format of the session configuration Save config writes: every run-defining
+#' input, the variable list and the tuning stores. A file without
+#' `config_version` is an older configuration and restores the fields it has.
+SESSION_CONFIG_VERSION <- 2L
+
+#' One scalar from a parsed configuration field (jsonlite, simplifyVector =
+#' FALSE), NULL when the field is absent, empty or not a single value.
+config_scalar <- function(x) {
+  x <- unlist(x)
+  if (length(x) == 1 && !is.na(x) && nzchar(as.character(x))) x else NULL
+}
+
+#' The tuning stores as rows a JSON file can carry: the manual variogram models
+#' (Apply manual model; OPTIMIZE ALL VARIOGRAMS previews are refitted, not
+#' stored) and the per-locality IDW power and TPS lambda entries, each with the
+#' tuning key it was set for.
+config_stores_out <- function(v_fit_list, idw_factors, tps_lambdas) {
+  vgm_rows <- lapply(names(v_fit_list %||% list()), function(slot) {
+    m <- v_fit_list[[slot]]
+    if (!identical(attr(m, "monolith_source"), "manual")) return(NULL)
+    d <- as.data.frame(m)
+    s <- d[d$model != "Nug", , drop = FALSE]
+    if (!nrow(s)) return(NULL)
+    list(loc = sub("_(act|pre)$", "", slot), target = sub("^.*_", "", slot),
+         key = attr(m, "monolith_key"), model = as.character(s$model[1]),
+         psill = s$psill[1], range = s$range[1], nugget = sum(d$psill[d$model == "Nug"]))
+  })
+  param_rows <- function(store) {
+    unlist(lapply(names(store %||% list()), function(loc) {
+      lapply(names(store[[loc]]), function(tg) {
+        list(loc = loc, target = tg, value = store[[loc]][[tg]]$value, key = store[[loc]][[tg]]$key)
+      })
+    }), recursive = FALSE)
+  }
+  list(variograms = Filter(Negate(is.null), vgm_rows),
+       idw = param_rows(idw_factors), tps = param_rows(tps_lambdas))
+}
+
+#' The tuning stores back from config_stores_out() rows as parsed from JSON.
+#' Rows of a locality outside `locs`, and rows that are not a valid model or
+#' value, are dropped; the localities outside `locs` are listed in `skipped`.
+config_stores_in <- function(stores, locs) {
+  key_of <- function(r) {
+    if (!is.list(r)) return(NULL)
+    loc <- config_scalar(r$loc); target <- config_scalar(r$target); key <- config_scalar(r$key)
+    if (is.null(loc) || !isTRUE(target %in% c("act", "pre")) || is.null(key)) return(NULL)
+    list(loc = as.character(loc), target = target, key = as.character(key))
+  }
+  all_rows <- c(stores$variograms, stores$idw, stores$tps)
+  row_locs <- unlist(lapply(all_rows, function(r) key_of(r)$loc))
+  params <- function(rows, ok) {
+    out <- list()
+    for (r in rows) {
+      k <- key_of(r)
+      v <- suppressWarnings(as.numeric(config_scalar(r$value)))
+      if (is.null(k) || !k$loc %in% locs || length(v) != 1 || !ok(v)) next
+      out[[k$loc]][[k$target]] <- list(value = v, key = k$key)
+    }
+    out
+  }
+  vgms <- list()
+  for (r in stores$variograms) {
+    k <- key_of(r)
+    model <- config_scalar(r$model)
+    p <- suppressWarnings(as.numeric(c(config_scalar(r$psill), config_scalar(r$range),
+                                       config_scalar(r$nugget))))
+    if (is.null(k) || !k$loc %in% locs || !isTRUE(model %in% c("Sph", "Exp", "Gau", "Mat")) ||
+        length(p) != 3 || !is.null(validate_manual_vgm(p[1], p[3], p[2]))) next
+    vgms[[paste0(k$loc, "_", k$target)]] <- stamp_vgm(manual_vgm(p[1], model, p[2], p[3]), k$key, "manual")
+  }
+  list(v_fit_list = vgms,
+       idw_factors = params(stores$idw, function(v) isTRUE(v == -1) || idw_fixed_ok(v)),
+       tps_lambdas = params(stores$tps, function(v) v %in% c(-1, 0) || tps_fixed_ok(v)),
+       skipped = setdiff(unique(row_locs), locs))
+}
+
+#' A saved variable list, kept to the variables whose measured column is in
+#' `cols`; a prediction column missing from `cols` is dropped from its entry.
+#' `skipped` lists the measured columns that are missing.
+config_vars_in <- function(vars, cols) {
+  str1 <- function(x, default) {
+    x <- config_scalar(x)
+    if (is.null(x)) default else as.character(x)
+  }
+  col_or_null <- function(x) {
+    x <- str1(x, NA_character_)
+    if (!is.na(x) && x %in% cols) x else NULL
+  }
+  kept <- list(); skipped <- character(0)
+  for (v in vars %||% list()) {
+    act <- str1(v$actual, NA_character_)
+    if (is.na(act)) next
+    if (!act %in% cols) { skipped <- c(skipped, act); next }
+    cat_v <- str1(v$category, "Uploaded Data")
+    lab <- str1(v$label, act)
+    kept[[length(kept) + 1]] <- list(
+      actual = act, pred = col_or_null(v$pred), pred_ss = col_or_null(v$pred_ss),
+      label = lab, category = cat_v, unit = str1(v$unit, ""),
+      palette = str1(v$palette, get_default_palette(act, cat_v, lab)))
+  }
+  list(vars = kept, skipped = skipped)
 }
 
 #' `-mo` options for gdal_translate from a named character vector of tags. A
@@ -1785,8 +1948,10 @@ write_vector_export <- function(sf_obj, file, fmt, layer_name = "layer") {
   }
 
   if (fmt == "shp") {
-    # A shapefile is a set of sibling files, so it travels as a zip.
-    temp_dir <- file.path(tempdir(), paste0("vec_export_", as.integer(Sys.time())))
+    # A shapefile is a set of sibling files, so it travels as a zip. The
+    # directory is unique per call; the on.exit below would otherwise delete a
+    # second export's files if two shared a name.
+    temp_dir <- tempfile("vec_export_")
     dir.create(temp_dir, showWarnings = FALSE)
     on.exit(unlink(temp_dir, recursive = TRUE), add = TRUE)
     sf::st_write(sf_obj, file.path(temp_dir, paste0(layer_name, ".shp")),
@@ -1829,6 +1994,3 @@ remove_surplus_raster_images <- function(m, n_now, n_prev) {
 
 #' Leaflet layer id of the i-th Map Viewer raster image.
 raster_img_layer_id <- function(i) paste0("rast_img_", i)
-
-# robust_vgm_fit and clean_gstat_env live in spatial_helpers.R (they are model
-# code and must be resolvable by workers that source only that file).

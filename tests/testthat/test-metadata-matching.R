@@ -105,6 +105,42 @@ test_that("match_metadata_columns assigns palettes", {
   expect_equal(result[[1]]$palette, get_default_palette("TN", "Soil", "Total Nitrogen"))
 })
 
+test_that("match_metadata_columns reads a Unit column into each variable", {
+  m_df <- data.frame(actual = c("pH", "K", "TN"), label = c("Soil pH", "Potassium", "Total N"),
+                     cat = "Soil", Unit = c(NA, "mg/kg", " % "), stringsAsFactors = FALSE)
+  res <- match_metadata_columns(m_df, c("pH", "K", "TN", "x", "y"))
+  expect_equal(vapply(res, `[[`, character(1), "unit"), c("", "mg/kg", "%"))
+  # "Units" and a header naming the unit in words are unit columns too.
+  names(m_df)[4] <- "Measurement units"
+  expect_equal(match_metadata_columns(m_df, c("pH", "K", "TN"))[[2]]$unit, "mg/kg")
+})
+
+test_that("a variable list without a Unit column gives every variable an empty unit", {
+  # The shipped list's identifier headers must not be read as a unit column,
+  # nor a header that merely contains the letters "unit".
+  # Headers as the shipped samp_var_list.xlsx has them.
+  m_df <- data.frame(`Variable Number (VN)` = c("pH", "K"),
+                     `Variable ID (VID)` = c("Soil pH", "K (mg/kg)"),
+                     `Variable Category` = "Soil", Community = c("a", "b"),
+                     check.names = FALSE, stringsAsFactors = FALSE)
+  res <- match_metadata_columns(m_df, c("pH", "K"))
+  expect_length(res, 2L)
+  expect_equal(vapply(res, `[[`, character(1), "label"), c("Soil pH", "K (mg/kg)"))
+  expect_equal(vapply(res, `[[`, character(1), "unit"), c("", ""))
+})
+
+test_that("map legend titles carry the unit once", {
+  expect_equal(map_legend_title("K", "mg/kg", "var"), "Variance: K (mg/kg)^2")
+  expect_equal(map_legend_title("K (mg/kg)", "mg/kg"), "K (mg/kg)")
+  expect_equal(map_legend_title("K (MG/KG)", "mg/kg", "se"), "SE: K (MG/KG)")
+  expect_equal(map_legend_title("K", "mg/kg"), "K mg/kg")
+  # The variance layer always states the squared unit.
+  expect_equal(map_legend_title("K (mg/kg)", "mg/kg", "var"), "Variance: K (mg/kg) (mg/kg)^2")
+  # A short unit inside a longer word is not a unit the label names.
+  expect_equal(map_legend_title("Organic matter", "g"), "Organic matter g")
+  expect_equal(map_legend_title("Temperature (°C)", "°C"), "Temperature (°C)")
+})
+
 # ── find_subset_column ──────────────────────────────────────────────────────
 
 test_that("find_subset_column detects the partition column case-insensitively", {

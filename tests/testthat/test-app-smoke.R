@@ -4,20 +4,22 @@
 # that ui_main.R + the nine server_*.R chunks actually assemble into a running
 # Shiny app. A typo in a chunk, a duplicated input id, or a UI element that
 # references a helper removed elsewhere is invisible to unit tests and fatal in
-# production. These six tests boot the app in a headless browser and assert the
-# shell: the server initialises without error, the sidebar defaults are what the
-# engines assume, and the tab strip's stable `value=` ids still drive the
-# sidebar swap.
+# production. These tests boot the app in a headless browser and assert the
+# shell (the server initialises without error, the sidebar defaults are what
+# the engines assume, the tab strip's stable `value=` ids still drive the
+# sidebar swap) and the flows only a browser reaches: the CRS wiring, the
+# auxiliary correlation table, and a saved session configuration restored in a
+# second, fresh session.
 #
-# Deliberately NOT attempted: export flows, and any assertion on a run's
-# NUMBERS. Those dispatch parallel futures and would make the suite depend on
-# wall-clock timing. The last three tests do run the pipeline, because their
-# subjects cannot be reached any other way: whether a rendered DataTable puts
-# its values under their own headings is a property of the browser's layout,
-# and whether a restored or cancelled run is described consistently across the
-# panels needs real runs to archive, restore and cancel. They compare runs with
-# each other (hashes, the record's fields), never with fixed numbers, and skip
-# rather than fail if a run does not complete in time.
+# Deliberately NOT attempted: any assertion on a run's NUMBERS. Runs dispatch
+# parallel futures and would make the suite depend on wall-clock timing. The
+# tests that do run the pipeline need it for subjects no other route reaches:
+# whether a rendered DataTable puts its values under their own headings is a
+# property of the browser's layout, whether a restored or cancelled run is
+# described consistently across the panels needs real runs to archive, restore
+# and cancel, and a TPS lambda must reach the run unchanged. They compare runs
+# with each other (hashes, the record's fields, the parameter used), never with
+# fixed numbers, and skip rather than fail if a run does not complete in time.
 #
 # The whole file self-skips unless a Chromium-based browser and shinytest2 are
 # available (CI has neither, and CI expansion is a standing decision).
@@ -42,10 +44,10 @@ resolve_browser <- function() {
   hit
 }
 
-# One booted app shared by every test in this file: startup costs ~20 s (60
-# packages), and none of them mutates state another one reads back. The handle
-# lives in an environment rather than a closure variable so the file can shut
-# the app down at the end (see the bottom of the file).
+# One booted app shared by every test in this file (startup costs ~20 s); a
+# test that reads state an earlier one left says so. The handle lives in an
+# environment rather than a closure variable so the file can shut the app down
+# at the end (see the bottom of the file).
 .smoke <- new.env(parent = emptyenv())
 .smoke$app <- NULL
 
@@ -82,9 +84,18 @@ smoke_app <- local({
       '    rast_hash = if (!is.null(rv$rast)) rlang::hash(terra::values(rv$rast, mat = FALSE)),',
       '    rmse = if (length(rv$cv_metrics_act)) rv$cv_metrics_act[[1]]$rmse,',
       '    map_label = rv$export_registry$map_actual$label,',
-      '    history = vapply(rv$run_history, function(h) h$config$method, character(1))))',
+      '    history = vapply(rv$run_history, function(h) h$config$method, character(1))),',
+      '    tps_store = rv$tps_lambdas,',
+      '    tps_lambda_used = lapply(rv$disp$regional_params, function(p) p$tps_fit_act$lambda),',
+      '    idw_store = rv$idw_factors,',
+      '    vgm_manual = lapply(Filter(function(m) identical(attr(m, "monolith_source"), "manual"), rv$v_fit_list),',
+      '      function(m) list(key = attr(m, "monolith_key"), model = as.character(m$model), psill = m$psill, range = m$range)),',
+      '    vars = vapply(rv$mapping$vars, function(v) paste(v$actual, if (is_valid_col_ref(v$pred)) v$pred else "",',
+      '      if (is_valid_col_ref(v$pred_ss)) v$pred_ss else "", v$label, v$category, v$unit, v$palette, sep = "|"), ""),',
+      '    cfg_restore = list(active = cfg_restore_active(), skipped = cfg_restore$skipped))',
       '})'
     ), file.path(shim, "app.R"))
+    .smoke$shim <- shim
 
     # shinytest2 skips on CRAN internally; this file's own guards above decide.
     withr::local_envvar(NOT_CRAN = "true", .local_envir = testthat::teardown_env())
@@ -138,6 +149,15 @@ test_that("sidebar defaults match what the engines assume", {
   app <- smoke_app()
   expect_equal(app$get_value(input = "method"), "OK")
   expect_equal(app$get_value(input = "cv_strategy"), "auto")
+  # kNNDM is the second choice in both CV selectors; the defaults are unchanged.
+  choice_values <- function(id) {
+    unlist(app$get_js(sprintf(
+      "Array.prototype.map.call(document.querySelectorAll('#%s input[type=radio]'), function (e) { return e.value; })",
+      id)))
+  }
+  expect_identical(choice_values("cv_strategy"), c("auto", "knndm", "loocv", "block"))
+  expect_identical(choice_values("classification-cv_strategy"), c("spatial", "knndm", "standard"))
+  expect_equal(app$get_value(input = "classification-cv_strategy"), "spatial")
   expect_equal(app$get_value(input = "value_type"), "actual")
   expect_equal(app$get_value(input = "color_style"), "cont")
   # Repeated CV must default to OFF: it multiplies cross-validation cost and
@@ -146,6 +166,16 @@ test_that("sidebar defaults match what the engines assume", {
 
   app$set_inputs(method = "IDW")
   expect_equal(app$get_value(input = "method"), "IDW")
+  # No IDW run is on screen yet, so the panel draws no pooled-CV box.
+  expect_equal(app$get_js("document.getElementById('idw_metrics_ui').children.length"), 0)
+  # IDW runs at a fixed p = 2 unless Auto (CV) is chosen; TPS selects its
+  # smoothing by GCV unless a lambda is fixed. Both apply to all localities.
+  expect_equal(app$get_value(input = "idw_p_mode"), "fixed")
+  expect_equal(app$get_value(input = "idw_p"), 2)
+  expect_equal(app$get_value(input = "idw_mode"), "auto")
+  app$set_inputs(method = "TPS")
+  expect_equal(app$get_value(input = "tps_lambda_mode"), "gcv")
+  expect_equal(app$get_value(input = "tps_mode"), "auto")
   app$set_inputs(method = "OK")
 })
 
@@ -568,6 +598,190 @@ test_that("a cancelled run is labelled cancelled and never archived", {
   expect_setequal(st$history, c("IDW", "OK"))
   expect_match(app$get_html("#run_status_chip"), "Cancelled", fixed = TRUE)
   expect_match(app$get_html("#run_config_display_map"), "CANCELLED", fixed = TRUE)
+})
+
+test_that("a TPS lambda survives the per-locality panel and the run unchanged", {
+  app <- smoke_app()
+  # Two localities of 30 samples, in UTM 33N with a lon/lat twin so the Input
+  # Data CRS is identified on upload (see the CRS tests above).
+  ctr <- sf::st_coordinates(sf::st_transform(
+    sf::st_sfc(sf::st_point(c(12.958, 52.466)), crs = 4326), 32633))
+  set.seed(8)
+  d <- data.frame(locality = rep(c("A", "B"), each = 30),
+                  x = ctr[1] + c(runif(30, -2000, 2000), runif(30, 4000, 8000)),
+                  y = ctr[2] + runif(60, -1500, 1500),
+                  value = runif(60, 10, 24))
+  ll <- sf::st_coordinates(sf::st_transform(
+    sf::st_as_sf(d, coords = c("x", "y"), crs = 32633), 4326))
+  d <- data.frame(d[, c("locality", "x", "y")], lon = ll[, 1], lat = ll[, 2], value = d$value)
+  csv <- tempfile(fileext = ".csv")
+  withr::defer(unlink(csv))
+  utils::write.csv(d, csv, row.names = FALSE)
+  app$upload_file(user_file = csv)
+  app$wait_for_idle()
+  app$set_inputs(var_id = "value", value_type = "actual", method = "TPS")
+  app$set_inputs(locality = c("A", "B"))
+  app$set_inputs(tps_mode = "manual")
+  app$wait_for_idle()
+
+  # GCV-scale values, a value above the old slider's range, and the value a
+  # fixed lambda of 0.000256 used to round to 0 on: each is stored as typed,
+  # shown again when the locality is revisited, and valid in the browser
+  # (step = "any"; a numeric step flags 2.4e-06 as invalid).
+  for (lam in c(2.4e-06, 20.2, 0.000256)) {
+    app$set_inputs(tps_m_loc = "A")
+    app$wait_for_idle()
+    app$set_inputs(tps_m_mode = "fixed")
+    app$set_inputs(tps_m_lambda = lam)
+    app$wait_for_idle()
+    expect_true(isTRUE(app$get_js("document.getElementById('tps_m_lambda').validity.valid")),
+                info = format(lam))
+    app$click("apply_tps_manual")
+    app$wait_for_idle()
+    app$set_inputs(tps_m_loc = "B")
+    app$wait_for_idle()
+    app$set_inputs(tps_m_loc = "A")
+    app$wait_for_idle()
+    expect_identical(app$get_value(input = "tps_m_mode"), "fixed", info = format(lam))
+    expect_identical(app$get_value(input = "tps_m_lambda"), lam, info = format(lam))
+    expect_identical(app$get_value(export = "tps_store")$A$act$value, lam, info = format(lam))
+  }
+
+  # "All localities" runs every locality with the sidebar setting; A's stored
+  # 0.000256 applies only under "Per locality".
+  app$set_inputs(tps_mode = "auto")
+  app$set_inputs(tps_lambda_mode = "fixed")
+  app$set_inputs(tps_lambda = 20.2)
+  app$wait_for_idle()
+  skip_if_not(run_and_reveal(app), "the TPS run did not finish inside the smoke harness")
+  used <- app$get_value(export = "tps_lambda_used")
+  expect_identical(used$A, 20.2)
+  expect_identical(used$B, 20.2)
+})
+
+test_that("Save config and Load config restore every run-defining setting", {
+  app <- smoke_app()
+  # Two localities 5 km apart in UTM 35N with no lon/lat pair, so a new
+  # session opens with both CRS selectors empty. A second locality column and
+  # a copy of each coordinate let the saved mapping differ from the one an
+  # upload picks by itself.
+  ctr <- sf::st_coordinates(sf::st_transform(
+    sf::st_sfc(sf::st_point(c(27.5, 38.5)), crs = 4326), 32635))
+  gx <- rep(0:5, 5) * 150
+  gy <- rep(0:4, each = 6) * 150
+  i <- seq_len(60)
+  d <- data.frame(locality = rep(c("A", "B"), each = 30), site = rep(c("A", "B"), each = 30),
+                  x = ctr[1] + c(gx, gx + 5000), y = ctr[2] + c(gy, gy))
+  d$east_m <- d$x
+  d$north_m <- d$y
+  d$ph <- 6.5 + 0.4 * sin(i / 3)
+  d$ph_cve <- d$ph + 0.05 * cos(i)
+  d$k <- 200 + 60 * cos(i / 4)
+  d$k_cve <- d$k + 8 * sin(i)
+  d$k_ss <- d$k - 6 * cos(i / 2)
+  d$subset <- rep(c("Train", "Test"), 30)
+  d$elev <- 100 + 3 * (i %% 7)
+  d$clay <- 20 + 5 * sin(i / 5)
+  data_csv <- tempfile(fileext = ".csv")
+  meta_csv <- tempfile(fileext = ".csv")
+  withr::defer(unlink(c(data_csv, meta_csv)))
+  utils::write.csv(d, data_csv, row.names = FALSE)
+  utils::write.csv(data.frame(Variable = c("ph", "k"), Label = c("pH", "Potassium"),
+                              Category = c("Soil", "Nutrients"), Unit = c("", "mg/kg")),
+                   meta_csv, row.names = FALSE)
+
+  set <- function(a, ...) {
+    a$set_inputs(..., wait_ = FALSE)
+    a$wait_for_idle()
+  }
+  app$upload_file(user_file = data_csv)
+  app$wait_for_idle()
+  app$upload_file(meta_file = meta_csv)
+  app$wait_for_idle()
+  set(app, map_x = "east_m", map_y = "north_m", map_loc = "site")
+  app$run_js("Shiny.setInputValue('map_crs', 'EPSG:32635'); Shiny.setInputValue('crs_selection', 'EPSG:32635');")
+  app$wait_for_idle()
+  set(app, var_category = "Nutrients")
+  set(app, var_id = "k")
+  set(app, value_type = "pred_ss")
+  set(app, subset = "Test", comp_mode = TRUE, sep_fit = FALSE, match_scales = TRUE, locality = "B")
+  # One per-locality IDW power and one manual variogram model.
+  set(app, method = "IDW")
+  set(app, idw_mode = "manual")
+  set(app, idw_m_mode = "fixed", idw_m_p = 3.2)
+  app$click("apply_idw_manual")
+  app$wait_for_idle()
+  set(app, method = "OK", vgm_mode = "manual")
+  set(app, k_mod = "Exp")
+  app$click("apply_manual")
+  app$wait_for_idle()
+  set(app, method = "RK")
+  set(app, cv_strategy = "knndm", cv_population = "comparable", cv_repeat_on = TRUE, cv_repeat_n = "10",
+      rfk_uncertainty = "spread", ck_nmax = 25, aux_vars = c("elev", "clay"))
+  set(app, idw_p_mode = "cv", idw_p = 3.5, idw_nmax = 20, tps_mode = "manual",
+      tps_lambda_mode = "fixed", tps_lambda = 2.4e-06)
+  set(app, boundary_type = "wrapped", buff_mode = "fixed", buff_dist = 150, res_mode = "fixed", grid_res = 35)
+  set(app, color_style = "agro")
+  set(app, agro_method = "limits", agro_n_classes = 4)
+  set(app, agro_limit_1 = 150, agro_limit_2 = 250, agro_limit_3 = 350)
+
+  ids <- c("map_x", "map_y", "map_loc", "map_crs", "crs_selection", "locality", "var_category",
+           "var_id", "value_type", "subset", "comp_mode", "sep_fit", "match_scales", "method",
+           "cv_strategy", "cv_population", "cv_repeat_on", "cv_repeat_n", "rfk_uncertainty",
+           "ck_nmax", "aux_vars", "vgm_mode", "idw_mode", "idw_p_mode", "idw_p", "idw_nmax",
+           "tps_mode", "tps_lambda_mode", "tps_lambda", "boundary_type", "buff_mode", "buff_dist",
+           "res_mode", "grid_res", "color_style", "agro_method", "agro_n_classes",
+           "agro_limit_1", "agro_limit_2", "agro_limit_3")
+  before <- app$get_values(input = ids)$input
+  expect_identical(before$map_x, "east_m")
+  expect_identical(before$method, "RK")
+  expect_equal(before$agro_limit_3, 350)
+  stores <- c("idw_store", "vgm_manual", "vars")
+  saved <- app$get_values(export = stores)$export
+  expect_equal(saved$idw_store$B$act$value, 3.2)
+  expect_length(saved$vgm_manual, 1)
+  expect_true(any(grepl("^k\\|k_cve\\|k_ss\\|Potassium\\|Nutrients\\|mg/kg\\|", saved$vars)))
+
+  app$click("save_config")
+  app$wait_for_idle()
+  cfg_file <- app$get_download("download_config_json")
+  app$run_js("$('#shiny-modal').modal('hide');")
+  app$wait_for_idle()
+  # Load config reads through the server's file chooser, whose roots are the
+  # home directory and the project; the file goes under the project.
+  proj_root <- normalizePath(file.path(testthat::test_path(), "..", ".."), winslash = "/")
+  cfg_copy <- file.path(proj_root, "tests", "testthat", "_config_roundtrip.json")
+  withr::defer(unlink(cfg_copy))
+  file.copy(cfg_file, cfg_copy, overwrite = TRUE)
+
+  # A new session on the same data.
+  app2 <- tryCatch(
+    shinytest2::AppDriver$new(.smoke$shim, name = "monolith-config", load_timeout = 180 * 1000,
+                              timeout = 60 * 1000),
+    error = function(e) skip(paste("Could not start a second app:", conditionMessage(e))))
+  withr::defer(try(app2$stop(), silent = TRUE))
+  app2$upload_file(user_file = data_csv)
+  app2$wait_for_idle()
+  expect_false(identical(app2$get_value(input = "map_x"), "east_m"))
+  expect_identical(app2$get_value(input = "map_crs") %||% "", "")
+
+  app2$run_js(paste0("Shiny.setInputValue('load_config', {files: {'0': ['tests', 'testthat', ",
+                     "'_config_roundtrip.json']}, root: 'Project'}, {priority: 'event'});"))
+  deadline <- Sys.time() + 90
+  repeat {
+    Sys.sleep(1)
+    st <- app2$get_value(export = "cfg_restore")
+    after <- app2$get_values(input = ids)$input
+    if ((isFALSE(st$active) && isTRUE(all.equal(after[ids], before[ids]))) || Sys.time() > deadline) break
+  }
+  expect_false(st$active)
+  expect_length(st$skipped, 0)
+  for (id in ids) expect_equal(after[[id]], before[[id]], info = id)
+  restored <- app2$get_values(export = stores)$export
+  # Full precision is written (digits = NA); the tolerance allows its last bit.
+  expect_equal(restored$idw_store, saved$idw_store)
+  expect_equal(restored$vgm_manual, saved$vgm_manual)
+  expect_identical(sort(restored$vars), sort(saved$vars))
 })
 
 # Shut the app down here rather than at suite teardown: global.R sets

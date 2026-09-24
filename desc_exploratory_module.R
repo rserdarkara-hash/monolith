@@ -85,8 +85,8 @@ compute_normality <- function(x) {
 
 #' The normality verdict as one sentence, for reading and for copying.
 #'
-#' The verdict used to live only in an icon's `title`, so it could not be
-#' copied into a report or read without hovering; the tooltip keeps the long
+#' A verdict held only in an icon's `title` could not be copied into a report
+#' or read without hovering; the tooltip keeps the long
 #' explanation and the per-group breakdown, this is the line on the page. It
 #' names the test, its statistic with the symbol that test reports (W for
 #' Shapiro-Wilk, D for Lilliefors), the p-value through the app's own
@@ -801,8 +801,8 @@ desc_exploratory_server <- function(id, data_reactive, vars_metadata_reactive,
           df, v1, v2, x_col = sp$x, y_col = sp$y,
           src_crs = sp$src_crs, proj_crs = sp$proj_crs,
           n_bins = input$corr_n_bins %||% 15, method = method)
-        # The plot names the reason it cannot be computed; the table used to
-        # just vanish. Show the same reason instead.
+        # The plot names the reason it cannot be computed; the table shows the
+        # same reason rather than vanishing.
         if (is.null(res$bins)) return(desc_empty_dt(gsub("\n", " ", res$message %||% "Cross-correlogram not computable for this selection.")))
         # Numbers stay numbers (sorting, copying); the display shows four
         # significant digits, as every result table does.
@@ -1007,7 +1007,7 @@ desc_exploratory_server <- function(id, data_reactive, vars_metadata_reactive,
       col_check <- check_collinearity(df, input$pca_vars, threshold = 0.95)
 
       if (col_check$has_collinearity) {
-        # Correlated pairs and high VIF are judgement calls: stop and ask.
+        # Near-duplicate pairs are a judgement call: stop and ask.
         pca_rv$guard <- col_check
         pca_rv$refusal <- NULL
         pca_rv$res <- NULL
@@ -1017,11 +1017,11 @@ desc_exploratory_server <- function(id, data_reactive, vars_metadata_reactive,
       }
     })
 
-    # Three kinds of finding, each under its own heading and sentence. Only the
-    # first two are advisory, so the button to continue follows them; a
-    # constant column is never a reason to stop, because it is excluded anyway.
-    # The same slot carries a refusal, or, once a PCA is shown, the standing
-    # note naming the columns it left out.
+    # Two kinds of finding, each under its own heading and sentence. Only the
+    # near-duplicate pairs are advisory, so the button to continue follows
+    # them; a constant column is never a reason to stop, because it is excluded
+    # anyway. The same slot carries a refusal, or, once a PCA is shown, the
+    # standing note naming the columns it left out.
     output$pca_collinearity_warning_ui <- shiny::renderUI({
       lab <- function(v) get_var_labels(v, vmeta())
       if (!is.null(pca_rv$refusal)) {
@@ -1047,22 +1047,16 @@ desc_exploratory_server <- function(id, data_reactive, vars_metadata_reactive,
       shiny::div(class = "alert alert-warning",
         shiny::h4(shiny::icon("exclamation-triangle"), "Check the selected variables"),
         if (nrow(g$pairs) > 0) section(
-          "Highly correlated pairs",
-          "These pairs have |r| > 0.95. Near-duplicate variables dominate the first components and split their loadings, so the biplot understates every other variable.",
+          "Near-duplicate pairs",
+          "These pairs are near-duplicates (|r| > 0.95); each pair double-weights one dimension of the PCA. Consider keeping one variable of each pair.",
           sprintf("%s & %s (r = %s)", lab(g$pairs$var1), lab(g$pairs$var2), format_sig(g$pairs$r))),
-        if (nrow(g$high_vif) > 0) section(
-          "High multicollinearity (VIF > 10)",
-          "These variables are predicted almost exactly by a combination of the others, so their contribution to a component is not separately identifiable.",
-          sprintf("%s (VIF = %s)", lab(g$high_vif$variable),
-                  ifelse(is.finite(g$high_vif$vif), format_sig(g$high_vif$vif),
-                         "not finite: the correlation matrix is singular"))),
         if (length(g$constant) > 0) section(
           "No variance",
           "These variables are constant across the selected rows. They carry no information and cannot be standardised, so they are excluded from the PCA.",
           lab(g$constant)),
         shiny::p(style = "margin-top: 10px;",
-                 "Remove the variables named above from the selection, or continue with them: correlated and high-VIF variables are advisory findings."),
-        shiny::actionButton(ns("pca_force_btn"), "Ignore Warning & Force PCA", class = "btn-danger")
+                 "Remove a variable of each pair from the selection, or continue with all of them."),
+        shiny::actionButton(ns("pca_force_btn"), "Run PCA with these variables", class = "btn-warning")
       )
     })
 

@@ -105,12 +105,13 @@ test_that("get_default_palette uses label when var_name doesn't match", {
 
 test_that("get_method_label returns full names for all methods", {
   expect_equal(get_method_label("OK"), "Ordinary Kriging")
-  expect_equal(get_method_label("UK"), "Universal Kriging")
   expect_equal(get_method_label("RK"), "Regression Kriging")
   expect_equal(get_method_label("RFK"), "Random Forest Kriging")
   expect_equal(get_method_label("CK"), "Co-Kriging")
   expect_equal(get_method_label("IDW"), "IDW")
   expect_equal(get_method_label("TPS"), "Thin Plate Spline")
+  # The labels are exactly the six engines the Interpolation control offers.
+  expect_setequal(names(method_labels), c("OK", "RK", "RFK", "CK", "IDW", "TPS"))
 })
 
 test_that("get_method_label returns input for unknown methods", {
@@ -301,4 +302,135 @@ test_that("apply_desc_palette applies a continuous gradient for XYZ surface", {
   p <- generate_advanced_plot(df, vars = c("a", "b", "c"), plot_type = "xyz_surface")
   p2 <- apply_desc_palette(p, "plasma", continuous = TRUE)
   expect_no_error(ggplot2::ggplot_build(p2))
+})
+
+# ── Reference class limits (Supervised styling) ───────────────────────────
+
+test_that("the reference class limits are the published ones, with method and unit", {
+  # Table S2 of the accompanying manuscript, written out by hand.
+  s2 <- data.frame(
+    key    = c("TN", "P", "K", "Ca", "Mg", "Fe", "Mn", "Cu", "Zn"),
+    method = c("Total N", "Olsen P", "NH₄OAc K", "NH₄OAc Ca", "NH₄OAc Mg",
+               "DTPA Fe", "DTPA Mn", "DTPA Cu", "DTPA Zn"),
+    unit   = c("%", rep("mg kg⁻¹", 8)),
+    low    = c(0.05, 8, 200, 1428, 80, 4, 1.2, 0.3, 1),
+    high   = c(0.10, 25, 300, 2857, 160, 6, 3.5, 0.8, 3),
+    stringsAsFactors = FALSE)
+  expect_identical(names(NUTRIENT_REFERENCE), s2$key)
+  for (i in seq_len(nrow(s2))) {
+    r <- NUTRIENT_REFERENCE[[s2$key[i]]]
+    expect_identical(r$method, s2$method[i], info = s2$key[i])
+    expect_identical(r$unit, s2$unit[i], info = s2$key[i])
+    expect_identical(r$limits, c(s2$low[i], s2$high[i]), info = s2$key[i])
+  }
+  # The DTPA classes are local limits, cited with the test they are based on.
+  for (k in c("Fe", "Mn", "Cu", "Zn")) {
+    expect_match(NUTRIENT_REFERENCE[[k]]$source, "Çokuysal & Erbaş (2004)", fixed = TRUE)
+    expect_match(NUTRIENT_REFERENCE[[k]]$source, "Lindsay & Norvell (1978)", fixed = TRUE)
+  }
+})
+
+test_that("a variable's unit decides whether the reference limits apply", {
+  for (u in c("mg/kg", "mg kg-1", "mg kg⁻¹", "ppm", "µg/g", "MG/KG", " mg·kg⁻¹ "))
+    expect_identical(reference_unit_status(u, "mg kg⁻¹"), "equivalent", info = u)
+  expect_identical(reference_unit_status("%", "%"), "equivalent")
+  expect_identical(reference_unit_status("cmol/kg", "mg kg⁻¹"), "different")
+  expect_identical(reference_unit_status("g/kg", "%"), "different")
+  expect_identical(reference_unit_status("", "mg kg⁻¹"), "empty")
+  expect_identical(reference_unit_status(NA, "mg kg⁻¹"), "empty")
+
+  vals <- c(120, 180, 240, 310, 420)
+  d <- class_limit_defaults("K", "ppm", 3, vals)
+  expect_identical(d$source, "reference")
+  expect_identical(d$limits, c(200, 300))
+  d_empty <- class_limit_defaults("K", "", 3, vals)
+  expect_identical(d_empty$source, "reference")
+  expect_match(paste(class_limit_note(d_empty, ""), collapse = " "), "No unit is recorded")
+  d_cmol <- class_limit_defaults("K", "cmol/kg", 3, vals)
+  expect_identical(d_cmol$source, "quantile")
+  expect_match(paste(class_limit_note(d_cmol, "cmol/kg"), collapse = " "),
+               "this variable is recorded in cmol/kg", fixed = TRUE)
+})
+
+test_that("reference limits prefill only a three-class split; otherwise data quantiles", {
+  vals <- c(3.1, 5.8, 9.4, 12.2, 17.5, 21.0, 26.3, 30.9)
+  for (k in c(2, 4, 5)) {
+    d <- class_limit_defaults("P", "mg/kg", k, vals)
+    expect_identical(d$source, "quantile", info = k)
+    expect_identical(d$limits, stats::quantile(vals, probs = seq_len(k - 1) / k,
+                                               type = 7, names = FALSE), info = k)
+    expect_match(class_limit_note(d)[2], "define three classes", fixed = TRUE)
+  }
+  # A variable with no reference gets quantiles at any class count.
+  d_ph <- class_limit_defaults("ph", "", 3, vals)
+  expect_identical(d_ph$source, "quantile")
+  expect_identical(d_ph$limits, unname(stats::quantile(vals, c(1, 2) / 3, type = 7)))
+  expect_identical(class_limit_note(d_ph), "Data quantiles (not agronomic limits).")
+  expect_match(class_limit_note(class_limit_defaults("P", "mg/kg", 3, vals))[1],
+               "Reference limits: Olsen P, mg kg⁻¹, Yüksel & Ekinci (2019). Low < 8 ≤ Moderate < 25 ≤ High.",
+               fixed = TRUE)
+})
+
+test_that("Supervised limits stay in their boxes, and classify only their own variable", {
+  local_mocked_bindings(shinyApp = .real_shinyApp, .package = "shiny")
+  withr::local_dir(proj_root)
+  box_value <- function(html, i) {
+    m <- regmatches(html, regexpr(sprintf('id="agro_limit_%d"[^>]*value="[^"]*"', i), html))
+    as.numeric(sub('.*value="([^"]*)"$', "\\1", m))
+  }
+  k_vals <- c(150, 180, 220, 260, 310, 400)
+  shiny::testServer(function(input, output, session) {
+    rv <- shiny::reactiveValues(
+      user_data = data.frame(k = k_vals, k_cve = k_vals + c(5, -5, 10, -10, -10, -10),
+                             ph = c(6.1, 6.4, 6.9, 7.2, 7.6, 8.0)),
+      mapping = list(vars = list(
+        list(actual = "k", pred = "k_cve", pred_ss = NULL, label = "K", category = "Soil", unit = "mg/kg"),
+        list(actual = "ph", pred = NULL, pred_ss = NULL, label = "pH", category = "Soil", unit = ""))),
+      disp = NULL, rast = NULL, rast_pred = NULL)
+    source(file.path(proj_root, "server_run_config.R"), local = TRUE)
+  }, {
+    session$setInputs(var_id = "k", value_type = "actual", color_style = "agro",
+                      agro_method = "limits", agro_n_classes = 3)
+    # K in mg/kg at three classes opens on the published limits.
+    html <- output$agro_options$html
+    expect_identical(c(box_value(html, 1), box_value(html, 2)), c(200, 300))
+
+    # The boxes are rebuilt whenever their defaults' inputs move (here a view
+    # change before any run); for the same variable and class count they keep
+    # what is on screen.
+    session$setInputs(agro_limit_1 = 210, agro_limit_2 = 320)
+    session$setInputs(value_type = "pred")
+    html <- output$agro_options$html
+    expect_identical(c(box_value(html, 1), box_value(html, 2)), c(210, 320))
+    # Another class count opens on its own defaults, the data quantiles.
+    session$setInputs(agro_n_classes = 4)
+    q <- stats::quantile(k_vals, c(1, 2, 3) / 4, type = 7, names = FALSE)
+    html <- output$agro_options$html
+    expect_equal(vapply(1:3, function(i) box_value(html, i), numeric(1)), signif(q, 4))
+
+    # Applied limits classify the variable they were applied for, and no other:
+    # they are numbers in that variable's units.
+    session$setInputs(agro_n_classes = 3)
+    session$setInputs(agro_limit_1 = 210, agro_limit_2 = 320)
+    session$setInputs(agro_apply = 1)
+    expect_identical(class_breaks_act(), c(210, 320))
+    expect_null(output$agro_pending_note$html)
+    session$setInputs(var_id = "ph", value_type = "actual")
+    expect_null(class_breaks_act())
+    expect_match(output$agro_pending_note$html, "Class settings are staged", fixed = TRUE)
+    session$setInputs(var_id = "k")
+    expect_identical(class_breaks_act(), c(210, 320))
+  })
+})
+
+test_that("a value equal to a class limit falls in the upper class, on the map and in the agreement table", {
+  cb <- class_breaks_matrix(c(8, 25))
+  vals <- c(7.99, 8, 24.99, 25, 30)
+  r <- terra::rast(nrows = 1, ncols = 5, xmin = 0, xmax = 5, ymin = 0, ymax = 1, vals = vals)
+  # The map's own call (build_classification_params' matrix, right = FALSE).
+  expect_equal(as.vector(terra::values(terra::classify(r, cb$rcl_mat, right = FALSE))),
+               c(1, 2, 2, 3, 3))
+  ag <- compute_agreement_metrics(vals, vals, method = "agro",
+                                  params = list(rcl_mat = cb$rcl_mat, labels = c("Low", "Med", "High")))
+  expect_identical(as.character(ag$actual_bin), c("Low", "Med", "Med", "High", "High"))
 })

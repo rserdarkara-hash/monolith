@@ -124,7 +124,11 @@ gov_factors_ui <- function(id) {
               )
             ),
             shiny::hr(),
-            sci_table(ns("gov_summary_table"), "Tabular Data Metrics", title_tag = shiny::h4)
+            sci_table(ns("gov_summary_table"), "Tabular Data Metrics", title_tag = shiny::h4,
+              content = shiny::tagList(
+                shiny::div(class = "table-container", DT::dataTableOutput(ns("gov_summary_table"))),
+                shiny::div(class = "mn-table-note",
+                  "Out-of-bag samples lie among the training samples, so with spatially autocorrelated samples the OOB variance explained overstates how well the forest predicts at new locations (Meyer et al. 2019; Ploton et al. 2020).")))
           )
         )
       )
@@ -463,8 +467,8 @@ gov_factors_server <- function(id, data_reactive, vars_metadata_reactive) {
       df <- gov_summary_df(gov_rv$res, vars_metadata_reactive())
       # paging off: dom = 't' shows no paging controls, so rows past the first
       # page would be unreachable on screen and missing from a copy. Values stay
-      # numeric and are formatted at four significant digits for display: the
-      # importances used to print as raw doubles (2.001495588850122).
+      # numeric and are formatted at four significant digits for display, not
+      # printed as raw doubles such as 2.001495588850122.
       DT::datatable(df, options = list(dom = 't', paging = FALSE, scrollX = TRUE,
                                        columnDefs = sig_render_defs(df, c("Value", GOV_SCALED_COL))),
                     rownames = FALSE)

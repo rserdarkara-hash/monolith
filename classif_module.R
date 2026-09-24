@@ -87,8 +87,8 @@ classif_ui <- function(id) {
           ),
 
           # Default to binning: .classif_is_categorical accepts character /
-          # factor columns only (the cardinality heuristic was removed after it
-          # mislabelled coarse-resolution climate covariates), so a typical soil
+          # factor columns only (a cardinality heuristic mislabels
+          # coarse-resolution climate covariates as categorical), so a typical soil
           # dataset offers no categorical column at all and "cat" would open the
           # panel on nothing but "switch to binning".
           shiny::radioButtons(ns("target_mode"), "Target",
@@ -139,11 +139,10 @@ classif_ui <- function(id) {
             shiny::selectInput(ns("boundary_type"),
               shiny::tags$span("Boundary Type",
                 shiny::tags$i(class = "fa fa-info-circle",
-                  title = "How the predicted class surface is cropped around the scoped samples. Concave/Convex hull wrap the points; Wrapped adds a buffer around the hull; Strict buffers each point individually.",
+                  title = "How the predicted class surface is cropped around the scoped samples. Concave hull: follows the sample outline tightly. Convex hull: the smallest convex polygon around the samples. Buffered: the concave hull padded by the buffer distance. Point buffer: a disc around each sample.",
                   style = "color: var(--mn-text-3); cursor: help; margin-left: 5px;")),
-              choices = c("Concave Hull" = "concave", "Convex Hull" = "convex",
-                          "Wrapped (Buffered)" = "wrapped",
-                          "Strict Measured (Point Buffer)" = "strict"),
+              choices = c("Concave hull" = "concave", "Convex hull" = "convex",
+                          "Buffered" = "wrapped", "Point buffer" = "strict"),
               selected = "concave"),
             shiny::conditionalPanel(
               condition = sprintf("input['%s'] == 'wrapped'", ns("boundary_type")),
@@ -176,9 +175,10 @@ classif_ui <- function(id) {
                              selected = "rf"),
           shiny::radioButtons(ns("cv_strategy"), shiny::tags$span("Cross-validation",
               shiny::tags$i(class = "fa fa-info-circle",
-                title = "Spatial CV clusters nearby points into folds so accuracy reflects prediction into unsampled areas; random k-fold usually reports optimistic accuracy under spatial autocorrelation.",
+                title = "Spatial (blocked) clusters nearby points into folds, so accuracy reflects prediction away from the sampled clusters, into unsampled areas. kNNDM (map-matched) forms folds whose held-out points are about as far from their training points as the prediction grid is from the samples (Linnenbrink et al. 2024): class-stratified random folds when the samples cover the scope evenly, spatially grouped folds when they are clustered or the scope reaches beyond them, so the reported accuracy is that of this map over this scope. Below 30 points it uses Standard folds. Standard (random k-fold) estimates accuracy within the sampled area; with a clustered sample it overstates accuracy in the gaps between clusters.",
                 style = "color: var(--mn-text-3); cursor: help; margin-left: 5px;")),
-            choices = c("Spatial (blocked)" = "spatial", "Standard (random k-fold)" = "standard"),
+            choices = c("Spatial (blocked)" = "spatial", "kNNDM (map-matched)" = "knndm",
+                        "Standard (random k-fold)" = "standard"),
             selected = "spatial"),
           shiny::selectInput(ns("tuning_depth"), shiny::tags$span("Hyperparameter tuning",
               shiny::tags$i(class = "fa fa-info-circle",
@@ -372,6 +372,20 @@ classif_ui <- function(id) {
                 )
               )
             ),
+            # How closely the folds' held-out distances match the prediction
+            # grid's, under every strategy (map or no map). Full width: three
+            # labelled curves, W for two designs and the caption need the room
+            # a half-width card does not have.
+            shiny::fluidRow(
+              shiny::column(12,
+                sci_plot_card(ns("cv_distance_plot"), "CV Distance Match",
+                              expand_id = ns("cv_distance_expand_btn"),
+                              info = shiny::tags$i(class = "fa fa-info-circle",
+                                title = "Three distance distributions for the scoped points, as cumulative curves. Map cells → nearest sample: how far the prediction grid lies from the training points. Held-out → nearest training sample: how far this run's cross-validation predicted. Sample → nearest other sample: the sampling density. The closer the held-out curve lies to the map curve, the better the reported accuracy describes this map: a held-out curve to the left means it is optimistic for this map, to the right pessimistic. W is the area between those two curves (Wasserstein distance, in map units), shown for this run's folds and for the Standard (class-stratified random) folds; kNNDM chooses its folds to make it small. Scientific Guide Section 10.2.",
+                                style = "color: var(--mn-text-3); cursor: help; margin-left: 5px;"),
+                              head_min_height = CLASSIF_CARD_HEAD_H)
+              )
+            ),
             shiny::hr(),
             # Result tables: one visible at a time, chosen from the dropdown
             # (metrics first). Availability adapts to the run (per-area rows,
@@ -518,9 +532,9 @@ classif_server <- function(id, data_reactive, vars_metadata_reactive, spatial_re
     shiny::observe({
       if (!identical(cl_rv$ready, "running")) return(invisible(NULL))
       shiny::invalidateLater(800, session)
-      # While a cancel is pending, leave the notice alone: the old poller
-      # overwrote it on the next tick, which is why "Cancelling..." flipped
-      # straight back to a progress caption.
+      # While a cancel is pending, leave the notice alone: overwriting it on the
+      # next tick would flip "Cancelling..." straight back to a progress
+      # caption.
       if (isTRUE(cl_rv$cancelling)) return(invisible(NULL))
       pct <- tryCatch({
         v <- suppressWarnings(as.numeric(readLines(cls_progress_file, warn = FALSE)))
@@ -580,8 +594,8 @@ classif_server <- function(id, data_reactive, vars_metadata_reactive, spatial_re
     })
 
     # Locality picker, specific to the Classification Suite (deliberately NOT
-    # synced with the sidebar Context panel: the two selections used to drift
-    # apart mid-session, leaving it ambiguous which one a run would honour).
+    # synced with the sidebar Context panel: two synced selections can drift
+    # apart mid-session and leave it ambiguous which one a run honours).
     # Defaults to all localities; a previous selection survives re-renders.
     output$scope_loc_ui <- shiny::renderUI({
       ch <- scope_choices()
@@ -735,7 +749,7 @@ classif_server <- function(id, data_reactive, vars_metadata_reactive, spatial_re
         sprintf("Target Mapping CRS is geographic, so this run is computed and mapped in %s.", nm))
     })
 
-    # Live advisory: a Strict Measured buffer narrower than half the grid cell
+    # Live advisory: a Point buffer narrower than half the grid cell
     # diagonal discards the cells of isolated samples, so sampled points end up
     # over blank map (see strict_buffer_gap, spatial_pipeline.R). The scope
     # carries the boundary area and bbox, so the Auto resolution the run will
@@ -1254,7 +1268,7 @@ classif_server <- function(id, data_reactive, vars_metadata_reactive, spatial_re
     # ── Performance outputs ──────────────────────────────────────────────────
     output$cv_badge <- shiny::renderUI({
       res <- cl_rv$res; shiny::req(res)
-      lbl <- if (identical(res$strategy, "spatial")) "Spatial blocked CV" else "Random k-fold CV"
+      lbl <- classif_cv_label(res$strategy, res$knndm)
       scope_part <- if (is.null(res$scope_label)) "" else sprintf(" | scope: %s", res$scope_label)
       wt_part <- if (isTRUE(res$weights_applied)) {
         " | class-weighted"
@@ -1356,6 +1370,42 @@ classif_server <- function(id, data_reactive, vars_metadata_reactive, spatial_re
         ggplot2::theme_minimal(base_size = 13)
     }
     output$importance_plot <- shiny::renderPlot({ build_importance_plot() })
+
+    # ── CV Distance Match ───────────────────────────────────────────────────
+    # One builder (build_cv_distance_plot, ui_plotting.R) for the card, its
+    # expanded view and its 300-dpi PNG.
+    build_cv_distance_cls <- function() {
+      res <- cl_rv$res; shiny::req(res)
+      # No record only when the scope boundary yielded no map locations (the
+      # suite has no run log to point to).
+      if (is.null(res$cv_design)) {
+        return(sci_placeholder("No distance record: no map locations could be drawn inside the scope boundary."))
+      }
+      build_cv_distance_plot(res$cv_design,
+                             title = paste("CV Distance Match:", classif_cv_label(res$strategy, res$knndm)))
+    }
+    output$cv_distance_plot <- shiny::renderCachedPlot({
+      build_cv_distance_cls()
+    }, cacheKeyExpr = {
+      res <- cl_rv$res; shiny::req(res)
+      list(res$run_id, "cv_distance")
+    })
+    shiny::observeEvent(input$cv_distance_expand_btn, {
+      shiny::showModal(shiny::modalDialog(
+        title = "Expanded View: CV Distance Match", size = "l", easyClose = TRUE,
+        shiny::plotOutput(ns("modal_cv_distance"), height = "700px"),
+        footer = shiny::modalButton("Close")
+      ))
+    })
+    output$modal_cv_distance <- shiny::renderPlot({ build_cv_distance_cls() }, res = 96)
+    output$cv_distance_plot_dl <- shiny::downloadHandler(
+      filename = function() "classification_cv_distance_match.png",
+      content = function(file) {
+        p <- build_cv_distance_cls()
+        with_showtext_dpi(300, suppressWarnings(
+          ggplot2::ggsave(file, plot = p, width = 9, height = 7, dpi = 300, bg = "white")))
+      }
+    )
 
     output$group_metrics_table <- DT::renderDataTable({
       res <- cl_rv$res; shiny::req(res, res$group_metrics)

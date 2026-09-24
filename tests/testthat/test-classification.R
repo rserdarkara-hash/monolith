@@ -204,8 +204,8 @@ test_that("classification tuning resamples score fold-kriged covariates", {
 
 test_that("a fold that never sees a class still pools its predictions", {
   pts <- make_classif_points(n = 60)
-  # A singleton class is capped to v = 2 by classif_make_fold_id and lands in
-  # exactly ONE fold, so that fold's analysis rows hold none of it. ranger (and
+  # A singleton class lands in exactly ONE fold of any class-stratified
+  # partition, so that fold's analysis rows hold none of it. ranger (and
   # nnet::multinom) then drop the unused outcome level and return one fewer
   # .pred_ column, which used to abort the pooled rbind with "numbers of columns
   # of arguments do not match".
@@ -257,8 +257,8 @@ test_that("target levels with no samples are dropped before modelling", {
   ba <- cv$metrics$.estimate[cv$metrics$.metric == "bal_accuracy"]
   expect_length(ba, 1)
   expect_false(is.na(ba))
-  # The empty level must not collapse the stratified fold cap (min class = 0).
-  expect_gt(cv$n_folds, 2)
+  # The empty level must not reduce the fold count.
+  expect_identical(cv$n_folds, 4L)
 })
 
 test_that("all three learners fit and cross-validate", {
@@ -1303,11 +1303,20 @@ test_that("a missing covariate value does not stop the classification maps", {
   # and the final fit had run. They are built from the covariate-complete rows.
   d <- make_classif_scope_df(nA = 35, nB = 30)
   d$elev[1:5] <- NA
-  res <- run_classification_pipeline(
-    d, target = "soil", predictors = c("elev", "slope"),
-    x_col = "x", y_col = "y", src_crs = 32633, proj_crs = "EPSG:32633",
-    method = "multinom", strategy = "standard", depth = "none",
-    v = 4, grid_res = 250, make_surface = TRUE)
+  # The binary target is fitted by glm, and on this fixture one fold's training
+  # rows separate the two classes: glm says so, which is the data, not the
+  # subject here. Only that notice is muffled.
+  res <- withCallingHandlers(
+    run_classification_pipeline(
+      d, target = "soil", predictors = c("elev", "slope"),
+      x_col = "x", y_col = "y", src_crs = 32633, proj_crs = "EPSG:32633",
+      method = "multinom", strategy = "standard", depth = "none",
+      v = 4, grid_res = 250, make_surface = TRUE),
+    warning = function(w) {
+      if (grepl("fitted probabilities numerically 0 or 1", conditionMessage(w), fixed = TRUE)) {
+        invokeRestart("muffleWarning")
+      }
+    })
   expect_false(is.null(res$surface_df))
   expect_gt(nrow(res$surface_df), 0)
   prob_cols <- setdiff(grep("^\\.pred_", names(res$surface_df), value = TRUE), ".pred_class")
@@ -1729,7 +1738,7 @@ test_that("classif_build_grid flags a strict buffer below half the cell diagonal
 
   g_bad <- classif_build_grid(pts, res = 350, boundary = "strict",
                               buffer_dist = 175)
-  expect_match(g_bad$strict_warning, "Strict Measured buffer")
+  expect_match(g_bad$strict_warning, "Point buffer [(]")
   expect_match(g_bad$strict_warning, "248 m or more")
 
   # 300 m clears the 247.5 m half-diagonal of a 350 m cell.
@@ -2095,4 +2104,194 @@ test_that("scope adequacy names the rare texture classes in the golden survey", 
   # A scope holding only the two largest classes raises nothing at all.
   big <- gs$texture[gs$texture %in% c("Loam", "Sandy clay loam")]
   expect_null(classif_scope_adequacy(big, length(big)))
+})
+
+# ── kNNDM folds (k-fold nearest-neighbour distance matching) ────────────────
+# Two layouts built without RNG: a regular lattice whose samples cover its hull
+# evenly (random folds already match the map) and six tight sub-grids under a
+# wide prediction domain (they do not). Classes and covariates are smooth
+# functions of position.
+knndm_classif_df <- function(layout = c("lattice", "subgrids")) {
+  layout <- match.arg(layout)
+  xy <- if (layout == "lattice") {
+    as.matrix(expand.grid(x = 0:9 * 100, y = 0:5 * 100))
+  } else {
+    cen <- expand.grid(cx = 0:2 * 4000, cy = 0:1 * 3000)
+    sub <- expand.grid(dx = 0:4 * 20, dy = 0:4 * 20)
+    do.call(rbind, lapply(seq_len(nrow(cen)), function(i) cbind(cen$cx[i] + sub$dx, cen$cy[i] + sub$dy)))
+  }
+  df <- data.frame(x = 500000 + xy[, 1], y = 5800000 + xy[, 2])
+  score <- sin(xy[, 1] / 900) + cos(xy[, 2] / 700) + xy[, 1] / 5000
+  df$soil <- cut(score, breaks = stats::quantile(score, c(0, 1 / 3, 2 / 3, 1)),
+                 labels = c("Low", "Med", "High"), include.lowest = TRUE)
+  df$elev <- 100 + 20 * score + (xy[, 2] %% 7)
+  df$slope <- 5 + 3 * cos(xy[, 1] / 400) + (xy[, 1] %% 11) / 10
+  df
+}
+knndm_classif_sf <- function(df) sf::st_as_sf(df, coords = c("x", "y"), crs = 32633, remove = FALSE)
+knndm_bbox_domain <- function(pts) {
+  knndm_domain_points(sf::st_sf(geometry = sf::st_as_sfc(sf::st_bbox(pts))))
+}
+
+test_that("class-stratified random k-fold spreads every class and balances the folds", {
+  y <- factor(rep(c("a", "b", "c", "d", "e"), c(1, 2, 7, 25, 3)))
+  f <- classif_stratified_folds(y, 10L, 12345L)
+  tab <- table(y, factor(f, levels = 1:10))
+  m <- as.vector(table(y))
+  # A class of m samples spreads over min(m, 10) folds, at floor(m / 10) or
+  # ceiling(m / 10) per fold; the folds differ in size by at most one.
+  expect_identical(unname(rowSums(tab > 0)), as.numeric(pmin(m, 10)))
+  for (i in seq_along(m)) expect_true(all(tab[i, ] %in% c(floor(m[i] / 10), ceiling(m[i] / 10))), info = i)
+  expect_lte(diff(range(tabulate(f, 10))), 1)
+  expect_setequal(unique(f), 1:10)
+  # Reproducible, and the caller's random state is left alone.
+  withr::local_seed(7)
+  before <- .Random.seed
+  expect_identical(classif_stratified_folds(y, 10L, 12345L), f)
+  expect_identical(.Random.seed, before)
+  expect_false(identical(classif_stratified_folds(y, 10L, 1L), f))
+})
+
+test_that("Standard folds keep the requested fold count whatever the class sizes", {
+  pts <- make_classif_points(n = 60)
+  soil <- as.character(sf::st_drop_geometry(pts)$soil)
+  soil[1] <- "Single"
+  soil[2:3] <- "Pair"
+  pts$soil <- factor(soil)
+  f <- classif_make_fold_id(pts, "standard", target = "soil", v = 5L, seed = 12345L)
+  # The Standard folds are the class-stratified random k-fold, at v folds.
+  expect_identical(f, classif_stratified_folds(pts$soil, 5L, 12345L))
+  expect_setequal(unique(f), 1:5)
+  # A pair sits in two folds, so every training set keeps one of it; only the
+  # singleton leaves a fold without it, as it would at any fold count.
+  gaps <- vapply(1:5, function(i) {
+    paste(sort(setdiff(levels(pts$soil), as.character(unique(pts$soil[f != i])))), collapse = ",")
+  }, character(1))
+  expect_identical(sum(gaps == "Single"), 1L)
+  expect_true(all(gaps %in% c("", "Single")))
+  # Without a target: the seeded random k-fold.
+  expect_identical(classif_make_fold_id(pts, "standard", v = 5L, seed = 12345L),
+                   cv_random_folds(nrow(pts), 5L, 12345L))
+})
+
+test_that("classification kNNDM folds: Standard folds where random already matches, spatial folds otherwise", {
+  lat <- knndm_classif_sf(knndm_classif_df("lattice"))
+  hull <- sf::st_sf(geometry = sf::st_convex_hull(sf::st_union(sf::st_geometry(lat))))
+  D <- knndm_domain_points(hull)
+  strat <- classif_stratified_folds(lat$soil, 10L, 12345L)
+  f <- classif_make_fold_id(lat, "knndm", target = "soil", v = 10L, seed = 12345L, domain_xy = D)
+  expect_identical(attr(f, "knndm")$branch, "random")
+  expect_identical(as.integer(f), strat)
+  expect_identical(as.integer(f), classif_make_fold_id(lat, "standard", target = "soil", v = 10L, seed = 12345L))
+  # The record scores the folds it returned, against the same partition.
+  xy <- sf::st_coordinates(lat)[, 1:2]
+  Gij <- FNN::get.knnx(xy, D, 1)$nn.dist[, 1]
+  W_strat <- cv_wasserstein1(cv_heldout_nnd(xy, strat), Gij)
+  expect_equal(attr(f, "knndm")$W, W_strat)
+  expect_equal(attr(f, "knndm")$W_random, W_strat)
+  expect_identical(classif_make_fold_id(lat, "knndm", target = "soil", v = 10L, seed = 12345L, domain_xy = D), f)
+
+  # Below CV_KNNDM_MIN_N points: the same random partition, and the record says why.
+  small <- lat[seq_len(CV_KNNDM_MIN_N - 1L), ]
+  fs <- classif_make_fold_id(small, "knndm", target = "soil", v = 5L, seed = 12345L, domain_xy = D)
+  expect_identical(attr(fs, "knndm")$branch, "small")
+  expect_identical(as.integer(fs), classif_stratified_folds(small$soil, 5L, 12345L))
+  expect_match(classif_cv_label("knndm", attr(fs, "knndm")), "kNNDM needs n ≥ 30")
+  # No domain: the random partition too.
+  fn <- classif_make_fold_id(lat, "knndm", target = "soil", v = 10L, seed = 12345L)
+  expect_identical(attr(fn, "knndm")$branch, "none")
+  expect_identical(as.integer(fn), as.integer(f))
+
+  sub <- knndm_classif_sf(knndm_classif_df("subgrids"))
+  Ds <- knndm_bbox_domain(sub)
+  sp <- classif_make_fold_id(sub, "knndm", target = "soil", v = 10L, seed = 12345L, domain_xy = Ds)
+  expect_identical(attr(sp, "knndm")$branch, "spatial")
+  expect_true(all(sp %in% seq_len(10)))
+  xs <- sf::st_coordinates(sub)[, 1:2]
+  expect_identical(as.integer(sp), as.integer(knndm_folds(xs, Ds, k = 10L)))
+  expect_equal(attr(sp, "knndm")$W_random,
+               cv_wasserstein1(cv_heldout_nnd(xs, classif_stratified_folds(sub$soil, 10L, 12345L)),
+                               FNN::get.knnx(xs, Ds, 1)$nn.dist[, 1]))
+  expect_identical(classif_cv_label("knndm", attr(sp, "knndm")), "kNNDM CV [spatial folds]")
+  expect_identical(classif_cv_label("spatial"), "Spatial blocked CV")
+  expect_identical(classif_cv_label("standard"), "Random k-fold CV")
+})
+
+test_that("kNNDM reaches the outer, nested and final-fit folds of a classification run", {
+  df <- knndm_classif_df("subgrids")
+  pts <- knndm_classif_sf(df)
+  D <- knndm_bbox_domain(pts)
+  preds <- c("elev", "slope")
+  cv <- suppressWarnings(run_classification_cv(pts, "soil", preds, method = "multinom",
+                                               strategy = "knndm", v = 5L, depth = "light",
+                                               nested = TRUE, domain_xy = D))
+  expect_identical(cv$fold_id, classif_make_fold_id(pts, "knndm", target = "soil", v = 5L,
+                                                    seed = 12345L, domain_xy = D))
+  expect_true(cv$nested)
+  expect_equal(nrow(cv$nested_params), cv$n_folds)
+
+  # The final fit's tuning folds are the CV's, so it reuses the CV's held-out
+  # covariates and never rebuilds them; with other folds it has to.
+  calls <- 0L
+  orig <- .classif_fold_assessment
+  assign(".classif_fold_assessment", function(...) { calls <<- calls + 1L; orig(...) }, envir = globalenv())
+  withr::defer(assign(".classif_fold_assessment", orig, envir = globalenv()))
+  cv5 <- suppressWarnings(run_classification_cv(pts, "soil", preds, method = "multinom",
+                                                strategy = "knndm", v = 5L, depth = "light",
+                                                domain_xy = D))
+  calls <- 0L
+  suppressWarnings(fit_classification_model(pts, "soil", preds, method = "multinom", depth = "light",
+                                            strategy = "knndm", v = 5L,
+                                            cv_assessment_df = cv5$assessment_df,
+                                            cv_fold_id = cv5$fold_id, domain_xy = D))
+  expect_identical(calls, 0L)
+  suppressWarnings(fit_classification_model(pts, "soil", preds, method = "multinom", depth = "light",
+                                            strategy = "knndm", v = 5L,
+                                            cv_assessment_df = cv5$assessment_df,
+                                            cv_fold_id = cv5$fold_id))
+  expect_identical(calls, 1L)
+
+  nn <- run_classification_nn_cv(pts, "soil", strategy = "knndm", v = 5L, domain_xy = D)
+  expect_identical(nn$fold_id, cv5$fold_id)
+})
+
+test_that("a kNNDM classification run records its design against the scope boundary", {
+  df <- knndm_classif_df("subgrids")
+  res <- suppressWarnings(run_classification_pipeline(
+    df, target = "soil", predictors = c("elev", "slope"), x_col = "x", y_col = "y",
+    src_crs = 32633, proj_crs = 32633, method = "multinom", strategy = "knndm",
+    depth = "none", v = 5L, boundary = "concave", make_surface = FALSE))
+  expect_false(is.null(res$cv_design))
+  expect_identical(res$cv_design$n, length(res$fold_id))
+  expect_identical(res$knndm, attr(res$fold_id, "knndm"))
+
+  pts <- knndm_classif_sf(df)
+  bnd <- classif_domain_boundary(pts, "concave")
+  D <- knndm_domain_points(bnd)
+  expect_identical(res$cv_design$n_domain, nrow(D))
+  inside <- lengths(sf::st_intersects(sf::st_as_sf(as.data.frame(D), coords = 1:2, crs = 32633), bnd)) > 0
+  expect_true(all(inside))
+  # The panel's random reference is the suite's random partition, the one
+  # kNNDM compared against: the run's Standard folds.
+  xy <- sf::st_coordinates(pts)[, 1:2]
+  W_ref <- cv_wasserstein1(cv_heldout_nnd(xy, classif_stratified_folds(df$soil, 5L, 12345L)),
+                           FNN::get.knnx(xy, D, 1)$nn.dist[, 1])
+  expect_equal(res$cv_design$W_random, W_ref)
+  expect_equal(res$knndm$W_random, W_ref)
+  expect_identical(res$cv_design$reference, "class-stratified random 5-fold")
+
+  csv <- classif_metrics_csv_df(res)
+  des <- csv[csv$scope == "CV design", ]
+  expect_equal(des$value[des$yardstick_id == "W_cv"], res$cv_design$W_cv)
+  expect_equal(des$value[des$yardstick_id == "W_random"], W_ref)
+  expect_true("W, class-stratified random 5-fold (m)" %in% des$metric)
+  expect_true(all(des$estimator == classif_cv_label("knndm", res$knndm)))
+
+  # Without covariates the spatial 1-NN run records the same design.
+  nn <- suppressWarnings(run_classification_pipeline(
+    df, target = "soil", predictors = character(0), x_col = "x", y_col = "y",
+    src_crs = 32633, proj_crs = 32633, strategy = "knndm", v = 5L, boundary = "concave",
+    make_surface = FALSE))
+  expect_identical(nn$fold_id, res$fold_id)
+  expect_equal(nn$cv_design, res$cv_design)
 })

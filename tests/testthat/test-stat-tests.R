@@ -238,6 +238,5 @@ test_that("the Kruskal path uses BH-adjusted comparisons on ranks", {
   df_log <- df
   df_log$v <- log(df$v - min(df$v) + 1)
   got_log <- get_stat_letters(df_log, "v", "g", "kruskal")
-  expect_equal(got_log[order(got_log$g), ], got[order(got$g), ],
-               ignore_attr = TRUE)
+  expect_equal(got_log[order(got_log$g), ], got[order(got$g), ])
 })

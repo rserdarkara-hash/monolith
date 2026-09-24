@@ -41,7 +41,7 @@ Contributions that will probably be declined:
   something testable that was not testable before. If you do propose one, show
   the old and the new implementation agreeing on the golden fixture (see
   [Testing](#testing)).
-- Dependencies. `renv.lock` already resolves to about 250 packages. A new one has
+- Dependencies. `renv.lock` already resolves to 224 packages. A new one has
   to earn its place against doing the same thing with what is already loaded,
   and needs an entry in `global.R`'s `required_packages`, a regenerated
   `renv.lock` and the tables in README section 3.
@@ -84,8 +84,8 @@ Run the suite from the project root:
 Rscript tests/testthat.R
 ```
 
-Startup attaches the app's 59 packages before the first test runs; expect tens
-of seconds.
+Startup attaches 50 of the app's 64 required packages before the first test
+runs; expect tens of seconds.
 
 What the suite tells you about your environment:
 

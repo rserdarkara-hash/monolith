@@ -270,7 +270,64 @@ test_that("grid_template gives square cells of exactly the requested size", {
   expect_equal(terra::res(g2), c(45, 45))
 })
 
-test_that("Auto (Global) grids every locality at the Auto size of the largest boundary", {
+test_that("the Auto cell size follows sampling density (Hengl 2006)", {
+  # Hand values. Kale-like: 2.7 km2, 79 samples, 150 m spacing - the density
+  # term binds, 0.0791 * sqrt(2.7e6 / 79) = 14.62 m, well under h / 2 = 75 m.
+  expect_equal(auto_grid_resolution(2.7e6, 79, 150), 0.0791 * sqrt(2.7e6 / 79))
+  expect_equal(round(auto_grid_resolution(2.7e6, 79, 150), 2), 14.62)
+  # Clustered (a transect): the same area and count, samples 10 m apart, so
+  # h / 2 = 5 m binds below the density term (25.0 m).
+  expect_equal(auto_grid_resolution(1e6, 10, 10), 5)
+  # Both bounds.
+  expect_equal(auto_grid_resolution(100, 50, 2), AUTO_RES_MIN)
+  expect_equal(auto_grid_resolution(1e12, 3, 1e6), AUTO_RES_MAX)
+  # No spacing to consult: the density term alone.
+  expect_equal(auto_grid_resolution(1e6, 10, NA), 0.0791 * sqrt(1e5))
+  expect_equal(auto_grid_resolution(1e6, 1, 10), 0.0791 * sqrt(1e6))
+})
+
+test_that("the sidebar buffer preview uses the run's point set and rule", {
+  # A 100 m square of four locations, A carrying three rows and D two
+  # (replicates), plus E 200 m east of B whose covariate is missing.
+  x0 <- 500000; y0 <- 5800000
+  df <- data.frame(x = x0 + c(0, 0, 0, 100, 0, 100, 100, 300),
+                   y = y0 + c(0, 0, 0, 0, 100, 100, 100, 0),
+                   v = c(1, 2, 3, 4, 5, 6, 7, 8),
+                   cov = c(1, 2, 3, 4, 5, 6, 7, NA))
+  preview <- function(d, crs, method, aux) {
+    pp <- .locality_points("L", d, crs, method, aux, list())
+    list(pp = pp, res = locality_buffer_res(pp$pts, "local", NA_real_))
+  }
+
+  # Hand values. Merged, A-D each have a 100 m nearest neighbour and E one of
+  # 200 m: mean (4 * 100 + 200) / 5 = 120, basis 60. RK drops E (no
+  # covariate): mean 100, basis 50. Raw rows would count the replicates at
+  # 0 m: (0 + 0 + 0 + 100 + 100 + 0 + 0 + 200) / 8 = 50, basis 25.
+  idw <- preview(df, 32633, "IDW", character(0))
+  rk <- preview(df, 32633, "RK", "cov")
+  expect_equal(idw$res, 60)
+  expect_equal(rk$res, 50)
+  expect_equal(nrow(idw$pp$pts), 5)
+
+  # Geographic input is measured in the working UTM zone, in metres.
+  ll <- sf::st_coordinates(sf::st_transform(sf::st_as_sf(df, coords = c("x", "y"), crs = 32633), 4326))
+  df_ll <- transform(df, x = ll[, 1], y = ll[, 2])
+  expect_equal(preview(df_ll, 4326, "IDW", character(0))$res, 60, tolerance = 1e-6)
+
+  # The run's Buffered boundary gets exactly the buffer the preview shows.
+  for (case in list(list(p = idw, m = "IDW"), list(p = rk, m = "RK"))) {
+    lb <- .locality_boundary("L", case$p$pp$pts, 32633, case$m, NULL, "wrapped",
+                             "dynamic", 250, "local", 50)
+    expect_equal(lb$b_dist_local, dynamic_buffer_dist(case$m, case$p$res))
+  }
+  expect_equal(dynamic_buffer_dist("RK", 50), 150)
+  expect_equal(dynamic_buffer_dist("TPS", 1), 5)
+  expect_equal(dynamic_buffer_dist("OK", 1000), 2000)
+  # Fixed resolution: the slider value is the basis.
+  expect_equal(locality_buffer_res(idw$pp$pts, "fixed", 30), 30)
+})
+
+test_that("Auto grids: each locality its own density size, Global the finest of them", {
   proj_root <- normalizePath(file.path(testthat::test_path(), "..", ".."), winslash = "/")
   mk_item <- function(l, n, x0, span, seed) {
     set.seed(seed)
@@ -290,30 +347,58 @@ test_that("Auto (Global) grids every locality at the Auto size of the largest bo
              progress_dir_val = tempdir(), session_id_val = "global_res",
              cancel_file_val = NULL, vif_threshold = 10)
 
-  # Reference from the definition: the Auto size of the larger convex hull.
-  areas <- vapply(items, function(it) {
+  # Reference from the definition, computed without the app's helpers: the
+  # convex hull's area, the number of distinct locations and the mean
+  # nearest-neighbour distance from FNN.
+  own_size <- vapply(items, function(it) {
+    co <- as.matrix(it$pts_data[c("x", "y")])
     p <- sf::st_as_sf(it$pts_data, coords = c("x", "y"), crs = 32635)
-    as.numeric(sf::st_area(sf::st_convex_hull(sf::st_union(p))))
+    a <- as.numeric(sf::st_area(sf::st_convex_hull(sf::st_union(p))))
+    n <- nrow(unique(round(co, 2)))
+    h <- mean(FNN::get.knn(co, k = 1)$nn.dist)
+    max(1, min(1000, min(0.0791 * sqrt(a / n), h / 2)))
   }, numeric(1))
-  expected <- max(5, min(1000, sqrt(max(areas) / 1e5)))
   shared <- shared_auto_resolution(items, rp)
-  expect_equal(shared, expected)
+  expect_equal(shared, min(own_size))
 
   rp$shared_res <- shared
   runs <- lapply(items, interp_run_item, run_params = rp)
   for (r in runs) {
     expect_false(grepl("Error", r$log_msg))
-    expect_equal(r$actual_res, expected)
+    expect_equal(r$actual_res, min(own_size))
     ras <- terra::unwrap(r$r_a)
-    expect_equal(terra::res(ras), c(expected, expected), tolerance = 1e-6)
+    expect_equal(terra::res(ras), rep(min(own_size), 2), tolerance = 1e-6)
     ex <- as.vector(terra::ext(ras))
-    expect_equal(ex / expected, round(ex / expected), tolerance = 1e-6)
+    expect_equal(ex / min(own_size), round(ex / min(own_size)), tolerance = 1e-6)
   }
 
-  # Per Locality keeps each boundary's own Auto size.
+  # Per Locality keeps each locality's own size.
   rp_local <- rp; rp_local$res_mode <- "local"; rp_local$shared_res <- NULL
-  small_local <- interp_run_item(items[[1]], rp_local)
-  expect_equal(small_local$actual_res, max(5, min(1000, sqrt(areas[1] / 1e5))))
+  for (i in seq_along(items)) {
+    expect_equal(interp_run_item(items[[i]], rp_local)$actual_res, own_size[i])
+  }
+})
+
+test_that("a golden Auto run grids at the density size of its boundary and samples", {
+  pts <- golden_sf("tiny")
+  co <- sf::st_coordinates(pts)
+  bnd <- golden_pin_boundary(pts)
+  item <- list(l = "golden",
+               pts_data = data.frame(x = co[, 1], y = co[, 2], v = pts$ph, pv = NA,
+                                     Locality = "golden"),
+               m_params = list(idw_p_act = 2, idw_p_pre = 2, idw_nmax = 12,
+                               tps_lambda_act = -1, tps_lambda_pre = -1,
+                               pre_fit_act = NULL, pre_fit_pre = NULL,
+                               cv_strategy = "auto", rfk_uncertainty = "jackknife"))
+  res <- suppressWarnings(run_regional_interpolation(
+    item, "IDW", golden_meta()$crs, character(0), bnd, "wrapped", "fixed", 300,
+    "local", 300, paste0("EPSG:", golden_meta()$crs), FALSE, "actual"))
+  expect_false(grepl("Error in", res$log_msg))
+
+  a <- as.numeric(sf::st_area(sf::st_union(bnd)))
+  n <- nrow(unique(round(co, 2)))
+  h <- mean(FNN::get.knn(co, k = 1)$nn.dist)
+  expect_equal(res$actual_res, max(1, min(1000, min(0.0791 * sqrt(a / n), h / 2))))
 })
 
 # ── validate_and_project_sf ───────────────────────────────────────────────
@@ -363,31 +448,70 @@ test_that("dedup_valid_points drops target NAs and refreshes x/y", {
   expect_equal(out$y, unname(coords[, 2]))
 })
 
-test_that("dedup_valid_points removes points sharing a rounded coordinate", {
-  pts <- make_test_points(5)
-  # Force rows 1 and 2 onto the same location (within 2 dp)
-  geom <- sf::st_geometry(pts)
-  geom[[2]] <- geom[[1]]
-  sf::st_geometry(pts) <- geom
+test_that("co-located replicates are averaged over the rows that measured the target", {
+  # Four rows at one location (they agree to the centimetre) with v = 1, 2, NA
+  # and 6, and two rows elsewhere. The NA row is dropped first, so the location
+  # carries mean(1, 2, 6) = 3, the covariate mean over the same three rows, and
+  # the id and label of the smallest row id among them (2).
+  df <- data.frame(x = c(500000, 500000.001, 500000.003, 500000.004, 500100, 500200),
+                   y = c(4e6, 4e6 + 0.002, 4e6, 4e6 + 0.001, 4e6, 4e6 + 50),
+                   v = c(1, 2, NA, 6, 8, 9),
+                   cov = c(10, 20, 30, 60, 80, 90),
+                   site = c("a", "b", "c", "d", "e", "f"))
+  df[[CV_ROW_ID_COL]] <- c(4L, 2L, 1L, 3L, 5L, 6L)
+  pts <- sf::st_as_sf(df, coords = c("x", "y"), crs = 32635)
+
   out <- dedup_valid_points(pts, "v")
-  expect_equal(nrow(out), 4)
+  expect_equal(nrow(out), 3)
+  shared <- out[out[[CV_ROW_ID_COL]] == 2L, ]
+  expect_equal(shared$v, 3)
+  expect_equal(shared$cov, (10 + 20 + 60) / 3)
+  expect_identical(shared$site, "b")
+  # The location's coordinate is the mean of the rows that were merged, and the
+  # refreshed x/y follow it.
+  expect_equal(unname(sf::st_coordinates(shared)[1, ]),
+               c(mean(c(500000, 500000.001, 500000.004)), mean(c(4e6, 4e6 + 0.002, 4e6 + 0.001))))
+  expect_equal(c(shared$x, shared$y), unname(sf::st_coordinates(shared)[1, ]))
+  # Singletons pass through untouched.
+  expect_equal(out$v[out[[CV_ROW_ID_COL]] %in% 5:6], c(8, 9))
+
+  # The count the display set carries, and the merge record.
+  m <- merge_colocated(pts[!is.na(pts$v), ], count = TRUE)
+  expect_identical(m$.mn_n_rep[m[[CV_ROW_ID_COL]] == 2L], 3L)
+  expect_equal(attr(m, "merged"), c(groups = 1, rows = 3))
+
+  # Order independence: the same rows in another order give the same location
+  # values under the same ids.
+  by_id <- function(o) o[order(o[[CV_ROW_ID_COL]]), ]
+  out_s <- dedup_valid_points(pts[c(6, 3, 4, 1, 5, 2), ], "v")
+  expect_equal(sf::st_drop_geometry(by_id(out_s)), sf::st_drop_geometry(by_id(out)))
+  expect_equal(sf::st_coordinates(by_id(out_s)), sf::st_coordinates(by_id(out)))
 })
 
-test_that("dedup_valid_points keeps the valid neighbour when the co-located point has an NA target", {
-  # Regression: deduping BEFORE NA-filtering would keep row 1 (NA target) and
-  # then drop it, silently discarding row 2's valid measurement at that spot.
+test_that("a location whose only measured row sits beside an unmeasured twin keeps that value", {
   pts <- make_test_points(4)
   geom <- sf::st_geometry(pts)
   geom[[2]] <- geom[[1]]          # rows 1 & 2 co-located
   sf::st_geometry(pts) <- geom
-  pts$v[1] <- NA                  # first (surviving) copy has no target
-  keep_val <- pts$v[2]
+  pts$v[1] <- NA
   out <- dedup_valid_points(pts, "v")
-  # The co-located location must survive, carrying row 2's value
   same_loc <- out[round(out$x, 2) == round(sf::st_coordinates(pts)[1, 1], 2) &
                   round(out$y, 2) == round(sf::st_coordinates(pts)[1, 2], 2), ]
   expect_equal(nrow(same_loc), 1)
-  expect_equal(same_loc$v, keep_val)
+  expect_equal(same_loc$v, pts$v[2])
+})
+
+test_that("merge_colocated is the identity on data with no co-located samples", {
+  # Golden case 2: the golden set holds no replicates, so every model point set
+  # built from it must be the input itself, bit for bit.
+  full <- golden_sf("full")
+  expect_identical(merge_colocated(full), full)
+  counted <- merge_colocated(full, count = TRUE)
+  expect_identical(counted[setdiff(names(counted), ".mn_n_rep")], full)
+  expect_identical(unique(counted$.mn_n_rep), 1L)
+  expect_null(replicate_merge_note("L", counted$.mn_n_rep))
+  expect_match(replicate_merge_note("L", c(1L, 2L, 3L, 2L)),
+               "[Replicates] L: 3 locations carried 2–3 co-located samples (7 rows)", fixed = TRUE)
 })
 
 test_that("dedup_valid_points returns 0-row sf when all targets are NA", {
@@ -506,7 +630,7 @@ test_that("repeated CV reaches the kriging engines too", {
 
 # ── apply_TPS exactness ───────────────────────────────────────────────────
 
-test_that("TPS and its optimizer preserve geometry under rotation", {
+test_that("TPS and its GCV selection preserve geometry under rotation", {
   d <- with_seed(11, {
     x <- runif(80, 0, 4000); y <- runif(80, 0, 1000)
     data.frame(x = x, y = y, v = sin(x / 700) + cos(y / 300) + rnorm(80, 0, 0.05))
@@ -520,17 +644,25 @@ test_that("TPS and its optimizer preserve geometry under rotation", {
     suppressWarnings(apply_TPS(p, "v", p, list(tps_lambda = -1)))
   })
   expect_equal(fits[[1]]$res_sf$var1.pred, fits[[2]]$res_sf$var1.pred, tolerance = 1e-6)
+  # The selection rotates with the data too. Lambda is read on the unit box
+  # (coordinates divided by the larger extent s), which a rotation changes, and
+  # the bending energy scales as s^2 there, so the invariant is lambda * s^2,
+  # the smoothing in ground units, together with the effective df.
+  span <- function(z) max(diff(range(z$x)), diff(range(z$y)))
+  expect_equal(fits[[2]]$tps_fit$lambda * span(rotated)^2,
+               fits[[1]]$tps_fit$lambda * span(d)^2, tolerance = 1e-6)
+  expect_equal(fits[[2]]$tps_fit$eff_df, fits[[1]]$tps_fit$eff_df, tolerance = 1e-6)
+  # Fixing lambda at the GCV value reproduces the Auto map.
   for (i in 1:2) {
-    z <- list(d, rotated)[[i]]
-    opt <- suppressWarnings(tps_gcv_item(list(l = "R", df = z), 32633))
-    p <- mk(z)
-    fixed <- suppressWarnings(apply_TPS(p, "v", p, list(tps_lambda = opt$best_lam)))
+    p <- mk(list(d, rotated)[[i]])
+    fixed <- suppressWarnings(apply_TPS(p, "v", p, list(tps_lambda = fits[[i]]$tps_fit$lambda)))
     expect_equal(fixed$res_sf$var1.pred, fits[[1]]$res_sf$var1.pred, tolerance = 1e-6)
-    expect_equal(fits[[i]]$tps_fit$lambda, opt$best_lam)
+    expect_identical(fixed$tps_fit$mode, "fixed")
+    expect_null(fixed$tps_fit$gcv)
   }
 })
 
-test_that("TPS reports fitted smoothing and a qualified near-plane warning", {
+test_that("TPS reports fitted smoothing, and GCV at the plane end says nothing lies beyond it", {
   pts <- golden_sf("full", localities = "Tavas")
   dir <- tempfile("tps_report_"); dir.create(dir)
   withr::defer(unlink(dir, recursive = TRUE))
@@ -538,13 +670,72 @@ test_that("TPS reports fitted smoothing and a qualified near-plane warning", {
   res <- suppressWarnings(apply_TPS(pts, "ph", pts, list(tps_lambda = -1), "Tavas"))
   expect_type(res$tps_fit$lambda, "double")
   expect_lt(res$tps_fit$eff_df, 3.5)
-  expect_match(res$log_msg, "near-planar")
+  # GCV's minimum is the grid's largest lambda, the least-squares plane.
+  gcv <- res$tps_fit$gcv
+  expect_equal(gcv$lambda[which.min(gcv$gcv)], max(gcv$lambda))
+  expect_identical(res$tps_fit$gcv_end, "plane")
+  expect_null(res$tps_fit$exact_cv_rmse)
+  expect_match(res$log_msg, "GCV chose the smoothest end of the spline family, the least-squares plane", fixed = TRUE)
+  expect_match(res$log_msg, "nothing lies beyond it to search", fixed = TRUE)
   warnings <- list.files(dir, pattern = "^warn_", full.names = TRUE)
   expect_gt(length(warnings), 0)
   expect_match(paste(unlist(lapply(warnings, readLines)), collapse = " "), "GCV")
   fixed <- suppressWarnings(apply_TPS(pts, "ph", pts, list(tps_lambda = 1e8), "Tavas"))
-  expect_match(fixed$log_msg, "Fixed lambda")
+  expect_match(fixed$log_msg, "Fixed lambda produced a near-planar TPS surface", fixed = TRUE)
   expect_false(grepl("GCV", fixed$log_msg))
+  expect_null(fixed$tps_fit$gcv_end)
+})
+
+test_that("at GCV's least-smoothing end the run cross-validates exact interpolation on its own folds", {
+  dir <- withr::local_tempdir("tps_end_")
+  withr::local_options(monolith_progress_dir = dir, monolith_session_id = "end")
+  # Exact interpolation's CV on the run's folds, recomputed here with
+  # fields::Tps at lambda = 0 on centred kilometre coordinates: the
+  # interpolating spline does not depend on the coordinates' scale.
+  exact_cv <- function(pts, v) {
+    xy <- sf::st_coordinates(pts)
+    km <- sweep(xy, 2, colMeans(xy)) / 1000
+    folds <- make_cv_folds(xy, "auto", nrow(xy), CV_FOLD_SEED)
+    pred <- numeric(nrow(xy))
+    for (f in unique(folds)) {
+      te <- folds == f
+      fit <- fields::Tps(km[!te, ], pts[[v]][!te], lambda = 0, scale.type = "unscaled", give.warnings = FALSE)
+      pred[te] <- fields::predict.Krig(fit, km[te, , drop = FALSE])
+    }
+    sqrt(mean((pts[[v]] - pred)^2))
+  }
+  run <- function(loc, v) {
+    pts <- golden_sf("full", localities = loc)
+    list(pts = pts, res = suppressWarnings(apply_TPS(pts, v, pts, list(tps_lambda = -1, cv_strategy = "auto"), loc)))
+  }
+
+  # Acipayam CaCO3: the run's smoothing cross-validates better; a log line only.
+  a <- run("Acipayam", "caco3")
+  gcv <- a$res$tps_fit$gcv
+  expect_equal(gcv$lambda[which.min(gcv$gcv)], min(gcv$lambda))
+  expect_identical(a$res$tps_fit$gcv_end, "interpolation")
+  expect_equal(a$res$tps_fit$exact_cv_rmse, exact_cv(a$pts, "caco3"), tolerance = 1e-6)
+  expect_identical(a$res$tps_fit$run_cv_rmse, a$res$cv_metrics$rmse)
+  expect_gt(a$res$tps_fit$exact_cv_rmse, a$res$tps_fit$run_cv_rmse)
+  expect_match(a$res$log_msg, "[TPS] Acipayam (Actual): GCV chose the least smoothing it can evaluate", fixed = TRUE)
+  expect_match(a$res$log_msg, "this run's smoothing predicts them better", fixed = TRUE)
+  expect_length(list.files(dir, pattern = "^warn_"), 0)
+
+  # Tavas Mn: exact interpolation cross-validates better; a warning on both channels.
+  t <- run("Tavas", "mn")
+  expect_identical(t$res$tps_fit$gcv_end, "interpolation")
+  expect_equal(t$res$tps_fit$exact_cv_rmse, exact_cv(t$pts, "mn"), tolerance = 1e-6)
+  expect_lt(t$res$tps_fit$exact_cv_rmse, t$res$tps_fit$run_cv_rmse)
+  expect_match(t$res$log_msg, "[WARN] Tavas (Actual): GCV chose the least smoothing", fixed = TRUE)
+  expect_match(t$res$log_msg, "select Exact (λ = 0) under Smoothing (λ)", fixed = TRUE)
+  expect_match(paste(readLines(file.path(dir, "warn_end_Tavas_act.txt")), collapse = " "),
+               "select Exact (λ = 0)", fixed = TRUE)
+
+  # A minimum inside the grid names no end and runs no comparison.
+  mid <- run("Acipayam", "ph")
+  expect_null(mid$res$tps_fit$gcv_end)
+  expect_null(mid$res$tps_fit$exact_cv_rmse)
+  expect_no_match(mid$res$log_msg, "least smoothing", fixed = TRUE)
 })
 
 test_that("locality overlap is excess coverage in square metres", {
@@ -733,6 +924,35 @@ test_that("TPS shares the measured values' smoothing only when separate fitting 
   fixed <- suppressWarnings(apply_TPS(pts, "pv", grid, list(cv_strategy = "loocv", tps_lambda = 0.01,
                                                             tps_gcv_col = "v")))
   expect_equal(fixed$tps_fit$lambda, 0.01)
+})
+
+test_that("an unseparated Predicted surface's IDW power is the measured values' selection, in a TPS run's IDW fallback too", {
+  dir <- withr::local_tempdir("idw_unsep_")
+  withr::local_options(monolith_progress_dir = dir, monolith_session_id = "unsep")
+  # Samples on one line: IDW runs, while the spline's plane (1, x, y) is
+  # singular, so a TPS run falls back to IDW for both surfaces.
+  x <- seq(500000, by = 100, length.out = 14)
+  v <- sin((x - 500000) / 300)
+  df <- data.frame(x = x, y = 4000000, v = v, pv = 5 + 3 * v + cos((x - 500000) / 170), Locality = "LocA")
+  run <- function(method, separate) suppressWarnings(run_regional_interpolation(
+    list(l = "LocA", pts_data = df,
+         m_params = list(sep_fit = separate, idw_p_act = -1, idw_p_pre = -1, idw_nmax = 12,
+                         tps_lambda_act = -1, tps_lambda_pre = -1, cv_strategy = "loocv")),
+    method, 32633, character(0), NULL, "strict", "dynamic", 250,
+    "fixed", 100, "EPSG:32633", FALSE, "pred"))
+  pts <- sf::st_as_sf(df, coords = c("x", "y"), crs = 32633)
+  on_v <- select_idw_power(sf::st_coordinates(pts), pts$v, "loocv", 12)$p
+
+  idw <- run("IDW", FALSE)
+  expect_identical(idw$idw_fit_act$select_source, "own")
+  expect_identical(idw$idw_fit_pre$select_source, "measured")
+  expect_identical(idw$idw_fit_pre$p, on_v)
+  expect_identical(run("IDW", TRUE)$idw_fit_pre$select_source, "own")
+
+  tps <- run("TPS", FALSE)
+  expect_match(tps$log_msg, "TPS failed", fixed = TRUE)
+  expect_identical(tps$idw_fit_pre$select_source, "measured")
+  expect_identical(tps$idw_fit_pre$p, on_v)
 })
 
 test_that("the Comparable CV population scores exactly the rows RK scores", {
@@ -943,19 +1163,56 @@ test_that("the run record separates the two CRS and selected from used covariate
   # Written and read back, the record keeps both CRS fields and the per-
   # locality covariate lists; the kriging engines consume no IDW power or TPS
   # lambda, so none is written for them.
-  params <- list(Kale = list(idw_p_act = 2, idw_p_pre = 2.5, tps_lambda_act = -1, tps_lambda_pre = -1))
-  back <- jsonlite::fromJSON(jsonlite::toJSON(run_record_payload(cfg, params, "9.9.9", list(sf = "1")),
-                                              auto_unbox = TRUE, null = "null", force = TRUE),
-                             simplifyVector = FALSE)
+  params <- list(Kale = list(idw_p_act = 2, idw_p_pre = 2.5, tps_lambda_act = -1, tps_lambda_pre = -1,
+                             idw_fit_act = list(mode = "fixed", p = 2),
+                             tps_fit_act = list(mode = "gcv", lambda = 1e-4, eff_df = 6)))
+  json_back <- function(payload) jsonlite::fromJSON(run_record_json(payload), simplifyVector = FALSE)
+  back <- json_back(run_record_payload(cfg, params, "9.9.9", list(sf = "1")))
   expect_equal(back$config$input_crs, "EPSG:4326")
   expect_equal(back$config$target_crs, "EPSG:32633")
   expect_null(back$config$crs)
   expect_equal(back$config$covariates_dropped$Kale$actual, "clay")
   expect_null(back$regional_params)
   idw <- run_record_payload(modifyList(cfg, list(method = "IDW")), params, "9.9.9", list())
-  expect_equal(names(idw$regional_params$Kale), c("idw_p_act", "idw_p_pre"))
+  expect_equal(names(idw$regional_params$Kale), c("idw_p_act", "idw_p_pre", "idw_fit_act"))
   tps <- run_record_payload(modifyList(cfg, list(method = "TPS")), params, "9.9.9", list())
-  expect_equal(names(tps$regional_params$Kale), c("tps_lambda_act", "tps_lambda_pre"))
+  expect_equal(names(tps$regional_params$Kale), c("tps_lambda_act", "tps_lambda_pre", "tps_fit_act"))
+
+  # Written at full precision: a GCV score or an RMSE keeps every digit.
+  tps_fit <- list(mode = "gcv", lambda = 2.4e-06, eff_df = 12.345678,
+                  gcv = data.frame(lambda = c(2.4e-06, 0.4585602), gcv = c(0.000505076, 6.527426e-05)),
+                  gcv_end = "interpolation", exact_cv_rmse = 0.123456789, run_cv_rmse = 0.1234)
+  tps_back <- json_back(run_record_payload(modifyList(cfg, list(method = "TPS")),
+                                           list(Kale = list(tps_lambda_act = -1, tps_fit_act = tps_fit)),
+                                           "9.9.9", list()))$regional_params$Kale$tps_fit_act
+  expect_identical(tps_back$exact_cv_rmse, 0.123456789)
+  expect_identical(tps_back$gcv[[1]]$gcv, 0.000505076)
+  expect_identical(tps_back$eff_df, 12.345678)
+  # JSON has no infinity: the nearest-neighbour limit is a name, never "Inf"
+  # and never a candidate row without its power.
+  nn_fit <- list(mode = "cv", p = Inf, limit = "nearest_neighbour", nmax = 12,
+                 profile = data.frame(p = c(0, 2, Inf), rmse = c(1.25, 1.123456789, 1)),
+                 fold_p = c(`1` = 2, `2` = Inf))
+  idw_back <- json_back(run_record_payload(modifyList(cfg, list(method = "IDW")),
+                                           list(Kale = list(idw_p_act = -1, idw_fit_act = nn_fit)),
+                                           "9.9.9", list()))$regional_params$Kale$idw_fit_act
+  expect_null(idw_back$p)
+  expect_identical(idw_back$selected, "the nearest-neighbour limit (p → ∞)")
+  expect_identical(vapply(idw_back$profile, `[[`, "", "candidate"),
+                   c("equal weights (p = 0)", "p = 2", "the nearest-neighbour limit (p → ∞)"))
+  expect_identical(idw_back$profile[[2]]$cv_rmse, 1.123456789)
+  expect_null(idw_back$profile[[3]]$p)
+  expect_identical(vapply(idw_back$fold_p, `[[`, "", "selected"), c("p = 2", "the nearest-neighbour limit (p → ∞)"))
+  # Which powers the data do not separate from the best travels with the profile.
+  nn_banded <- nn_fit
+  nn_banded$profile$within_se <- c(FALSE, TRUE, TRUE)
+  banded_back <- json_back(run_record_payload(modifyList(cfg, list(method = "IDW")),
+                                              list(Kale = list(idw_fit_act = nn_banded)), "9.9.9", list()))
+  expect_identical(vapply(banded_back$regional_params$Kale$idw_fit_act$profile, `[[`, TRUE, "within_se"),
+                   c(FALSE, TRUE, TRUE))
+  expect_false(grepl("Inf", run_record_json(run_record_payload(modifyList(cfg, list(method = "IDW")),
+                                                               list(Kale = list(idw_fit_act = nn_fit)), "9.9.9", list())),
+                     fixed = TRUE))
 
   # Load Config reads session configurations. A run record - recent, or an
   # older one with a single `crs` field - is refused by name, never "loaded"
@@ -964,6 +1221,74 @@ test_that("the run record separates the two CRS and selected from used covariate
   expect_match(session_config_refusal(back), "run record .*Monolith 9\\.9\\.9")
   legacy <- list(config = list(crs = "EPSG:32633", app_version = "1.1.0"), provenance = list())
   expect_match(session_config_refusal(legacy), "Monolith 1.1.0", fixed = TRUE)
+})
+
+test_that("a session configuration carries the tuning stores through its JSON file", {
+  # Written as Save config writes it, read as Load config reads it.
+  json_trip <- function(x) {
+    jsonlite::fromJSON(jsonlite::toJSON(x, auto_unbox = TRUE, digits = NA, null = "null"),
+                       simplifyVector = FALSE)
+  }
+  v_fits <- list(
+    Kale_act = stamp_vgm(manual_vgm(0.8, "Sph", 350, 0.2), "ph", "manual"),
+    Loc_B_pre = stamp_vgm(manual_vgm(1.5e-3, "Mat", 1200.5, 0), "k [subset Test]", "manual"),
+    Yorga_act = stamp_vgm(manual_vgm(1, "Exp", 200, 0.1), "ph", "autofit"))
+  idw <- list(Kale = list(act = list(value = 2.35, key = "ph"), pre = list(value = -1, key = "ph_cve")))
+  tps <- list(Loc_B = list(act = list(value = 2.4e-06, key = "k"), pre = list(value = 0, key = "k_cve")))
+  back <- json_trip(config_stores_out(v_fits, idw, tps))
+  got <- config_stores_in(back, c("Kale", "Loc_B", "Yorga"))
+  # Only the applied manual models travel; a preview is refitted, not stored.
+  expect_identical(sort(names(got$v_fit_list)), c("Kale_act", "Loc_B_pre"))
+  expect_equal(got$v_fit_list$Kale_act, v_fits$Kale_act)
+  expect_equal(got$v_fit_list$Loc_B_pre, v_fits$Loc_B_pre)
+  expect_equal(got$idw_factors, idw)
+  expect_equal(got$tps_lambdas, tps)
+  expect_length(got$skipped, 0)
+
+  # A locality missing from the loaded data is left out and named.
+  part <- config_stores_in(back, "Kale")
+  expect_identical(names(part$v_fit_list), "Kale_act")
+  expect_length(part$tps_lambdas, 0)
+  expect_identical(part$skipped, "Loc_B")
+
+  # Rows that are not a valid model or value are dropped: a power above the
+  # range Auto (CV) searches, a value that is not a number, a negative lambda.
+  bad <- back
+  bad$variograms[[1]]$range <- -5
+  bad$idw[[1]]$value <- IDW_MAX_FINITE_POWER + 1
+  bad$tps[[1]]$value <- -3
+  dropped <- config_stores_in(bad, c("Kale", "Loc_B"))
+  expect_false("Kale_act" %in% names(dropped$v_fit_list))
+  expect_null(dropped$idw_factors$Kale$act)
+  expect_equal(dropped$idw_factors$Kale$pre$value, -1)
+  expect_null(dropped$tps_lambdas$Loc_B$act)
+  bad$idw[[1]]$value <- "steep"
+  expect_null(config_stores_in(bad, c("Kale", "Loc_B"))$idw_factors$Kale$act)
+  # Equal weights (p = 0) is a Fixed power and travels as one.
+  zero <- back
+  zero$idw[[1]]$value <- 0
+  expect_identical(config_stores_in(zero, "Kale")$idw_factors$Kale$act$value, 0)
+
+  # The variable list keeps the variables and prediction columns the loaded
+  # data has.
+  vars <- list(
+    list(actual = "ph", pred = "ph_cve", pred_ss = NULL, label = "pH", category = "Soil",
+         unit = "", palette = "Greens"),
+    list(actual = "gone", label = "Gone", category = "Soil"),
+    list(actual = "k", pred = "k_missing", label = "K", category = "Nutrients", unit = "mg/kg"))
+  vin <- config_vars_in(json_trip(vars), c("ph", "ph_cve", "k"))
+  expect_identical(vin$skipped, "gone")
+  expect_identical(vapply(vin$vars, `[[`, character(1), "actual"), c("ph", "k"))
+  expect_identical(vin$vars[[1]]$pred, "ph_cve")
+  expect_identical(vin$vars[[1]]$palette, "Greens")
+  expect_null(vin$vars[[2]]$pred)
+  expect_identical(vin$vars[[2]]$unit, "mg/kg")
+  expect_identical(vin$vars[[2]]$palette, get_default_palette("k", "Nutrients", "K"))
+
+  expect_null(config_scalar(list()))
+  expect_null(config_scalar(NA))
+  expect_null(config_scalar(""))
+  expect_identical(config_scalar(list(3)), 3)
 })
 
 test_that("manual parameter targets follow the switch in every prediction view", {
@@ -1161,6 +1486,149 @@ test_that("a CK fold screens its covariates on its own training rows", {
   res_a <- run(a); res_b <- run(b)
   expect_true(is.finite(res_a$cv_obj$var1.pred[n]))
   expect_equal(res_b$cv_obj$var1.pred[n], res_a$cv_obj$var1.pred[n], tolerance = 1e-8)
+})
+
+# ── Heterotopic Co-Kriging ─────────────────────────────────────────────────
+
+test_that("the CK variogram assembly is gstat's own variogram on isotopic data", {
+  # Direct pieces on each variable's rows and cross pieces on the rows carrying
+  # both reduce, when every row carries every variable, to the variogram gstat
+  # computes for the whole object: same rows, same order, same attributes.
+  pts <- golden_sf("tiny")
+  aux <- c("v82", "v85")
+  lags <- calc_scientific_lags(pts)
+  fit <- .ck_fit_lmc(pts, NULL, "ph", aux, lags, 15)
+  expect_identical(fit$design, "isotopic")
+  d <- pts[c("ph", aux)]
+  for (a in aux) d[[a]] <- as.numeric(scale(d[[a]]))
+  g <- gstat::gstat(NULL, "ph", ph ~ 1, d)
+  for (a in aux) g <- gstat::gstat(g, a, stats::reformulate("1", response = a), d)
+  expect_identical(attr(fit$g, "monolith_vm"),
+                   gstat::variogram(g, width = lags$width, cutoff = lags$cutoff))
+})
+
+test_that("a CK cross-variogram is computed on the locations carrying both variables", {
+  h <- make_heterotopic_ck(n_cov = 150, n_t = 50)
+  lags <- calc_scientific_lags(h$t)
+  fit <- .ck_fit_lmc(h$t, h$x, "v", "ec", lags, 15)
+  expect_identical(fit$design, "heterotopic")
+  expect_equal(unname(fit$counts[, "ec"]), c(150, 50))
+  vm <- attr(fit$g, "monolith_vm")
+  piece <- function(v, id) {
+    d <- as.data.frame(v)[v$id == id, c("np", "dist", "gamma")]
+    rownames(d) <- NULL
+    d
+  }
+  # By hand: the covariate standardized on every location that measures it,
+  # then an isotopic two-variable variogram of the collocated rows.
+  all_ec <- c(h$t$ec, h$x$ec)
+  both <- h$t[c("v", "ec")]
+  both$ec <- (both$ec - mean(all_ec)) / stats::sd(all_ec)
+  gx <- gstat::gstat(NULL, "v", v ~ 1, both)
+  gx <- gstat::gstat(gx, "ec", ec ~ 1, both)
+  ref <- gstat::variogram(gx, width = lags$width, cutoff = lags$cutoff)
+  expect_equal(piece(vm, "v.ec"), piece(ref, "v.ec"))
+  # The covariate's direct variogram uses the target-less locations too.
+  ec_all <- rbind(h$t["ec"], h$x["ec"])
+  ec_all$ec <- (ec_all$ec - mean(all_ec)) / stats::sd(all_ec)
+  ref_ec <- gstat::variogram(ec ~ 1, ec_all, width = lags$width, cutoff = lags$cutoff)
+  expect_equal(piece(vm, "ec"), piece(ref_ec, "var1"))
+  expect_gt(sum(vm$np[vm$id == "ec"]), sum(vm$np[vm$id == "v.ec"]))
+})
+
+test_that("heterotopic CK maps a sparsely sampled target better than OK and than its isotopic subset", {
+  h <- make_heterotopic_ck()
+  lags <- calc_scientific_lags(h$t)
+  mp <- list(cv_strategy = "auto", ck_nmax = 15)
+  het <- suppressWarnings(apply_CK(h$t, "v", h$grid, lags, c(mp, list(ck_extra = h$x)), "ec"))
+  iso <- suppressWarnings(apply_CK(h$t, "v", h$grid, lags, mp, "ec"))
+  ok <- suppressWarnings(apply_OK(h$t, "v", h$grid, lags, list(cv_strategy = "auto")))
+  expect_false(grepl("Falling back to OK", het$log_msg, fixed = TRUE))
+  expect_identical(het$ck_design, "heterotopic")
+  expect_identical(iso$ck_design, "isotopic")
+  expect_match(het$log_msg, "heterotopic design: target n = 80; ec: n = 300 (80 collocated)", fixed = TRUE)
+  rmse <- function(p) sqrt(mean((p - h$truth)^2))
+  expect_lt(rmse(het$res_sf$var1.pred), rmse(ok$res_sf$var1.pred))
+  expect_lt(rmse(het$res_sf$var1.pred), rmse(iso$res_sf$var1.pred))
+  expect_gt(max(abs(het$res_sf$var1.pred - iso$res_sf$var1.pred)), 0.1)
+})
+
+test_that("a CK fold withholds its held-out covariates and keeps every covariate-only row", {
+  h <- make_heterotopic_ck(n_cov = 120, n_t = 40)
+  lags <- calc_scientific_lags(h$t)
+  n <- nrow(h$t)
+  run <- function(t, x) suppressWarnings(apply_CK(t, "v", h$grid[1:5, ], lags,
+    list(cv_strategy = "loocv", ck_extra = x), "ec"))
+  base <- run(h$t, h$x)
+  expect_true(all(is.finite(base$cv_obj$var1.pred)))
+  # The population is the target rows, in their order.
+  expect_identical(base$cv_obj$row_id, seq_len(n))
+  # A held-out location contributes its coordinates only: its own measured
+  # covariate never reaches its prediction.
+  t2 <- h$t
+  t2$ec[n] <- t2$ec[n] + 10 * stats::sd(h$t$ec)
+  expect_equal(run(t2, h$x)$cv_obj$var1.pred[n], base$cv_obj$var1.pred[n], tolerance = 1e-8)
+  # Every fold keeps every covariate-only row: changing one moves every
+  # out-of-fold prediction.
+  x2 <- h$x
+  x2$ec[1] <- x2$ec[1] + 10 * stats::sd(h$x$ec)
+  expect_true(all(abs(run(h$t, x2)$cv_obj$var1.pred - base$cv_obj$var1.pred) > 1e-10))
+})
+
+test_that("a covariate enters CK only with enough locations measured together with the target", {
+  h <- make_heterotopic_ck(n_cov = 150, n_t = 40)
+  lags <- calc_scientific_lags(h$t)
+  t <- h$t; x <- h$x
+  with_seed(3, {
+    x$ec2 <- runif(nrow(x))
+    t$ec2 <- NA_real_
+    t$ec2[1:10] <- runif(10)
+  })
+  run <- function(t) suppressWarnings(apply_CK(t, "v", h$grid[1:5, ], lags,
+    list(cv_strategy = "auto", ck_extra = x), c("ec", "ec2")))
+  t9 <- t
+  t9$ec2[10] <- NA_real_
+  res9 <- run(t9)
+  expect_match(res9$log_msg, "dropped ec2 (9 collocated)", fixed = TRUE)
+  expect_true("ec2" %in% res9$aux_dropped)
+  res10 <- run(t)
+  expect_false(grepl("dropped ec2", res10$log_msg, fixed = TRUE))
+  expect_false("ec2" %in% res10$aux_dropped)
+})
+
+test_that("CK's target rows are OK Native's rows, with covariates from every sample at a location", {
+  # Two samples at one location, one carrying the target and one the
+  # covariate: the location is a target row with that covariate value.
+  df <- data.frame(.mn_row_id = 1:5, x = c(0, 0, 100, 200, 300), y = 0,
+                   v = c(NA, 3, 4, NA, NA), ec = c(5, NA, 7, 9, NA))
+  pts <- sf::st_as_sf(df, coords = c("x", "y"), crs = 32635)
+  rows <- ck_design_rows(pts, "v", "ec")
+  ok_native <- dedup_valid_points(pts, "v")
+  expect_identical(rows$t$.mn_row_id, ok_native$.mn_row_id)
+  expect_identical(rows$t$v, ok_native$v)
+  expect_equal(rows$t$ec, c(5, 7))
+  expect_equal(rows$x$ec, 9)
+  expect_false(".mn_ck_loc" %in% c(names(rows$t), names(rows$x)))
+})
+
+test_that("a CK run scores the population OK Native scores and maps with every row", {
+  h <- make_heterotopic_ck(n_cov = 120, n_t = 40)
+  all_pts <- rbind(h$t, h$x)
+  cc <- sf::st_coordinates(all_pts)
+  df <- data.frame(.mn_row_id = seq_len(nrow(all_pts)), x = cc[, 1], y = cc[, 2],
+                   v = all_pts$v, pv = NA_real_, ec = all_pts$ec, Locality = "L")
+  run <- function(method) suppressWarnings(run_regional_interpolation(
+    list(l = "L", pts_data = df,
+         m_params = list(cv_strategy = "auto", cv_population = "native", idw_p_act = 2,
+                         idw_nmax = 12, ck_nmax = 15)),
+    method, 32635, "ec", NULL, "convex", "fixed", 300, "fixed", 100, "EPSG:32635", FALSE, "actual"))
+  ok <- run("OK"); ck <- run("CK")
+  expect_identical(ck$cv_info_act$population, "native rows")
+  expect_identical(ck$cv_info_act$row_id, ok$cv_info_act$row_id)
+  expect_identical(ck$cv_info_act$folds1, ok$cv_info_act$folds1)
+  expect_identical(ck$ck_design_act, "heterotopic")
+  expect_equal(nrow(ck$pts), nrow(all_pts))
+  expect_false(is.null(ck$r_a))
 })
 
 # ── apply_RK ──────────────────────────────────────────────────────────────
@@ -1716,8 +2184,7 @@ test_that("autofit_vgm_item fits actual and predicted variograms per item", {
   expect_true(res$act$mod %in% c("Sph", "Exp", "Gau", "Mat"))
 
   # matches the same fit computed inline (the observer's former lambda body)
-  sub_a <- validate_and_project_sf(sf::st_as_sf(df_a, coords = c("x", "y"), crs = 32633))
-  sub_a <- sub_a[!duplicated(round(sf::st_coordinates(sub_a), 2)), ]
+  sub_a <- merge_colocated(validate_and_project_sf(sf::st_as_sf(df_a, coords = c("x", "y"), crs = 32633)))
   lags <- calc_scientific_lags(sub_a)
   v_emp <- gstat::variogram(v ~ 1, sub_a, width = lags$width, cutoff = lags$cutoff)
   expect_equal(res$act$emp$gamma, v_emp$gamma)
@@ -1749,116 +2216,6 @@ test_that("autofit_vgm_item fits actual and predicted variograms per item", {
   res2 <- autofit_vgm_item(list(l = "LocB", act = df_a, pre = NULL), current_crs = 32633)
   expect_null(res2$pre$fit)
   expect_identical(res2$pre$mod, "FAIL")
-})
-
-test_that("tps_gcv_item returns a GCV curve and idw_opt_item an optimized power", {
-  pts <- make_test_points(25)
-  coords <- sf::st_coordinates(pts)
-  df <- data.frame(x = coords[, 1], y = coords[, 2], v = pts$v)
-
-  tps_res <- tps_gcv_item(list(l = "LocA", df = df), current_crs = 32633)
-  expect_identical(tps_res$l, "LocA")
-  expect_null(tps_res$err)
-  expect_true(is.numeric(tps_res$best_lam))
-  expect_true(is.data.frame(tps_res$gcv_data) && all(c("lambda", "gcv") %in% names(tps_res$gcv_data)))
-  expect_true(all(tps_res$gcv_data$lambda > 0))
-
-  idw_res <- idw_opt_item(list(l = "LocA", df = df), current_crs = 32633, idw_nmax_val = 12)
-  expect_true(idw_res$best_f >= 0.5 && idw_res$best_f <= 5)
-
-  # Below OPTIMIZER_MIN_POINTS nothing is searched and nothing is returned to
-  # store: a stand-in value would override the locality's sidebar setting.
-  small <- df[1:4, ]
-  tps_small <- tps_gcv_item(list(l = "S", df = small), 32633)
-  idw_small <- idw_opt_item(list(l = "S", df = small), 32633, 12)
-  expect_null(tps_small$best_lam)
-  expect_null(idw_small$best_f)
-  expect_match(tps_small$skipped, "fewer than 5")
-  expect_match(idw_small$skipped, "fewer than 5")
-  # The guard counts DISTINCT samples: five rows on four locations are four.
-  twin <- rbind(small, small[1, ])
-  expect_false(is.null(tps_gcv_item(list(l = "T", df = twin), 32633)$skipped))
-  expect_false(is.null(idw_opt_item(list(l = "T", df = twin), 32633, 12)$skipped))
-})
-
-test_that("idw_opt_item forwards cv_strategy to the power search", {
-  # 2026-08-23 audit, Tier 3: the worker must hand the run's CV strategy to
-  # optimize_idw_p, or the power is tuned on a partition the metrics never use.
-  pts <- make_test_points(60, seed = 21)
-  coords <- sf::st_coordinates(pts)
-  df <- data.frame(x = coords[, 1], y = coords[, 2], v = pts$v)
-  # idw_opt_item dedups at centimetre precision before searching; mirror that
-  # so the expectation is scored on the identical point set.
-  kept <- pts[!duplicated(round(sf::st_coordinates(pts), 2)), ]
-
-  for (strategy in c("loocv", "block")) {
-    expect_identical(
-      idw_opt_item(list(l = "L", df = df), current_crs = 32633,
-                   idw_nmax_val = 12, cv_strategy = strategy)$best_f,
-      optimize_idw_p(kept, "v", nmax = 12, cv_strategy = strategy),
-      info = strategy)
-  }
-  # Default keeps the auto plan when the caller supplies no strategy.
-  expect_identical(
-    idw_opt_item(list(l = "L", df = df), 32633, 12)$best_f,
-    optimize_idw_p(kept, "v", nmax = 12, cv_strategy = "auto"))
-})
-
-test_that("idw_opt_item and tps_gcv_item project geographic input to match the run CRS", {
-  # Finding 1 (third external review): both optimizers searched on the raw
-  # upload CRS. For a geographic upload that means degree distances (and, for
-  # TPS, a degree-scaled unit box), while the actual run interpolates on
-  # projected metres -- so the stored power / lambda disagreed with the run they
-  # feed. They now project via validate_and_project_sf first, exactly like the
-  # sibling autofit_vgm_item and the run pipeline, so the answer is invariant to
-  # whether the same points arrive in a geographic or a projected CRS.
-  set.seed(101)
-  n   <- 40
-  lon <- 13 + runif(n, -0.05, 0.05)                   # UTM zone 33N territory
-  lat <- 52 + runif(n, -0.05, 0.05)
-  v   <- 10 + 5 * lon + 3 * lat + rnorm(n, 0, 0.2)    # smooth spatial signal
-  df_geo <- data.frame(x = lon, y = lat, v = v)
-
-  # The projected twin: exactly what validate_and_project_sf yields for df_geo,
-  # so both inputs reduce to the identical metric coordinate set.
-  pts_proj <- validate_and_project_sf(
-    sf::st_as_sf(df_geo, coords = c("x", "y"), crs = 4326))
-  cc       <- sf::st_coordinates(pts_proj)
-  df_proj  <- data.frame(x = cc[, 1], y = cc[, 2], v = v)
-  utm_crs  <- sf::st_crs(pts_proj)
-
-  # IDW power: identical whether supplied as geographic or projected.
-  idw_geo  <- idw_opt_item(list(l = "L", df = df_geo),  current_crs = 4326,    idw_nmax_val = 12)$best_f
-  idw_proj <- idw_opt_item(list(l = "L", df = df_proj), current_crs = utm_crs, idw_nmax_val = 12)$best_f
-  expect_identical(idw_geo, idw_proj)
-
-  # TPS lambda: same invariance (the unit-box normalization now runs on metres).
-  # suppressWarnings muffles fields' benign "GCV minimum at endpoint" note that
-  # a near-linear signal provokes; it is orthogonal to the CRS invariance tested.
-  tps_geo  <- suppressWarnings(tps_gcv_item(list(l = "L", df = df_geo),  current_crs = 4326))$best_lam
-  tps_proj <- suppressWarnings(tps_gcv_item(list(l = "L", df = df_proj), current_crs = utm_crs))$best_lam
-  expect_equal(tps_geo, tps_proj)
-})
-
-test_that("idw_opt_item and tps_gcv_item dedup co-located points like the run pipeline", {
-  # Review 2026-07-22: the run fits on dedup_valid_points() output, but the
-  # optimizer workers searched on the raw na.omit()ed frame. A co-located twin
-  # predicts its held-out partner at distance zero (an exact hit for every IDW
-  # power) and triggers fields::Tps's replicate handling (shifted GCV curve),
-  # so the stored parameter was optimized on a different point set than the
-  # run that consumes it. Appending exact twins must now be a no-op.
-  pts <- make_test_points(25)
-  coords <- sf::st_coordinates(pts)
-  df <- data.frame(x = coords[, 1], y = coords[, 2], v = pts$v)
-  df_dup <- rbind(df, df[1:5, ])
-
-  idw_clean <- idw_opt_item(list(l = "L", df = df),     current_crs = 32633, idw_nmax_val = 12)$best_f
-  idw_dup   <- idw_opt_item(list(l = "L", df = df_dup), current_crs = 32633, idw_nmax_val = 12)$best_f
-  expect_identical(idw_dup, idw_clean)
-
-  tps_clean <- suppressWarnings(tps_gcv_item(list(l = "L", df = df),     current_crs = 32633))$best_lam
-  tps_dup   <- suppressWarnings(tps_gcv_item(list(l = "L", df = df_dup), current_crs = 32633))$best_lam
-  expect_equal(tps_dup, tps_clean)
 })
 
 test_that("interp_run_item forwards a run_params list into a full regional run", {
@@ -2053,11 +2410,12 @@ test_that("engine parameter guards: absent IDW params and an NA TPS lambda", {
   grid <- make_test_grid_safe(pts, res = 200)
 
   # R2: apply_IDW is publicly callable, and apply_TPS's fallback depends on
-  # these defaults existing rather than on a run_regional_interpolation
-  # invariant holding.
+  # it resolving absent parameters itself: no neighbourhood is the default 12,
+  # no power is Auto (CV).
   idw_res <- suppressWarnings(apply_IDW(pts, "v", grid, list(cv_strategy = "loocv")))
   expect_false(is.null(idw_res$res_sf))
   expect_true(any(is.finite(idw_res$res_sf$var1.pred)))
+  expect_identical(idw_res$idw_fit$mode, "cv")
 
   # R1: `NA < 0` is NA, which errors the if() and silently sent the entire
   # surface down the IDW fallback. NA now means unset = Auto (GCV).
@@ -2512,7 +2870,7 @@ test_that("strict_buffer_gap quantifies a buffer below half the cell diagonal", 
 
 test_that("strict_buffer_message speaks only for an incoherent pair", {
   msg <- strict_buffer_message(175, 350, label = "Yorga")
-  expect_match(msg, "^Yorga: Strict Measured buffer")
+  expect_match(msg, "^Yorga: Point buffer [(]")
   expect_match(msg, "248 m or more")   # ceiling(350 / sqrt(2))
   expect_match(msg, "247 m or less")   # floor(175 * sqrt(2))
   expect_match(msg, "21%")             # 100 * (1 - pi/4)
@@ -2554,14 +2912,14 @@ test_that("run_regional_interpolation names an incoherent strict buffer", {
   res <- suppressWarnings(run_regional_interpolation(
     item, "IDW", 32633, character(0), NULL, "strict", "fixed", 100,
     "fixed", 350, "EPSG:4326", FALSE, "actual"))
-  expect_match(res$log_msg, "Strict Measured buffer")
+  expect_match(res$log_msg, "Point buffer [(]")
   expect_false(grepl("Error in", res$log_msg))
 
   # A coherent pair (100 m buffer, 50 m grid) must stay silent.
   res_ok <- suppressWarnings(run_regional_interpolation(
     item, "IDW", 32633, character(0), NULL, "strict", "fixed", 100,
     "fixed", 50, "EPSG:4326", FALSE, "actual"))
-  expect_false(grepl("Strict Measured buffer", res_ok$log_msg))
+  expect_false(grepl("Point buffer [(]", res_ok$log_msg))
 
   # Non-strict boundaries are never flagged: a hull covers the neighbourhood of
   # every interior sample, so only its perimeter is exposed - and a dynamic
@@ -2569,7 +2927,7 @@ test_that("run_regional_interpolation names an incoherent strict buffer", {
   res_wrap <- suppressWarnings(run_regional_interpolation(
     item, "IDW", 32633, character(0), NULL, "wrapped", "fixed", 100,
     "fixed", 350, "EPSG:4326", FALSE, "actual"))
-  expect_false(grepl("Strict Measured buffer", res_wrap$log_msg))
+  expect_false(grepl("Point buffer [(]", res_wrap$log_msg))
 })
 
 test_that("a coarsened grid reaches both the progress panel and the run log", {
@@ -2848,18 +3206,41 @@ test_that("TPS roughness decreases monotonically with lambda", {
   expect_gt(rough[1] / rough[length(rough)], 5)
 })
 
-test_that("the GCV optimum agrees with the curve the panel plots", {
+test_that("an Auto (GCV) run records the curve that selected its lambda", {
   pts <- golden_sf("tiny")
-  item <- list(l = "Kale", df = data.frame(x = pts$x, y = pts$y, v = pts$ph))
-  tg <- tps_gcv_item(item, "EPSG:32635")
-
-  expect_false(is.null(tg$gcv_data))
-  expect_gt(tg$best_lam, 0)
+  res <- suppressWarnings(apply_TPS(pts, "ph", pts, list(tps_lambda = -1)))
+  fit <- res$tps_fit
+  expect_identical(fit$mode, "gcv")
+  expect_identical(fit$gcv_source, "own")
+  expect_named(fit$gcv, c("lambda", "gcv"))
+  expect_true(all(fit$gcv$lambda > 0) && all(is.finite(fit$gcv$gcv)))
   # fields optimises lambda continuously while the plotted curve is its coarse
   # GCV grid, so the two agree to the grid's resolution rather than exactly.
   # A reported optimum sitting off the visible minimum would be a real defect.
-  argmin <- tg$gcv_data$lambda[which.min(tg$gcv_data$gcv)]
-  expect_lt(abs(log10(tg$best_lam) - log10(argmin)), 0.1)
+  argmin <- fit$gcv$lambda[which.min(fit$gcv$gcv)]
+  expect_lt(abs(log10(fit$lambda) - log10(argmin)), 0.1)
+  # The same curve fields draws for the same unit-box coordinates.
+  co <- sf::st_coordinates(pts)
+  span <- max(diff(range(co[, 1])), diff(range(co[, 2])))
+  unit <- cbind((co[, 1] - min(co[, 1])) / span, (co[, 2] - min(co[, 2])) / span)
+  ref <- fields::Tps(unit, pts$ph, scale.type = "unscaled", give.warnings = FALSE)
+  keep <- ref$gcv.grid[, 1] > 0 & is.finite(ref$gcv.grid[, 3])
+  expect_equal(fit$gcv$lambda, ref$gcv.grid[keep, 1])
+  expect_equal(fit$gcv$gcv, ref$gcv.grid[keep, 3])
+
+  # Unseparated: the curve is the one GCV draws for the MEASURED values.
+  pts$pv <- pts$ph + with_seed(9, rnorm(nrow(pts), 0, 0.1))
+  unsep <- suppressWarnings(apply_TPS(pts, "pv", pts, list(tps_lambda = -1, tps_gcv_col = "ph")))
+  expect_identical(unsep$tps_fit$gcv_source, "measured")
+  expect_equal(unsep$tps_fit$gcv, fit$gcv)
+  expect_equal(unsep$tps_fit$lambda, fit$lambda)
+
+  # Fixed and exact lambdas search nothing, so they record no curve.
+  for (lam in c(0, 0.01)) {
+    f <- suppressWarnings(apply_TPS(pts, "ph", pts, list(tps_lambda = lam)))
+    expect_identical(f$tps_fit$mode, if (lam == 0) "exact" else "fixed")
+    expect_null(f$tps_fit$gcv)
+  }
 })
 
 test_that("a one-square-kilometre surface reports its ground area, not its projected area", {

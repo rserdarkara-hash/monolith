@@ -377,51 +377,75 @@ classif_build_recipe <- function(train_df, target, predictors, weight_col = NULL
 }
 
 # ── Fold construction ───────────────────────────────────────────────────────
+#' Class-stratified random k-fold, the Standard strategy's folds: the samples
+#' of each class in random order, the classes one after another, and fold ids
+#' dealt in turn along that sequence from a random order of the v folds. Each
+#' class spreads over as many folds as it has samples (a class of m <= v
+#' samples lands in m different folds, so no training set loses more than one
+#' of its samples), and the folds differ in size by at most one. The fold count
+#' does not follow the smallest class: only a singleton leaves a fold's
+#' training set without its class (a reported class gap), and it would at any
+#' fold count. Seed-sandboxed. The same partition is kNNDM's random partition
+#' in this suite and the random reference of its CV Distance Match panel.
+classif_stratified_folds <- function(y, v, seed = 12345L) {
+  y <- droplevels(as.factor(y))
+  n <- length(y)
+  .classif_with_seed(seed, {
+    ord <- unlist(lapply(levels(y), function(lev) {
+      idx <- which(y == lev)
+      idx[sample.int(length(idx))]
+    }), use.names = FALSE)
+    folds <- integer(n)
+    folds[ord] <- rep_len(sample.int(v), length(ord))
+    folds
+  })
+}
+
 #' Integer fold vector for classification CV, mirroring make_cv_folds' contract
 #' (one integer per row). `spatial` clusters projected coordinates
 #' (spatialsample::spatial_clustering_cv, k-means, matching the interpolation
-#' engines' spatial-block convention); `standard` is seeded, class-stratified
-#' k-fold. Both are seed-sandboxed. v is clamped so no fold is empty and, for
-#' the standard strategy, so every fold can hold each class.
-classif_make_fold_id <- function(pts_sf, strategy = c("spatial", "standard"),
-                                 target = NULL, v = 10L, seed = 12345L) {
+#' engines' spatial-block convention); `standard` is the class-stratified
+#' random k-fold (classif_stratified_folds; unstratified random k-fold without
+#' a target). Both are seed-sandboxed. v is clamped to the point count, so no
+#' fold is empty.
+#' `knndm` matches the folds to the prediction grid's locations `domain_xy`
+#' (knndm_folds, with k = v), with the `standard` folds for the same v and seed
+#' as its random partition: where kNNDM chooses spatial folds they are
+#' returned, and everywhere else - random folds already match the map, no
+#' spatial partition is valid, there is no domain, or fewer than
+#' CV_KNNDM_MIN_N points - the `standard` folds. attr(, "knndm") records the
+#' choice (knndm_folds' record; branch "small" below CV_KNNDM_MIN_N).
+classif_make_fold_id <- function(pts_sf, strategy = c("spatial", "knndm", "standard"),
+                                 target = NULL, v = 10L, seed = 12345L, domain_xy = NULL) {
   strategy <- match.arg(strategy)
   n <- nrow(pts_sf)
   v <- max(2L, min(as.integer(v), n))
+  if (strategy == "standard") {
+    if (is.null(target)) return(cv_random_folds(n, v, seed))
+    return(classif_stratified_folds(sf::st_drop_geometry(pts_sf)[[target]], v, seed))
+  }
+  if (strategy == "knndm") {
+    rnd <- classif_make_fold_id(pts_sf, "standard", target = target, v = v, seed = seed)
+    if (n < CV_KNNDM_MIN_N) {
+      attr(rnd, "knndm") <- list(branch = "small", q = NA_integer_, k = v, W = NA_real_,
+                                 W_random = NA_real_, ks_p = NA_real_,
+                                 n_domain = NROW(domain_xy), units = n, exact = TRUE)
+      return(rnd)
+    }
+    return(knndm_folds(sf::st_coordinates(pts_sf), domain_xy, k = v, maxp = KNNDM_MAXP, seed = seed,
+                       random_folds = rnd))
+  }
 
   .classif_with_seed(seed, {
-    if (strategy == "spatial") {
-      sp <- spatialsample::spatial_clustering_cv(pts_sf, v = v)
-      fold_id <- rep(NA_integer_, n)
-      for (i in seq_along(sp$splits)) {
-        assess_idx <- rsample::complement(sp$splits[[i]])
-        fold_id[assess_idx] <- i
-      }
-      # Degenerate geometry can leave a point unassigned; fold it into cluster 1.
-      fold_id[is.na(fold_id)] <- 1L
-      fold_id
-    } else {
-      if (!is.null(target)) {
-        # droplevels: an empty level would make min(table(y)) zero and collapse
-        # the cap below to v = 2 for a target that supports far more folds.
-        y <- droplevels(as.factor(sf::st_drop_geometry(pts_sf)[[target]]))
-        # Cap v at the smallest class so stratified folds can each hold a class.
-        # A singleton class floors this at v = 2 and lands that class in exactly
-        # one fold, so it is absent from that fold's training set and its recall
-        # is 0 by construction, not by model failure. This is inherent to
-        # stratified CV with singleton classes; classif_scope_adequacy() warns
-        # up front for every class below 3 samples.
-        v <- max(2L, min(v, min(table(y))))
-        fold_id <- integer(n)
-        for (lev in levels(y)) {
-          idx <- which(y == lev)
-          fold_id[idx] <- sample(rep(seq_len(v), length.out = length(idx)))
-        }
-        fold_id
-      } else {
-        sample(rep(seq_len(v), length.out = n))
-      }
+    sp <- spatialsample::spatial_clustering_cv(pts_sf, v = v)
+    fold_id <- rep(NA_integer_, n)
+    for (i in seq_along(sp$splits)) {
+      assess_idx <- rsample::complement(sp$splits[[i]])
+      fold_id[assess_idx] <- i
     }
+    # Degenerate geometry can leave a point unassigned; fold it into cluster 1.
+    fold_id[is.na(fold_id)] <- 1L
+    fold_id
   })
 }
 
@@ -698,24 +722,6 @@ classif_per_class_accuracy <- function(pred_df, target) {
 }
 
 # ── Cross-validation ────────────────────────────────────────────────────────
-#' Cross-validate one classification method. Returns pooled out-of-fold
-#' predictions, aggregate metrics, per-class accuracies, the confusion matrix,
-#' and the fold vector used. If `depth` requests tuning, hyperparameters are
-#' chosen by an inner grid over the same folds before the out-of-fold
-#' predictions are collected (defended against leakage by tune's per-split
-#' preprocessing).
-#'
-#' `nested = TRUE` (only meaningful when `depth` tunes something) switches to
-#' nested cross-validation: instead of selecting one hyperparameter set on the
-#' same folds that score it (mildly optimistic — the selection has seen every
-#' fold's held-out data), each OUTER fold re-runs the grid search on
-#' `inner_v` inner folds built from its analysis rows only, finalises the
-#' workflow with that fold's winner, and predicts its held-out rows. The
-#' pooled metrics then estimate the performance of the WHOLE procedure
-#' including the tuning search (Varma & Simon 2006; Cawley & Talbot 2010).
-#' Inner folds reuse the outer `strategy` (spatial folds inside spatial CV,
-#' so inner selection faces the same leakage regime as the outer estimate).
-#' Cost multiplies roughly by `inner_v`.
 # Cooperative cancellation for the classification worker: the module writes a
 # flag file, the worker checks it between expensive stages (fold boundaries,
 # tuning, final fit, surface build) — the same file-based machinery the
@@ -800,15 +806,36 @@ classif_per_class_accuracy <- function(pred_df, target) {
        missing = sub("^\\.pred_", "", absent))
 }
 
+#' Cross-validate one classification method. Returns pooled out-of-fold
+#' predictions, aggregate metrics, per-class accuracies, the confusion matrix,
+#' and the fold vector used. If `depth` requests tuning, hyperparameters are
+#' chosen by an inner grid over the same folds before the out-of-fold
+#' predictions are collected (defended against leakage by tune's per-split
+#' preprocessing).
+#'
+#' `nested = TRUE` (only meaningful when `depth` tunes something) switches to
+#' nested cross-validation: instead of selecting one hyperparameter set on the
+#' same folds that score it (mildly optimistic — the selection has seen every
+#' fold's held-out data), each OUTER fold re-runs the grid search on
+#' `inner_v` inner folds built from its analysis rows only, finalises the
+#' workflow with that fold's winner, and predicts its held-out rows. The
+#' pooled metrics then estimate the performance of the WHOLE procedure
+#' including the tuning search (Varma & Simon 2006; Cawley & Talbot 2010).
+#' Inner folds reuse the outer `strategy` (spatial folds inside spatial CV,
+#' so inner selection faces the same leakage regime as the outer estimate;
+#' under kNNDM, folds matched on the outer fold's analysis rows against the
+#' same prediction grid locations `domain_xy`).
+#' Cost multiplies roughly by `inner_v`.
 run_classification_cv <- function(pts_sf, target, predictors,
                                   method = "rf",
-                                  strategy = c("spatial", "standard"),
+                                  strategy = c("spatial", "knndm", "standard"),
                                   v = 10L, depth = "none", seed = 12345L,
                                   group = NULL, class_weights = FALSE,
                                   nested = FALSE, inner_v = 5L,
                                   oof_importance = FALSE, importance_reps = 5L,
                                   vif_threshold = NULL,
-                                  cancel_file = NULL, progress_cb = NULL) {
+                                  cancel_file = NULL, progress_cb = NULL,
+                                  domain_xy = NULL) {
   strategy <- match.arg(strategy)
   if (!is.null(group) && length(group) != nrow(pts_sf)) {
     stop("`group` must have one entry per row of `pts_sf`.")
@@ -856,10 +883,11 @@ run_classification_cv <- function(pts_sf, target, predictors,
     workflows::add_model(spec)
   if (weights_applied) wf <- workflows::add_case_weights(wf, .case_wt)
 
-  fold_id <- classif_make_fold_id(keep_sf, strategy, target = target, v = v, seed = seed)
+  fold_id <- classif_make_fold_id(keep_sf, strategy, target = target, v = v, seed = seed,
+                                  domain_xy = domain_xy)
   nested_active <- isTRUE(nested) && length(tune_params) > 0
   # progress_cb reports progress within the CV stage. Covariate reconstruction
-  # has its own share because it can dominate the old fold-fitting work.
+  # has its own share because it can dominate the fold-fitting work.
   cov_share <- 0.25
   tune_share <- if (length(tune_params) > 0 && !nested_active) 0.25 else 0
   fold_share <- 1 - cov_share - tune_share
@@ -947,7 +975,7 @@ run_classification_cv <- function(pts_sf, target, predictors,
         # hyperparameters.
         inner_id <- classif_make_fold_id(keep_sf[fold_id != i, , drop = FALSE],
                                          strategy, target = target,
-                                         v = inner_v, seed = seed + i)
+                                         v = inner_v, seed = seed + i, domain_xy = domain_xy)
         inner_assess <- .classif_fold_assessment(
           keep_sf[fold_id != i, , drop = FALSE], tr, predictors, inner_id,
           cancel_file = cancel_file,
@@ -1109,8 +1137,8 @@ classif_nn_surface <- function(train_xy, train_y, grid_xy, levels = NULL) {
 #' column of a covariate run. No probabilities exist, so only the class
 #' metrics are computed. `.pred_base` mirrors `.pred_class` so every consumer
 #' of the pooled predictions keeps working.
-run_classification_nn_cv <- function(pts_sf, target, strategy = c("spatial", "standard"),
-                                     v = 10L, seed = 12345L, group = NULL) {
+run_classification_nn_cv <- function(pts_sf, target, strategy = c("spatial", "knndm", "standard"),
+                                     v = 10L, seed = 12345L, group = NULL, domain_xy = NULL) {
   strategy <- match.arg(strategy)
   if (!is.null(group) && length(group) != nrow(pts_sf)) {
     stop("`group` must have one entry per row of `pts_sf`.")
@@ -1125,7 +1153,8 @@ run_classification_nn_cv <- function(pts_sf, target, strategy = c("spatial", "st
   lvl <- levels(y)
   grp <- if (is.null(group)) NULL else as.character(group)[cc]
 
-  fold_id <- classif_make_fold_id(keep_sf, strategy, target = target, v = v, seed = seed)
+  fold_id <- classif_make_fold_id(keep_sf, strategy, target = target, v = v, seed = seed,
+                                  domain_xy = domain_xy)
   xy <- unname(sf::st_coordinates(keep_sf)[, 1:2, drop = FALSE])
   base <- classif_spatial_baseline(xy, y, fold_id)
 
@@ -1157,6 +1186,23 @@ run_classification_nn_cv <- function(pts_sf, target, strategy = c("spatial", "st
     majority_acc = max(table(y)) / length(y),
     best_params = NULL, nested = FALSE, importance = NULL, weights_applied = FALSE
   )
+}
+
+#' The fold design a classification run was scored under, as its badge and
+#' its Metrics CSV name it: the strategy, and for kNNDM the design it chose
+#' (`knndm`, classif_make_fold_id()'s record) - random or spatial folds, or the
+#' random folds it used without a search and why.
+classif_cv_label <- function(strategy, knndm = NULL) {
+  switch(strategy %||% "",
+    spatial = "Spatial blocked CV",
+    knndm = switch(knndm$branch %||% "",
+      random   = "kNNDM CV [random folds]",
+      spatial  = "kNNDM CV [spatial folds]",
+      small    = sprintf("Random k-fold CV [kNNDM needs n ≥ %d]", CV_KNNDM_MIN_N),
+      none     = "Random k-fold CV [kNNDM: no prediction domain]",
+      fallback = "Random k-fold CV [kNNDM: no valid spatial partition]",
+      "kNNDM CV"),
+    "Random k-fold CV")
 }
 
 #' Plain-language reading of the covariate-lift result. McNemar's test is
@@ -1472,15 +1518,17 @@ classif_permutation_importance <- function(model, train_df, target, predictors,
 #' metrics picks hyperparameters against exactly the optimism spatial CV exists
 #' to remove, and those hyperparameters are what the map, the entropy surface,
 #' the permutation importance and the exported .rds bundle are all built from.
+#' Under kNNDM the same `domain_xy` gives the same folds as the CV's, so its
+#' held-out covariates (`cv_assessment_df`) are reused.
 #' Returns the fitted workflow plus the target levels for downstream raster
 #' layer naming.
 fit_classification_model <- function(pts_sf, target, predictors,
                                      method = "rf", depth = "none",
-                                     strategy = c("spatial", "standard"),
+                                     strategy = c("spatial", "knndm", "standard"),
                                      v = 10L, seed = 12345L,
                                      class_weights = FALSE,
                                      cv_assessment_df = NULL, cv_fold_id = NULL,
-                                     vif_threshold = NULL) {
+                                     vif_threshold = NULL, domain_xy = NULL) {
   strategy <- match.arg(strategy)
   full_df <- as.data.frame(sf::st_drop_geometry(pts_sf))
   cc <- stats::complete.cases(full_df[, c(target, predictors), drop = FALSE])
@@ -1511,7 +1559,8 @@ fit_classification_model <- function(pts_sf, target, predictors,
   final_params <- NULL
   if (length(tune_params) > 0) {
     keep_sf <- pts_sf[cc, ]
-    fold_id <- classif_make_fold_id(keep_sf, strategy, target = target, v = v, seed = seed)
+    fold_id <- classif_make_fold_id(keep_sf, strategy, target = target, v = v, seed = seed,
+                                    domain_xy = domain_xy)
     assess_df <- if (!is.null(cv_assessment_df) && identical(fold_id, cv_fold_id) &&
                      nrow(cv_assessment_df) == nrow(train_df)) {
       cv_assessment_df
@@ -1584,9 +1633,9 @@ classif_shannon_entropy <- function(prob_mat) {
 #' normalise centres/scales), so baking is row-independent and a blocked
 #' prediction is identical to a single whole-grid call. Blocking buys two
 #' things on the million-cell grids this stage produces: a cancel checkpoint
-#' and a progress tick between blocks (the surface stage used to run for
-#' minutes with the bar frozen and the cancel flag unread), plus a lower peak
-#' memory footprint.
+#' and a progress tick between blocks (a whole-grid call runs for minutes with
+#' the bar frozen and the cancel flag unread), plus a lower peak memory
+#' footprint.
 predict_classification_surface <- function(model, newdata, chunk_size = NULL,
                                            cancel_file = NULL, progress = NULL) {
   wf <- model$workflow
@@ -1688,7 +1737,7 @@ classif_surface_to_rasters <- function(grid_sf, res, crs_wkt, levels_order = NUL
   templ <- terra::rast(ext, resolution = res, crs = crs_wkt)
 
   # One coordinate matrix for every layer below (class + k probability layers +
-  # entropy): it was rebuilt inside the probability lapply, materialising an
+  # entropy), built once: inside the probability lapply it would materialise an
   # n x 2 matrix once per class on a million-cell grid.
   xy <- as.matrix(df[, c("x", "y")])
 
@@ -1751,11 +1800,6 @@ classif_surface_to_rasters <- function(grid_sf, res, crs_wkt, levels_order = NUL
 }
 
 # ── Prediction grid + covariate surface ─────────────────────────────────────
-#' Build a projected prediction grid inside the sample boundary, mirroring the
-#' interpolation pipeline's approach (concave/convex hull, terra raster, clip).
-#' A pre-resolved scope boundary (sf/sfc in the points' CRS, e.g. from
-#' classif_resolve_scope) can be supplied via `boundary_sf` and then replaces
-#' the hull construction entirely.
 #' Auto grid resolution for a classification scope: ~50k cells inside the
 #' domain, clamped to [5, 1000] m. A multi-part boundary (distant localities)
 #' can cover a bounding box far larger than its own area, and the raster
@@ -1791,30 +1835,45 @@ classif_cap_res <- function(res, bbox) {
   if (is.finite(cap) && res < cap) cap else res
 }
 
-#' Resolution defaults to ~50k cells inside the domain, clamped to [5, 1000] m.
-#' `strict_scope` says whether the domain in force really is a union of
-#' per-point buffers, which is what the buffer/cell-size advisory below is
-#' about. It defaults to the boundary style, but a caller that supplies its own
-#' `boundary_sf` can override it: polygons-only scoping, for instance, hands
-#' over the user's polygons and the Boundary Type control is then inert.
-classif_build_grid <- function(pts_proj, res = NULL,
-                               boundary = c("concave", "convex", "bbox", "wrapped", "strict"),
-                               boundary_sf = NULL,
-                               buffer_mode = "fixed", buffer_dist = 250,
-                               strict_scope = NULL) {
-  boundary <- match.arg(boundary)
-  if (is.null(strict_scope)) strict_scope <- identical(boundary, "strict")
+#' The scope boundary a classification run maps, as sf in the points' CRS: a
+#' pre-resolved boundary (sf/sfc, e.g. from classif_resolve_scope) supplied as
+#' `boundary_sf`, unioned into one geometry, else - for direct calls - the
+#' single hull of the points by the Boundary Type, with the style/buffer
+#' semantics of .classif_scope_hulls. The prediction grid is clipped to it and
+#' kNNDM reads the map's locations from it.
+classif_domain_boundary <- function(pts_proj, boundary = "concave", boundary_sf = NULL,
+                                    buffer_mode = "fixed", buffer_dist = 250) {
   bnd <- if (!is.null(boundary_sf)) {
     g <- sf::st_geometry(boundary_sf)
     if (is.na(sf::st_crs(g))) sf::st_crs(g) <- sf::st_crs(pts_proj)
     sf::st_union(g)
   } else {
-    # Single-hull fallback for direct calls without a pre-resolved scope
-    # boundary; shares the style/buffer semantics with .classif_scope_hulls.
     .classif_scope_hulls(pts_proj, group = NULL, style = boundary,
                          buffer_mode = buffer_mode, buffer_dist = buffer_dist)
   }
-  bnd <- sf::st_as_sf(sf::st_sfc(sf::st_geometry(bnd), crs = sf::st_crs(pts_proj)))
+  sf::st_as_sf(sf::st_sfc(sf::st_geometry(bnd), crs = sf::st_crs(pts_proj)))
+}
+
+#' Build a projected prediction grid inside the scope boundary
+#' (classif_domain_boundary), mirroring the interpolation pipeline's approach
+#' (hull, terra raster, clip). Resolution defaults to ~50k cells inside the
+#' domain, clamped to [5, 1000] m.
+#' `strict_scope` says whether the domain in force really is a union of
+#' per-point buffers, which is what the buffer/cell-size advisory below is
+#' about. It defaults to the boundary style, but a caller that supplies its own
+#' `boundary_sf` can override it: polygons-only scoping, for instance, hands
+#' over the user's polygons and the Boundary Type control is then inert.
+#' `scope` is the boundary classif_domain_boundary() already resolved from the
+#' same arguments (run_classification_pipeline resolves it before the
+#' cross-validation), so the hull is not built twice.
+classif_build_grid <- function(pts_proj, res = NULL,
+                               boundary = c("concave", "convex", "bbox", "wrapped", "strict"),
+                               boundary_sf = NULL,
+                               buffer_mode = "fixed", buffer_dist = 250,
+                               strict_scope = NULL, scope = NULL) {
+  boundary <- match.arg(boundary)
+  if (is.null(strict_scope)) strict_scope <- identical(boundary, "strict")
+  bnd <- scope %||% classif_domain_boundary(pts_proj, boundary, boundary_sf, buffer_mode, buffer_dist)
 
   bbox <- sf::st_bbox(bnd)
   res_note <- NULL
@@ -1830,7 +1889,7 @@ classif_build_grid <- function(pts_proj, res = NULL,
       res <- res_capped
     }
   }
-  # A Strict Measured boundary narrower than half the cell diagonal discards
+  # A Point buffer boundary narrower than half the cell diagonal discards
   # the cells of isolated samples (see strict_buffer_gap, spatial_pipeline.R).
   # Reported here because this is the only place the effective resolution is
   # known in Auto mode; advisory only, the grid is still built as asked.
@@ -2316,6 +2375,19 @@ classif_metrics_csv_df <- function(res, area = NULL, area_note = NULL) {
       "Paired out-of-fold",
       c(lf$baseline_acc, lf$baseline_kap, lf$majority_acc, lf$lift_abs, lf$mcnemar_p))
   }
+  # The fold design and how closely its held-out distances match the
+  # prediction grid's (the CV Distance Match panel): W for this run's folds and
+  # for the random reference partition, in the working CRS's units.
+  d <- res$cv_design
+  if (!is.null(d)) {
+    u <- if (is.na(d$units %||% NA_character_)) "map units" else d$units
+    out[[length(out) + 1]] <- blk(
+      "CV design",
+      c(sprintf("W, this CV (%s)", u), sprintf("W, %s (%s)", d$reference, u)),
+      c("W_cv", "W_random"),
+      classif_cv_label(res$strategy, res$knndm),
+      c(d$W_cv, d$W_random))
+  }
   # Permutation feature importance. The scope names the evaluation design (each
   # fold's model on its held-out rows, or the final model on its own training
   # rows) so a reader of the CSV alone cannot mistake one for the other - they
@@ -2440,6 +2512,27 @@ run_classification_pipeline <- function(df, target, predictors,
   work_crs <- sf::st_crs(pts)
   co <- sf::st_coordinates(pts); pts$x <- co[, 1]; pts$y <- co[, 2]
 
+  # The scope boundary the maps are clipped to, resolved before the
+  # cross-validation: kNNDM matches its folds to the map's locations inside it
+  # (knndm_domain_points), and the CV Distance Match compares any strategy's
+  # folds with them. A boundary that cannot be resolved here leaves the grid to
+  # resolve its own, as it always did, and kNNDM without a domain.
+  bnd_sf <- if (is.null(boundary_wkt)) NULL else {
+    sf::st_transform(sf::st_as_sfc(boundary_wkt, crs = proj_crs), work_crs)
+  }
+  scope_bnd <- tryCatch(classif_domain_boundary(pts, boundary, bnd_sf, buffer_mode, buffer_dist),
+                        error = function(e) NULL)
+  domain_xy <- if (!is.null(scope_bnd)) tryCatch(knndm_domain_points(scope_bnd), error = function(e) NULL)
+  # The panel's random reference is this suite's random partition, the
+  # Standard folds (class-stratified random k-fold at the run's fold count):
+  # the partition kNNDM compares against and returns where random folds win.
+  cv_design_of <- function(cv) {
+    v_ref <- max(2L, min(as.integer(v), length(cv$base_y)))
+    cv_distance_summary(cv$base_xy, cv$fold_id, domain_xy, units = crs_unit_label(pts),
+                        random_folds = classif_stratified_folds(cv$base_y, v_ref, seed),
+                        reference = sprintf("class-stratified random %d-fold", v_ref))
+  }
+
   # Covariate-free run: the spatial 1-NN classifier is the model. No fitting,
   # tuning, importance, covariate kriging or model bundle - only its
   # out-of-fold metrics and, on request, its map on the usual grid.
@@ -2447,7 +2540,7 @@ run_classification_pipeline <- function(df, target, predictors,
     .classif_check_cancel(cancel_file)
     report("cv", 0, "Cross-validating the spatial 1-NN classifier...")
     cv <- run_classification_nn_cv(pts, target, strategy = strategy, v = v,
-                                   seed = seed, group = grp)
+                                   seed = seed, group = grp, domain_xy = domain_xy)
     report("cv", 1)
     out <- list(
       nn_only = TRUE,
@@ -2456,6 +2549,7 @@ run_classification_pipeline <- function(df, target, predictors,
       conf_mat = cv$conf_mat$table,
       best_params = NULL, nested = FALSE, nested_params = NULL,
       fold_id = cv$fold_id, n_folds = cv$n_folds,
+      knndm = attr(cv$fold_id, "knndm"), cv_design = cv_design_of(cv),
       class_gaps = cv$class_gaps,
       method = "nn", strategy = strategy, depth = "none",
       n = length(cv$fold_id), levels = cv$levels, predictors = character(0),
@@ -2468,12 +2562,9 @@ run_classification_pipeline <- function(df, target, predictors,
     if (make_surface) {
       .classif_check_cancel(cancel_file)
       report("grid", 0, "Building the prediction grid...")
-      bnd_sf <- if (is.null(boundary_wkt)) NULL else {
-        sf::st_transform(sf::st_as_sfc(boundary_wkt, crs = proj_crs), work_crs)
-      }
       gr <- classif_build_grid(pts, res = grid_res, boundary = boundary, boundary_sf = bnd_sf,
                                buffer_mode = buffer_mode, buffer_dist = buffer_dist,
-                               strict_scope = strict_scope)
+                               strict_scope = strict_scope, scope = scope_bnd)
       report("surface", 0, sprintf("Assigning nearest-sample classes to %s grid cells...",
                                    format(nrow(gr$grid_p), big.mark = ",")))
       out$surface_df <- classif_nn_surface(cv$base_xy, cv$base_y,
@@ -2495,7 +2586,8 @@ run_classification_pipeline <- function(df, target, predictors,
                               importance_reps = importance_reps,
                               vif_threshold = vif_threshold,
                               cancel_file = cancel_file,
-                              progress_cb = function(frac, label = NULL) report("cv", frac, label))
+                              progress_cb = function(frac, label = NULL) report("cv", frac, label),
+                              domain_xy = domain_xy)
 
   # The modelled level set, taken from the CV (complete cases, empty levels
   # dropped) rather than re-derived from every scoped point: the two disagree
@@ -2510,6 +2602,8 @@ run_classification_pipeline <- function(df, target, predictors,
     nested = isTRUE(cv$nested),
     nested_params = cv$nested_params,
     fold_id = cv$fold_id, n_folds = cv$n_folds,
+    # What a kNNDM request chose, and how closely the folds match the map.
+    knndm = attr(cv$fold_id, "knndm"), cv_design = cv_design_of(cv),
     # Classes some fold could not learn because its analysis rows held none of
     # them; NULL in the ordinary case. A CV-design caveat the module reports.
     class_gaps = cv$class_gaps,
@@ -2535,7 +2629,8 @@ run_classification_pipeline <- function(df, target, predictors,
                                     class_weights = class_weights,
                                     cv_assessment_df = cv$assessment_df,
                                     cv_fold_id = cv$fold_id,
-                                    vif_threshold = vif_threshold)
+                                    vif_threshold = vif_threshold,
+                                    domain_xy = domain_xy)
   report("fit", 1)
   # Auto-Drop: what the final model's screen removed on all rows, and what
   # each CV fold's own screen removed on its training rows.
@@ -2615,12 +2710,9 @@ run_classification_pipeline <- function(df, target, predictors,
   if (make_surface) {
     .classif_check_cancel(cancel_file)
     report("grid", 0, "Building the prediction grid...")
-    bnd_sf <- if (is.null(boundary_wkt)) NULL else {
-      sf::st_transform(sf::st_as_sfc(boundary_wkt, crs = proj_crs), work_crs)
-    }
     gr <- classif_build_grid(pts, res = grid_res, boundary = boundary, boundary_sf = bnd_sf,
                              buffer_mode = buffer_mode, buffer_dist = buffer_dist,
-                             strict_scope = strict_scope)
+                             strict_scope = strict_scope, scope = scope_bnd)
     report("grid", 1)
     n_cell_lab <- format(nrow(gr$grid_p), big.mark = ",")
 

@@ -573,11 +573,9 @@ test_that("check_collinearity returns no collinearity for independent vars", {
   expect_false(result$has_collinearity)
 })
 
-test_that("check_collinearity reports pairs, high VIF and constants apart", {
-  # One correlated pair (a, b), one variable that is a combination of two
-  # others without matching either (z = x + y), and a constant. They used to
-  # share one frame, with "High VIF (> 10)" or "Constant (no variance)" as a
-  # placeholder in var2 - which read as a variable name.
+test_that("check_collinearity reports near-duplicate pairs and constants apart", {
+  # One near-duplicate pair (a, b), one variable that is a combination of two
+  # others without matching either (z = x + y), and a constant.
   set.seed(8)
   n <- 60
   x <- rnorm(n); y <- rnorm(n); a <- rnorm(n)
@@ -585,21 +583,34 @@ test_that("check_collinearity reports pairs, high VIF and constants apart", {
                    z = x + y + rnorm(n, sd = 0.05), k = 3)
   res <- check_collinearity(df, names(df))
 
+  expect_setequal(names(res), c("has_collinearity", "pairs", "constant"))
   expect_equal(nrow(res$pairs), 1)
   expect_setequal(c(res$pairs$var1, res$pairs$var2), c("a", "b"))
-  expect_true(all(c(res$pairs$var1, res$pairs$var2) %in% names(df)))
-  expect_true(all(res$high_vif$variable %in% names(df)))
-  expect_true(any(res$high_vif$variable %in% c("x", "y", "z")))
-  expect_true(all(res$high_vif$vif > 10))
   expect_equal(res$constant, "k")
   # A constant is not a collinearity finding: it appears in no other group.
-  expect_false("k" %in% c(res$pairs$var1, res$pairs$var2, res$high_vif$variable))
+  expect_false("k" %in% c(res$pairs$var1, res$pairs$var2))
   expect_true(res$has_collinearity)
 
   # A constant alone is not an advisory finding (it is excluded, not debated).
   only_k <- check_collinearity(data.frame(x = x, y = y, k = 3), c("x", "y", "k"))
   expect_false(only_k$has_collinearity)
   expect_equal(only_k$constant, "k")
+})
+
+test_that("a high VIF without a near-duplicate pair does not stop a PCA", {
+  # z = x + y is predicted almost exactly by the other two (VIF far above 10),
+  # yet no pair reaches |r| = 0.95: VIF describes regression coefficients and
+  # is no objection to a PCA, which exists to summarise correlated variables.
+  set.seed(8)
+  n <- 60
+  x <- rnorm(n); y <- rnorm(n)
+  df <- data.frame(x = x, y = y, z = x + y + rnorm(n, sd = 0.05))
+  vif <- diag(solve(stats::cor(df)))
+  expect_gt(max(vif), 10)
+  expect_lt(max(abs(stats::cor(df)[upper.tri(diag(3))])), 0.95)
+  res <- check_collinearity(df, names(df))
+  expect_false(res$has_collinearity)
+  expect_equal(nrow(res$pairs), 0)
 })
 
 test_that("desc_empty_dt returns a renderable placeholder, never NULL", {

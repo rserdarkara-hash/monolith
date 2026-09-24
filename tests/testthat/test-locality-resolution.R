@@ -46,7 +46,14 @@ test_that("analysis locality filter offers a combined view only for multiple loc
   local_mocked_bindings(shinyApp = .real_shinyApp, .package = "shiny")
   withr::local_dir(proj_root)
   shiny::testServer(function(input, output, session) {
-    rv <- shiny::reactiveValues(loc_names = "A")
+    rv <- shiny::reactiveValues(loc_names = "A", v_fit_list = list(),
+                                user_data = data.frame(loc = c("A", "B", "C")),
+                                mapping = list(loc = "loc"))
+    # Names the chunk reads from chunks C and F, stubbed to their contract:
+    # whether variogram tuning is active, and the tuning store filtered to the
+    # current variable and localities.
+    sci_vgm_tuning <- shiny::reactiveVal(FALSE)
+    tuning_vgm_entries <- function(store) store
     source(file.path(proj_root, "server_run_config.R"), local = TRUE)
   }, {
     html <- output$locality_selector_ui$html
@@ -56,6 +63,17 @@ test_that("analysis locality filter offers a combined view only for multiple loc
     rv$loc_names <- c("A", "B")
     session$flushReact()
     expect_true(grepl("Total (Combined)", output$locality_selector_ui$html, fixed = TRUE))
+    expect_identical(output$sci_multiple_localities, "yes")
+
+    # A variogram tuning session adds the locality it tuned and leaves the
+    # displayed run's list, and with it the Total entry, alone.
+    sci_vgm_tuning(TRUE)
+    rv$v_fit_list <- list(C_act = "fit")
+    session$flushReact()
+    html <- output$locality_selector_ui$html
+    expect_true(grepl("Total (Combined)", html, fixed = TRUE))
+    expect_true(grepl('value="C"', html, fixed = TRUE))
+    expect_identical(rv$loc_names, c("A", "B"))
     expect_identical(output$sci_multiple_localities, "yes")
   })
 })
@@ -134,4 +152,19 @@ test_that("factor locality columns keep their values", {
   df <- data.frame(loc = factor(c("A", "B", "A")))
   res <- resolve_selected_localities("ALL", df, "loc")
   expect_setequal(as.character(res), c("A", "B"))
+})
+
+test_that("the analysis filter adds tuned localities without rewriting the run's list", {
+  # No run on screen, two localities tuned: their names only. The combined
+  # tables belong to a run, so no Total (Combined) entry.
+  expect_identical(sci_locality_choices(NULL, c("Kale", "Tavas")), c("Kale", "Tavas"))
+  # A 3-locality run keeps its list and its Total; a tuned locality the run did
+  # not cover is appended, one it covered is not repeated.
+  run <- c("Altinova", "Kale", "Yorga")
+  expect_identical(sci_locality_choices(run, "Tavas"),
+                   c("Total (Combined)", run, "Tavas"))
+  expect_identical(sci_locality_choices(run, "Kale"), c("Total (Combined)", run))
+  # A 1-locality run with nothing tuned: that locality alone.
+  expect_identical(sci_locality_choices("Kale", character(0)), "Kale")
+  expect_identical(sci_locality_choices(NULL, NULL), character(0))
 })

@@ -200,25 +200,29 @@
         "<p style='margin: 0 0 6px 0; color: var(--mn-text-3); font-style: italic;'>",
         "No measured value for the mapped variable: this point was not used in the fit.</p>")
     }
+    # Samples sharing this location (merge_colocated): the numeric values below
+    # are their replicate means.
+    n_rep <- suppressWarnings(as.integer(data_row[[".mn_n_rep"]] %||% 1L))
+    if (isTRUE(n_rep > 1L)) {
+      html_content <- paste0(html_content,
+        "<p style='margin: 0 0 6px 0; color: var(--mn-text-3); font-style: italic;'>",
+        "Co-located samples: ", n_rep, " (values averaged)</p>")
+    }
     html_content <- paste0(html_content, "<table style='width: 100%; border-collapse: collapse;'>")
     
     for(cat in names(grouped_vars)) {
       cat_vars <- grouped_vars[[cat]]
-      html_content <- paste0(html_content, "<tr style='background-color: var(--mn-surface-2);'><td colspan='2'><b>", cat, "</b></td></tr>")
+      html_content <- paste0(html_content, popup_group_row(cat))
       for(v in cat_vars) {
-        val <- find_val(as.character(v$actual))
-        val_str <- if(!is.null(val) && (is.numeric(val) || !is.na(suppressWarnings(as.numeric(val))))) format_sig(as.numeric(val)) else as.character(val %||% "N/A")
-        html_content <- paste0(html_content, "<tr><td style='padding: 3px;'>", v$label, "</td><td style='padding: 3px; text-align: right;'>", val_str, "</td></tr>")
+        html_content <- paste0(html_content, popup_value_row(v$label, find_val(as.character(v$actual))))
       }
     }
-    
+
     other_vars <- setdiff(vars_to_show, meta_actuals)
     if(length(other_vars) > 0) {
-      html_content <- paste0(html_content, "<tr style='background-color: var(--mn-surface-2);'><td colspan='2'><b>Other Variables</b></td></tr>")
+      html_content <- paste0(html_content, popup_group_row("Other Variables"))
       for(ov in other_vars) {
-        val <- find_val(as.character(ov))
-        val_str <- if(!is.null(val) && (is.numeric(val) || !is.na(suppressWarnings(as.numeric(val))))) format_sig(as.numeric(val)) else as.character(val %||% "N/A")
-        html_content <- paste0(html_content, "<tr><td style='padding: 3px;'>", ov, "</td><td style='padding: 3px; text-align: right;'>", val_str, "</td></tr>")
+        html_content <- paste0(html_content, popup_value_row(ov, find_val(as.character(ov))))
       }
     }
     

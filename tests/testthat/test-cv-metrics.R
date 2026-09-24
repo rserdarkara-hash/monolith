@@ -408,29 +408,29 @@ test_that("get_cv_residuals extracts residual column when pred/obs missing", {
 })
 
 
-# ── cv_type_label / resolve_cv_plan / make_cv_folds ────────────────────────
+# ── applied_cv_plan / resolve_cv_plan / make_cv_folds ────────────────────────
 
-test_that("cv_type_label (Auto) reports LOOCV for n <= 50 and random 10-fold above", {
-  expect_equal(cv_type_label(3), "LOOCV")
-  expect_equal(cv_type_label(50), "LOOCV")
-  expect_equal(cv_type_label(51), "Random 10-fold CV")
-  expect_equal(cv_type_label(500), "Random 10-fold CV")
+test_that("applied_cv_plan (Auto) is labelled LOOCV for n <= 50 and random 10-fold above", {
+  expect_equal(applied_cv_plan(3)$label, "LOOCV")
+  expect_equal(applied_cv_plan(50)$label, "LOOCV")
+  expect_equal(applied_cv_plan(51)$label, "Random 10-fold CV")
+  expect_equal(applied_cv_plan(500)$label, "Random 10-fold CV")
 })
 
-test_that("cv_type_label falls back to generic CV for unknown n", {
-  expect_equal(cv_type_label(NA), "CV")
-  expect_equal(cv_type_label(NULL), "CV")
-  expect_equal(cv_type_label(integer(0)), "CV")
+test_that("applied_cv_plan falls back to a generic CV label for unknown n", {
+  expect_equal(applied_cv_plan(NA)$label, "CV")
+  expect_equal(applied_cv_plan(NULL)$label, "CV")
+  expect_equal(applied_cv_plan(integer(0))$label, "CV")
 })
 
-test_that("cv_type_label reflects the chosen strategy", {
-  expect_equal(cv_type_label(500, "loocv"), "Full LOOCV")
-  expect_equal(cv_type_label(20, "loocv"), "Full LOOCV")
-  expect_match(cv_type_label(500, "block"), "^Spatial Block CV")
+test_that("the applied_cv_plan label reflects the chosen strategy", {
+  expect_equal(applied_cv_plan(500, "loocv")$label, "Full LOOCV")
+  expect_equal(applied_cv_plan(20, "loocv")$label, "Full LOOCV")
+  expect_match(applied_cv_plan(500, "block")$label, "^Spatial Block CV")
   # Spatial Block degrades to LOOCV below the minimum block size
-  expect_match(cv_type_label(20, "block"), "^LOOCV")
+  expect_match(applied_cv_plan(20, "block")$label, "^LOOCV")
   # NULL / empty strategy is treated as Auto
-  expect_equal(cv_type_label(51, NULL), "Random 10-fold CV")
+  expect_equal(applied_cv_plan(51, NULL)$label, "Random 10-fold CV")
 })
 
 test_that("resolve_cv_plan encodes fold type and count per strategy", {
@@ -1302,9 +1302,9 @@ test_that("pred_perf_df drops incomplete pairs before scoring", {
 })
 
 test_that("a strongly autocorrelated residual field exports a Moran p that is small, not zero", {
-  # A 10 x 10 grid whose residual is a smooth east-west gradient. At 4 dp the
-  # two-sided p (far below 5e-5 here) was rounded to exactly 0, an impossible
-  # value, and landed in an exported numeric column.
+  # A 10 x 10 grid whose residual is a smooth east-west gradient: no permutation
+  # of the residuals comes near its I, so the permutation p is the smallest the
+  # test can attain, 2 / (MORAN_NSIM + 1), and the export carries it unrounded.
   g <- expand.grid(x = seq(0, 900, by = 100), y = seq(0, 900, by = 100))
   g$var1.observed <- 10 + g$x / 100
   g$var1.pred <- 10 + 0.5 * g$x / 100
@@ -1313,8 +1313,7 @@ test_that("a strongly autocorrelated residual field exports a Moran p that is sm
 
   p <- cv_metrics_export_df(res, "Actual Model")[["Moran p"]]
   expect_true(is.numeric(p))
-  expect_gt(p, 0)
-  expect_lt(p, 1e-4)
+  expect_identical(p, 2 / (MORAN_NSIM + 1))
 })
 
 test_that("the Model Performance labels extend the fold-realization labels", {
@@ -1355,14 +1354,14 @@ test_that("rf_importance_df writes every importance measure the forest recorded"
 })
 
 # ── The two point sets an uploaded-prediction card can be read against ─────
-# The model's set drops rows with no measured target FIRST and deduplicates
-# co-located points after (dedup_valid_points). The DISPLAY set (rv$sf)
-# deduplicates first and is filtered to rows carrying both values afterwards.
-# Where a co-located pair carries the measurement on one member and the
-# prediction on the other, the two counts differ and neither is wrong.
+# The model's set drops rows with no measured target FIRST and merges
+# co-located samples after (dedup_valid_points). The DISPLAY set (rv$sf) merges
+# every row of a location (merge_colocated, NA-aware means) and is filtered to
+# locations carrying both values afterwards. The two populations differ only
+# where a location lacks one of the two values.
 
-test_that("a co-located pair splits the model and display populations", {
-  # Two points share a coordinate: the first has a prediction but no measured
+test_that("co-located samples reach the card and the model as one averaged location", {
+  # Two samples share a coordinate: the first has a prediction but no measured
   # value, the second has both. Four more ordinary points sit apart.
   df <- data.frame(
     id = c("S0001", "DUP_S0001", paste0("P", 1:4)),
@@ -1373,32 +1372,39 @@ test_that("a co-located pair splits the model and display populations", {
   )
   pts <- sf::st_as_sf(df, coords = c("x", "y"), crs = 32633)
 
-  # Model: NA-target filter, then dedup. DUP_S0001 survives its coordinate.
+  # Model: NA-target filter, then merge. Only DUP_S0001 measured the target at
+  # the shared location, so the location carries its value.
   model_set <- dedup_valid_points(pts, "v")
   expect_equal(nrow(model_set), 5)
-  expect_true("DUP_S0001" %in% model_set$id)
+  expect_equal(model_set$v[model_set$id == "DUP_S0001"], 6.2)
   expect_false("S0001" %in% model_set$id)
 
-  # Display (rv$sf): dedup first, keeping S0001, then the card filters to rows
-  # carrying both values - which drops it again. Taken from the production
-  # path (.locality_points builds rv$sf's contents), not reconstructed here:
-  # a change to the display dedup rule has to move this test, or the note the
-  # test protects goes wrong while the test stays green.
+  # Display (rv$sf), taken from the production path (.locality_points builds
+  # rv$sf's contents): the shared location is ONE point whose measured value is
+  # the mean of the rows that measured it (6.2) and whose prediction is the
+  # mean of the rows that predicted it (6.1); the character id is the first
+  # row's, as no row id column is present.
   loc <- .locality_points("L1", df, 32633, "IDW", character(0), list())
   expect_true(loc$ok)
   display_set <- loc$pts
   expect_equal(nrow(display_set), 5)
-  expect_true("S0001" %in% display_set$id)
+  shared <- display_set[display_set$id == "S0001", ]
+  expect_equal(c(shared$v, shared$pv, shared$.mn_n_rep), c(6.2, 6.1, 2))
   card_set <- display_set[!is.na(display_set$v) & !is.na(display_set$pv), ]
-  expect_equal(nrow(card_set), 4)
-  expect_false("S0001" %in% card_set$id)
-  expect_false("DUP_S0001" %in% card_set$id)
+  expect_equal(nrow(card_set), 5)
 
-  # The two are not nested, which is exactly why the note has to exist.
-  expect_false(all(model_set$id %in% card_set$id))
-  expect_match(pred_pop_note(nrow(card_set), nrow(model_set)),
+  # Same number of locations on both sides, so no population note.
+  expect_null(pred_pop_note(nrow(card_set), nrow(model_set)))
+
+  # A location with a measured value and no prediction anywhere is in the
+  # model's population and not on the card: then the note says so.
+  df$pv[3] <- NA
+  disp2 <- .locality_points("L1", df, 32633, "IDW", character(0), list())$pts
+  card_n <- sum(!is.na(disp2$v) & !is.na(disp2$pv))
+  expect_equal(card_n, 4)
+  expect_match(pred_pop_note(card_n, nrow(model_set)),
                "not the model's cross-validation population", fixed = TRUE)
-  expect_match(pred_pop_note(nrow(card_set), nrow(model_set)), "n = 5", fixed = TRUE)
+  expect_match(pred_pop_note(card_n, nrow(model_set)), "n = 5", fixed = TRUE)
 })
 
 test_that("the population note fires only when the two counts differ", {
