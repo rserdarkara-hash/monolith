@@ -32,6 +32,7 @@ All notable changes to Monolith are documented in this file.
 - **One label per boundary type** (Concave hull, Convex hull, Buffered, Point buffer); the engine and CV-strategy tooltips state what each engine gives and what each CV design estimates (Wadoux et al. 2021), in the Classification Suite too.
 - **The run log carries one registry line per run**, counting its plots, tables and maps.
 - **The three guides are rendered once per app start.**
+- **A new banner** (`assets/banner.png`, the README masthead and the About dialog's image): one simulated survey mapped by IDW, ordinary kriging and TPS with its natural-break classes, above the suite's analyses (distribution, group tests, correlation, PCA, variogram, cross-validation, importance), each computed from the data rather than drawn.
 - **README figures rebuilt from the current interface** (`assets/fig1.jpg`-`fig10.jpg`, replacing `1.png`-`10.png`): all six engines on one field, each engine's fitting diagnostic, a kNNDM run's diagnostics, the four Exploratory tabs, the Classification Suite, and the light and dark themes.
 
 ### Removed
