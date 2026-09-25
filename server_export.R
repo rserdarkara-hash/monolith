@@ -297,6 +297,10 @@
     get(item$surface %||% "act")
   }
 
+  # The palette an exported map is drawn in: the displayed variable's, as the
+  # Map Viewer draws it. The registry holds the displayed run's items only.
+  export_palette <- function() get_display_meta()$palette %||% "YlOrRd"
+
   base_preview_plot <- reactive({
     req(active_styler_item(), rv$export_registry)
     item <- rv$export_registry[[active_styler_item()]]
@@ -305,7 +309,8 @@
     generate_base_plot(
       item = item,
       input = input,
-      agro_params = export_class_params(item)
+      agro_params = export_class_params(item),
+      palette = export_palette()
     )
   })
   
@@ -774,7 +779,8 @@
           } else if (item$type %in% c("plot", "map", "map_combined")) {
             p_obj <- generate_styled_plot(
               item, input,
-              agro_params = export_class_params(item)
+              agro_params = export_class_params(item),
+              palette = export_palette()
             )
 
             export_plot_to_file(p_obj, file, ext, input)
@@ -876,7 +882,8 @@
             } else {
               p <- generate_styled_plot(
                 item, input,
-                agro_params = export_class_params(item)
+                agro_params = export_class_params(item),
+                palette = export_palette()
               )
               export_plot_to_file(p, filepath, ext, input)
             }

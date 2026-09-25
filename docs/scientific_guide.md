@@ -770,7 +770,7 @@ Class limits for the agronomical styling algorithms are computed by `calc_class_
 
 #### 9.4.1 Reference class limits (Supervised styling)
 
-With the **Supervised** algorithm and **3 classes**, the limit boxes open with published agronomic limits when the variable's column name identifies one of the nutrients below (for example `k`, `K`, `Potassium`; the same name rules pick the nutrient's default palette). The three classes are **Low** below the first limit, **Moderate** from the first limit up to the second, and **High** from the second up: every class holds its lower limit, as the map, the class areas and the agreement table classify (`right = FALSE`), so a value equal to a limit belongs to the class above it.
+With the **Supervised** algorithm and **3 classes**, the limit boxes open with published agronomic limits when the variable's column name identifies one of the nutrients below. A name identifies a nutrient by its symbol as a whole word (`k`, `Fe_DTPA`) or by its name as a word or at either end of one (`Potassium`, `TotalNitrogen`), never inside a longer word (`Environment` names no iron). Words are separated by spaces, punctuation, underscores and dots, and bracketed text and units (`(mg/kg)`, `mg kg-1`) are removed first, because the "mg" of a unit is the symbol of magnesium. A name naming two nutrients (`Ca/Mg ratio`) identifies neither, since its values are not one nutrient's concentration. The same rules, applied to the column name and then to the label, pick a nutrient's default palette (Section 9.4.2). The three classes are **Low** below the first limit, **Moderate** from the first limit up to the second, and **High** from the second up: every class holds its lower limit, as the map, the class areas and the agreement table classify (`right = FALSE`), so a value equal to a limit belongs to the class above it.
 
 | Nutrient | Method, unit | Low < a ≤ Moderate < b ≤ High | Source |
 |---|---|---|---|
@@ -789,7 +789,17 @@ The micronutrient classes are **local limits**: Lindsay & Norvell (1978) develop
 * **Units decide.** The limits are prefilled when the variable's recorded unit (the **Unit** of the variable list or of *Variable Mapping & Verification*) is the reference unit under any spelling (mg/kg, mg kg-1, mg kg⁻¹, ppm and µg/g for mg kg⁻¹; % for TN), and also when no unit is recorded, with a note naming the method and unit the limits assume. A variable recorded in another unit (K in cmol kg⁻¹, TN in g kg⁻¹) is not prefilled: a limit in the wrong unit would classify the whole map wrongly, and the note says so.
 * **Other variables and other class counts.** A variable with no reference, or a class count other than three, opens with the *k* − 1 equal-probability quantiles (type 7) of the displayed Actual surface (before a run, of the data column), labelled "Data quantiles (not agronomic limits)". They describe the data and carry no agronomic meaning.
 * **Caveat.** Interpretation limits are crop-, soil- and region-specific. The defaults are a starting point and not a recommendation: replace them with the limits that apply to your crop, extraction method and region.
-* **Where:** `NUTRIENT_REFERENCE`, `reference_unit_status()` and `class_limit_defaults()` in `ui_colors.R`; the note under the limit boxes is `class_limit_note()` (`ui_formatting.R`).
+* **Where:** `NUTRIENT_REFERENCE`, `get_nut_key()`, `reference_unit_status()` and `class_limit_defaults()` in `ui_colors.R`; the note under the limit boxes is `class_limit_note()` (`ui_formatting.R`).
+
+#### 9.4.2 Default colour palettes
+
+Each variable opens on a default palette until one is picked for it; a picked palette stays with its variable (User Guide, Map Styling). A recognised nutrient (Section 9.4.1) opens on a ramp of its own; the Environmental, Terrain, Landsat, Sentinel and Merged Data categories open on viridis; every other variable on YlOrRd.
+
+* **Every default is sequential.** A diverging scheme gives equal emphasis to departures on either side of a critical middle value (Harrower & Brewer 2003), and the continuous maps place its middle colour at the midpoint of the surface's range, which is not a property of a concentration, an elevation or a temperature. Its colour order also carries meaning: RdYlBu runs from red at low values to blue at high ones, which draws the warmest areas of a temperature map blue.
+* **Viridis for the covariate categories.** The Environmental and Terrain categories mix quantities whose colour conventions conflict (warm hues for temperature and radiation, blue for precipitation; brown uplands for elevation, blue for a wetness index), so no single hue family reads correctly for all of them. They take viridis, a perceptually uniform scale that stays readable under colour-vision deficiency (Crameri et al. 2020), as the satellite categories do.
+* **Nutrient ramps** are sequential ColorBrewer schemes rated safe for colour-vision deficiency, light for low values and dark for high ones.
+* The diverging schemes (RdYlBu, BrBG, Spectral) remain in the picker for variables with a meaningful centre, such as a curvature or a topographic position index around zero; uncertainty maps refuse them (Section 7.2).
+* **Where:** `get_default_palette()`, `nutrient_palettes` and `VIRIDIS_DEFAULT_CATEGORIES` in `ui_colors.R`; the picker's scales are `dashboard_palettes` (`global_utils.R`).
 
 ### 9.5 Class zones as vector polygons
 
@@ -896,6 +906,7 @@ Selected fixed constants affecting results, grouped by stage; package-internal d
 | Agronomical classes | slider 2 to 5, default 3 | `agro_n_classes` (`ui_sidebar.R`) |
 | Supervised limits, recognised nutrient | published three-class limits (total N, Olsen P, NH₄OAc K/Ca/Mg, DTPA Fe/Mn/Cu/Zn), offered at three classes when the unit matches or is empty [9.4.1] | `NUTRIENT_REFERENCE`, `class_limit_defaults` (`ui_colors.R`) |
 | Supervised limits, otherwise | quantiles (type 7) of the Actual surface at probabilities 1/k, ..., (k − 1)/k [9.4.1] | `class_limit_defaults` (`ui_colors.R`) |
+| Default palettes | TN Greens, P Blues, K Oranges, Ca YlOrRd, Mg PuBuGn, Fe Purples, Mn GnBu, Cu YlGn, Zn YlOrBr; viridis for Environmental, Terrain, Landsat, Sentinel and Merged Data; YlOrRd otherwise [9.4.2] | `get_default_palette`, `nutrient_palettes`, `VIRIDIS_DEFAULT_CATEGORIES` (`ui_colors.R`) |
 
 **Exploratory suite and Governing Factors**
 
@@ -1131,6 +1142,8 @@ Cohen, J. (1968). Weighted kappa: nominal scale agreement with provision for sca
 
 Congalton, R. G. (1991). A review of assessing the accuracy of classifications of remotely sensed data. *Remote Sensing of Environment*, 37(1), 35-46. https://doi.org/10.1016/0034-4257(91)90048-B
 
+Crameri, F., Shephard, G. E., & Heron, P. J. (2020). The misuse of colour in science communication. *Nature Communications*, 11, 5444. https://doi.org/10.1038/s41467-020-19160-7
+
 Craven, P., & Wahba, G. (1978). Smoothing noisy data with spline functions: estimating the correct degree of smoothing by the method of generalized cross-validation. *Numerische Mathematik*, 31(4), 377-403. https://doi.org/10.1007/BF01404567
 
 Cressie, N. (1985). Fitting variogram models by weighted least squares. *Journal of the International Association for Mathematical Geology*, 17(5), 563-586. https://doi.org/10.1007/BF01032109
@@ -1152,6 +1165,8 @@ Fisher, W. D. (1958). On grouping for maximum homogeneity. *Journal of the Ameri
 Goovaerts, P. (1997). *Geostatistics for Natural Resources Evaluation*. Oxford University Press, New York. https://doi.org/10.1093/oso/9780195115383.001.0001
 
 Hand, D. J., & Till, R. J. (2001). A simple generalisation of the area under the ROC curve for multiple class classification problems. *Machine Learning*, 45(2), 171-186. https://doi.org/10.1023/A:1010920819831
+
+Harrower, M., & Brewer, C. A. (2003). ColorBrewer.org: an online tool for selecting colour schemes for maps. *The Cartographic Journal*, 40(1), 27-37. https://doi.org/10.1179/000870403235002042
 
 Hartigan, J. A., & Wong, M. A. (1979). Algorithm AS 136: a k-means clustering algorithm. *Journal of the Royal Statistical Society, Series C (Applied Statistics)*, 28(1), 100-108. https://doi.org/10.2307/2346830
 

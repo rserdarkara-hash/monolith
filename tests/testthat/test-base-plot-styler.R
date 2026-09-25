@@ -11,7 +11,6 @@ mock_input_full <- list(
   # styled plot is titled "16" instead of its item label. Shiny's real `input`
   # does not partial-match, so the mock has to say what it means.
   styler_title         = "",
-  palette_select       = "YlOrRd",
   color_style          = "continuous",
   styler_high_contrast = FALSE,
   styler_title_size    = 16,
@@ -126,6 +125,26 @@ test_that("an exported file's name carries the item, the method and the time", {
   expect_equal(export_file_name("Batch_Statistics", NULL, "RK", "t", "xlsx"),
                "Batch_Statistics_RK_t.xlsx")
   expect_equal(export_file_name("Export", "x", NULL, "t", "png"), "Export_x_t.png")
+})
+
+test_that("an exported value map is drawn in the palette it is handed", {
+  # The server hands the displayed variable's palette (export_palette), the one
+  # the Map Viewer draws; the picker input is not read here.
+  item <- list(type = "map", obj = make_test_wrapped_raster(), kind = "value", label = "pH - Actual Map")
+  ends <- function(p) fill_scale_of(p)$palette(c(0, 1))
+  for (pal in c("Blues", "Greens")) {
+    expect_identical(ends(generate_base_plot(item, mock_input_full, palette = pal)),
+                     ggplot2::scale_fill_distiller(palette = pal, direction = 1)$palette(c(0, 1)),
+                     info = pal)
+  }
+  expect_false(identical(ends(generate_base_plot(item, mock_input_full, palette = "Blues")),
+                         ends(generate_base_plot(item, mock_input_full, palette = "Greens"))))
+  expect_identical(ends(generate_base_plot(item, mock_input_full, palette = "viridis")),
+                   ggplot2::scale_fill_viridis_c(option = "viridis")$palette(c(0, 1)))
+  # An uncertainty map refuses a diverging palette, whatever it is handed.
+  unc <- utils::modifyList(item, list(kind = "uncertainty"))
+  expect_identical(ends(generate_base_plot(unc, mock_input_full, palette = "RdYlBu")),
+                   ends(generate_base_plot(unc, mock_input_full, palette = "viridis")))
 })
 
 test_that("value maps ARE classified under agro styling", {

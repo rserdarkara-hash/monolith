@@ -1330,9 +1330,9 @@ crs_choice_groups <- function(base, near = integer(0), extra = NULL) {
   lapply(groups[lengths(groups) > 0], as.list)
 }
 
-# Every palette get_default_palette() can return must be listed here, or the
-# picker cannot show it and the variable's default is replaced by the first
-# entry. The nutrient defaults come first, in nutrient order.
+# Every palette get_default_palette() can return must be listed here:
+# resolve_var_palette() returns only these, and the picker offers only these.
+# The nutrient defaults come first, in nutrient order.
 dashboard_palettes <- c("viridis", "Greens", "Blues", "Oranges", "YlOrRd",
                         "PuBuGn", "Purples", "GnBu", "YlGn", "YlOrBr",
                         "RdYlBu", "BrBG", "Greys", "Spectral")
@@ -1356,6 +1356,21 @@ palette_choices_precomputed <- (function() {
   })
   setNames(pals, labels)
 })()
+
+#' The palette variable `var` is drawn in: the one the user picked for it this
+#' session (`picks`, column -> palette), else the palette its entry in `vars`
+#' carries (get_default_palette at mapping time), else `fallback`. Only palettes
+#' the picker offers are returned.
+resolve_var_palette <- function(var, vars, picks = list(), fallback = "YlOrRd") {
+  offered <- function(p) {
+    p <- as.character(p %||% NA_character_)[1]
+    if (!is.na(p) && p %in% dashboard_palettes) p
+  }
+  var <- as.character(var %||% NA_character_)[1]
+  if (is.na(var) || !nzchar(var)) return(offered(fallback) %||% "YlOrRd")
+  entry <- Find(function(v) identical(as.character(v$actual), var), vars %||% list())
+  offered(picks[[var]]) %||% offered(entry$palette) %||% offered(fallback) %||% "YlOrRd"
+}
 
 styler_fields <- list(
   title_size = list(fn = updateSliderInput, name = "styler_title_size"),
@@ -1584,8 +1599,9 @@ session_config_refusal <- function(cfg) {
 }
 
 #' Format of the session configuration Save config writes: every run-defining
-#' input, the variable list and the tuning stores. A file without
-#' `config_version` is an older configuration and restores the fields it has.
+#' input, the variable list, the palettes picked per variable and the tuning
+#' stores. A file without `config_version` is an older configuration and
+#' restores the fields it has.
 SESSION_CONFIG_VERSION <- 2L
 
 #' One scalar from a parsed configuration field (jsonlite, simplifyVector =
@@ -1678,12 +1694,42 @@ config_vars_in <- function(vars, cols) {
     if (!act %in% cols) { skipped <- c(skipped, act); next }
     cat_v <- str1(v$category, "Uploaded Data")
     lab <- str1(v$label, act)
+    pal <- str1(v$palette, NA_character_)
+    if (!pal %in% dashboard_palettes) pal <- get_default_palette(act, cat_v, lab)
     kept[[length(kept) + 1]] <- list(
       actual = act, pred = col_or_null(v$pred), pred_ss = col_or_null(v$pred_ss),
-      label = lab, category = cat_v, unit = str1(v$unit, ""),
-      palette = str1(v$palette, get_default_palette(act, cat_v, lab)))
+      label = lab, category = cat_v, unit = str1(v$unit, ""), palette = pal)
   }
   list(vars = kept, skipped = skipped)
+}
+
+#' The palettes the user picked (column -> palette) as a session configuration
+#' carries them: the entries of variables in `vars`.
+config_palettes_out <- function(picks, vars) {
+  cols <- vapply(vars %||% list(), function(v) as.character(v$actual), character(1))
+  picks <- picks %||% list()
+  picks[intersect(names(picks), cols)]
+}
+
+#' Picked palettes back from a configuration: entries of variables in `vars`
+#' naming a palette the picker offers; the others are listed in `skipped`. A file
+#' written before palettes were kept per variable carries one `palette_select`,
+#' the picker's value for the variable it restores (`legacy_var`).
+config_palettes_in <- function(palettes, vars, legacy_palette = NULL, legacy_var = NULL) {
+  if (is.null(palettes) && !is.null(legacy_palette) && !is.null(legacy_var)) {
+    palettes <- stats::setNames(list(legacy_palette), legacy_var)
+  }
+  cols <- vapply(vars %||% list(), function(v) as.character(v$actual), character(1))
+  picks <- list(); skipped <- character(0)
+  for (var in intersect(names(palettes %||% list()), cols)) {
+    p <- config_scalar(palettes[[var]])
+    if (isTRUE(as.character(p) %in% dashboard_palettes)) {
+      picks[[var]] <- as.character(p)
+    } else {
+      skipped <- c(skipped, sprintf("palette %s of %s (not offered)", p %||% "(empty)", var))
+    }
+  }
+  list(picks = picks, skipped = skipped)
 }
 
 #' `-mo` options for gdal_translate from a named character vector of tags. A

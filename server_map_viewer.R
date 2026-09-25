@@ -139,7 +139,7 @@
     paste(
       rv$run_counter, lab,
       style_eff,
-      input$palette_select %||% "",
+      get_display_meta()$palette %||% "",
       map_view_layer(),
       match_scales_on(),
       if (!is.null(class_params)) paste(signif(class_params$brks, 10), collapse = ",") else "none",
@@ -382,7 +382,7 @@
     # Styling dependencies, registered unconditionally so the observer is
     # armed even before the first run.
     style_now <- input$color_style %||% "cont"
-    input$palette_select; match_scales_on(); map_view_layer()
+    rv$palette_picks; match_scales_on(); map_view_layer()
     # Both surfaces' classes are dependencies: each map is restyled with its
     # own (class_params_for below).
     if (style_now %in% c("agro", "bin")) {

@@ -92,6 +92,9 @@ smoke_app <- local({
       '      function(m) list(key = attr(m, "monolith_key"), model = as.character(m$model), psill = m$psill, range = m$range)),',
       '    vars = vapply(rv$mapping$vars, function(v) paste(v$actual, if (is_valid_col_ref(v$pred)) v$pred else "",',
       '      if (is_valid_col_ref(v$pred_ss)) v$pred_ss else "", v$label, v$category, v$unit, v$palette, sep = "|"), ""),',
+      '    palettes = stats::setNames(lapply(rv$mapping$vars, function(v) palette_of(v$actual)),',
+      '      vapply(rv$mapping$vars, function(v) v$actual, "")),',
+      '    display_palette = get_display_meta()$palette,',
       '    cfg_restore = list(active = cfg_restore_active(), skipped = cfg_restore$skipped))',
       '})'
     ), file.path(shim, "app.R"))
@@ -466,7 +469,18 @@ test_that("Model Performance values sit under their own headings", {
   app$set_inputs(var_id = "value", method = "IDW", value_type = "actual")
   app$wait_for_idle()
 
+  # A palette picked before the run is the one the run is drawn in, and a
+  # Styling switch does not undo it: the picker used to reopen on the
+  # variable's default whenever it was redrawn.
+  expect_identical(app$get_value(input = "palette_select"), "YlOrRd")
+  app$set_inputs(palette_select = "viridis")
+  app$set_inputs(color_style = "bin")
+  app$set_inputs(color_style = "cont")
+  expect_identical(app$get_value(input = "palette_select"), "viridis")
+
   skip_if_not(run_and_reveal(app), "the interpolation run did not finish inside the smoke harness")
+  expect_identical(app$get_value(input = "palette_select"), "viridis")
+  expect_identical(app$get_value(export = "display_palette"), "viridis")
 
   # header.left vs body.left for the first and last column of the rendered
   # table. Under scrollX these are two tables; the whole point is that they
@@ -549,6 +563,8 @@ test_that("restoring an archived run brings back its maps, metrics and record to
   expect_equal(second$method, "OK")
   expect_false(identical(second$rast_hash, first$rast_hash))
   expect_equal(second$history, "IDW")
+  # The palette picked before the previous run is still the variable's.
+  expect_identical(app$get_value(input = "palette_select"), "viridis")
 
   # Restoring the IDW run brings back its record, its surface and its metrics
   # together - restoring used to swap the record and the registry only - and
@@ -567,6 +583,9 @@ test_that("restoring an archived run brings back its maps, metrics and record to
   expect_match(back$map_label, get_method_label("IDW"), fixed = TRUE)
   expect_equal(back$history, "OK")
   expect_equal(as.character(app$get_value(output = "disp_method")), "IDW")
+  # A palette is not run state: the restored run is drawn in the variable's pick.
+  expect_identical(app$get_value(input = "palette_select"), "viridis")
+  expect_identical(app$get_value(export = "display_palette"), "viridis")
 })
 
 test_that("a cancelled run is labelled cancelled and never archived", {
@@ -703,6 +722,8 @@ test_that("Save config and Load config restore every run-defining setting", {
   app$wait_for_idle()
   set(app, var_category = "Nutrients")
   set(app, var_id = "k")
+  # The run on screen is of another dataset's variable, so the picker styles k.
+  set(app, palette_select = "Greys")
   set(app, value_type = "pred_ss")
   set(app, subset = "Test", comp_mode = TRUE, sep_fit = FALSE, match_scales = TRUE, locality = "B")
   # One per-locality IDW power and one manual variogram model.
@@ -736,11 +757,12 @@ test_that("Save config and Load config restore every run-defining setting", {
   expect_identical(before$map_x, "east_m")
   expect_identical(before$method, "RK")
   expect_equal(before$agro_limit_3, 350)
-  stores <- c("idw_store", "vgm_manual", "vars")
+  stores <- c("idw_store", "vgm_manual", "vars", "palettes")
   saved <- app$get_values(export = stores)$export
   expect_equal(saved$idw_store$B$act$value, 3.2)
   expect_length(saved$vgm_manual, 1)
   expect_true(any(grepl("^k\\|k_cve\\|k_ss\\|Potassium\\|Nutrients\\|mg/kg\\|", saved$vars)))
+  expect_identical(saved$palettes$k, "Greys")
 
   app$click("save_config")
   app$wait_for_idle()
@@ -782,6 +804,7 @@ test_that("Save config and Load config restore every run-defining setting", {
   expect_equal(restored$idw_store, saved$idw_store)
   expect_equal(restored$vgm_manual, saved$vgm_manual)
   expect_identical(sort(restored$vars), sort(saved$vars))
+  expect_identical(restored$palettes, saved$palettes)
 })
 
 # Shut the app down here rather than at suite teardown: global.R sets

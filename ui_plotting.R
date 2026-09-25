@@ -549,7 +549,8 @@ ggplotly_smart <- function(p) {
 
 # `agro_params` is one class definition, or list(act =, pre =) for the Actual
 # vs Predicted figure, whose panels each keep their own surface's classes.
-generate_base_plot <- function(item, input, agro_params = NULL) {
+# `palette` is the displayed variable's palette, as the Map Viewer draws it.
+generate_base_plot <- function(item, input, agro_params = NULL, palette = "YlOrRd") {
   req(item)
 
   if (item$type == "map" || item$type == "map_combined") {
@@ -579,7 +580,7 @@ generate_base_plot <- function(item, input, agro_params = NULL) {
         return(bp)
       }
       if (inherits(obj, "PackedSpatRaster")) obj <- terra::unwrap(obj)
-      pal_name <- input$palette_select %||% "YlOrRd"
+      pal_name <- palette %||% "YlOrRd"
       # Registry items carry kind ("value"/"residual"/"uncertainty"); the
       # label grepl is a fallback for items archived before kind existed.
       is_resid <- identical(kind, "residual") ||
@@ -769,8 +770,8 @@ apply_styler_theme <- function(p_obj, input, item_label = "", item_type = "plot"
   }
 }
 
-generate_styled_plot <- function(item, input, agro_params = NULL) {
-  base_p <- generate_base_plot(item, input, agro_params)
+generate_styled_plot <- function(item, input, agro_params = NULL, palette = "YlOrRd") {
+  base_p <- generate_base_plot(item, input, agro_params, palette)
   apply_styler_theme(base_p, input, item_label = item$label, item_type = item$type)
 }
 

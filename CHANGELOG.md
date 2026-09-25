@@ -2,7 +2,7 @@
 
 All notable changes to Monolith are documented in this file.
 
-## [1.1.4] - 2026-09-25 - kNNDM cross-validation / CV Distance Match panel / IDW Auto (CV) power over the whole family / TPS GCV range ends / Nested power and lambda selection / Heterotopic co-kriging / Pooled within-locality variograms / Variable units / Complete session configuration / Co-located sample averaging / Density-based Auto grids / Permutation Moran p-values / Full-fold classification CV
+## [1.1.4] - 2026-09-25 - kNNDM cross-validation / CV Distance Match panel / IDW Auto (CV) power over the whole family / TPS GCV range ends / Nested power and lambda selection / Heterotopic co-kriging / Pooled within-locality variograms / Variable units / Complete session configuration / Co-located sample averaging / Density-based Auto grids / Permutation Moran p-values / Full-fold classification CV / Palettes kept per variable
 
 ### Added
 - **kNNDM cross-validation (Linnenbrink et al. 2024)** for all six engines and the Classification Suite: folds matched to the map's distances within its boundary, random where those already match (the Standard folds in the Classification Suite). Defaults unchanged.
@@ -16,7 +16,7 @@ All notable changes to Monolith are documented in this file.
 - **Total (Combined) variograms pool within localities.** The Data Structure, residual and directional variograms pool point pairs inside each locality on common lag classes (McBratney & Pringle 1999); an info icon explains the lag range.
 - **Variable units.** A Unit column in the variable list, or the unit box of the variable mapping, labels the map legends and the GeoTIFF unit tag.
 - **Published Supervised class limits.** Total N, Olsen P, NH₄OAc K/Ca/Mg and DTPA Fe/Mn/Cu/Zn open on published three-class limits when the unit matches, with the source named; K's lower limit is 200 mg kg⁻¹.
-- **Save config and Load config cover every run-defining setting**, the manual variogram models and per-locality IDW powers and TPS lambdas included; one notification lists what the loaded data could not take.
+- **Save config and Load config cover every run-defining setting**, the manual variogram models, per-locality IDW powers and TPS lambdas, and the palette picked for each variable included; one notification lists what the loaded data could not take. A file from an earlier version restores its one palette onto the variable it saved.
 - **Residual Variogram Parameters for RK and RFK**, marking a locality whose trend fell back to Ordinary Kriging.
 - **The co-kriging run log flags an LMC whose Gaussian or Matérn structure leaves a variable's nugget below 5% of its sill.**
 
@@ -31,6 +31,7 @@ All notable changes to Monolith are documented in this file.
 - **The PCA guard names near-duplicate pairs (|r| > 0.95) and runs no VIF screen**; *Run PCA with these variables* continues.
 - **One label per boundary type** (Concave hull, Convex hull, Buffered, Point buffer); the engine and CV-strategy tooltips state what each engine gives and what each CV design estimates (Wadoux et al. 2021), in the Classification Suite too.
 - **The run log carries one registry line per run**, counting its plots, tables and maps.
+- **Environmental and Terrain Data variables open on viridis**, like the satellite categories; no default palette is diverging (Scientific Guide 9.4.2). RdYlBu, BrBG and Spectral stay in the picker.
 - **The three guides are rendered once per app start.**
 - **A new banner** (`assets/banner.png`, the README masthead and the About dialog's image): one simulated survey mapped by IDW, ordinary kriging and TPS with its natural-break classes, above the suite's analyses (distribution, group tests, correlation, PCA, variogram, cross-validation, importance), each computed from the data rather than drawn.
 - **README figures rebuilt from the current interface** (`assets/fig1.jpg`-`fig10.jpg`, replacing `1.png`-`10.png`): all six engines on one field, each engine's fitting diagnostic, a kNNDM run's diagnostics, the four Exploratory tabs, the Classification Suite, and the light and dark themes.
@@ -40,6 +41,9 @@ All notable changes to Monolith are documented in this file.
 - **Dead code:** `agro_colors`, `rv$desc_vars_state`, `rv$pt_style_palette`, the UK method label, `cv_type_label()`, `.ck_standardize()`, the VIF-at-drop record and a CSV-to-PNG extension rewrite.
 
 ### Fixed
+- **A colour palette picked for a variable stays with it.** A pick made before a run is the palette the run is drawn in, and it survives later runs, Continuous / Binned / Agronomical switches and archive restores. With a map on screen and another variable selected for the next run, a pick applies to both, so the next run opens in the palette the picker shows. Exported maps use the palette of the map on screen, also while Agronomical styling hides the picker, and after another dataset is loaded the picker styles the variable selected in the sidebar.
+- **Nutrient names are read word by word**, with units and bracketed text ignored: `Fe (mg/kg)` is iron, not magnesium, for its palette and Supervised limits; `Environment` names no iron, a band labelled in kelvin "(K)" no potassium, and a name naming two nutrients (`Ca/Mg ratio`) neither. Snake-case names such as `Fe_mg_kg` and `K_exch` are recognised.
+- **The per-locality class-area tables wait for the analysis filter**, so switching Styling before the Scientific Analysis tab has been opened logs no errors.
 - **The sidebar IDW panel shows the pooled CV of a displayed IDW run only**, never another engine's metrics, and no empty box before one.
 - **OPTIMIZE ALL VARIOGRAMS leaves the displayed run's locality list and its Total (Combined) tables in place**; the analysis filter adds the tuned localities.
 - **A per-locality TPS λ keeps the value entered** (2.4e-06 or 20.2 alike), with no rounding to 0 or clamping to 1.
@@ -65,6 +69,7 @@ All notable changes to Monolith are documented in this file.
 - **Replicate averaging, the density-based grid, the permutation p, the GCV record and the λ round trip in Edge** are tested against their definitions.
 - **Heterotopic CK** against gstat's own variogram on isotopic data, hand-built cross pieces, a simulated field (it beats OK and its isotopic subset), fold holdout and the collocation minimum.
 - **Pooled variograms** against a brute-force pair loop and gstat on one locality; **Save/Load** as a JSON round trip and across two Edge sessions; **reference limits** against the published table.
+- **5,547 passed, 0 failed, 0 skipped (1 package-version warning)**
 
 ## [1.1.3] - 2026-09-23 - Variogram auto-fit ranking and diagnostic range / Complete run archive and lifecycle restoration / Scientific metric precision and zero-span validation / Unified Actual-Predicted engine separation / GeoTIFF metadata tags and export packaging / PCA collinearity guards and DataTables alignment / Run dispatch latency and worker pool footprint / Session memory retention / Test-suite overhaul / Column names with units or spaces / Per-surface class breaks / Exact natural breaks / Out-of-bag Governing Factors importance / Seeded RFK forest
 

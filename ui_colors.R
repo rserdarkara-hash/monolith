@@ -84,39 +84,69 @@ apply_desc_palette <- function(p, pal, continuous = FALSE) {
 # Reference limits prefilled for Agronomical > Supervised styling with three
 # classes: Low below `limits[1]`, Moderate from `limits[1]` up to `limits[2]`,
 # High from `limits[2]` up, each class holding its lower limit (the map and
-# the agreement table classify with right = FALSE). `pattern` recognises the
-# nutrient in a column name, in list order. The DTPA micronutrient classes are
-# local limits (Çokuysal & Erbaş 2004) on the DTPA soil test of Lindsay &
-# Norvell (1978), who publish single critical levels rather than classes.
-# Scientific Guide section 9.4.1 lists the full references.
+# the agreement table classify with right = FALSE). `symbol` and `name` are
+# how get_nut_key() recognises the nutrient in a column name or label. The DTPA
+# micronutrient classes are local limits (Çokuysal & Erbaş 2004) on the DTPA
+# soil test of Lindsay & Norvell (1978), who publish single critical levels
+# rather than classes. Scientific Guide section 9.4.1 lists the full references.
 DTPA_LOCAL_SOURCE <- "local limits of Çokuysal & Erbaş (2004) on the DTPA test of Lindsay & Norvell (1978)"
 NUTRIENT_REFERENCE <- list(
-  TN = list(pattern = "\\bTN\\b|NITROGEN", method = "Total N", unit = "%",
+  TN = list(symbol = "TN", name = "NITROGEN", method = "Total N", unit = "%",
             limits = c(0.05, 0.10), source = "Çokuysal & Erbaş (2004)"),
-  P  = list(pattern = "\\bP\\b|PHOSPHORUS|OLSEN", method = "Olsen P", unit = "mg kg⁻¹",
+  P  = list(symbol = "P", name = c("PHOSPHORUS", "OLSEN"), method = "Olsen P", unit = "mg kg⁻¹",
             limits = c(8, 25), source = "Yüksel & Ekinci (2019)"),
-  K  = list(pattern = "\\bK\\b|POTASSIUM", method = "NH₄OAc K", unit = "mg kg⁻¹",
+  K  = list(symbol = "K", name = "POTASSIUM", method = "NH₄OAc K", unit = "mg kg⁻¹",
             limits = c(200, 300), source = "Çokuysal & Erbaş (2004)"),
-  Ca = list(pattern = "\\bCA\\b|CALCIUM", method = "NH₄OAc Ca", unit = "mg kg⁻¹",
+  Ca = list(symbol = "CA", name = "CALCIUM", method = "NH₄OAc Ca", unit = "mg kg⁻¹",
             limits = c(1428, 2857), source = "Çokuysal & Erbaş (2004)"),
-  Mg = list(pattern = "\\bMG\\b|MAGNESIUM", method = "NH₄OAc Mg", unit = "mg kg⁻¹",
+  Mg = list(symbol = "MG", name = "MAGNESIUM", method = "NH₄OAc Mg", unit = "mg kg⁻¹",
             limits = c(80, 160), source = "Çokuysal & Erbaş (2004)"),
-  Fe = list(pattern = "\\bFE\\b|IRON", method = "DTPA Fe", unit = "mg kg⁻¹",
+  Fe = list(symbol = "FE", name = "IRON", method = "DTPA Fe", unit = "mg kg⁻¹",
             limits = c(4, 6), source = DTPA_LOCAL_SOURCE),
-  Mn = list(pattern = "\\bMN\\b|MANGANESE", method = "DTPA Mn", unit = "mg kg⁻¹",
+  Mn = list(symbol = "MN", name = "MANGANESE", method = "DTPA Mn", unit = "mg kg⁻¹",
             limits = c(1.2, 3.5), source = DTPA_LOCAL_SOURCE),
-  Cu = list(pattern = "\\bCU\\b|COPPER", method = "DTPA Cu", unit = "mg kg⁻¹",
+  Cu = list(symbol = "CU", name = "COPPER", method = "DTPA Cu", unit = "mg kg⁻¹",
             limits = c(0.3, 0.8), source = DTPA_LOCAL_SOURCE),
-  Zn = list(pattern = "\\bZN\\b|ZINC", method = "DTPA Zn", unit = "mg kg⁻¹",
+  Zn = list(symbol = "ZN", name = "ZINC", method = "DTPA Zn", unit = "mg kg⁻¹",
             limits = c(1, 3), source = DTPA_LOCAL_SOURCE)
 )
 
+# An amount per mass or volume written outside brackets (mg/kg, mg kg-1,
+# g kg-1, cmol/kg, meq/100 g, mg/L), in the upper case nutrient_name_words()
+# works in. Its "MG" would otherwise read as the symbol of magnesium.
+.NUTRIENT_UNIT_RE <- paste0("(?<![A-Z0-9])(?:MG|UG|G|KG|MMOL|CMOL|MEQ|MOL)\\s*(?:/|PER\\s)?\\s*",
+                            "(?:KG|G|L|DM3|M3|100\\s*G)(?:\\s*-?\\s*1)?(?![A-Z0-9])")
+
+# The words of a column name or label that can name a nutrient: upper case,
+# bracketed text (units, extraction methods, qualifiers) and unit expressions
+# removed, split at anything that is not a letter or digit, so spaces,
+# punctuation, underscores and dots all separate words.
+nutrient_name_words <- function(v) {
+  s <- toupper(as.character(v)[1])
+  if (is.na(s)) return(character(0))
+  repeat {
+    s2 <- gsub("\\([^()]*\\)|\\[[^\\[\\]]*\\]|\\{[^{}]*\\}", " ", s, perl = TRUE)
+    if (identical(s2, s)) break
+    s <- s2
+  }
+  s <- gsub("[_.]", " ", gsub("¹", "1", gsub("⁻", "-", s, fixed = TRUE), fixed = TRUE))
+  s <- gsub(.NUTRIENT_UNIT_RE, " ", s, perl = TRUE)
+  w <- strsplit(s, "[^A-Z0-9]+")[[1]]
+  w[nzchar(w)]
+}
+
+# The nutrient a column name or label names (a key of NUTRIENT_REFERENCE), or
+# NULL. A symbol counts only as a whole word; an element name as a whole word
+# or at either end of one (TotalNitrogen, NitrogenTotal), never inside one
+# (ENVIRONMENT holds no IRON). A name naming two nutrients (Ca/Mg ratio, N_P_K)
+# names neither: its values are not one nutrient's concentration.
 get_nut_key <- function(v) {
-  v_up <- toupper(as.character(v))
-  if (length(v_up) == 0 || is.na(v_up) || v_up == "") return(NULL)
-  matches <- vapply(NUTRIENT_REFERENCE, function(r) grepl(r$pattern, v_up), logical(1))
-  if (any(matches)) return(names(NUTRIENT_REFERENCE)[which(matches)[1]])
-  NULL
+  w <- nutrient_name_words(v)
+  if (!length(w)) return(NULL)
+  hit <- vapply(NUTRIENT_REFERENCE, function(r) {
+    any(w %in% r$symbol) || any(vapply(r$name, function(e) any(startsWith(w, e) | endsWith(w, e)), logical(1)))
+  }, logical(1))
+  if (sum(hit) == 1L) names(NUTRIENT_REFERENCE)[hit] else NULL
 }
 
 # Units the reference limits accept as their own, compared after .unit_key():
@@ -170,27 +200,22 @@ class_limit_defaults <- function(var_id, unit, n_classes, values) {
   list(limits = q, source = "quantile", ref = ref, unit_status = status)
 }
 
+# Data categories whose variables open on viridis: satellite bands and indices,
+# and the covariate families that mix quantities with opposite colour
+# conventions (temperature and precipitation, elevation and wetness), for which
+# a perceptually uniform sequential scale is the one default that misreads none.
+# A diverging scale marks a midpoint these variables do not have, so none is a
+# default; the picker still offers them.
+VIRIDIS_DEFAULT_CATEGORIES <- c("Environmental Data", "Landsat Data", "Sentinel Data",
+                                "Merged Data", "Terrain Data")
+
+# The palette a variable opens on until the user picks one: its nutrient's
+# ramp, else viridis for the categories above, else YlOrRd. Every value must
+# be in dashboard_palettes (global_utils.R).
 get_default_palette <- function(var_name, category = "Soil", label = NULL) {
-  nut <- get_nut_key(var_name)
-  if (is.null(nut) && !is.null(label)) nut <- get_nut_key(label)
-  
+  nut <- get_nut_key(var_name) %||% get_nut_key(label)
   if (!is.null(nut)) return(nutrient_palettes[[nut]])
-  
-  if (is.null(category)) {
-    return("YlOrRd")
-  } else if (category == "Environmental Data") {
-    "RdYlBu"
-  } else if (category == "Landsat Data") {
-    "viridis"
-  } else if (category == "Sentinel Data") {
-    "viridis"
-  } else if (category == "Merged Data") {
-    "viridis"
-  } else if (category == "Terrain Data") {
-    "BrBG"
-  } else {
-    "YlOrRd"
-  }
+  if (isTRUE(category %in% VIRIDIS_DEFAULT_CATEGORIES)) "viridis" else "YlOrRd"
 }
 
 TABLEAU10 <- c("#4e79a7","#f28e2b","#e15759","#76b7b2","#59a14f",

@@ -521,6 +521,10 @@
 
     loc_buffer_res = list(), # Per locality, the Auto dynamic-buffer resolution (sidebar preview)
     idw_factors = list(), tps_lambdas = list(), # Per-locality IDW powers / TPS lambdas
+    # Colour palette picked per variable (column -> palette) this session;
+    # resolve_var_palette() falls back to the variable's default. Not run state:
+    # an archive restore leaves it alone.
+    palette_picks = list(),
     pop_up_vars = NULL, # Selected variables for pop-ups
     model_summaries = list(), # RK trend summaries (summary.lm)
     rf_models = list(), # trained random forests

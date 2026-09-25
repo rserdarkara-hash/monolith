@@ -69,6 +69,58 @@ test_that("get_nut_key returns NULL for unrecognized input", {
   expect_null(get_nut_key("Clay"))
   expect_null(get_nut_key(""))
   expect_null(get_nut_key(NA_character_))
+  expect_null(get_nut_key(NULL))
+})
+
+test_that("a unit in a name never reads as magnesium", {
+  # "mg" of mg/kg is the symbol of magnesium; it named Fe, Mn, Cu and Zn as Mg,
+  # and gave organic matter and sodium Mg's palette and limits.
+  for (nm in c("Fe (mg/kg)", "Fe mg/kg", "Fe mg kg-1", "Fe..mg.kg.", "Fe_mg_kg", "Fe [mg kg⁻¹]"))
+    expect_identical(get_nut_key(nm), "Fe", info = nm)
+  expect_identical(get_nut_key("Zn (mg kg⁻¹)"), "Zn")
+  expect_identical(get_nut_key("Cu (mg kg-1)"), "Cu")
+  expect_identical(get_nut_key("Mn (mg/kg)"), "Mn")
+  for (nm in c("Mg (mg/kg)", "Mg_mg_kg", "Mg mg/kg")) expect_identical(get_nut_key(nm), "Mg", info = nm)
+  for (nm in c("OM (mg/kg)", "Na (mg/kg)", "EC (mg/L)", "SOM (%)")) expect_null(get_nut_key(nm), info = nm)
+  expect_identical(get_nut_key("Ca (cmol(+)/kg)"), "Ca")
+})
+
+test_that("a nutrient is named by a whole word, or an element name at either end of one", {
+  expect_null(get_nut_key("Environmental_index"))   # ENVIRONMENT holds IRON
+  expect_null(get_nut_key("Environment"))
+  expect_identical(get_nut_key("Iron (DTPA)"), "Fe")
+  for (nm in c("total_nitrogen", "TotalNitrogen", "totalNitrogen", "NitrogenTotal"))
+    expect_identical(get_nut_key(nm), "TN", info = nm)
+  expect_identical(get_nut_key("available_phosphorus"), "P")
+  # Underscores and dots separate words, as spaces do.
+  expect_identical(get_nut_key("Fe_DTPA"), "Fe")
+  expect_identical(get_nut_key("K_exch"), "K")
+  expect_identical(get_nut_key("P_Olsen"), "P")
+  expect_identical(get_nut_key("Olsen P"), "P")
+  # Symbols inside a longer word are not symbols.
+  for (nm in c("pH_KCl", "pHKCl", "pHH2O", "CaCO3", "CEC", "P2O5", "K2O", "MNDWI", "B4"))
+    expect_null(get_nut_key(nm), info = nm)
+  # Bracketed text is a unit or a qualifier: a kelvin band is not potassium.
+  expect_null(get_nut_key("Landsat Band 10 (Thermal IR 1) (K)"))
+})
+
+test_that("a name naming two nutrients names neither", {
+  for (nm in c("Ca/Mg ratio", "Ca+Mg", "N_P_K", "Exchangeable Ca and Mg"))
+    expect_null(get_nut_key(nm), info = nm)
+})
+
+test_that("reference limits follow the nutrient a unit-bearing column names", {
+  vals <- c(2, 3.5, 5, 7, 9)
+  d <- class_limit_defaults("Fe (mg/kg)", "mg/kg", 3, vals)
+  expect_identical(d$source, "reference")
+  expect_identical(d$limits, NUTRIENT_REFERENCE$Fe$limits)
+  expect_identical(class_limit_defaults("Na (mg/kg)", "mg/kg", 3, vals)$source, "quantile")
+})
+
+test_that("unit-bearing labels no longer borrow another variable's palette", {
+  expect_identical(get_default_palette("na", "Soil Physicochemistry", "Na (mg/kg)"), "YlOrRd")
+  expect_identical(get_default_palette("v41", "Landsat Data", "Landsat Band 10 (Thermal IR 1) (K)"), "viridis")
+  expect_identical(get_default_palette("fe", "Soil Physicochemistry", "Fe (mg/kg)"), "Purples")
 })
 
 # ── get_default_palette ───────────────────────────────────────────────────
@@ -80,11 +132,25 @@ test_that("get_default_palette returns nutrient palette when matched", {
 })
 
 test_that("get_default_palette returns category-based palettes", {
-  expect_equal(get_default_palette("NDVI", "Environmental Data"), "RdYlBu")
+  expect_equal(get_default_palette("NDVI", "Environmental Data"), "viridis")
   expect_equal(get_default_palette("B4", "Landsat Data"), "viridis")
   expect_equal(get_default_palette("VV", "Sentinel Data"), "viridis")
   expect_equal(get_default_palette("merged_var", "Merged Data"), "viridis")
-  expect_equal(get_default_palette("Slope", "Terrain Data"), "BrBG")
+  expect_equal(get_default_palette("Slope", "Terrain Data"), "viridis")
+})
+
+test_that("no default palette is diverging", {
+  # A diverging scale marks a meaningful midpoint; the maps centre it on the
+  # surface's mid-range, which no default variable has. The picker still offers
+  # diverging choices for data that do.
+  info <- RColorBrewer::brewer.pal.info
+  defaults <- unique(c(unlist(nutrient_palettes),
+                       vapply(c(VIRIDIS_DEFAULT_CATEGORIES, "Soil", "Uploaded Data"),
+                              function(cat) get_default_palette("unmatched", cat), character(1))))
+  expect_true(all(defaults %in% dashboard_palettes))
+  brewer <- intersect(defaults, rownames(info))
+  expect_true(all(info[brewer, "category"] == "seq"))
+  expect_true(any(info[dashboard_palettes[dashboard_palettes %in% rownames(info)], "category"] == "div"))
 })
 
 test_that("get_default_palette falls back to YlOrRd for unrecognized", {
@@ -433,4 +499,113 @@ test_that("a value equal to a class limit falls in the upper class, on the map a
   ag <- compute_agreement_metrics(vals, vals, method = "agro",
                                   params = list(rcl_mat = cb$rcl_mat, labels = c("Low", "Med", "High")))
   expect_identical(as.character(ag$actual_bin), c("Low", "Med", "Med", "High", "High"))
+})
+
+# ── Palette picked per variable ───────────────────────────────────────────
+
+test_that("resolve_var_palette: a pick wins, else the variable's palette, only offered ones", {
+  vars <- list(list(actual = "k", palette = "Oranges"), list(actual = "x", palette = "not-offered"))
+  expect_identical(resolve_var_palette("k", vars), "Oranges")
+  expect_identical(resolve_var_palette("k", vars, list(k = "viridis")), "viridis")
+  expect_identical(resolve_var_palette("k", vars, list(k = "bogus")), "Oranges")
+  expect_identical(resolve_var_palette("x", vars), "YlOrRd")
+  # A displayed run whose variable left the list keeps its pick, else its own palette.
+  expect_identical(resolve_var_palette("gone", vars, fallback = "Blues"), "Blues")
+  expect_identical(resolve_var_palette("gone", vars, list(gone = "Greys"), fallback = "Blues"), "Greys")
+  expect_identical(resolve_var_palette(NULL, vars), "YlOrRd")
+  expect_identical(resolve_var_palette("", vars, fallback = "Greens"), "Greens")
+})
+
+test_that("picked palettes travel in a session configuration", {
+  vars <- list(list(actual = "k"), list(actual = "ph"))
+  out <- config_palettes_out(list(k = "viridis", gone = "Blues"), vars)
+  expect_identical(out, list(k = "viridis"))
+  json <- jsonlite::toJSON(out, auto_unbox = TRUE)
+  back <- config_palettes_in(jsonlite::fromJSON(json, simplifyVector = FALSE), vars)
+  expect_identical(back$picks, list(k = "viridis"))
+  expect_length(back$skipped, 0)
+  bad <- config_palettes_in(list(k = "bogus", ph = "Greys", gone = "Blues"), vars)
+  expect_identical(bad$picks, list(ph = "Greys"))
+  expect_match(bad$skipped, "palette bogus of k", fixed = TRUE)
+  # A file from before per-variable palettes: its one palette_select was the
+  # picker's value for the variable it restores.
+  legacy <- config_palettes_in(NULL, vars, legacy_palette = "Greens", legacy_var = "ph")
+  expect_identical(legacy$picks, list(ph = "Greens"))
+  # A file with no picks is not read as an old one.
+  empty <- jsonlite::fromJSON(jsonlite::toJSON(config_palettes_out(list(), vars), auto_unbox = TRUE),
+                              simplifyVector = FALSE)
+  expect_length(config_palettes_in(empty, vars, legacy_palette = "Greens", legacy_var = "ph")$picks, 0)
+  # A saved variable-list palette the picker does not offer opens on the default.
+  vin <- config_vars_in(list(list(actual = "k", label = "K", category = "Soil", palette = "bogus")), "k")
+  expect_identical(vin$vars[[1]]$palette, get_default_palette("k", "Soil", "K"))
+})
+
+test_that("a picked palette stays with its variable through runs, styling switches and restores", {
+  local_mocked_bindings(shinyApp = .real_shinyApp, .package = "shiny")
+  withr::local_dir(proj_root)
+  selected <- function(html) {
+    opt <- regmatches(html, regexpr('<option value="[^"]*"[^>]*selected', html))
+    sub('^<option value="([^"]*)".*$', "\\1", opt)
+  }
+  entry <- function(col, label) list(actual = col, pred = NULL, pred_ss = NULL, label = label,
+                                     category = "Soil", unit = "",
+                                     palette = get_default_palette(col, "Soil", label))
+  shiny::testServer(function(input, output, session) {
+    rv <- shiny::reactiveValues(
+      user_data = data.frame(k = c(150, 220, 310), ph = c(6.1, 6.9, 7.6), zn = c(0.5, 1, 2)),
+      mapping = list(vars = list(entry("k", "K"), entry("ph", "pH"))),
+      disp = NULL, rast = NULL, rast_pred = NULL, palette_picks = list())
+    source(file.path(proj_root, "server_run_config.R"), local = TRUE)
+  }, {
+    session$setInputs(var_id = "k", value_type = "actual", color_style = "cont")
+    # Before any run the picker styles the sidebar variable, on its default.
+    expect_identical(selected(output$palette_ui$html), "Oranges")
+    # The picker drawing itself is not a pick.
+    session$setInputs(palette_select = "Oranges")
+    expect_length(rv$palette_picks, 0)
+    # A palette picked before the run is the one the run starts with...
+    session$setInputs(palette_select = "viridis")
+    expect_identical(rv$palette_picks$k, "viridis")
+    expect_identical(get_current_meta()$palette, "viridis")
+    # ...and the redraw the run causes keeps it.
+    rv$disp <- c(get_current_meta(), list(var_id = "k"))
+    session$flushReact()
+    expect_identical(selected(output$palette_ui$html), "viridis")
+    expect_identical(get_display_meta()$palette, "viridis")
+    # So does a Styling switch, Binned included.
+    session$setInputs(color_style = "bin")
+    expect_identical(selected(output$palette_ui$html), "viridis")
+    expect_identical(build_classification_params(c(200, 300))$colors,
+                     viridis::viridis(3, option = "viridis"))
+
+    # K on screen, pH chosen for the next run: a pick restyles K now and is
+    # what pH's run starts with.
+    session$setInputs(var_id = "ph")
+    session$setInputs(palette_select = "Blues")
+    expect_identical(rv$palette_picks[c("k", "ph")], list(k = "Blues", ph = "Blues"))
+    expect_identical(get_display_meta()$palette, "Blues")
+    expect_identical(get_current_meta()$palette, "Blues")
+    # pH's run; a pick then belongs to pH alone.
+    rv$disp <- c(get_current_meta(), list(var_id = "ph"))
+    session$flushReact()
+    expect_identical(selected(output$palette_ui$html), "Blues")
+    session$setInputs(palette_select = "Greys")
+    expect_identical(rv$palette_picks[c("k", "ph")], list(k = "Blues", ph = "Greys"))
+
+    # Restoring K's run redraws the picker on K's palette; that redraw arriving
+    # must not overwrite pH's pick, though pH is still the sidebar variable.
+    rv$disp <- list(var_id = "k", actual = "k", label = "K", unit = "", palette = "viridis")
+    session$flushReact()
+    expect_identical(selected(output$palette_ui$html), "Blues")
+    session$setInputs(palette_select = "Blues")
+    expect_identical(rv$palette_picks[c("k", "ph")], list(k = "Blues", ph = "Greys"))
+    expect_identical(session_config_snapshot()$palettes, list(k = "Blues", ph = "Greys"))
+
+    # Another dataset: the picker styles the sidebar variable again, while the
+    # map still on screen keeps its palette.
+    rv$mapping$vars <- list(entry("zn", "Zn"))
+    session$setInputs(var_id = "zn")
+    expect_identical(selected(output$palette_ui$html), "YlOrBr")
+    expect_identical(get_display_meta()$palette, "Blues")
+  })
 })

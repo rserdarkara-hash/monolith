@@ -716,12 +716,16 @@
   output$area_table_total_act <- DT::renderDataTable({ req(length(rv$loc_names) > 1, input$color_style %in% c("agro", "bin")); area_card(area_df_total_act()) })
   output$area_table_total_pre <- DT::renderDataTable({ req(length(rv$loc_names) > 1, input$color_style %in% c("agro", "bin")); area_card(area_df_total_pre()) })
 
+  # The locality filter does not exist until the Scientific Analysis tab has
+  # been opened, while these tables render eagerly (list below).
   output$area_table_loc_act <- DT::renderDataTable({
-    req(rv$rast_list_act, input$color_style %in% c("agro", "bin")); loc <- input$sel_loc_stats
+    loc <- input$sel_loc_stats
+    req(rv$rast_list_act, loc, input$color_style %in% c("agro", "bin"))
     if(loc == "Total (Combined)") sci_dt(NULL) else area_card(calc_area_df(rv$rast_list_act[[loc]], paste0("loc_act_", loc), "act"))
   })
   output$area_table_loc_pre <- DT::renderDataTable({
-    req(rv$rast_list_pre, input$color_style %in% c("agro", "bin")); loc <- input$sel_loc_stats
+    loc <- input$sel_loc_stats
+    req(rv$rast_list_pre, loc, input$color_style %in% c("agro", "bin"))
     if(loc == "Total (Combined)") sci_dt(NULL) else area_card(calc_area_df(rv$rast_list_pre[[loc]], paste0("loc_pre_", loc), "pre"))
   })
 

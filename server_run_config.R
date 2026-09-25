@@ -1,21 +1,30 @@
 # server_run_config.R (sourced with local = TRUE inside server) - display/run
 # context resolvers (get_current_meta / get_display_meta), docs drawer,
 # classification params, config persistence, palette + selector UIs.
+
+  # The palette a variable is drawn in (resolve_var_palette): the one picked for
+  # it this session, else its default. `fallback` serves a displayed run whose
+  # variable has left the variable list (another dataset loaded since).
+  palette_of <- function(var, fallback = "YlOrRd") {
+    resolve_var_palette(var, rv$mapping$vars, rv$palette_picks, fallback)
+  }
+  # The variable the Color Palette picker styles: the displayed run's while it is
+  # in the variable list, else the sidebar's (before the first run, and after
+  # another dataset replaced the list).
+  palette_var <- function() {
+    shown <- rv$disp$var_id
+    listed <- vapply(rv$mapping$vars %||% list(), function(v) as.character(v$actual), character(1))
+    if (!is.null(shown) && shown %in% listed) shown else input$var_id
+  }
+
   get_current_meta <- function() {
     var <- input$var_id
     if (is.null(var) || var == "" || is.null(rv$mapping$vars)) return(NULL)
-    
+
     idx <- which(sapply(rv$mapping$vars, function(x) x$actual == var))
     if (length(idx) == 0) return(NULL)
     m <- rv$mapping$vars[[idx]]
-    
-    pal <- "YlOrRd"
-    if (!is.null(input$palette_select) && input$palette_select != "") {
-      pal <- input$palette_select
-    } else if (!is.null(m$palette) && m$palette != "") {
-      pal <- m$palette
-    }
-    
+
     pred_col <- if(is_valid_col_ref(m$pred)) as.character(m$pred) else NULL
     pred_ss_col <- if(is_valid_col_ref(m$pred_ss)) as.character(m$pred_ss) else NULL
 
@@ -32,7 +41,7 @@
       pred_ss = pred_ss_col,
       view_col = view_col,
       label = as.character(m$label %||% m$actual),
-      palette = as.character(pal),
+      palette = palette_of(var),
       unit = as.character(m$unit %||% "")
     )
   }
@@ -41,12 +50,12 @@
   # run dispatch (rv$disp) instead of reading the live sidebar inputs, so the
   # Map Viewer and Scientific Analysis tabs keep describing the run that is
   # actually on screen while the sidebar is reconfigured for the next run.
-  # Only the colour palette stays live - styling may be changed on the
-  # displayed map at any time. Returns NULL before the first run.
+  # Only the colour palette stays live: a palette picked for the displayed
+  # variable restyles the map on screen. Returns NULL before the first run.
   get_display_meta <- function() {
     d <- rv$disp
     if (is.null(d)) return(NULL)
-    if (isTruthy(input$palette_select)) d$palette <- as.character(input$palette_select)
+    d$palette <- palette_of(d$var_id, fallback = d$palette)
     d
   }
 
@@ -395,7 +404,7 @@
       footer = modalButton("Cancel"),
       div(style = "padding: 10px;",
           h4("Export the session's settings to a local JSON file:"),
-          p("The file holds the column mapping and both coordinate systems, the variable list with its labels, categories and units, the context (localities, variable, view, data subset, comparison settings), the spatial engine with its cross-validation design, covariates and parameters, the manual variogram models and per-locality IDW powers and TPS lambdas you applied, the domain and grid, and the map styling."),
+          p("The file holds the column mapping and both coordinate systems, the variable list with its labels, categories and units, the context (localities, variable, view, data subset, comparison settings), the spatial engine with its cross-validation design, covariates and parameters, the manual variogram models and per-locality IDW powers and TPS lambdas you applied, the domain and grid, and the map styling with the colour palette you picked for each variable."),
           p("Load it after loading the same data. Settings that do not match the loaded data are skipped and listed; an uploaded boundary shapefile is not part of the file."),
           hr(),
           div(style = "text-align: center; margin-top: 20px;",
@@ -406,8 +415,8 @@
   })
 
   # Every run-defining input of the sidebar and the Data Setup tab, the
-  # variable list and the tuning stores. Supervised class limits are saved
-  # while their boxes are on screen.
+  # variable list, the palettes picked per variable and the tuning stores.
+  # Supervised class limits are saved while their boxes are on screen.
   session_config_snapshot <- function() {
     n_c <- input$agro_n_classes
     lims <- if (isTruthy(n_c) && n_c > 1) {
@@ -434,7 +443,8 @@
       tps_lambda_mode = input$tps_lambda_mode, tps_lambda = input$tps_lambda,
       boundary_type = input$boundary_type, buff_mode = input$buff_mode, buff_dist = input$buff_dist,
       res_mode = input$res_mode, grid_res = input$grid_res,
-      color_style = input$color_style, palette_select = input$palette_select,
+      color_style = input$color_style,
+      palettes = config_palettes_out(rv$palette_picks, rv$mapping$vars),
       agro_method = input$agro_method, agro_n_classes = n_c, agro_limits = lims,
       stores = config_stores_out(rv$v_fit_list, rv$idw_factors, rv$tps_lambdas)
     )
@@ -455,8 +465,8 @@
   # A configuration is restored stage by stage, because a parent control
   # re-renders or re-chooses its children: the data mapping; the variable
   # category; the variable; the rest of the context; the engine, domain and
-  # styling switches; the controls built for them (covariates, palette,
-  # Supervised limits); then the tuning stores, once the data-mapping signature
+  # styling switches; the controls built for them (covariates, Supervised
+  # limits); then the tuning stores, once the data-mapping signature
   # the stores are cleared on (tuning_data_sig, server_model_tuning.R) is
   # current. Each item is re-sent until the browser reports the saved value; an
   # item not accepted within CFG_STAGE_TIMEOUT_S is skipped, and one
@@ -468,8 +478,8 @@
   cfg_restore <- new.env(parent = emptyenv())
   cfg_restore_active <- reactiveVal(FALSE)
 
-  # The value a control built by renderUI (aux_vars, palette_select,
-  # agro_limit_*) opens with: the restored one while a restore runs, and after
+  # The value a control built by renderUI (aux_vars, agro_limit_*) opens
+  # with: the restored one while a restore runs, and after
   # it for a control that was not on screen, until its first render. Read in
   # isolate(), so a restore never re-renders the control itself.
   restore_ui_value <- function(id) {
@@ -601,10 +611,9 @@
       plain("agro_n_classes", "slider"))
 
     # Controls built by renderUI for the settings above: covariates only where
-    # the method shows them, the palette outside Agronomical styling, the
-    # Supervised limits at the saved class count. Palette and limits live in
-    # a sidebar section that may be collapsed, so they are not reported when
-    # their control is not on screen to accept them.
+    # the method shows them, the Supervised limits at the saved class count.
+    # The limits live in a sidebar section that may be collapsed, so they are
+    # not reported when their boxes are not on screen to accept them.
     method <- one(cfg$method) %||% input$method
     population <- one(cfg$cv_population) %||% input$cv_population
     style <- one(cfg$color_style) %||% input$color_style
@@ -619,15 +628,11 @@
       built <- c(built, list(item("aux_vars", "multi_picker", intersect(want, offered))))
       ui$aux_vars <- intersect(want, offered)
     }
-    pal <- one(cfg$palette_select)
-    if (!is.null(pal) && !identical(style, "agro")) {
-      if (pal %in% dashboard_palettes) {
-        built <- c(built, list(item("palette_select", "picker", pal, quiet = TRUE)))
-        ui$palette_select <- pal
-      } else {
-        skip("palette %s (not offered)", pal)
-      }
-    }
+    # Palettes are kept per variable, apart from the picker, so none is a
+    # control to re-send.
+    pals <- config_palettes_in(cfg$palettes, vars_now, legacy_palette = one(cfg$palette_select),
+                               legacy_var = if (!is.null(var_e)) var_v)
+    skipped <- c(skipped, pals$skipped)
     lims <- suppressWarnings(as.numeric(unlist(cfg$agro_limits)))
     n_c <- one(cfg$agro_n_classes)
     if (length(lims) && identical(style, "agro") &&
@@ -664,7 +669,8 @@
         TRUE
       }))
     }
-    list(stages = stages, vars = vars, ui = ui, built = built, skipped = skipped)
+    list(stages = stages, vars = vars, palettes = pals$picks, ui = ui, built = built,
+         skipped = skipped)
   }
 
   cfg_restore_next_stage <- function() {
@@ -750,6 +756,7 @@
     }
     plan <- config_restore_plan(cfg)
     if (!is.null(plan$vars)) rv$mapping$vars <- plan$vars
+    rv$palette_picks <- plan$palettes
     cfg_restore$stages <- plan$stages
     cfg_restore$built <- plan$built
     cfg_restore$ui <- plan$ui
@@ -762,24 +769,37 @@
     cfg_restore_active(TRUE)
   })
 
+  # The picker styles the displayed run's variable once a run exists, so a
+  # context change cannot restyle the map on screen, and it opens on that
+  # variable's palette (palette_of): a run, a Styling switch or a restore redraws
+  # it without undoing a pick.
   output$palette_ui <- renderUI({
-    # Follow the displayed run's variable once one exists so a context change
-    # cannot silently reset the palette of the map on screen (input$var_id is
-    # only a reactive dependency before the first run).
-    vid <- if (!is.null(rv$disp)) rv$disp$var_id else input$var_id
+    vid <- palette_var()
     req(vid, rv$mapping$vars)
     # Agronomical styling supplies its own class palette, so the manual
     # colour-palette picker is irrelevant there — hide it.
     if (isTruthy(input$color_style) && input$color_style == "agro") return(NULL)
-    idx <- which(sapply(rv$mapping$vars, function(x) x$actual == vid))
-    if (length(idx) == 0) return(NULL)
-    m <- rv$mapping$vars[[idx]]
+    if (!any(vapply(rv$mapping$vars, function(x) identical(x$actual, vid), logical(1)))) return(NULL)
     choices <- palette_choices_precomputed
-    pickerInput("palette_select", "Color Palette", 
-                choices = choices, 
-                selected = isolate(restore_ui_value("palette_select")) %||% m$palette %||% "YlOrRd",
+    pickerInput("palette_select", "Color Palette",
+                choices = choices,
+                selected = palette_of(vid),
                 options = list(`live-search` = TRUE),
                 choicesOpt = list(content = names(choices)))
+  })
+
+  # A pick belongs to the variable whose map it restyles and, when the sidebar
+  # already names another variable for the next run, to that one too, so the
+  # next run uses what the picker shows. A value equal to the palette the
+  # picker was drawn with is its redraw arriving, not a pick.
+  observeEvent(input$palette_select, {
+    pal <- as.character(input$palette_select)
+    vid <- palette_var()
+    req(isTRUE(pal %in% dashboard_palettes), vid)
+    if (identical(pal, palette_of(vid))) return()
+    picks <- rv$palette_picks %||% list()
+    for (v in unique(c(vid, input$var_id))) if (isTruthy(v)) picks[[v]] <- pal
+    rv$palette_picks <- picks
   })
 
   # The values the Actual surface's classes are cut from: the displayed run's
