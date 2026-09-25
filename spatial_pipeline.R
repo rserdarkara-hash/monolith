@@ -18,14 +18,35 @@
 .INTERP_MAX_CANDIDATE_CELLS <- 4e6
 
 
+# The first 8 hex digits of the MD5 of a string's UTF-8 bytes. Here, not in
+# global_utils.R, because workers load this file: safe_key() runs in them.
+.hash8 <- function(s) {
+  substr(unname(tools::md5sum(bytes = charToRaw(enc2utf8(s)))), 1, 8)
+}
+
+#' A key for a name, made of [A-Za-z0-9_] only, for file names and the export
+#' registry: the name itself when it is already made of those characters,
+#' otherwise its stem (every other character replaced by "_") plus "_" and
+#' .hash8() of the name. Names that differ only in punctuation or in
+#' non-Latin letters ("Field-1" / "Field 1", "Çal" / "Şal") therefore never
+#' share a key, and every key in use for such names is unchanged. Vectorised.
+safe_key <- function(x) {
+  x <- enc2utf8(as.character(x))
+  # PCRE: the ranges are code points, so A-Z is ASCII under every locale.
+  stem <- gsub("[^A-Za-z0-9_]", "_", x, perl = TRUE)
+  alter <- !is.na(x) & stem != x
+  stem[alter] <- paste0(stem[alter], "_", vapply(x[alter], .hash8, character(1), USE.NAMES = FALSE))
+  stem
+}
+
 # Workers cannot touch Shiny reactives, so run state travels to the main
 # session as small files under the session's progress directory. Both writers
 # share this body; `kind` is the file-name stem the pollers watch
-# ("progress_<sid>_<locality>_<prefix>.txt" / "warn_...").
+# ("progress_<sid>_<key>_<prefix>.txt" / "warn_...", key = safe_key(locality)).
 # Never let a status write break a run: the directory creation and the write
 # are both best-effort.
 .write_status_file <- function(l, prefix, kind, content) {
-  clean_l <- gsub("[^a-zA-Z0-9_]", "_", as.character(l))
+  clean_l <- safe_key(l)
   progress_dir <- getOption("monolith_progress_dir", tempdir())
   session_id <- getOption("monolith_session_id", "default")
 
@@ -417,7 +438,14 @@ validate_and_project_sf <- function(pts_sf) {
 #' samples: it uses every measurement and does not depend on file order. When
 #' no location repeats, the input comes back unchanged, so duplicate-free data
 #' keep their geometry, values, row order and fold assignment bit for bit.
-merge_colocated <- function(pts_sf, dp = 2, count = FALSE) {
+#'
+#' Each column named in `majority` (a class label: character or factor) takes
+#' instead the group's most frequent non-missing value, compared as text; a
+#' factor keeps its levels. A tie for most frequent, like a group with no
+#' value, gives NA, so the result never depends on file order.
+#' attr(, "majority_ties") counts, per such column, the locations a tie left
+#' at NA (set only when something merged).
+merge_colocated <- function(pts_sf, dp = 2, count = FALSE, majority = character(0)) {
   if (is.null(pts_sf) || nrow(pts_sf) == 0) return(pts_sf)
   cc <- sf::st_coordinates(pts_sf)
   key <- paste(round(cc[, 1], dp), round(cc[, 2], dp))
@@ -443,11 +471,34 @@ merge_colocated <- function(pts_sf, dp = 2, count = FALSE) {
   df <- sf::st_drop_geometry(pts_sf)
   num_cols <- setdiff(names(df)[vapply(df, is.numeric, logical(1))], CV_ROW_ID_COL)
   for (col in num_cols) out[[col]] <- grp_mean(df[[col]])
+  # A numeric column keeps its mean: the vote is for class labels only.
+  majority <- intersect(majority, setdiff(names(df), num_cols))
+  if (length(majority)) {
+    ties <- stats::setNames(integer(length(majority)), majority)
+    # Only a location holding several rows can differ from its first row.
+    multi <- which(n_rep > 1L)
+    for (col in majority) {
+      x <- df[[col]]
+      val <- as.character(out[[col]])
+      by_grp <- split(as.character(x), g)
+      for (k in multi) {
+        v <- by_grp[[k]]
+        v <- v[!is.na(v)]
+        if (!length(v)) { val[k] <- NA_character_; next }
+        tb <- table(v)
+        top <- names(tb)[tb == max(tb)]
+        if (length(top) > 1L) ties[[col]] <- ties[[col]] + 1L
+        val[k] <- if (length(top) == 1L) top else NA_character_
+      }
+      out[[col]] <- if (is.factor(x)) factor(val, levels = levels(x), ordered = is.ordered(x)) else val
+    }
+  }
   sf::st_geometry(out) <- sf::st_geometry(sf::st_as_sf(
     data.frame(.x = grp_mean(cc[, 1]), .y = grp_mean(cc[, 2])),
     coords = c(".x", ".y"), crs = sf::st_crs(pts_sf)))
   if (count) out$.mn_n_rep <- n_rep
   attr(out, "merged") <- c(groups = sum(n_rep > 1L), rows = sum(n_rep[n_rep > 1L]))
+  if (length(majority)) attr(out, "majority_ties") <- ties
   out
 }
 

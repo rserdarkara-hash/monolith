@@ -43,20 +43,17 @@ next_trigger <- function(x) {
   if (is.numeric(x) && length(x) == 1 && is.finite(x)) as.integer(x) + 1L else 1L
 }
 
-.cv_hash8 <- function(s) {
-  substr(unname(tools::md5sum(bytes = charToRaw(enc2utf8(s)))), 1, 8)
-}
-
 # The identity of one cross-validation experiment: the target column (with its
 # data subset), the rows that were scored, and the partition they were scored
 # under. Two runs on the same uploaded table whose ids agree cross-validated
 # exactly the same samples in exactly the same folds, so their metrics are
 # comparable; different ids say they are not. Row and fold ids are written as
-# integers because as.character(1e5) is "1e+05".
+# integers because as.character(1e5) is "1e+05". The hash is .hash8()
+# (spatial_pipeline.R).
 cv_population_id <- function(key, row_id, folds) {
   if (is.null(row_id) || !length(row_id)) return(NA_character_)
   ints <- function(x) paste(as.character(as.integer(x)), collapse = ",")
-  .cv_hash8(paste(as.character(key %||% ""), ints(row_id), ints(folds), sep = "|"))
+  .hash8(paste(as.character(key %||% ""), ints(row_id), ints(folds), sep = "|"))
 }
 
 # The pooled ("Total (Combined)") row's identity: the same hash over the
@@ -65,7 +62,7 @@ cv_population_id <- function(key, row_id, folds) {
 cv_pooled_population_id <- function(ids) {
   ids <- ids[!vapply(ids, function(x) is.null(x) || length(x) != 1 || is.na(x), logical(1))]
   if (!length(ids)) return(NA_character_)
-  .cv_hash8(paste(sort(paste0(names(ids), ":", unlist(ids, use.names = FALSE))), collapse = "|"))
+  .hash8(paste(sort(paste0(names(ids), ":", unlist(ids, use.names = FALSE))), collapse = "|"))
 }
 
 # The main-session record of one surface's cross-validation population: what
@@ -107,23 +104,27 @@ pooled_cv_population <- function(infos) {
 #' Which locality and surface a progress/warning status file belongs to.
 #'
 #' `.write_status_file()` (spatial_pipeline.R) names its files
-#' `<kind>_<session>_<locality>_<act|pre>.txt`, with the locality sanitised to
-#' `[A-Za-z0-9_]`, so the name itself can contain underscores and the trailing
-#' `_act` / `_pre` is what separates the two fields. ONE parser, used by both
-#' the live progress poller and the completion handler that persists the
-#' warnings into the run log - a warning must not be readable in one place and
-#' lost in the other.
+#' `<kind>_<session>_<key>_<act|pre>.txt`, where the key is safe_key() of the
+#' locality: made of `[A-Za-z0-9_]`, so it can contain underscores and the
+#' trailing `_act` / `_pre` is what separates the two fields. ONE parser, used
+#' by both the live progress poller and the completion handler that persists
+#' the warnings into the run log - a warning must not be readable in one place
+#' and lost in the other.
 #'
-#' Returns `list(locality, target, suffix, label)`; `target` is NA and `suffix`
-#' empty for a file with no recognised surface suffix.
-status_file_parts <- function(path, session_id, kind = "warn") {
+#' Returns `list(key, locality, target, suffix, label)`. `locality` is the
+#' name among the run's `localities` whose key the file carries, and the key
+#' itself when none does. `target` is NA and `suffix` empty for a file with no
+#' recognised surface suffix.
+status_file_parts <- function(path, session_id, kind = "warn", localities = NULL) {
   base <- basename(as.character(path)[1])
   stem <- sub(paste0("^", kind, "_", session_id, "_"), "", sub("\\.txt$", "", base))
   target <- if (grepl("_act$", stem)) "act" else if (grepl("_pre$", stem)) "pre" else NA_character_
-  locality <- if (is.na(target)) stem else sub("_(act|pre)$", "", stem)
+  key <- if (is.na(target)) stem else sub("_(act|pre)$", "", stem)
+  hit <- match(key, safe_key(localities))
+  locality <- if (is.na(hit)) key else as.character(localities[hit])
   suffix <- if (identical(target, "act")) " (Actual)"
             else if (identical(target, "pre")) " (Predicted)" else ""
-  list(locality = locality, target = target, suffix = suffix,
+  list(key = key, locality = locality, target = target, suffix = suffix,
        label = paste0(locality, suffix))
 }
 

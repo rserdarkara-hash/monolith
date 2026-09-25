@@ -514,6 +514,42 @@ test_that("merge_colocated is the identity on data with no co-located samples", 
                "[Replicates] L: 3 locations carried 2–3 co-located samples (7 rows)", fixed = TRUE)
 })
 
+test_that("merge_colocated gives a class column the location's majority, NA on a tie", {
+  # Locations (key = coordinates to the centimetre):
+  #   L1 A, A, B -> A        L2 A, B -> tie: NA, counted
+  #   L3 A, NA   -> A (a missing label does not vote)
+  #   L4 NA, NA  -> NA, not a tie       L5 B (single row)
+  xy <- c(0, 0, 0, 10, 10, 20, 20, 30, 30, 40)
+  df <- data.frame(x = 500000 + xy, y = 4000000,
+                   cls = c("A", "A", "B", "A", "B", "A", NA, NA, NA, "B"),
+                   fct = factor(c("p", "q", "q", "p", "q", "p", "p", "q", NA, "q"),
+                                levels = c("q", "p", "r")),
+                   v = c(1, 2, 6, 10, 20, 5, NA, 7, 9, 3))
+  pts <- sf::st_as_sf(df, coords = c("x", "y"), crs = 32635)
+  m <- merge_colocated(pts, majority = c("cls", "fct"))
+  expect_identical(m$cls, c("A", NA, "A", NA, "B"))
+  # A factor keeps its levels (and so an unused one); (p, q, q) -> q,
+  # (p, q) -> tie, (p, p) -> p, (q, NA) -> q.
+  expect_identical(m$fct, factor(c("q", NA, "p", "q", "q"), levels = c("q", "p", "r")))
+  expect_identical(attr(m, "majority_ties"), c(cls = 1L, fct = 1L))
+  # Numeric columns keep the mean of their non-missing values.
+  expect_equal(m$v, c(3, 15, 5, 8, 3))
+  expect_equal(attr(m, "merged"), c(groups = 4, rows = 9))
+
+  # Without `majority` a class column keeps the smallest-id row's value, the
+  # rule every interpolation caller relies on.
+  m0 <- merge_colocated(pts)
+  expect_identical(m0$cls, c("A", "A", "A", NA, "B"))
+  expect_identical(m0$fct, factor(c("p", "p", "p", "q", "q"), levels = c("q", "p", "r")))
+  expect_identical(m0$v, m$v)
+  expect_identical(sf::st_geometry(m0), sf::st_geometry(m))
+  expect_null(attr(m0, "majority_ties"))
+
+  # Duplicate-free input comes back unchanged, with or without `majority`.
+  one <- pts[c(1, 4, 6, 8, 10), ]
+  expect_identical(merge_colocated(one, majority = c("cls", "fct")), one)
+})
+
 test_that("dedup_valid_points returns 0-row sf when all targets are NA", {
   pts <- make_test_points(4)
   pts$v <- NA_real_
@@ -1629,6 +1665,49 @@ test_that("a CK run scores the population OK Native scores and maps with every r
   expect_identical(ck$ck_design_act, "heterotopic")
   expect_equal(nrow(ck$pts), nrow(all_pts))
   expect_false(is.null(ck$r_a))
+})
+
+# ── krige_covariates: a solve that returns no prediction ──────────────────
+
+test_that("a covariate kriging that returns no prediction falls back to IDW", {
+  # gstat's kriging system is singular when two observations share a location:
+  # krige() then returns NA at every cell with no error and, at debug.level 0,
+  # no warning, so the error handler that falls back to IDW never ran and an
+  # all-NA surface was passed on.
+  f <- with_seed(7, {
+    x <- runif(80, 500000, 502000); y <- runif(80, 4000000, 4002000)
+    data.frame(x = x, y = y,
+               elev = (x - 500000) / 20 + (y - 4000000) / 40 + rnorm(80, 0, 5))
+  })
+  grid <- sf::st_as_sf(expand.grid(x = seq(500050, 501950, by = 100),
+                                   y = seq(4000050, 4001950, by = 100)),
+                       coords = c("x", "y"), crs = 32635)
+  mp <- list(idw_p = 2, idw_nmax = 12)
+  as_pts <- function(d) sf::st_as_sf(d, coords = c("x", "y"), crs = 32635)
+
+  # Distinct locations: the path is unchanged, i.e. the surface is gstat's own
+  # kriging under the same fitted variogram.
+  p <- as_pts(f)
+  lags <- calc_scientific_lags(p)
+  kc <- krige_covariates(p, grid, "elev", lags, mp)
+  v_emp <- gstat::variogram(elev ~ 1, p, width = lags$width, cutoff = lags$cutoff)
+  direct <- gstat::krige(elev ~ 1, p, grid, model = robust_vgm_fit(v_emp, p$elev),
+                         debug.level = 0)
+  expect_equal(kc$grid_aux$elev, direct$var1.pred)
+  expect_identical(kc$log_msg, "")
+  expect_identical(kc$fallback, character(0))
+
+  # One exact duplicate (with another value): no hole reaches the caller, the
+  # surface is the IDW fallback, and the run log names it and its cause.
+  p_dup <- as_pts(rbind(f, transform(f[1, ], elev = elev + 3)))
+  kc_dup <- krige_covariates(p_dup, grid, "elev", calc_scientific_lags(p_dup), mp)
+  expect_false(anyNA(kc_dup$grid_aux$elev))
+  expect_identical(kc_dup$fallback, "elev")
+  expect_match(kc_dup$log_msg, paste("Covariate elev kriging failed (kriging returned no",
+                                     "prediction at 400 of 400 locations), falling back to IDW"),
+               fixed = TRUE)
+  idw_ref <- gstat::idw(elev ~ 1, p_dup, grid, nmax = 12, idp = 2, debug.level = 0)
+  expect_equal(kc_dup$grid_aux$elev, idw_ref$var1.pred)
 })
 
 # ── apply_RK ──────────────────────────────────────────────────────────────

@@ -158,7 +158,7 @@ classif_ui <- function(id) {
             shiny::radioButtons(ns("res_mode"),
               shiny::tags$span("Grid Resolution",
                 shiny::tags$i(class = "fa fa-info-circle",
-                  title = "Auto derives a cell size from the scope boundary area (~50k cells). Fixed forces a specific cell size in metres.",
+                  title = "Auto: cell size = √(scope area ÷ 50,000) m, about 50,000 cells inside the scope boundary, kept between 5 and 1,000 m. Example: a 2 km² scope gives √(2,000,000 ÷ 50,000) ≈ 6.3 m cells, a 100 km² scope about 44.7 m. Fixed: a cell size you set, 5 to 500 m. In either mode a size that would need more than about 4 million cells over the scope's bounding box is coarsened; the note under this panel states the cell size the run will use. A cell is mapped when its centre lies inside the boundary.",
                   style = "color: var(--mn-text-3); cursor: help; margin-left: 5px;")),
               choices = c("Auto" = "auto", "Fixed" = "fixed"),
               selected = "auto", inline = TRUE),
@@ -724,13 +724,27 @@ classif_server <- function(id, data_reactive, vars_metadata_reactive, spatial_re
     output$scope_note <- shiny::renderUI({
       sc <- current_scope()
       if (is.null(sc)) return(NULL)
+      # The count is of sampled locations: co-located rows are one location
+      # (classif_resolve_scope), and the red threshold counts locations too.
       col <- if (sc$n_scoped < 20) "var(--mn-danger)" else "var(--mn-text-3)"
+      grid <- grid_res_note()
       shiny::tagList(
-        shiny::tags$small(style = paste0("color:", col, ";"),
-          sprintf("In scope: %d of %d georeferenced points.", sc$n_scoped, sc$n_input)),
+        shiny::tags$small(style = paste0("color:", col, ";"), classif_scope_count_text(sc)),
+        if (!is.null(grid)) {
+          shiny::tags$small(style = "color: var(--mn-text-3); display:block; margin-top: 4px;", grid$text)
+        },
         crs_note(),
         strict_note()
       )
+    })
+
+    # The cell size the run will grid at, computed by the grid builder's own
+    # rules (classif_grid_res_note), so the note and the run cannot disagree.
+    grid_res_note <- shiny::reactive({
+      sc <- current_scope()
+      if (is.null(sc)) return(NULL)
+      bs <- bset()
+      classif_grid_res_note(bs$res_mode, bs$res, sc$boundary_area_m2, sc$boundary_bbox)
     })
 
     # The Target Mapping CRS can be geographic; the run cannot (grid, buffers,
@@ -766,18 +780,10 @@ classif_server <- function(id, data_reactive, vars_metadata_reactive, spatial_re
     strict_note <- shiny::reactive({
       bs <- bset()
       if (!strict_scope_active()) return(NULL)
-      sc <- current_scope()
-      if (is.null(sc)) return(NULL)
-      res_eff <- if (identical(bs$res_mode, "fixed")) {
-        # A manual resolution is coarsened by the grid builder when it would
-        # exceed ~4M candidate cells, so the advisory must read the same
-        # effective cell size the run will use.
-        if (is.null(sc$boundary_bbox)) bs$res else classif_cap_res(bs$res, sc$boundary_bbox)
-      } else if (!is.null(sc$boundary_area_m2) && !is.null(sc$boundary_bbox)) {
-        classif_auto_res(sc$boundary_area_m2, sc$boundary_bbox)
-      } else NULL
-      if (is.null(res_eff)) return(NULL)
-      msg <- strict_buffer_message(bs$buff_dist, res_eff)
+      # The effective cell size the run will use: a coarsened one included.
+      grid <- grid_res_note()
+      if (is.null(grid)) return(NULL)
+      msg <- strict_buffer_message(bs$buff_dist, grid$res)
       if (is.null(msg)) return(NULL)
       shiny::tags$p(style = paste("font-size: 0.78em; margin-top: 8px;",
                                   "border-left: 2px solid var(--mn-warn); padding-left: 8px;",
@@ -941,6 +947,16 @@ classif_server <- function(id, data_reactive, vars_metadata_reactive, spatial_re
       if (is.null(tvec) || nlevels(droplevels(as.factor(tvec))) < 2) {
         shiny::showNotification("Target must resolve to at least two non-empty classes within the selected scope.", type = "error"); return()
       }
+      # Merged locations whose class columns tied under the majority rule
+      # (classif_resolve_scope): a tied categorical target leaves its location
+      # out of the run, a tied categorical covariate out of training.
+      label_of <- function(v) get_var_label(v, vars_metadata_reactive())
+      tie_msg <- classif_tie_note(sc, if (identical(input$target_mode, "cat")) input$target_cat,
+                                  preds, label_of = label_of)
+      if (!is.null(tie_msg)) {
+        shiny::showNotification(tie_msg, type = "warning", duration = 15)
+      }
+      scope_counts_v <- list(text = classif_scope_count_text(sc), tie_note = tie_msg)
 
       # Assemble the analysis frame: coordinates + covariates + fixed-name
       # target and scope-group columns, so the worker sees generic inputs.
@@ -1099,6 +1115,8 @@ classif_server <- function(id, data_reactive, vars_metadata_reactive, spatial_re
         res$run_id <- paste0(substr(session$token, 1, 8), "-",
                              format(Sys.time(), "%Y%m%d%H%M%OS3"))
         res$scope_label <- scope_label_v
+        # The scope's location count and merge record, for the run summary.
+        res$scope_counts <- scope_counts_v
         # What the final model's own screen removed, not the pre-run modal list.
         res$dropped_covariates <- res$screened_out %||% character(0)
         res$train_xy <- train_xy_v
@@ -1120,6 +1138,14 @@ classif_server <- function(id, data_reactive, vars_metadata_reactive, spatial_re
         # mapped cell. The maps are valid, the support is just under-resolved.
         if (!is.null(res$grid_warning)) {
           shiny::showNotification(res$grid_warning, type = "warning", duration = 15)
+        }
+        # A covariate surface kriging could not provide (an error, or a solve
+        # that returned no prediction) came from inverse distance weighting.
+        fb_notes <- classif_covariate_notes(
+          res$covariate_fallback,
+          label_of = function(v) get_var_label(v, shiny::isolate(vars_metadata_reactive())))
+        if (length(fb_notes)) {
+          shiny::showNotification(paste(fb_notes, collapse = " "), type = "warning", duration = 15)
         }
         # CV-design caveat, not a failure: some fold's training rows held none of
         # these classes, so that fold could not predict them and their held-out
@@ -1280,7 +1306,7 @@ classif_server <- function(id, data_reactive, vars_metadata_reactive, spatial_re
         paste("tuning:", depth_part)
       shiny::tags$span(class = "badge",
         style = "background: var(--mn-accent-weak); color: var(--mn-accent); padding: 4px 8px; border-radius: 4px; font-weight: 500;",
-        sprintf("%s | %d folds | n = %d | %s%s%s",
+        sprintf("%s | %d folds | n = %d locations | %s%s%s",
                 lbl, res$n_folds, res$n, model_part, scope_part, wt_part))
     })
 
@@ -1501,13 +1527,23 @@ classif_server <- function(id, data_reactive, vars_metadata_reactive, spatial_re
           " The model produced no predictions for %s: %s. Their precision and F1 are scored 0 and are included in the macro averages.",
           if (length(gone) == 1) "class" else "classes", paste(gone, collapse = ", ")))
       }
+      # Covariate surfaces that came from inverse distance weighting instead
+      # of kriging, in the CV folds or on the map.
+      fb_notes <- classif_covariate_notes(
+        res$covariate_fallback, label_of = function(v) get_var_label(v, vars_metadata_reactive()))
+      if (length(fb_notes)) drop_part <- paste(drop_part, paste(fb_notes, collapse = " "))
+      # The sample is the sampled location: the scope's count and merge record,
+      # and the locations a class tie left out.
+      sc_part <- paste(c(res$scope_counts$text, res$scope_counts$tie_note), collapse = " ")
       shiny::tagList(
         shiny::tags$small(style = "color: var(--mn-text-3);",
-          sprintf("Last run: %s, %d classes, scope: %s. Accuracy %.3f, kappa %.3f.%s",
+          sprintf("Last run: %s, %d classes, scope: %s, %d locations modelled. Accuracy %.3f, kappa %.3f.%s%s",
                   if (isTRUE(res$nn_only)) "Spatial 1-NN (no covariates)" else classif_methods()[[res$method]],
                   length(res$levels),
                   if (is.null(res$scope_label)) "all data" else res$scope_label,
-                  ifelse(length(acc), acc, NA), ifelse(length(kap), kap, NA), drop_part))
+                  res$n,
+                  ifelse(length(acc), acc, NA), ifelse(length(kap), kap, NA), drop_part,
+                  if (nzchar(sc_part)) paste0(" ", sc_part) else ""))
       )
     })
 

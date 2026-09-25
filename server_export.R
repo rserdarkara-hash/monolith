@@ -1,12 +1,15 @@
 # server_export.R (sourced with local = TRUE inside server) - export registry,
 # run-config/run-history panels, WYSIWYG styler and export download handlers.
+  # Returns the item's registry key (safe_key of `id`, spatial_pipeline.R):
+  # names that differ only in punctuation or non-Latin letters keep separate
+  # entries, and a caller that selects the item must use this key.
   register_export_item <- function(id, label, type, obj, category = "General", kind = "value",
                                    var_label = NULL, legend = NULL, derived = NULL,
                                    surface = NULL) {
     # `derived` items carry no payload of their own: export_item_obj()
     # (global_utils.R) rebuilds them from a raster the registry already holds.
     req(!is.null(obj) || !is.null(derived))
-    clean_id <- gsub("[^a-zA-Z0-9_]", "_", id)
+    clean_id <- safe_key(id)
     # The variable label every registry label opens with ("<label> - ..."),
     # kept so a batch workbook can drop exactly that prefix from sheet names
     # (export_sheet_name). Defaults to the displayed run's variable.
@@ -40,6 +43,7 @@
     current_reg <- isolate(rv$export_registry)
     current_reg[[clean_id]] <- new_item
     rv$export_registry <- current_reg
+    invisible(clean_id)
   }
   
   output$export_registry_ui <- renderUI({
@@ -440,9 +444,11 @@
     legend <- map_legend_title(meta$label, meta$unit,
                                if (view == "view_resid") "resid" else layer)
 
-    register_export_item(id, label, type, target, meta$category, kind = kind, legend = legend,
-                         surface = if (view == "view_pred") "pre" else if (view == "view_act") "act")
-    active_styler_item(id)
+    # The registry key, not the raw id: a column name such as "Total N (%)"
+    # is stored under its safe key, which every lookup below reads.
+    key <- register_export_item(id, label, type, target, meta$category, kind = kind, legend = legend,
+                                surface = if (view == "view_pred") "pre" else if (view == "view_act") "act")
+    active_styler_item(key)
 
     shinyjs::click("open_styler")
   })

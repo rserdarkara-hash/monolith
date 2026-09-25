@@ -156,6 +156,51 @@ test_that("value maps ARE classified under agro styling", {
   expect_s3_class(fill_scale_of(p), "ScaleDiscrete")
 })
 
+test_that("a classified export's legend is the class scheme: every class swatched, no NA key", {
+  # A boundary clip leaves NA cells, and a class can be absent from the
+  # surface (here nothing reaches 1000). The exported legend must read as the
+  # Map Viewer's: all classes with their swatches, and no "NA" entry.
+  r <- terra::unwrap(make_test_wrapped_raster())
+  xy <- terra::xyFromCell(r, seq_len(terra::ncell(r)))
+  r[sqrt((xy[, 1] - 450500)^2 + (xy[, 2] - 5800500)^2) > 400] <- NA
+  cb <- class_breaks_matrix(c(40, 1000))
+  ap <- list(brks = cb$brks, rcl_mat = cb$rcl_mat, n_c = cb$n_c,
+             colors = c("#d73027", "#fee08b", "#1a9850"),
+             labels = c("Low", "Med", "High"),
+             leg_labels = c("Low : < 40", "Med : 40 - 1000", "High : >= 1000"))
+  n_cls <- table(factor(terra::values(terra::classify(r, cb$rcl_mat, right = FALSE)),
+                        levels = 1:3), useNA = "always")
+  expect_true(n_cls[["3"]] == 0 && n_cls[[4]] > 0 && all(n_cls[1:2] > 0))
+
+  swatches <- function(p) {
+    gt <- ggplot2::ggplotGrob(p)
+    fills <- character()
+    walk <- function(g) {
+      if (inherits(g, "rect") && !is.null(g$gp$fill)) fills <<- c(fills, g$gp$fill)
+      for (ch in g$children) walk(ch)
+      for (ch in g$grobs) walk(ch)
+    }
+    for (box in gt$grobs[grepl("^guide-box", gt$layout$name)]) walk(box)
+    toupper(substr(fills[!is.na(fills)], 1, 7))
+  }
+  single <- list(type = "map", obj = terra::wrap(r), kind = "value", label = "P - Actual Map")
+  paired <- list(type = "map_combined", obj = list(act = terra::wrap(r), pre = terra::wrap(r)),
+                 kind = "value", label = "P - Actual vs Predicted")
+  for (style in c("agro", "bin")) {
+    inp <- mock_input_full; inp$color_style <- style
+    p <- generate_base_plot(single, inp, agro_params = ap)
+    pp <- generate_base_plot(paired, inp, agro_params = list(act = ap, pre = ap))
+    for (x in list(p, pp$p1, pp$p2)) {
+      expect_identical(ggplot2::get_guide_data(x, "fill")$.label, ap$leg_labels, info = style)
+      expect_true(all(toupper(ap$colors) %in% swatches(x)), info = style)
+    }
+    # Only the surface is painted; the masked cells stay see-through.
+    fill <- ggplot2::ggplot_build(p)$data[[1]]$fill
+    painted <- grDevices::col2rgb(fill, alpha = TRUE)["alpha", ] > 0
+    expect_equal(sum(painted), sum(!is.na(terra::values(r))), info = style)
+  }
+})
+
 test_that("point error maps are NOT classified under agro styling", {
   input_agro <- mock_input_full
   input_agro$color_style <- "agro"

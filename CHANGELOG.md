@@ -2,7 +2,7 @@
 
 All notable changes to Monolith are documented in this file.
 
-## [1.1.4] - 2026-09-25 - kNNDM cross-validation / CV Distance Match panel / IDW Auto (CV) power over the whole family / TPS GCV range ends / Nested power and lambda selection / Heterotopic co-kriging / Pooled within-locality variograms / Variable units / Complete session configuration / Co-located sample averaging / Density-based Auto grids / Permutation Moran p-values / Full-fold classification CV / Palettes kept per variable
+## [1.1.4] - 2026-09-25 - kNNDM cross-validation / CV Distance Match panel / IDW Auto (CV) power over the whole family / TPS GCV range ends / Nested power and lambda selection / Heterotopic co-kriging / Pooled within-locality variograms / Variable units / Complete session configuration / Co-located sample averaging / Density-based Auto grids / Permutation Moran p-values / Full-fold classification CV / Classification by sampled location / Palettes kept per variable
 
 ### Added
 - **kNNDM cross-validation (Linnenbrink et al. 2024)** for all six engines and the Classification Suite: folds matched to the map's distances within its boundary, random where those already match (the Standard folds in the Classification Suite). Defaults unchanged.
@@ -19,6 +19,7 @@ All notable changes to Monolith are documented in this file.
 - **Save config and Load config cover every run-defining setting**, the manual variogram models, per-locality IDW powers and TPS lambdas, and the palette picked for each variable included; one notification lists what the loaded data could not take. A file from an earlier version restores its one palette onto the variable it saved.
 - **Residual Variogram Parameters for RK and RFK**, marking a locality whose trend fell back to Ordinary Kriging.
 - **The co-kriging run log flags an LMC whose Gaussian or Matérn structure leaves a variable's nugget below 5% of its sill.**
+- **The Classification Suite's scope note states the cell size a run will grid at**, and why when the cell budget coarsens it; the Grid Resolution tooltip gives the Auto rule, √(area ÷ 50,000) m within 5-1000 m, with an example.
 
 ### Changed
 - **Standard (random k-fold) classification CV keeps the full fold count.** Each class is dealt across the folds, so a rare class sits in fewer folds; the count no longer drops to the smallest class (two folds when a class had one or two samples).
@@ -41,6 +42,10 @@ All notable changes to Monolith are documented in this file.
 - **Dead code:** `agro_colors`, `rv$desc_vars_state`, `rv$pt_style_palette`, the UK method label, `cv_type_label()`, `.ck_standardize()`, the VIF-at-drop record and a CSV-to-PNG extension rewrite.
 
 ### Fixed
+- **In the Classification Suite one sampled location is one sample.** Co-located rows are merged before the target is built (numeric values averaged, a class by majority), so no location sits on both sides of a cross-validation split; a location whose classes tie is left out and counted in a warning.
+- **A covariate surface no longer comes back empty when two samples share a location**: a kriging solve that returns no prediction falls back to IDW like a kriging error, and the Classification Suite reports each fallback, per fold and on the map.
+- **Export and progress keys no longer collide** for names that differ only in punctuation or non-Latin letters; the progress panel and the run log show locality names as written, and Quick Export works for column names with spaces or symbols.
+- **Exported class legends show the class scheme only.** Under Agronomical or Binned styling, Export Styler and Quick Export figures carry no "NA" entry for the cells outside the boundary, and a class no cell falls in keeps its colour swatch.
 - **A colour palette picked for a variable stays with it.** A pick made before a run is the palette the run is drawn in, and it survives later runs, Continuous / Binned / Agronomical switches and archive restores. With a map on screen and another variable selected for the next run, a pick applies to both, so the next run opens in the palette the picker shows. Exported maps use the palette of the map on screen, also while Agronomical styling hides the picker, and after another dataset is loaded the picker styles the variable selected in the sidebar.
 - **Nutrient names are read word by word**, with units and bracketed text ignored: `Fe (mg/kg)` is iron, not magnesium, for its palette and Supervised limits; `Environment` names no iron, a band labelled in kelvin "(K)" no potassium, and a name naming two nutrients (`Ca/Mg ratio`) neither. Snake-case names such as `Fe_mg_kg` and `K_exch` are recognised.
 - **The per-locality class-area tables wait for the analysis filter**, so switching Styling before the Scientific Analysis tab has been opened logs no errors.
@@ -69,7 +74,9 @@ All notable changes to Monolith are documented in this file.
 - **Replicate averaging, the density-based grid, the permutation p, the GCV record and the λ round trip in Edge** are tested against their definitions.
 - **Heterotopic CK** against gstat's own variogram on isotopic data, hand-built cross pieces, a simulated field (it beats OK and its isotopic subset), fold holdout and the collocation minimum.
 - **Pooled variograms** against a brute-force pair loop and gstat on one locality; **Save/Load** as a JSON round trip and across two Edge sessions; **reference limits** against the published table.
-- **5,547 passed, 0 failed, 0 skipped (1 package-version warning)**
+- **Classification by location**: every row repeated three times reproduces the run of its locations exactly under Standard, Spatial and kNNDM folds, with and without covariates; the majority and tie rules are checked on worked examples. **New `test-export-registry.R`** drives the export chunk: colliding names keep separate entries and Quick Export selects its own item.
+- **Exported class legends**: a masked surface with an absent class, as one map and as Actual vs Predicted, under Agronomical and Binned styling.
+- **5,709 passed, 0 failed, 0 skipped (1 package-version warning)**
 
 ## [1.1.3] - 2026-09-23 - Variogram auto-fit ranking and diagnostic range / Complete run archive and lifecycle restoration / Scientific metric precision and zero-span validation / Unified Actual-Predicted engine separation / GeoTIFF metadata tags and export packaging / PCA collinearity guards and DataTables alignment / Run dispatch latency and worker pool footprint / Session memory retention / Test-suite overhaul / Column names with units or spaces / Per-surface class breaks / Exact natural breaks / Out-of-bag Governing Factors importance / Seeded RFK forest
 

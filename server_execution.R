@@ -14,11 +14,14 @@
     files <- list.files(path = session_progress_dir,
                         pattern = paste0("^warn_", session_id, "_.*_.*\\.txt$"),
                         full.names = TRUE)
+    # A file carries its locality's key (safe_key); the run's localities give
+    # the name back.
+    locs <- isolate(rv$disp$localities)
     out <- lapply(files, function(wf) {
       msg <- tryCatch(readLines(wf, warn = FALSE), error = function(e) character(0))
       msg <- paste(msg[nzchar(msg)], collapse = " ")
       if (!nzchar(msg)) return(NULL)
-      c(status_file_parts(wf, session_id, kind = "warn"), list(message = msg))
+      c(status_file_parts(wf, session_id, kind = "warn", localities = locs), list(message = msg))
     })
     Filter(Negate(is.null), out)
   }
@@ -33,13 +36,11 @@
       # constant-target notes use both channels) is already in rv$log; adding
       # it again would print the same sentence twice.
       # Matched per LINE on message AND locality, so the same sentence logged
-      # for one locality does not swallow another locality's warning. The file
-      # name carries the sanitised locality, hence the underscore/space twin.
+      # for one locality does not swallow another locality's warning.
       log_lines <- strsplit(rv$log %||% "", "\n", fixed = TRUE)[[1]]
       already <- function(w) {
-        hit <- grepl(w$message, log_lines, fixed = TRUE)
-        any(hit & (grepl(w$locality, log_lines, fixed = TRUE) |
-                   grepl(gsub("_", " ", w$locality), log_lines, fixed = TRUE)))
+        any(grepl(w$message, log_lines, fixed = TRUE) &
+              grepl(w$locality, log_lines, fixed = TRUE))
       }
       fresh <- Filter(Negate(already), warns)
       if (length(fresh) > 0) {
@@ -1618,20 +1619,28 @@
       if (!identical(rv$run_pct, chip_pct)) rv$run_pct <- chip_pct
       
       progress_msgs <- c()
+      # One parser for both readers of these file names (status_file_parts,
+      # global_utils.R). A file names its locality by key; the run's
+      # localities give the name back, and only a key that matches none of
+      # them is shown with its underscores read as spaces.
+      locs <- rv$disp$localities
+      shown_name <- function(parts) {
+        if (identical(parts$locality, parts$key) && !parts$key %in% locs) gsub("_", " ", parts$key)
+        else parts$locality
+      }
       for (f in files) {
-        # One parser for both readers of these file names (status_file_parts,
-        # global_utils.R); the display keeps its underscores-as-spaces reading.
-        parts <- status_file_parts(f, session_id, kind = "progress")
+        parts <- status_file_parts(f, session_id, kind = "progress", localities = locs)
         val <- tryCatch(as.numeric(readLines(f, warn = FALSE)), error = function(e) NA_real_)
         if(length(val) > 0 && !is.na(val)) {
-          progress_msgs <- c(progress_msgs, paste0("<b>", gsub("_", " ", parts$locality),
+          progress_msgs <- c(progress_msgs, paste0("<b>", htmltools::htmlEscape(shown_name(parts)),
                                                    parts$suffix, "</b>: ", val, "%"))
         }
       }
 
+      # Names and messages are plain text going into HTML.
       warn_msgs <- vapply(read_run_warnings(), function(w) {
-        paste0("⚠️ <b>", gsub("_", " ", w$locality),
-               w$suffix, "</b>: ", w$message)
+        paste0("⚠️ <b>", htmltools::htmlEscape(shown_name(w)),
+               w$suffix, "</b>: ", htmltools::htmlEscape(w$message))
       }, character(1))
       
       warn_block <- ""

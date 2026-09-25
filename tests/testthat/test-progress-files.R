@@ -20,7 +20,17 @@ test_that("update_progress_file creates file in temp directory", {
   expect_equal(pct, 50)
 })
 
-test_that("update_progress_file sanitizes locality name", {
+# The key a name travels under: the name when it is made of [A-Za-z0-9_],
+# else every other character replaced by "_" plus "_" and the first 8 hex
+# digits of the name's MD5. Written out here from the definition, so the
+# tests do not read the expected keys off safe_key() itself.
+key_by_definition <- function(x) {
+  stem <- gsub("[^A-Za-z0-9_]", "_", x, perl = TRUE)
+  if (identical(stem, x)) return(x)
+  paste0(stem, "_", substr(unname(tools::md5sum(bytes = charToRaw(enc2utf8(x)))), 1, 8))
+}
+
+test_that("update_progress_file names the file by the locality's key", {
   tmp <- tempfile("progress_test_")
   dir.create(tmp)
   old_progress_dir <- getOption("monolith_progress_dir")
@@ -35,8 +45,25 @@ test_that("update_progress_file sanitizes locality name", {
   # Locality name with special characters
   update_progress_file("Region A (North)", "act", 75, 100)
 
-  files <- list.files(tmp, pattern = "progress_test_Region_A__North__act")
-  expect_true(length(files) > 0)
+  expect_identical(list.files(tmp),
+                   paste0("progress_test_", key_by_definition("Region A (North)"), "_act.txt"))
+  expect_match(list.files(tmp), "^progress_test_Region_A__North__[0-9a-f]{8}_act\\.txt$")
+})
+
+test_that("safe_key keeps every name apart and leaves [A-Za-z0-9_] names as they are", {
+  nm <- c("Field-1", "Field 1", "Field_1", "Acıpayam", "Beyağaç",
+          "Çal", "Şal", "Орёл", "Тула",
+          "北京", "上海")
+  k <- safe_key(nm)
+  expect_length(unique(k), length(nm))
+  expect_true(all(grepl("^[A-Za-z0-9_]+$", k)))
+  expect_identical(k, vapply(nm, key_by_definition, character(1), USE.NAMES = FALSE))
+  # A name already made of those characters is its own key, so every key in
+  # use for such a name is unchanged; the same name always gives the same key.
+  expect_identical(safe_key(c("Kale", "West_Field", "loc_A", "classification")),
+                   c("Kale", "West_Field", "loc_A", "classification"))
+  expect_identical(safe_key(nm), k)
+  expect_identical(safe_key(character(0)), character(0))
 })
 
 test_that("update_progress_file creates directory if it doesn't exist", {
@@ -139,6 +166,7 @@ test_that("step 5 is passed through as the whole-strip-finished sentinel", {
 
 test_that("status_file_parts maps a file name to its locality and surface", {
   a <- status_file_parts("warn_sess1_Kale_act.txt", "sess1")
+  expect_identical(a$key, "Kale")
   expect_identical(a$locality, "Kale")
   expect_identical(a$target, "act")
   expect_identical(a$label, "Kale (Actual)")
@@ -147,8 +175,9 @@ test_that("status_file_parts maps a file name to its locality and surface", {
   expect_identical(p$target, "pre")
   expect_identical(p$label, "Kale (Predicted)")
 
-  # The locality is sanitised to [A-Za-z0-9_], so the name itself can contain
-  # underscores: only the trailing _act / _pre separates the two fields.
+  # The key is made of [A-Za-z0-9_], so it can contain underscores: only the
+  # trailing _act / _pre separates the two fields. Without the run's
+  # localities the key is all there is to show.
   u <- status_file_parts("warn_sess1_West_Field_act.txt", "sess1")
   expect_identical(u$locality, "West_Field")
   expect_identical(u$target, "act")
@@ -179,10 +208,34 @@ test_that("status_file_parts round-trips the names write_warning_file writes", {
   write_warning_file("West Field", "act", "constant target")
   f <- list.files(tmp, pattern = "^warn_", full.names = TRUE)
   expect_length(f, 1L)
-  parts <- status_file_parts(f, "sid42")
-  # The writer sanitises, so a space arrives as an underscore; what matters is
-  # that the surface suffix is still separated correctly.
-  expect_identical(parts$locality, "West_Field")
+  parts <- status_file_parts(f, "sid42", localities = c("Kale", "West Field"))
+  # The file carries the key; the run's localities give the name back.
+  expect_identical(parts$key, key_by_definition("West Field"))
+  expect_identical(parts$locality, "West Field")
+  expect_identical(parts$label, "West Field (Actual)")
   expect_identical(parts$target, "act")
   expect_identical(readLines(f, warn = FALSE), "constant target")
+})
+
+test_that("localities whose names sanitise alike write separate status files", {
+  tmp <- tempfile("warn_collide_")
+  dir.create(tmp)
+  old_dir <- getOption("monolith_progress_dir")
+  old_sid <- getOption("monolith_session_id")
+  options(monolith_progress_dir = tmp, monolith_session_id = "S")
+  on.exit({
+    options(monolith_progress_dir = old_dir, monolith_session_id = old_sid)
+    unlink(tmp, recursive = TRUE)
+  }, add = TRUE)
+
+  locs <- c("Field-1", "Field 1", "Field_1", "Acıpayam")
+  for (l in locs) write_warning_file(l, "act", paste("warning of", l))
+  f <- list.files(tmp, full.names = TRUE)
+  expect_length(f, length(locs))
+  parts <- lapply(f, status_file_parts, session_id = "S", localities = locs)
+  got <- vapply(parts, `[[`, character(1), "locality")
+  expect_setequal(got, locs)
+  # Each file holds its own locality's message.
+  msgs <- vapply(f, function(p) readLines(p, warn = FALSE), character(1), USE.NAMES = FALSE)
+  expect_identical(msgs, paste("warning of", got))
 })

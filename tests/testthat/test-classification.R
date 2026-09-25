@@ -629,6 +629,198 @@ test_that("classif_resolve_scope filters by locality and bounds per-locality hul
   expect_false(any(lengths(sf::st_intersects(gap_pt, bnd_all)) > 0))
 })
 
+test_that("classif_resolve_scope merges co-located samples into one location", {
+  d <- make_classif_scope_df()
+  # Decimetre coordinates, so a replicate 4 mm away shares the 1 cm key.
+  d$x <- round(d$x, 1)
+  d$y <- round(d$y, 1)
+  n <- nrow(d)
+  # Rows 1-2 of locality A and row 41 of locality B get replicates: row 1 two
+  # (one 4 mm away), row 2 one, row 41 one, so 3 locations hold 7 rows.
+  rep_rows <- d[c(1, 1, 2, 41), ]
+  rep_rows$x <- rep_rows$x + c(0, 0.004, 0, 0)
+  rep_rows$elev <- rep_rows$elev + c(2, 4, -1, 3)
+  dd <- rbind(d, rep_rows)
+  sc <- classif_resolve_scope(dd, "x", "y", 32633, "EPSG:32633", loc_col = "loc")
+
+  expect_equal(sc$n_input, n + 4L)
+  expect_equal(sc$n_rows, n + 4L)
+  expect_equal(sc$n_scoped, n)
+  expect_equal(sc$n_merged, c(locations = 3L, rows = 7L))
+  expect_equal(nrow(sc$df), n)
+  expect_length(sc$group, n)
+  # Numeric values, the source-CRS coordinates among them, are the row means;
+  # every other row passes through.
+  expect_equal(sc$df$elev[1], mean(c(d$elev[1], d$elev[1] + 2, d$elev[1] + 4)))
+  expect_equal(sc$df$x[1], mean(c(d$x[1], d$x[1], d$x[1] + 0.004)))
+  expect_equal(sc$df$elev[41], mean(c(d$elev[41], d$elev[41] + 3)))
+  expect_equal(sc$df$elev[-c(1, 2, 41)], d$elev[-c(1, 2, 41)])
+  expect_identical(sc$group, as.character(d$loc))
+  expect_identical(classif_scope_count_text(sc), sprintf(
+    "In scope: %d locations from %d of %d georeferenced points; 3 locations held more than one sample and were merged.",
+    n, n + 4L, n + 4L))
+
+  # Without replicates nothing merges and the counts say so.
+  sc0 <- classif_resolve_scope(d, "x", "y", 32633, "EPSG:32633", loc_col = "loc")
+  expect_equal(sc0$n_rows, n)
+  expect_equal(sc0$n_scoped, n)
+  expect_equal(sc0$n_merged, c(locations = 0L, rows = 0L))
+  expect_identical(classif_scope_count_text(sc0),
+                   sprintf("In scope: %d of %d georeferenced points.", n, n))
+
+  # A numeric locality code is a label: it is taken from the location's first
+  # row, never averaged, even when co-located rows name different localities.
+  dn <- dd
+  dn$loc <- ifelse(dn$loc == "A", 1, 2)
+  cross <- dn[1, ]
+  cross$loc <- 2
+  dn <- rbind(dn, cross)
+  scn <- classif_resolve_scope(dn, "x", "y", 32633, "EPSG:32633", loc_col = "loc")
+  expect_identical(scn$df$loc, ifelse(d$loc == "A", 1, 2))
+  expect_identical(scn$group, as.character(ifelse(d$loc == "A", 1, 2)))
+
+  # Polygon scope: a merged location keeps the polygon its rows fall in.
+  poly <- sf::st_sf(
+    label = c("West", "East"),
+    geometry = sf::st_sfc(
+      sf::st_polygon(list(rbind(c(449900, 5799900), c(451100, 5799900), c(451100, 5801100),
+                                c(449900, 5801100), c(449900, 5799900)))),
+      sf::st_polygon(list(rbind(c(457900, 5799900), c(459100, 5799900), c(459100, 5801100),
+                                c(457900, 5801100), c(457900, 5799900)))), crs = 32633))
+  scp <- classif_resolve_scope(dd, "x", "y", 32633, "EPSG:32633", loc_col = "loc",
+                               poly_sf = poly, poly_mode = "only")
+  expect_equal(scp$n_scoped, n)
+  expect_identical(scp$group, ifelse(d$loc == "A", "West", "East"))
+})
+
+test_that("a location's class is its majority, its value the mean of its rows", {
+  # The worked examples of the unit-of-analysis rule. A categorical class takes
+  # the location's majority (a tie is left out and counted); a binned target
+  # bins the location's mean, with breaks over the locations; a covariate is
+  # the mean of every row that measured it, labelled or not.
+  loc_df <- function(x, y, ...) data.frame(x = 450000 + x, y = 5800000 + y, loc = "A", ...)
+  d <- rbind(
+    loc_df(0, 0, cls = c("P", "P", "Q"), ph = 5.0, clay = c(10, 11, 12)),     # P
+    loc_df(100, 40, cls = c("P", "Q"), ph = 5.5, clay = 20),                  # tie
+    loc_df(200, 10, cls = c("Q", NA), ph = c(6.142, 5.892), clay = c(20, 30)), # Q, 6.017, 25
+    loc_df(300, 70, cls = "Q", ph = 6.1, clay = 40),
+    loc_df(150, 150, cls = "P", ph = 6.6, clay = 50),
+    loc_df(50, 120, cls = "Q", ph = 7.0, clay = 60))
+  sc <- classif_resolve_scope(d, "x", "y", 32633, "EPSG:32633", loc_col = "loc")
+  expect_equal(sc$n_rows, 10L)
+  expect_equal(sc$n_scoped, 6L)
+  expect_identical(sc$majority_ties, c(cls = 1L))
+  expect_identical(sc$df$cls, c("P", NA, "Q", "Q", "P", "Q"))
+  expect_equal(sc$df$clay[1:3], c(11, 20, 25))
+
+  # Categorical target: the tied location has no class and leaves the run.
+  tcat <- classif_build_target(sc$df, "cat", "cls", NULL)
+  expect_identical(as.character(tcat), c("P", NA, "Q", "Q", "P", "Q"))
+  tip <- paste("If the rows at a location are depth intervals or repeat surveys,",
+               "classify one interval or survey at a time (a file holding only its rows).")
+  expect_identical(classif_tie_note(sc, "cls", "clay", label_of = toupper),
+                   paste("1 of 6 locations has no majority class of CLS and is left out.", tip))
+  # As a categorical covariate the same tie leaves the location out of training.
+  expect_identical(classif_tie_note(sc, NULL, c("clay", "cls")),
+                   paste("1 location has no majority value of cls and is out of training,",
+                         "like a location missing a covariate.", tip))
+  expect_null(classif_tie_note(sc, NULL, "clay"))
+
+  # Binned target: the location with 6.142 and 5.892 carries 6.017 and gets
+  # the class of that value, under the median of the six location values.
+  expect_equal(sc$df$ph[3], 6.017)
+  tbin <- classif_build_target(sc$df, "bin", NULL, "ph", n_classes = 2, style = "quantile")
+  med <- stats::quantile(c(5.0, 5.5, 6.017, 6.1, 6.6, 7.0), 0.5, type = 7)
+  expect_identical(tbin[3], tbin[1])
+  expect_false(identical(tbin[3], tbin[4]))
+  expect_true(6.017 < med && med < 6.1)
+})
+
+test_that("replicated rows give exactly the run their locations give", {
+  # The acceptance test of the unit-of-analysis rule. Coordinates are integers
+  # and covariates multiples of 1/64, so the mean of three equal copies is the
+  # value itself, bit for bit, and the two runs must be identical: folds,
+  # out-of-fold predictions, metrics and maps, under every fold design, with
+  # and without covariates.
+  d <- make_classif_scope_df(nA = 35, nB = 30)
+  d$x <- round(d$x)
+  d$y <- round(d$y)
+  d$elev <- round(d$elev * 64) / 64
+  d$slope <- round(d$slope * 64) / 64
+  trip <- d[rep(seq_len(nrow(d)), each = 3), ]
+  run <- function(dat, strategy, preds, mode = "cat") {
+    sc <- classif_resolve_scope(dat, "x", "y", 32633, "EPSG:32633", loc_col = "loc")
+    adf <- sc$df[, c("x", "y", preds), drop = FALSE]
+    adf$.class_target <- classif_build_target(sc$df, mode, "soil", "elev", n_classes = 3)
+    adf$.scope_group <- sc$group
+    run_classification_pipeline(
+      adf, ".class_target", preds, "x", "y", 32633, sc$working_crs,
+      method = "rf", strategy = strategy, v = 5, grid_res = 300,
+      boundary_wkt = sc$boundary_wkt, group_col = ".scope_group",
+      nn_surface = identical(mode, "cat"))
+  }
+  same_run <- function(r, u) {
+    expect_identical(r$n, u$n)
+    expect_identical(r$fold_id, u$fold_id)
+    expect_identical(r$cv_predictions, u$cv_predictions)
+    expect_identical(r$cv_metrics, u$cv_metrics)
+    expect_identical(r$surface_df, u$surface_df)
+    expect_identical(r$surface_nn, u$surface_nn)
+  }
+  for (st in c("standard", "spatial", "knndm")) {
+    for (preds in list(c("elev", "slope"), character(0))) {
+      same_run(run(trip, st, preds), run(d, st, preds))
+    }
+  }
+  # A binned target: the breaks and the classes come from the locations.
+  same_run(run(trip, "standard", "slope", mode = "bin"), run(d, "standard", "slope", mode = "bin"))
+})
+
+test_that("co-located samples no longer collapse the covariate surfaces or the map", {
+  # Dataset 05's shape: 80 locations, 8 of them sampled twice, one twin with
+  # another class. As uploaded, gstat's singular solve made every kriged
+  # covariate NA, the recipe imputed one median everywhere and the map came
+  # out as one class.
+  f <- with_seed(11, {
+    x <- runif(80, 450000, 452000); y <- runif(80, 5800000, 5802000)
+    data.frame(x = x, y = y, loc = "A",
+               elev = (x - 450000) / 20 + (y - 5800000) / 40 + rnorm(80, 0, 5))
+  })
+  f$soil <- cut(f$elev, stats::quantile(f$elev, c(0, 1/3, 2/3, 1)),
+                labels = c("Low", "Mid", "High"), include.lowest = TRUE)
+  twins <- f[1:8, ]
+  twins$soil[1] <- setdiff(levels(f$soil), as.character(f$soil[1]))[1]
+  sc <- classif_resolve_scope(rbind(f, twins), "x", "y", 32633, "EPSG:32633", loc_col = "loc")
+  expect_equal(sc$n_scoped, 80L)
+  expect_equal(sc$n_merged, c(locations = 8L, rows = 16L))
+  expect_identical(sc$majority_ties, c(soil = 1L))
+  adf <- sc$df[, c("x", "y", "elev")]
+  adf$.class_target <- classif_build_target(sc$df, "cat", "soil", NULL)
+  res <- run_classification_pipeline(adf, ".class_target", "elev", "x", "y", 32633,
+                                     sc$working_crs, method = "rf", strategy = "spatial",
+                                     v = 5, grid_res = 100, boundary_wkt = sc$boundary_wkt)
+  # The tied location has no class, so 79 locations are modelled.
+  expect_equal(res$n, 79L)
+  expect_null(res$covariate_fallback)
+  expect_false(anyNA(res$surface_df$elev))
+  expect_gt(length(unique(res$surface_df$.pred_class)), 1L)
+})
+
+test_that("the classification pipeline refuses exactly repeated coordinates", {
+  # Two rows at one location make the covariate kriging system singular and
+  # can sit on both sides of a CV split; classif_resolve_scope merges them.
+  d <- make_classif_scope_df(nA = 35, nB = 30)
+  dd <- rbind(d, d[5, ])
+  args <- list(df = dd, target = "soil", x_col = "x", y_col = "y", src_crs = 32633,
+               proj_crs = "EPSG:32633", method = "rf", strategy = "standard",
+               v = 4, make_surface = FALSE)
+  msg <- "more than one row at the same coordinates"
+  expect_error(do.call(run_classification_pipeline, c(args, list(predictors = "elev"))),
+               msg, fixed = TRUE)
+  expect_error(do.call(run_classification_pipeline, c(args, list(predictors = character(0)))),
+               msg, fixed = TRUE)
+})
+
 test_that("polygon scope modes restrict points, groups, and boundary", {
   d <- make_classif_scope_df()
   # Square fully covering locality A, far from locality B.
@@ -847,6 +1039,34 @@ test_that("the Auto resolution keeps the candidate grid inside its budget", {
   # Two small distant hulls: a tiny domain area inside a very wide bounding box.
   res <- classif_auto_res(area_m2 = 2e6, bbox = bbox)
   expect_lte((20000 / res) * (20000 / res), .CLASSIF_MAX_CANDIDATE_CELLS)
+})
+
+test_that("the scope note states the cell size the run will grid at", {
+  # One locality: bounding box 2 x 1 km, far inside the candidate-cell budget.
+  small <- sf::st_bbox(c(xmin = 0, ymin = 0, xmax = 2000, ymax = 1000), crs = sf::st_crs(32633))
+  # Auto: sqrt(area / 50,000); a 2 km2 scope gives sqrt(40) m.
+  a <- classif_grid_res_note("auto", NULL, 2e6, small)
+  expect_equal(a$res, sqrt(40))
+  expect_identical(a$text, "Grid: Auto, 6.32 m cells.")
+  # Clamped at 5 m below 1.25 km2.
+  expect_equal(classif_grid_res_note("auto", NULL, 1e6, small)$res, 5)
+  expect_identical(classif_grid_res_note("fixed", 50, 2e6, small)$text, "Grid: Fixed, 50 m cells.")
+
+  # Two distant localities: 2 km2 of domain in a 20 x 20 km box, where the
+  # budget floor sqrt(20000^2 / 4e6) = 10 m binds on both modes.
+  wide <- sf::st_bbox(c(xmin = 0, ymin = 0, xmax = 20000, ymax = 20000), crs = sf::st_crs(32633))
+  aw <- classif_grid_res_note("auto", NULL, 2e6, wide)
+  expect_equal(aw$res, 10)
+  expect_identical(aw$text, paste("Grid: Auto, 10 m cells (the area rule's 6.32 m would need",
+                                  "more than 4,000,000 cells over the scope's bounding box)."))
+  fw <- classif_grid_res_note("fixed", 5, 2e6, wide)
+  expect_equal(fw$res, 10)
+  expect_identical(fw$text, paste("Grid: Fixed 5 m would need more than 4,000,000 cells over",
+                                  "the scope's bounding box; the run uses 10 m cells."))
+  # The note's size is the grid builder's, in both modes.
+  expect_equal(aw$res, classif_auto_res(2e6, wide))
+  expect_equal(fw$res, classif_cap_res(5, wide))
+  expect_null(classif_grid_res_note("auto", NULL, NULL, NULL))
 })
 
 test_that("the classification prediction grid is invariant to the clip block size", {
@@ -1324,6 +1544,56 @@ test_that("a missing covariate value does not stop the classification maps", {
   expect_true(all(is.finite(as.matrix(res$surface_df[prob_cols]))))
 })
 
+test_that("a covariate surface that fell back to IDW is reported, per fold and on the grid", {
+  # Directly: a repeated location makes gstat's kriging system singular, and
+  # the numeric covariates' surfaces come from the IDW fallback instead of NA.
+  pts <- make_classif_points(n = 60)
+  grid <- sf::st_as_sf(expand.grid(x = seq(450100, 451900, by = 200),
+                                   y = seq(5800100, 5801900, by = 200)),
+                       coords = c("x", "y"), crs = 32633)
+  aux_dup <- build_classification_grid_aux(rbind(pts, pts[3, ]), grid,
+                                           c("elev", "slope", "parent"))
+  expect_identical(attr(aux_dup, "cov_fallback"), c("elev", "slope"))
+  expect_false(anyNA(aux_dup$elev))
+  expect_null(attr(build_classification_grid_aux(pts, grid, c("elev", "slope")), "cov_fallback"))
+
+  # Through the pipeline, which refuses a repeated location: a kriging solve
+  # that returns no prediction, as gstat does on a singular system, in every
+  # fold and on the grid.
+  d <- make_classif_scope_df(nA = 35, nB = 30)
+  args <- list(df = d, target = "soil", predictors = c("elev", "slope"),
+               x_col = "x", y_col = "y", src_crs = 32633, proj_crs = "EPSG:32633",
+               method = "rf", strategy = "standard", v = 4, grid_res = 250)
+  withr::defer(if (exists("krige", envir = globalenv(), inherits = FALSE)) {
+    rm("krige", envir = globalenv())
+  })
+  assign("krige", function(...) {
+    r <- gstat::krige(...)
+    r$var1.pred <- NA_real_
+    r
+  }, envir = globalenv())
+  res <- do.call(run_classification_pipeline, c(args, list(make_surface = TRUE)))
+  rm("krige", envir = globalenv())
+
+  fb <- res$covariate_fallback
+  expect_identical(fb$grid, c("elev", "slope"))
+  expect_equal(fb$n_folds, 4L)
+  expect_equal(nrow(fb$folds), 8L)
+  expect_setequal(fb$folds$fold, 1:4)
+  expect_identical(
+    classif_covariate_notes(fb, label_of = toupper),
+    sprintf("%s: kriging failed on the prediction grid and in 4 of 4 cross-validation folds; inverse distance weighting (p = 2, 12 nearest samples) was used instead.",
+            c("ELEV", "SLOPE")))
+  expect_false(anyNA(res$surface_df$elev))
+
+  # When every surface was kriged there is nothing to report.
+  res0 <- do.call(run_classification_pipeline, c(args, list(make_surface = TRUE)))
+  expect_null(res0$covariate_fallback)
+  expect_null(classif_covariate_notes(res0$covariate_fallback))
+  expect_identical(classif_covariate_notes(list(folds = NULL, grid = "elev", n_folds = 4L)),
+                   "elev: kriging failed on the prediction grid; inverse distance weighting (p = 2, 12 nearest samples) was used instead.")
+})
+
 test_that("a covariate name that is not syntactic gives the results of its twin", {
   # krige_covariates builds the held-out and grid covariates; gstat re-read
   # "Elevation (m)" through make.names() and could not find it.
@@ -1355,11 +1625,11 @@ test_that("classif_scope_adequacy names the offending classes and shortfalls", {
   expect_match(msg, "2 classes with fewer than 3", fixed = TRUE)
   expect_false(grepl("'A'", msg, fixed = TRUE))
 
-  # Row shortfall is reported with both counts; combined shortfalls stack.
+  # Location shortfall is reported with both counts; combined shortfalls stack.
   msg2 <- classif_scope_adequacy(factor(rep(c("A", "B"), each = 7)), n_complete = 14)
-  expect_match(msg2, "only 14 complete rows (need >= 20)", fixed = TRUE)
+  expect_match(msg2, "only 14 complete locations (need >= 20)", fixed = TRUE)
   msg3 <- classif_scope_adequacy(factor(c(rep("A", 9), "B")), n_complete = 10)
-  expect_match(msg3, "only 10 complete rows", fixed = TRUE)
+  expect_match(msg3, "only 10 complete locations", fixed = TRUE)
   expect_match(msg3, "'B' (n = 1)", fixed = TRUE)
 })
 

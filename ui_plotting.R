@@ -623,11 +623,15 @@ generate_base_plot <- function(item, input, agro_params = NULL, palette = "YlOrR
             a_cols <- viridis::viridis(agro_params$n_c)
         }
         
-        bp <- ggplot() + 
-          tidyterra::geom_spatraster(data = obj_c, aes(fill = category)) +
-          scale_fill_manual(values = a_cols, 
+        # The legend is the class scheme, as the Map Viewer's is: every class
+        # with its swatch (ggplot2 >= 3.5 draws the key of a class absent from
+        # the surface only under show.legend = TRUE) and no "NA" entry for the
+        # cells outside the boundary, which stay transparent.
+        bp <- ggplot() +
+          tidyterra::geom_spatraster(data = obj_c, aes(fill = category), show.legend = TRUE) +
+          scale_fill_manual(values = a_cols,
                             labels = agro_params$leg_labels,
-                            na.value = "transparent", name = leg_name, drop = FALSE) +
+                            na.translate = FALSE, name = leg_name, drop = FALSE) +
           coord_sf()
       } else {
         is_viridis <- pal_name %in% c("viridis", "cividis")

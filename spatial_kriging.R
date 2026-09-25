@@ -445,9 +445,12 @@ screen_covariates <- function(df, candidates, vif_threshold = 10) {
 #' The classification pipeline uses it to tick the progress bar and to poll its
 #' cancel flag (one covariate is the coarsest interruptible unit here, since
 #' gstat's krige() call is a black box). NULL = the original behaviour.
+#' Returns `grid_aux`, the run-log text `log_msg` and `fallback`, the
+#' covariates whose surface is the IDW fallback.
 krige_covariates <- function(data, grid_p, aux_vars, lags, method_params, on_var = NULL) {
   grid_aux <- grid_p
   log_msg <- ""
+  fallback <- character(0)
   n_av <- length(aux_vars)
   for(i in seq_along(aux_vars)) {
     av <- aux_vars[i]
@@ -461,9 +464,18 @@ krige_covariates <- function(data, grid_p, aux_vars, lags, method_params, on_var
       v_emp_av <- variogram(.mn_cov ~ 1, d_av, width = lags$width, cutoff = lags$cutoff)
       fit_av <- robust_vgm_fit(v_emp_av, d_av$.mn_cov)
       res_av <- krige(.mn_cov ~ 1, d_av, grid_p, model = fit_av, debug.level = 0)
+      # A singular kriging system (two observations at one location) makes
+      # gstat return NA with no error and, at debug.level 0, no warning. A
+      # surface with holes is a failed fit, so it takes the fallback below.
+      n_na <- sum(is.na(res_av$var1.pred))
+      if (n_na > 0) {
+        stop(sprintf("kriging returned no prediction at %d of %d locations",
+                     n_na, length(res_av$var1.pred)))
+      }
       list(pred = res_av$var1.pred, warn = NULL)
     }, error = function(e) {
-      warn_msg <- sprintf(" [WARN] Covariate %s kriging failed, falling back to IDW. ", av)
+      warn_msg <- sprintf(" [WARN] Covariate %s kriging failed (%s), falling back to IDW. ",
+                          av, gsub("\\s+", " ", trimws(conditionMessage(e))))
       idw_p <- if(!is.null(method_params$idw_p)) method_params$idw_p else 2
       idw_nmax <- if(!is.null(method_params$idw_nmax)) method_params$idw_nmax else 12
       res_av <- idw(.mn_cov ~ 1, d_av, grid_p, nmax = idw_nmax, idp = idw_p, debug.level = 0)
@@ -472,11 +484,12 @@ krige_covariates <- function(data, grid_p, aux_vars, lags, method_params, on_var
     grid_aux[[av]] <- kr_res$pred
     if (!is.null(kr_res$warn)) {
       log_msg <- paste0(log_msg, kr_res$warn)
+      fallback <- c(fallback, av)
     }
     # A cancellation raised in the hook propagates out of the loop by design.
     if (is.function(on_var)) on_var(i, n_av)
   }
-  return(list(grid_aux = grid_aux, log_msg = log_msg))
+  return(list(grid_aux = grid_aux, log_msg = log_msg, fallback = fallback))
 }
 
 

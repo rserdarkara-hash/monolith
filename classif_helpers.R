@@ -139,13 +139,14 @@ classif_supports_weights <- function(method) {
 #' shortfall — including WHICH classes fall below the per-class minimum and
 #' their sample counts — plus what to do about it. The run is not blocked
 #' (small-class CV is defined, just weak), so the caller shows this as a
-#' warning notification.
+#' warning notification. A sample is a sampled location (classif_resolve_scope
+#' merges co-located rows), so `n_complete` counts complete locations.
 classif_scope_adequacy <- function(tvec, n_complete, min_rows = 20L, min_class = 3L) {
   tab <- table(droplevels(as.factor(tvec)))
   small <- tab[tab < min_class]
   problems <- character(0)
   if (n_complete < min_rows) {
-    problems <- c(problems, sprintf("only %d complete rows (need >= %d)", n_complete, min_rows))
+    problems <- c(problems, sprintf("only %d complete locations (need >= %d)", n_complete, min_rows))
   }
   if (length(small) > 0) {
     problems <- c(problems, sprintf(
@@ -498,20 +499,30 @@ classif_folds_to_rset <- function(train_df, fold_id, assess_df = NULL, target = 
 #' Build the covariates each fold would have at its held-out locations using
 #' only that fold's analysis rows. Target labels are retained for scoring, but
 #' never passed to the covariate-surface builder.
+#' attr(, "cov_fallback"): one row (fold, covariate) per numeric covariate
+#' whose held-out values came from the IDW fallback (krige_covariates); NULL
+#' when every fold's covariates were kriged.
 .classif_fold_assessment <- function(keep_sf, train_df, predictors, fold_id,
                                      cancel_file = NULL, progress = NULL) {
   assess_df <- train_df
   ids <- sort(unique(fold_id))
+  fallback <- list()
   for (k in seq_along(ids)) {
     .classif_check_cancel(cancel_file)
     idx <- which(fold_id == ids[k])
     grid <- sf::st_sf(geometry = sf::st_geometry(keep_sf[idx, ]))
-    cov <- sf::st_drop_geometry(build_classification_grid_aux(
+    aux <- build_classification_grid_aux(
       keep_sf[fold_id != ids[k], ], grid, predictors,
       cancel_file = cancel_file,
       progress = function(f) {
         if (is.function(progress)) progress((k - 1 + f) / length(ids))
-      }))
+      })
+    fb <- attr(aux, "cov_fallback")
+    if (length(fb)) {
+      fallback[[length(fallback) + 1]] <- data.frame(fold = ids[k], covariate = fb,
+                                                     stringsAsFactors = FALSE)
+    }
+    cov <- sf::st_drop_geometry(aux)
     for (p in predictors) {
       values <- cov[[p]]
       if (is.factor(train_df[[p]])) {
@@ -526,7 +537,28 @@ classif_folds_to_rset <- function(train_df, fold_id, assess_df = NULL, target = 
     }
     if (is.function(progress)) progress(k / length(ids))
   }
+  attr(assess_df, "cov_fallback") <- if (length(fallback)) do.call(rbind, fallback)
   assess_df
+}
+
+#' One sentence per numeric covariate whose surface came from the IDW
+#' fallback of krige_covariates() (a kriging error, or a solve that returned
+#' no prediction): where it happened (the prediction grid, and in how many
+#' cross-validation folds). `fb` is the pipeline's `covariate_fallback`
+#' record; `label_of` maps a column name to its display label. NULL when
+#' every covariate surface was kriged.
+classif_covariate_notes <- function(fb, label_of = identity) {
+  if (is.null(fb)) return(NULL)
+  folds <- fb$folds
+  covs <- unique(c(if (!is.null(folds)) as.character(folds$covariate), fb$grid))
+  if (!length(covs)) return(NULL)
+  vapply(covs, function(cv) {
+    n_f <- if (is.null(folds)) 0L else length(unique(folds$fold[folds$covariate == cv]))
+    where <- c(if (cv %in% fb$grid) "on the prediction grid",
+               if (n_f > 0) sprintf("in %d of %d cross-validation folds", n_f, fb$n_folds))
+    sprintf("%s: kriging failed %s; inverse distance weighting (p = 2, 12 nearest samples) was used instead.",
+            label_of(cv), paste(where, collapse = " and "))
+  }, character(1), USE.NAMES = FALSE)
 }
 
 # ── Metrics ─────────────────────────────────────────────────────────────────
@@ -1090,6 +1122,8 @@ run_classification_cv <- function(pts_sf, target, predictors,
     # training-row design in that case.
     importance = .classif_pool_fold_importance(imp_parts, predictors),
     fold_screen = if (length(fold_screen)) do.call(rbind, fold_screen) else NULL,
+    # (fold, covariate) pairs whose held-out values came from the IDW fallback.
+    cov_fallback = attr(assess_df, "cov_fallback"),
     weights_applied = weights_applied
   )
 }
@@ -1808,8 +1842,38 @@ classif_surface_to_rasters <- function(grid_sf, res, crs_wkt, levels_order = NUL
 #' Shared by classif_build_grid and the module's pre-run resolution advisory so
 #' the number the user is shown is the number the run will use.
 classif_auto_res <- function(area_m2, bbox) {
-  res <- max(5, min(1000, sqrt(area_m2 / 50000)))
-  max(res, .classif_res_floor(bbox))
+  max(.classif_auto_res_rule(area_m2), .classif_res_floor(bbox))
+}
+
+#' The Auto rule before the candidate-cell floor: sqrt(area / 50,000) m, about
+#' 50,000 cells inside the domain, clamped to [5, 1000] m.
+.classif_auto_res_rule <- function(area_m2) {
+  max(5, min(1000, sqrt(area_m2 / 50000)))
+}
+
+#' The cell size a classification run will grid at, as classif_build_grid
+#' derives it (Auto: classif_auto_res; Fixed: classif_cap_res), with the scope
+#' note's sentence stating it and, where the candidate-cell budget coarsens it,
+#' why. NULL without a scope boundary.
+classif_grid_res_note <- function(mode, res, area_m2, bbox) {
+  if (is.null(bbox) || (!identical(mode, "fixed") && is.null(area_m2))) return(NULL)
+  m <- function(x) paste(trimws(formatC(x, digits = 3, format = "fg")), "m")
+  budget <- format(.CLASSIF_MAX_CANDIDATE_CELLS, big.mark = ",", scientific = FALSE)
+  if (identical(mode, "fixed")) {
+    eff <- classif_cap_res(res, bbox)
+    txt <- if (eff > res) {
+      sprintf("Grid: Fixed %s would need more than %s cells over the scope's bounding box; the run uses %s cells.",
+              m(res), budget, m(eff))
+    } else sprintf("Grid: Fixed, %s cells.", m(res))
+  } else {
+    rule <- .classif_auto_res_rule(area_m2)
+    eff <- classif_auto_res(area_m2, bbox)
+    txt <- if (eff > rule) {
+      sprintf("Grid: Auto, %s cells (the area rule's %s would need more than %s cells over the scope's bounding box).",
+              m(eff), m(rule), budget)
+    } else sprintf("Grid: Auto, %s cells.", m(eff))
+  }
+  list(res = eff, text = txt)
 }
 
 #' The candidate-cell budget, as a resolution floor in metres. Named so the
@@ -1947,6 +2011,8 @@ classif_build_grid <- function(pts_proj, res = NULL,
 #' as RK/RFK); categorical covariates, which cannot be kriged, inherit the class
 #' of their nearest training point (FNN). Both approaches are documented as
 #' approximations that propagate onto the classifier's inputs.
+#' attr(, "cov_fallback") names the numeric covariates whose surface is the
+#' IDW fallback (absent when every one was kriged).
 build_classification_grid_aux <- function(pts_proj, grid_p, predictors,
                                           cancel_file = NULL, progress = NULL) {
   df <- sf::st_drop_geometry(pts_proj)
@@ -1964,6 +2030,7 @@ build_classification_grid_aux <- function(pts_proj, grid_p, predictors,
   cat_preds <- predictors[!is_num]
 
   grid_aux <- grid_p
+  fallback <- character(0)
   if (length(num_preds) > 0) {
     lags <- calc_scientific_lags(pts_proj)
     mp <- list(idw_p = 2, idw_nmax = 12)
@@ -1976,6 +2043,7 @@ build_classification_grid_aux <- function(pts_proj, grid_p, predictors,
                              if (is.function(progress)) progress(i / length(predictors))
                            })
     grid_aux <- kc$grid_aux
+    fallback <- kc$fallback
   }
   if (length(cat_preds) > 0) {
     .classif_check_cancel(cancel_file)
@@ -1989,6 +2057,7 @@ build_classification_grid_aux <- function(pts_proj, grid_p, predictors,
       if (is.function(progress)) progress((length(num_preds) + j) / length(predictors))
     }
   }
+  if (length(fallback)) attr(grid_aux, "cov_fallback") <- fallback
   grid_aux
 }
 
@@ -2147,6 +2216,22 @@ classif_scope_polygons <- function(drawn_sf = NULL, shp_sf = NULL, target_crs = 
 #' of the scoped points ("ignore"), or the intersection of the two
 #' ("intersect"), so prediction never extends into unsampled terrain between
 #' localities or outside the user's polygons.
+#'
+#' One sample is one sampled location. The scoped rows whose working-CRS
+#' coordinates agree to the centimetre are merged (merge_colocated) BEFORE the
+#' target is built: a numeric column (the source-CRS coordinates, a covariate,
+#' a variable to bin) becomes the mean of the rows that measured it, a class
+#' column (character or factor) the location's majority, NA where the most
+#' frequent classes tie. The locality, and the polygon in polygon modes, come
+#' from the location's first row, so co-located rows filed under different
+#' localities are one location. Every fold design, baseline and map downstream
+#' then works on locations.
+#'
+#' Returns `df` (one row per location), `group`, the boundary, the working
+#' CRS, `n_input` (georeferenced rows), `n_rows` (scoped rows), `n_scoped`
+#' (scoped locations), `n_merged = c(locations, rows)` (the locations that held
+#' two or more rows and how many rows they held) and `majority_ties` (per class
+#' column, the locations a tie left without a class).
 classif_resolve_scope <- function(df, x_col, y_col, src_crs, proj_crs,
                                   loc_col = NULL, localities = NULL,
                                   poly_sf = NULL,
@@ -2160,7 +2245,9 @@ classif_resolve_scope <- function(df, x_col, y_col, src_crs, proj_crs,
 
   d <- df[!is.na(df[[x_col]]) & !is.na(df[[y_col]]), , drop = FALSE]
   n_input <- nrow(d)
-  pts <- sf::st_as_sf(d, coords = c(x_col, y_col), crs = src_crs)
+  # remove = FALSE: the source-CRS coordinate columns travel with the points,
+  # so a merged location carries their means.
+  pts <- sf::st_as_sf(d, coords = c(x_col, y_col), crs = src_crs, remove = FALSE)
   pts <- sf::st_transform(pts, proj_crs)
   # Everything below this line is metric (see classif_project_metric); the CRS
   # actually used travels back so the caller stays on it.
@@ -2189,15 +2276,39 @@ classif_resolve_scope <- function(df, x_col, y_col, src_crs, proj_crs,
 
   d <- d[keep, , drop = FALSE]
   pts <- pts[keep, , drop = FALSE]
-  if (nrow(d) == 0) {
+  if (!is.null(poly_hit)) poly_hit <- poly_hit[keep]
+  n_rows <- nrow(d)
+  cls_cols <- setdiff(names(d)[vapply(d, function(v) is.character(v) || is.factor(v), logical(1))],
+                      if (use_loc) loc_col)
+  if (n_rows == 0) {
     return(list(df = d, group = character(0), boundary_wkt = NULL,
                 boundary_area_m2 = NULL, boundary_bbox = NULL,
                 working_crs = work_crs$wkt, crs_fallback = crs_fallback,
-                n_input = n_input, n_scoped = 0L))
+                n_input = n_input, n_rows = 0L, n_scoped = 0L,
+                n_merged = c(locations = 0L, rows = 0L),
+                majority_ties = stats::setNames(integer(length(cls_cols)), cls_cols)))
   }
 
+  # One row per sampled location. The row index travels as TEXT, so the
+  # merge keeps each location's first row index instead of averaging it; the
+  # locality (a numeric code included) and the polygon hit are then read off
+  # that row, never averaged or voted.
+  pts$.mn_scope_row <- as.character(seq_len(n_rows))
+  pts <- merge_colocated(pts, majority = cls_cols)
+  first <- as.integer(pts$.mn_scope_row)
+  pts$.mn_scope_row <- NULL
+  merged <- attr(pts, "merged")
+  ties <- attr(pts, "majority_ties") %||% stats::setNames(integer(length(cls_cols)), cls_cols)
+  d_loc <- d
+  # A new table, one row per location, with automatic row names whether or not
+  # anything merged.
+  d <- sf::st_drop_geometry(pts)
+  rownames(d) <- NULL
+  if (use_loc) d[[loc_col]] <- d_loc[[loc_col]][first]
+  if (!is.null(poly_hit)) poly_hit <- poly_hit[first]
+
   group <- if (poly_mode == "only") {
-    as.character(poly_proj$label)[poly_hit[keep]]
+    as.character(poly_proj$label)[poly_hit]
   } else if (use_loc) {
     as.character(d[[loc_col]])
   } else {
@@ -2239,7 +2350,56 @@ classif_resolve_scope <- function(df, x_col, y_col, src_crs, proj_crs,
        # the requested target CRS when it is metric, its UTM fallback when it
        # is not. Callers must reuse it rather than the requested CRS.
        working_crs = work_crs$wkt, crs_fallback = crs_fallback,
-       n_input = n_input, n_scoped = nrow(d))
+       n_input = n_input, n_rows = n_rows, n_scoped = nrow(d),
+       n_merged = c(locations = as.integer(merged[["groups"]] %||% 0L),
+                    rows = as.integer(merged[["rows"]] %||% 0L)),
+       majority_ties = ties)
+}
+
+#' The Spatial Scope note's count, from classif_resolve_scope(): the scoped
+#' locations out of the georeferenced rows, and how many locations held more
+#' than one sample. Without co-located rows a location is a point and the
+#' sentence says so.
+classif_scope_count_text <- function(sc) {
+  merged <- sc$n_merged[["locations"]] %||% 0L
+  if (!isTRUE(merged > 0)) {
+    return(sprintf("In scope: %d of %d georeferenced points.", sc$n_scoped, sc$n_input))
+  }
+  sprintf("In scope: %d locations from %d of %d georeferenced points; %d location%s held more than one sample and %s merged.",
+          sc$n_scoped, sc$n_rows, sc$n_input, merged,
+          if (merged == 1) "" else "s", if (merged == 1) "was" else "were")
+}
+
+#' The warning for merged locations whose class columns tied (the majority
+#' rule of classif_resolve_scope): a categorical target's tied locations have
+#' no class and are left out of the run; a categorical covariate's tied
+#' locations leave training like any location missing a covariate. NULL when
+#' neither holds a tie.
+classif_tie_note <- function(sc, target_col = NULL, predictors = character(0),
+                             label_of = identity) {
+  ties <- sc$majority_ties
+  if (!length(ties)) return(NULL)
+  n_of <- function(col) if (col %in% names(ties)) ties[[col]] else 0L
+  parts <- character(0)
+  if (!is.null(target_col) && n_of(target_col) > 0) {
+    k <- n_of(target_col)
+    parts <- sprintf("%d of %d locations %s no majority class of %s and %s left out.",
+                     k, sc$n_scoped, if (k == 1) "has" else "have", label_of(target_col),
+                     if (k == 1) "is" else "are")
+  }
+  for (p in setdiff(predictors, target_col)) {
+    k <- n_of(p)
+    if (k > 0) {
+      parts <- c(parts, sprintf(
+        "%d location%s %s no majority value of %s and %s out of training, like a location missing a covariate.",
+        k, if (k == 1) "" else "s", if (k == 1) "has" else "have", label_of(p),
+        if (k == 1) "is" else "are"))
+    }
+  }
+  if (!length(parts)) return(NULL)
+  paste(c(parts, paste("If the rows at a location are depth intervals or repeat surveys,",
+                       "classify one interval or survey at a time (a file holding only its rows).")),
+        collapse = " ")
 }
 
 #' Per-area performance from pooled out-of-fold predictions: one row per scope
@@ -2511,6 +2671,14 @@ run_classification_pipeline <- function(df, target, predictors,
   pts <- classif_project_metric(pts)
   work_crs <- sf::st_crs(pts)
   co <- sf::st_coordinates(pts); pts$x <- co[, 1]; pts$y <- co[, 2]
+  # One row is one sampled location. Rows at exactly the same coordinates make
+  # the covariate kriging system singular (gstat then returns no prediction)
+  # and put one location on both sides of a CV split. The module merges
+  # co-located rows before it builds the target (classif_resolve_scope).
+  if (anyDuplicated(co[, 1:2, drop = FALSE])) {
+    stop("The classification input holds more than one row at the same coordinates; ",
+         "merge co-located rows first (classif_resolve_scope does).")
+  }
 
   # The scope boundary the maps are clipped to, resolved before the
   # cross-validation: kNNDM matches its folds to the map's locations inside it
@@ -2729,6 +2897,7 @@ run_classification_pipeline <- function(df, target, predictors,
       pts[cov_ok, ], gr$grid_p, model$predictors,
       cancel_file = cancel_file,
       progress = function(f) report("covariates", f))
+    grid_fallback <- attr(grid_aux, "cov_fallback")
 
     report("surface", 0, sprintf("Classifying %s grid cells...", n_cell_lab))
     surf <- predict_classification_surface(
@@ -2753,6 +2922,14 @@ run_classification_pipeline <- function(df, target, predictors,
     # "Unclassified" row). A second, always-tau-0 table shipped across the
     # future boundary was dead payload and an invitation to report the wrong
     # numbers.
+  }
+  # The covariate surfaces that came from the IDW fallback instead of kriging,
+  # in the CV folds and on the prediction grid: the module reports them
+  # (classif_covariate_notes). NULL when every surface was kriged.
+  grid_fb <- if (make_surface) grid_fallback else NULL
+  if (!is.null(cv$cov_fallback) || length(grid_fb)) {
+    out$covariate_fallback <- list(folds = cv$cov_fallback, grid = grid_fb %||% character(0),
+                                   n_folds = cv$n_folds)
   }
   report("surface", 1, "Finishing...")
   # A cancel requested during the last unguarded moments still counts: the module
