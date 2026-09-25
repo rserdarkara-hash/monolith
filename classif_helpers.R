@@ -35,6 +35,11 @@ if (FALSE) {
 # the suite can shrink it and exercise the cap without allocating the budget.
 .CLASSIF_MAX_CANDIDATE_CELLS <- 4e6
 
+# The IDW that stands in for a numeric covariate surface kriging could not
+# provide (krige_covariates), on the grid and in every fold; the fallback
+# notes (classif_covariate_notes) state these values.
+.CLASSIF_COV_IDW <- list(idw_p = 2, idw_nmax = 12)
+
 # ── Seed sandbox ────────────────────────────────────────────────────────────
 # Thin alias for the app-wide sandbox `with_seed()` (spatial_vgm.R): seed the
 # RNG, run `expr`, then restore the caller's .Random.seed (or remove it if the
@@ -556,8 +561,9 @@ classif_covariate_notes <- function(fb, label_of = identity) {
     n_f <- if (is.null(folds)) 0L else length(unique(folds$fold[folds$covariate == cv]))
     where <- c(if (cv %in% fb$grid) "on the prediction grid",
                if (n_f > 0) sprintf("in %d of %d cross-validation folds", n_f, fb$n_folds))
-    sprintf("%s: kriging failed %s; inverse distance weighting (p = 2, 12 nearest samples) was used instead.",
-            label_of(cv), paste(where, collapse = " and "))
+    sprintf("%s: kriging failed %s; inverse distance weighting (p = %s, %d nearest samples) was used instead.",
+            label_of(cv), paste(where, collapse = " and "),
+            format(.CLASSIF_COV_IDW$idw_p), as.integer(.CLASSIF_COV_IDW$idw_nmax))
   }, character(1), USE.NAMES = FALSE)
 }
 
@@ -2033,11 +2039,10 @@ build_classification_grid_aux <- function(pts_proj, grid_p, predictors,
   fallback <- character(0)
   if (length(num_preds) > 0) {
     lags <- calc_scientific_lags(pts_proj)
-    mp <- list(idw_p = 2, idw_nmax = 12)
     # One covariate kriged onto the full grid is the coarsest interruptible
     # unit here (gstat's krige() call is a black box), so cancel latency in
     # this stage is one covariate.
-    kc <- krige_covariates(pts_proj, grid_p, num_preds, lags, mp,
+    kc <- krige_covariates(pts_proj, grid_p, num_preds, lags, .CLASSIF_COV_IDW,
                            on_var = function(i, total) {
                              .classif_check_cancel(cancel_file)
                              if (is.function(progress)) progress(i / length(predictors))
@@ -2672,9 +2677,9 @@ run_classification_pipeline <- function(df, target, predictors,
   work_crs <- sf::st_crs(pts)
   co <- sf::st_coordinates(pts); pts$x <- co[, 1]; pts$y <- co[, 2]
   # One row is one sampled location. Rows at exactly the same coordinates make
-  # the covariate kriging system singular (gstat then returns no prediction)
-  # and put one location on both sides of a CV split. The module merges
-  # co-located rows before it builds the target (classif_resolve_scope).
+  # the covariate kriging system singular and put one location on both sides
+  # of a CV split. The module merges co-located rows before it builds the
+  # target (classif_resolve_scope).
   if (anyDuplicated(co[, 1:2, drop = FALSE])) {
     stop("The classification input holds more than one row at the same coordinates; ",
          "merge co-located rows first (classif_resolve_scope does).")
@@ -2875,6 +2880,8 @@ run_classification_pipeline <- function(df, target, predictors,
     }, error = function(e) NULL)
   }
 
+  # The numeric covariates whose map surface is the IDW fallback.
+  grid_fallback <- character(0)
   if (make_surface) {
     .classif_check_cancel(cancel_file)
     report("grid", 0, "Building the prediction grid...")
@@ -2897,7 +2904,7 @@ run_classification_pipeline <- function(df, target, predictors,
       pts[cov_ok, ], gr$grid_p, model$predictors,
       cancel_file = cancel_file,
       progress = function(f) report("covariates", f))
-    grid_fallback <- attr(grid_aux, "cov_fallback")
+    grid_fallback <- attr(grid_aux, "cov_fallback") %||% character(0)
 
     report("surface", 0, sprintf("Classifying %s grid cells...", n_cell_lab))
     surf <- predict_classification_surface(
@@ -2926,9 +2933,8 @@ run_classification_pipeline <- function(df, target, predictors,
   # The covariate surfaces that came from the IDW fallback instead of kriging,
   # in the CV folds and on the prediction grid: the module reports them
   # (classif_covariate_notes). NULL when every surface was kriged.
-  grid_fb <- if (make_surface) grid_fallback else NULL
-  if (!is.null(cv$cov_fallback) || length(grid_fb)) {
-    out$covariate_fallback <- list(folds = cv$cov_fallback, grid = grid_fb %||% character(0),
+  if (!is.null(cv$cov_fallback) || length(grid_fallback)) {
+    out$covariate_fallback <- list(folds = cv$cov_fallback, grid = grid_fallback,
                                    n_folds = cv$n_folds)
   }
   report("surface", 1, "Finishing...")

@@ -44,6 +44,41 @@ test_that("every RK and RFK fold reports the state of its residual variogram", {
   }
 })
 
+test_that("an RK or RFK fold whose covariate kriging failed is named in the run log", {
+  # Each fold kriges its held-out covariates from its training rows and falls
+  # back to IDW where that fails (krige_covariates), as the map does for its
+  # grid; the fold records it and the run log counts the folds per covariate.
+  pts <- make_test_points(12)
+  cv0 <- suppressWarnings(perform_kriging_loocv(pts, "v", "aux1", calc_scientific_lags,
+                                                robust_vgm_fit, model_type = "lm"))
+  expect_true(all(vapply(attr(cv0, "cv_fold_meta"), function(m) !length(m$cov_fallback), logical(1))))
+  expect_false(grepl("came from IDW", safe_run_cv(init_interpolation_res(), cv0, "RK")$log_msg,
+                     fixed = TRUE))
+
+  # Covariate kriging that returns no prediction in every fold; the residual
+  # kriging is left alone.
+  withr::defer(if (exists("krige", envir = globalenv(), inherits = FALSE)) {
+    rm("krige", envir = globalenv())
+  })
+  assign("krige", function(formula, ...) {
+    r <- gstat::krige(formula, ...)
+    if (identical(all.vars(formula)[1], ".mn_cov")) r$var1.pred[] <- NA_real_
+    r
+  }, envir = globalenv())
+  for (engine in c("lm", "rf")) {
+    cv <- suppressWarnings(perform_kriging_loocv(pts, "v", "aux1", calc_scientific_lags,
+                                                 robust_vgm_fit, model_type = engine, rf_ntree = 50))
+    meta <- attr(cv, "cv_fold_meta")
+    expect_length(meta, length(unique(cv$fold)))
+    expect_true(all(vapply(meta, function(m) identical(m$cov_fallback, "aux1"), logical(1))))
+    expect_true(all(is.finite(cv$var1.pred)))
+    expect_match(safe_run_cv(init_interpolation_res(), cv, "RK")$log_msg,
+                 sprintf("[RK CV] covariate kriging failed, so the held-out values came from IDW: aux1 in %d of %d folds.",
+                         length(meta), length(meta)), fixed = TRUE)
+  }
+  rm("krige", envir = globalenv())
+})
+
 test_that("perform_kriging_loocv refuses a fold vector that does not match its rows", {
   pts <- make_test_points(12)
   expect_error(perform_kriging_loocv(pts, "v", "aux1", calc_scientific_lags, robust_vgm_fit,

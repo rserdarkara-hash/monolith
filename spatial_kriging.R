@@ -440,7 +440,8 @@ screen_covariates <- function(df, candidates, vif_threshold = 10) {
 # Interpolate each auxiliary covariate onto the prediction grid so RK can
 # evaluate the regression trend everywhere the target is predicted, not just at
 # sample points. Each covariate is kriged with its own robust variogram fit and
-# falls back to IDW if that fit fails.
+# falls back to IDW if kriging fails: an error, a repeated location or a
+# prediction missing anywhere.
 #' `on_var(i, total)` is an optional hook invoked after each covariate surface.
 #' The classification pipeline uses it to tick the progress bar and to poll its
 #' cancel flag (one covariate is the coarsest interruptible unit here, since
@@ -461,12 +462,21 @@ krige_covariates <- function(data, grid_p, aux_vars, lags, method_params, on_var
     d_av <- data[av]
     names(d_av)[names(d_av) == av] <- ".mn_cov"
     kr_res <- tryCatch({
+      # Two samples at one location make the kriging system singular. LAPACK's
+      # Cholesky factorisation then fails or completes on rounding noise,
+      # depending on the platform and even the row order: gstat returns NA, or
+      # a finite surface that is arbitrary along the singular direction. So a
+      # repeated location is a failed fit before any solve. Callers merge
+      # co-located samples first (merge_colocated).
+      if (anyDuplicated(sf::st_coordinates(d_av))) {
+        stop("two samples share a location, so the kriging system is singular")
+      }
       v_emp_av <- variogram(.mn_cov ~ 1, d_av, width = lags$width, cutoff = lags$cutoff)
       fit_av <- robust_vgm_fit(v_emp_av, d_av$.mn_cov)
       res_av <- krige(.mn_cov ~ 1, d_av, grid_p, model = fit_av, debug.level = 0)
-      # A singular kriging system (two observations at one location) makes
-      # gstat return NA with no error and, at debug.level 0, no warning. A
-      # surface with holes is a failed fit, so it takes the fallback below.
+      # gstat returns NA with no error and, at debug.level 0, no warning where
+      # its factorisation fails. A surface with holes is a failed fit, so it
+      # takes the fallback below.
       n_na <- sum(is.na(res_av$var1.pred))
       if (n_na > 0) {
         stop(sprintf("kriging returned no prediction at %d of %d locations",
@@ -538,6 +548,16 @@ safe_run_cv <- function(res, expr, label) {
           names(screen$dropped), " (", as.integer(screen$dropped), ")", collapse = ", ")) else "",
         ".")
     }
+  }
+  # A fold whose covariate kriging failed took the IDW fallback for its
+  # held-out covariates (krige_covariates), as the map does for its grid.
+  fold_meta <- attr(cv_obj, "cv_fold_meta")
+  fb <- unlist(lapply(fold_meta, `[[`, "cov_fallback"), use.names = FALSE)
+  if (length(fb)) {
+    fb <- table(fb)
+    res$log_msg <- paste0(
+      res$log_msg, "\n[", label, " CV] covariate kriging failed, so the held-out values came from IDW: ",
+      paste0(names(fb), " in ", as.integer(fb), " of ", length(fold_meta), " folds", collapse = ", "), ".")
   }
 
   # Per-fold variogram state, summarised as plain data so the Model Performance

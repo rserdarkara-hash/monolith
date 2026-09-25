@@ -1208,8 +1208,8 @@ perform_kriging_loocv <- function(pts, target_var, aux_vars, lags_func, vgm_fit_
                    nrow(train), length(kept) + 1L))
     }
     lags <- lags_func(train)
-    test_cov <- sf::st_drop_geometry(krige_covariates(
-      train, newdata, kept, lags, cov_params)$grid_aux)
+    kc <- krige_covariates(train, newdata, kept, lags, cov_params)
+    test_cov <- sf::st_drop_geometry(kc$grid_aux)
 
     if (model_type == "lm") {
       form_i <- as.formula(paste0("`", target_var, "` ~ ",
@@ -1237,9 +1237,11 @@ perform_kriging_loocv <- function(pts, target_var, aux_vars, lags_func, vgm_fit_
     v_fit <- vgm_fit_func(v_emp, train$residuals)
     res_krig <- krige(residuals ~ 1, train, newdata, model = v_fit, debug.level = 0)
     # The residual variogram is refitted per fold like OK's, so it reports the
-    # same fit state and the run log can name a fold that took a degraded one.
+    # same fit state and the run log can name a fold that took a degraded one;
+    # likewise the covariates whose held-out values are the IDW fallback.
     list(pred = as.numeric(pred_trend) + res_krig$var1.pred,
-         meta = list(kept = kept, vgm_status = vgm_fit_status(v_fit)))
+         meta = list(kept = kept, vgm_status = vgm_fit_status(v_fit),
+                     cov_fallback = kc$fallback))
   }
 
   cv <- run_kriging_folds(pts, target_var, row_id, folds, fold_fn, cancel_file, progress)

@@ -550,6 +550,26 @@ test_that("merge_colocated gives a class column the location's majority, NA on a
   expect_identical(merge_colocated(one, majority = c("cls", "fct")), one)
 })
 
+test_that("the majority vote matches its definition on replicated random labels", {
+  # The definition written out per location with table(): the most frequent
+  # non-missing class, NA on a tie or where no row carries one.
+  d <- with_seed(5, {
+    reps <- sample(1:5, 80, replace = TRUE)
+    x <- rep(runif(80, 0, 1000), reps); y <- rep(runif(80, 0, 1000), reps)
+    data.frame(x = 500000 + x, y = 4000000 + y,
+               cls = ifelse(runif(length(x)) < 0.2, NA, sample(c("A", "B", "C"), length(x), TRUE)))
+  })
+  d <- d[with_seed(6, sample(nrow(d))), ]
+  m <- merge_colocated(sf::st_as_sf(d, coords = c("x", "y"), crs = 32635), majority = "cls")
+  key <- paste(round(d$x, 2), round(d$y, 2))
+  votes <- lapply(split(d$cls, match(key, unique(key))), function(v) table(v[!is.na(v)]))
+  top <- lapply(votes, function(tb) names(tb)[tb == max(tb, 0L)])
+  expect_identical(m$cls, vapply(top, function(t) if (length(t) == 1L) t else NA_character_,
+                                 character(1), USE.NAMES = FALSE))
+  expect_identical(attr(m, "majority_ties"), c(cls = sum(lengths(top) > 1L)))
+  expect_gt(sum(lengths(top) > 1L), 0L)
+})
+
 test_that("dedup_valid_points returns 0-row sf when all targets are NA", {
   pts <- make_test_points(4)
   pts$v <- NA_real_
@@ -1667,13 +1687,14 @@ test_that("a CK run scores the population OK Native scores and maps with every r
   expect_false(is.null(ck$r_a))
 })
 
-# ── krige_covariates: a solve that returns no prediction ──────────────────
+# ── krige_covariates: a repeated location, a solve with no prediction ─────
 
-test_that("a covariate kriging that returns no prediction falls back to IDW", {
-  # gstat's kriging system is singular when two observations share a location:
-  # krige() then returns NA at every cell with no error and, at debug.level 0,
-  # no warning, so the error handler that falls back to IDW never ran and an
-  # all-NA surface was passed on.
+test_that("a repeated location or a solve with no prediction falls back to IDW", {
+  # gstat's kriging system is singular when two observations share a location.
+  # LAPACK's Cholesky then fails or completes on rounding noise, by platform
+  # and even by row order: krige() returns NA everywhere (no error and, at
+  # debug.level 0, no warning), or a finite surface that is arbitrary along
+  # the singular direction. Either way no kriged surface may be passed on.
   f <- with_seed(7, {
     x <- runif(80, 500000, 502000); y <- runif(80, 4000000, 4002000)
     data.frame(x = x, y = y,
@@ -1697,17 +1718,40 @@ test_that("a covariate kriging that returns no prediction falls back to IDW", {
   expect_identical(kc$log_msg, "")
   expect_identical(kc$fallback, character(0))
 
-  # One exact duplicate (with another value): no hole reaches the caller, the
-  # surface is the IDW fallback, and the run log names it and its cause.
+  # One exact duplicate (with another value), in three row orders: the
+  # repeated location is refused before any solve, so on every platform and
+  # in every order the surface is the IDW fallback and the run log names it
+  # and its cause.
   p_dup <- as_pts(rbind(f, transform(f[1, ], elev = elev + 3)))
-  kc_dup <- krige_covariates(p_dup, grid, "elev", calc_scientific_lags(p_dup), mp)
-  expect_false(anyNA(kc_dup$grid_aux$elev))
-  expect_identical(kc_dup$fallback, "elev")
-  expect_match(kc_dup$log_msg, paste("Covariate elev kriging failed (kriging returned no",
-                                     "prediction at 400 of 400 locations), falling back to IDW"),
+  n_dup <- nrow(p_dup)
+  for (o in list(seq_len(n_dup), rev(seq_len(n_dup)), with_seed(3, sample(n_dup)))) {
+    kc_dup <- krige_covariates(p_dup[o, ], grid, "elev", calc_scientific_lags(p_dup), mp)
+    expect_identical(kc_dup$fallback, "elev")
+    expect_match(kc_dup$log_msg, paste("Covariate elev kriging failed (two samples share a",
+                                       "location, so the kriging system is singular),",
+                                       "falling back to IDW"), fixed = TRUE)
+    idw_ref <- gstat::idw(elev ~ 1, p_dup[o, ], grid, nmax = 12, idp = 2, debug.level = 0)
+    expect_equal(kc_dup$grid_aux$elev, idw_ref$var1.pred)
+  }
+
+  # A solve that returns NA anywhere, as gstat does where its factorisation
+  # fails: no hole reaches the caller, and the log counts the missing cells.
+  withr::defer(if (exists("krige", envir = globalenv(), inherits = FALSE)) {
+    rm("krige", envir = globalenv())
+  })
+  assign("krige", function(...) {
+    r <- gstat::krige(...)
+    r$var1.pred[c(1, 7)] <- NA_real_
+    r
+  }, envir = globalenv())
+  kc_na <- krige_covariates(p, grid, "elev", lags, mp)
+  rm("krige", envir = globalenv())
+  expect_identical(kc_na$fallback, "elev")
+  expect_match(kc_na$log_msg, paste("Covariate elev kriging failed (kriging returned no",
+                                    "prediction at 2 of 400 locations), falling back to IDW"),
                fixed = TRUE)
-  idw_ref <- gstat::idw(elev ~ 1, p_dup, grid, nmax = 12, idp = 2, debug.level = 0)
-  expect_equal(kc_dup$grid_aux$elev, idw_ref$var1.pred)
+  expect_equal(kc_na$grid_aux$elev,
+               gstat::idw(elev ~ 1, p, grid, nmax = 12, idp = 2, debug.level = 0)$var1.pred)
 })
 
 # ── apply_RK ──────────────────────────────────────────────────────────────

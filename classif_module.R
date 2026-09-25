@@ -574,15 +574,21 @@ classif_server <- function(id, data_reactive, vars_metadata_reactive, spatial_re
     # Module-local boundary type, buffer logic, and grid resolution
     # (independent of the interpolation sidebar, which is hidden on this
     # tab), normalised with defaults. One source of truth: the live scope
-    # preview and the run dispatch both read this reactive.
-    bset <- shiny::reactive({
+    # preview and the run dispatch both read this reactive. The scope reads
+    # only the boundary part, so moving the resolution slider does not
+    # resolve the scope (merge, hulls, collinearity preview) again.
+    bset_boundary <- shiny::reactive({
       list(
         type      = input$boundary_type %||% "concave",
         buff_mode = input$buff_mode %||% "dynamic",
-        buff_dist = if (is.null(input$buff_dist) || is.na(input$buff_dist)) 250 else as.numeric(input$buff_dist),
+        buff_dist = if (is.null(input$buff_dist) || is.na(input$buff_dist)) 250 else as.numeric(input$buff_dist)
+      )
+    })
+    bset <- shiny::reactive({
+      c(bset_boundary(), list(
         res_mode  = input$res_mode %||% "auto",
         res       = if (is.null(input$grid_res) || is.na(input$grid_res)) NULL else as.numeric(input$grid_res)
-      )
+      ))
     })
 
     # ── Spatial scope ────────────────────────────────────────────────────────
@@ -644,7 +650,7 @@ classif_server <- function(id, data_reactive, vars_metadata_reactive, spatial_re
       psf <- if (mode == "ignore") NULL else tryCatch(
         classif_scope_polygons(pl$drawn, pl$shp, target_crs = sp$proj_crs),
         error = function(e) NULL)
-      bs <- bset()
+      bs <- bset_boundary()
       tryCatch(
         classif_resolve_scope(df, sp$x, sp$y, sp$src_crs, sp$proj_crs,
                               loc_col = sp$loc, localities = input$scope_loc,
@@ -773,7 +779,7 @@ classif_server <- function(id, data_reactive, vars_metadata_reactive, spatial_re
     # scoping replaces the hull entirely with the user's polygons, so the
     # Boundary Type control (and this advisory) is inert there.
     strict_scope_active <- shiny::reactive({
-      identical(bset()$type, "strict") &&
+      identical(bset_boundary()$type, "strict") &&
         !identical(input$scope_poly %||% "ignore", "only")
     })
 
@@ -1562,7 +1568,6 @@ classif_server <- function(id, data_reactive, vars_metadata_reactive, spatial_re
         ggplot2::theme(
           plot.title = ggplot2::element_text(face = "bold", size = 18),
           axis.text = ggplot2::element_text(size = 11, colour = "grey25"),
-          axis.text.y = ggplot2::element_text(angle = 90, hjust = 0.5),
           axis.title = ggplot2::element_text(size = 13),
           legend.title = ggplot2::element_text(size = 14),
           legend.text = ggplot2::element_text(size = 12),
@@ -1578,6 +1583,33 @@ classif_server <- function(id, data_reactive, vars_metadata_reactive, spatial_re
         ggplot2::scale_y_continuous(labels = scales::label_number(big.mark = ",", accuracy = 1)),
         ggplot2::labs(x = "Easting (m)", y = "Northing (m)")
       )
+    }
+    # Page width (in) of an export map at 300 dpi. Its Northing labels are
+    # horizontal, so they are wider than the single text line rotated ones
+    # would take; the page widens by exactly that difference, which keeps the
+    # map panel at the size it has on a 9 x 7 in page and moves the axis left
+    # into the added width. Measured on the device ggsave draws on (ragg when
+    # installed, else png; the new page starts showtext), so these are the
+    # widths the saved layout uses. Call inside with_showtext_dpi(300).
+    export_map_width <- function(p) {
+      axis_in <- function(q) {
+        gt <- ggplot2::ggplotGrob(q)
+        cols <- unique(gt$layout$l[gt$layout$name == "axis-l"])
+        grid::convertWidth(sum(gt$widths[cols]), "in", valueOnly = TRUE)
+      }
+      old_dev <- grDevices::dev.cur()
+      probe <- tempfile(fileext = ".png")
+      dev <- if (requireNamespace("ragg", quietly = TRUE)) ragg::agg_png else grDevices::png
+      dev(probe, width = 9, height = 7, units = "in", res = 300)
+      on.exit({
+        grDevices::dev.off()
+        if (old_dev > 1) grDevices::dev.set(old_dev)
+        unlink(probe)
+      })
+      grid::grid.newpage()
+      extra <- axis_in(p) - axis_in(p + ggplot2::theme(
+        axis.text.y = ggplot2::element_text(angle = 90, hjust = 0.5)))
+      9 + max(0, extra)
     }
     # Named palette shared by the on-screen map and the GeoTIFF colour table:
     # viridis over the model classes plus neutral grey for abstained cells.
@@ -1658,7 +1690,8 @@ classif_server <- function(id, data_reactive, vars_metadata_reactive, spatial_re
       layers
     }
     # maxcell caps geom_spatraster's display resampling: 5e4 for the small
-    # in-grid panels, 4e5 for the expanded modal view (higher resolution).
+    # in-grid panels, 4e5 for the expanded modal view and the styled PNG
+    # export (higher resolution).
     plot_class_map <- function(rl, export = FALSE, maxcell = 5e4) {
       ttl <- if (identical(rl$source, "nn")) "Spatial 1-NN Class (no covariates)" else "Predicted Class"
       ggplot2::ggplot() +
@@ -1860,11 +1893,16 @@ classif_server <- function(id, data_reactive, vars_metadata_reactive, spatial_re
         paths <- if (nn) file.path(tmp, "predicted_class_nn.png") else
           file.path(tmp, c("predicted_class.png", "prediction_entropy.png",
                            sprintf("probability_%s.png", gsub("[^A-Za-z0-9._-]+", "_", cls))))
+        maps <- list(plot_class_map(rl, export = TRUE, maxcell = 4e5))
+        if (!nn) maps <- c(maps, list(plot_entropy_map(rl, export = TRUE, maxcell = 4e5),
+                                      plot_prob_map(rl, lyr, cls, export = TRUE, maxcell = 4e5)))
         with_showtext_dpi(300, {
-          ggplot2::ggsave(paths[1], plot_class_map(rl, export = TRUE), width = 9, height = 7, dpi = 300)
-          if (!nn) {
-            ggplot2::ggsave(paths[2], plot_entropy_map(rl, export = TRUE), width = 9, height = 7, dpi = 300)
-            ggplot2::ggsave(paths[3], plot_prob_map(rl, lyr, cls, export = TRUE), width = 9, height = 7, dpi = 300)
+          # The maps share one raster grid, hence one set of Northing labels:
+          # the class map sizes every page, measured at the on-screen cell cap
+          # (resampling keeps the grid's extent, so the axes are the same).
+          width <- export_map_width(plot_class_map(rl, export = TRUE))
+          for (i in seq_along(maps)) {
+            ggplot2::ggsave(paths[i], maps[[i]], width = width, height = 7, dpi = 300)
           }
         })
         zip::zip(zipfile = file, files = basename(paths), root = tmp, mode = "cherry-pick")

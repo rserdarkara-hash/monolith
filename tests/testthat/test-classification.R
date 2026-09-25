@@ -1545,16 +1545,19 @@ test_that("a missing covariate value does not stop the classification maps", {
 })
 
 test_that("a covariate surface that fell back to IDW is reported, per fold and on the grid", {
-  # Directly: a repeated location makes gstat's kriging system singular, and
-  # the numeric covariates' surfaces come from the IDW fallback instead of NA.
+  # Directly: a repeated location makes the kriging system singular, and the
+  # numeric covariates' surfaces come from the IDW fallback whatever the row
+  # order (gstat's own outcome there depends on LAPACK's rounding).
   pts <- make_classif_points(n = 60)
   grid <- sf::st_as_sf(expand.grid(x = seq(450100, 451900, by = 200),
                                    y = seq(5800100, 5801900, by = 200)),
                        coords = c("x", "y"), crs = 32633)
-  aux_dup <- build_classification_grid_aux(rbind(pts, pts[3, ]), grid,
-                                           c("elev", "slope", "parent"))
-  expect_identical(attr(aux_dup, "cov_fallback"), c("elev", "slope"))
-  expect_false(anyNA(aux_dup$elev))
+  dup <- rbind(pts, pts[3, ])
+  for (o in list(seq_len(nrow(dup)), rev(seq_len(nrow(dup))))) {
+    aux_dup <- build_classification_grid_aux(dup[o, ], grid, c("elev", "slope", "parent"))
+    expect_identical(attr(aux_dup, "cov_fallback"), c("elev", "slope"))
+    expect_false(anyNA(aux_dup$elev))
+  }
   expect_null(attr(build_classification_grid_aux(pts, grid, c("elev", "slope")), "cov_fallback"))
 
   # Through the pipeline, which refuses a repeated location: a kriging solve

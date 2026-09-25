@@ -475,20 +475,31 @@ merge_colocated <- function(pts_sf, dp = 2, count = FALSE, majority = character(
   majority <- intersect(majority, setdiff(names(df), num_cols))
   if (length(majority)) {
     ties <- stats::setNames(integer(length(majority)), majority)
-    # Only a location holding several rows can differ from its first row.
-    multi <- which(n_rep > 1L)
+    # Only a location holding several rows can differ from its first row; its
+    # class starts missing and is set where one class is the most frequent.
+    multi_row <- n_rep[g] > 1L
     for (col in majority) {
       x <- df[[col]]
+      v <- as.character(x)
       val <- as.character(out[[col]])
-      by_grp <- split(as.character(x), g)
-      for (k in multi) {
-        v <- by_grp[[k]]
-        v <- v[!is.na(v)]
-        if (!length(v)) { val[k] <- NA_character_; next }
-        tb <- table(v)
-        top <- names(tb)[tb == max(tb)]
-        if (length(top) > 1L) ties[[col]] <- ties[[col]] + 1L
-        val[k] <- if (length(top) == 1L) top else NA_character_
+      val[n_rep > 1L] <- NA_character_
+      sel <- which(multi_row & !is.na(v))
+      if (length(sel)) {
+        # Every (location, class) pair counted once, in one pass: a location's
+        # pairs sorted by count put its most frequent class first, and a
+        # runner-up with the same count is a tie.
+        lv <- unique(v[sel])
+        pair <- (g[sel] - 1) * length(lv) + match(v[sel], lv)
+        up <- unique(pair)
+        cnt <- tabulate(match(pair, up))
+        pg <- (up - 1) %/% length(lv) + 1
+        o <- order(pg, -cnt)
+        pg <- pg[o]; cnt <- cnt[o]; cls <- lv[(up[o] - 1) %% length(lv) + 1]
+        m <- length(pg)
+        lead <- !duplicated(pg)
+        tied <- lead & c(pg[-1] == pg[-m] & cnt[-1] == cnt[-m], FALSE)
+        val[pg[lead & !tied]] <- cls[lead & !tied]
+        ties[[col]] <- sum(tied)
       }
       out[[col]] <- if (is.factor(x)) factor(val, levels = levels(x), ordered = is.ordered(x)) else val
     }
