@@ -184,7 +184,7 @@ build_tps_gcv_plot <- function(fit, loc, target = c("act", "pre")) {
     NULL)
   sub <- paste0("Fitted λ = ", lam_txt, " (effective df ", format_sig(fit$eff_df), ")",
                 if (identical(fit$gcv_source, "measured")) "; λ from GCV on the measured values",
-                if (!is.null(end_txt)) paste0("\n", paste(strwrap(end_txt, 100), collapse = "\n")))
+                if (!is.null(end_txt)) paste0("\n", wrap_lines(end_txt, 100)))
   ggplot(df, aes(x = lambda, y = gcv)) +
     geom_line(color = cols[1], linewidth = 1) +
     geom_point(color = cols[2]) +
@@ -226,13 +226,12 @@ build_idw_power_plot <- function(fit, loc, target = c("act", "pre")) {
   note <- idw_limit_note(fit$limit, fit$nmax %||% "Max Neighbors", fit[["n_samples"]], fit$p)
   flat <- idw_flatness_note(prof, fit$p)
   measured <- identical(fit$select_source, "measured")
-  wrapped <- function(x, width = 100) paste(strwrap(x, width), collapse = "\n")
   sub <- paste0("Selected ", idw_power_text(fit$p),
                 if (measured) " on the measured values of all rows" else " on all rows",
                 if (length(fp)) paste0("; CV folds selected ", format_power(stats::median(fp)),
                                        " [", format_power(min(fp)), "–", format_power(max(fp)), "]"),
-                if (!is.null(flat)) paste0("\n", wrapped(flat)),
-                if (!is.null(note)) paste0("\n", wrapped(note)))
+                if (!is.null(flat)) paste0("\n", wrap_lines(flat, 100)),
+                if (!is.null(note)) paste0("\n", wrap_lines(note, 100)))
   col <- if (target == "act") "steelblue" else "firebrick"
   # Filled points are within one standard error of the best, hollow ones the
   # data separate from it; a record without that flag draws every point filled.
@@ -258,7 +257,7 @@ build_idw_power_plot <- function(fit, loc, target = c("act", "pre")) {
     labs(title = paste0("IDW Power Selection (", target_label, "): ", loc), subtitle = sub,
          x = "Power p (0 = equal weights, ∞ = nearest neighbour)",
          y = if (measured) "Pooled CV RMSE of the measured values" else "Pooled CV RMSE",
-         caption = wrapped(cap, 110))
+         caption = wrap_lines(cap, 110))
   nn <- prof[!is.finite(prof$p), , drop = FALSE]
   if (nrow(nn)) {
     p <- p + geom_point(data = nn, aes(shape = shape), color = col, size = 2.6) +
@@ -335,10 +334,9 @@ build_cv_distance_plot <- function(design, title = NULL) {
          subtitle = if (faceted) paste0("W, in ", unit_txt, ", is the area between the map and held-out curves")
                     else sprintf("%s (%s); n = %d samples", w_pair(d1), unit_txt, as.integer(d1$n)),
          x = paste0("Distance (", unit_txt, ", square-root scale)"), y = "Cumulative share",
-         caption = paste(strwrap(sprintf(paste0(
+         caption = wrap_lines(sprintf(paste0(
            "Map cells: %d points spread evenly inside the boundary. Held-out curve left of the map ",
-           "curve: metrics optimistic for this map; right: pessimistic."), as.integer(d1$n_domain)), 85),
-           collapse = "\n"))
+           "curve: metrics optimistic for this map; right: pessimistic."), as.integer(d1$n_domain)), 85))
   if (faceted) p <- p + facet_wrap(~ panel, nrow = 1)
   p
 }
@@ -538,13 +536,117 @@ build_ck_variogram_ggplot <- function(vm, model, title = "") {
           strip.text = element_text(size = 8.5))
 }
 
-# ggplotly conversion that restricts the tooltip to the dedicated `text`
-# aesthetic when a layer defines one (avoids the duplicated x/y lines);
-# plots without a text aesthetic keep plotly's default tooltip.
-ggplotly_smart <- function(p) {
+# A ggplot's title with its subtitle and caption as smaller lines under it, for
+# a plotly layout title. ggplotly() drops both, yet they carry what the figure
+# rests on (the complete-case n, the variables a PCA left out, the estimator),
+# so they must reach the interactive view and the PNG its camera button saves.
+plotly_title_html <- function(p) {
+  paste0(plotly_text(p$labels$title %||% ""), plotly_notes_html(plot_notes(p)))
+}
+plotly_notes_html <- function(notes) {
+  paste0("<br><sup>", plotly_text(notes), "</sup>", collapse = "", recycle0 = TRUE)
+}
+plotly_text <- function(x) gsub("\n", "<br>", htmltools::htmlEscape(x), fixed = TRUE)
+plot_notes <- function(p) {
+  notes <- as.character(c(p$labels$subtitle, p$labels$caption))
+  notes[nzchar(notes)]
+}
+
+# Each line of `x` wrapped at word boundaries to fewer than `width` characters;
+# the line breaks already in it stay. Unnamed, so a scale's labels stay matched
+# to its breaks by position.
+wrap_lines <- function(x, width) {
+  vapply(strsplit(x, "\n", fixed = TRUE),
+         function(l) paste(unlist(lapply(l, strwrap, width = width)), collapse = "\n"), "",
+         USE.NAMES = FALSE)
+}
+
+# The text metrics the expanded view budgets with: plotly.js sets a line of
+# text every 1.3 em, an average sans-serif character is about 0.55 em wide, and
+# a <sup> line is drawn at 70% of the title's size.
+PLOTLY_LINE_EM <- 1.3
+PLOTLY_CHAR_EM <- 0.55
+PLOTLY_SUP_SCALE <- 0.7
+
+# The facet strips of a ggplotly layout (the centred, bottom-anchored labels it
+# puts above each panel), each wrapped to the width of its column, and the room
+# their extra lines need: above the top row (`top`) and between rows (`gap`),
+# in pixels. ggplotly reserves one line of strip text and lets a longer label
+# run across its neighbours. `plot_w` is the plotting area's width in pixels.
+fit_facet_strips <- function(layout, plot_w) {
+  ann <- layout$annotations
+  is_strip <- vapply(ann, function(a) {
+    is.null(a$annotationType) && identical(a$xanchor, "center") &&
+      identical(a$yanchor, "bottom") && identical(a$yref, "paper")
+  }, logical(1))
+  if (!any(is_strip)) return(list(layout = layout, top = 0, gap = 0))
+  idx <- which(is_strip)
+  x <- vapply(ann[idx], function(a) a$x, 0)
+  y <- vapply(ann[idx], function(a) a$y, 0)
+  cols <- sort(unique(x))
+  pitch <- if (length(cols) > 1) min(diff(cols)) * plot_w else plot_w
+  extra <- numeric(length(idx))
+  for (k in seq_along(idx)) {
+    size <- ann[[idx[k]]]$font$size
+    txt <- wrap_lines(gsub("<br\\s*/?>", "\n", ann[[idx[k]]]$text),
+                      max(1, floor((pitch - 4) / (PLOTLY_CHAR_EM * size))))
+    ann[[idx[k]]]$text <- txt
+    extra[k] <- (lengths(strsplit(txt, "\n", fixed = TRUE)) - 1) * PLOTLY_LINE_EM * size
+  }
+  layout$annotations <- ann
+  top_row <- y == max(y)
+  list(layout = layout, top = max(extra[top_row]),
+       gap = if (any(!top_row)) max(extra[!top_row]) else 0)
+}
+
+# ggplotly conversion for the expanded view (register_expanded_modal: the large
+# modal's 870 px body by a 700 px plot). The tooltip is restricted to the
+# dedicated `text` aesthetic when a layer defines one (avoids the duplicated
+# x/y lines); plots without one keep plotly's default tooltip. The conversion
+# runs at the view's size, so ggplotly's relative units resolve against it, and
+# the widget then fills its container. Facet strips are wrapped to their
+# columns, and a lower row's extra strip lines are given room by widening the
+# panel spacing and converting again (the domains are ggplotly's to lay out).
+# The subtitle and caption, wrapped to the plot's width, go under the title,
+# which is pinned to the top of the figure; the top margin grows by every line
+# they and the top row's strips add, so no text runs into another.
+ggplotly_smart <- function(p, width = 870, height = 700) {
   has_text <- "text" %in% names(p$mapping) ||
     any(vapply(p$layers, function(l) "text" %in% names(l$mapping), logical(1)))
-  plotly::ggplotly(p, tooltip = if (has_text) "text" else "all")
+  convert <- function(p) {
+    fig <- plotly::ggplotly(p, tooltip = if (has_text) "text" else "all",
+                            width = width, height = height)
+    plot_w <- width - fig$x$layout$margin$l - fig$x$layout$margin$r
+    strips <- fit_facet_strips(fig$x$layout, plot_w)
+    fig$x$layout <- strips$layout
+    list(fig = fig, plot_w = plot_w, top = strips$top, gap = strips$gap)
+  }
+  res <- convert(p)
+  lay <- res$fig$x$layout
+  title_px <- lay$title$font$size %||% lay$font$size
+  notes <- wrap_lines(plot_notes(p), floor(res$plot_w / (PLOTLY_CHAR_EM * PLOTLY_SUP_SCALE * title_px)))
+  top <- lay$margin$t + res$top +
+    sum(lengths(strsplit(notes, "\n", fixed = TRUE))) * PLOTLY_LINE_EM * title_px
+  if (res$gap > 0) {
+    # panel.spacing is converted against the whole figure's height, while the
+    # domains it becomes are shares of the plotting area; 72/96 takes px to pt.
+    area <- height - top - lay$margin$b
+    spacing <- ggplot2::calc_element("panel.spacing.y", ggplot2::complete_theme(p$theme))
+    res <- convert(p + ggplot2::theme(panel.spacing.y = spacing +
+                                        grid::unit(res$gap * height / area * 72 / 96, "pt")))
+  }
+  fig <- res$fig
+  fig$x$layout[c("width", "height")] <- NULL
+  fig[c("width", "height")] <- NULL
+  if (top == lay$margin$t) return(fig)
+  # The title's first baseline is pinned one line below the top edge. It is
+  # anchored by that baseline because plotly.js drops a top anchor's offset
+  # once a title runs to several lines. ggplotly's own title markup keeps the
+  # plot's title face.
+  plotly::layout(fig, title = list(text = paste0(lay$title$text %||% "", plotly_notes_html(notes)),
+                                   y = 1 - (8 + title_px) / height, yref = "container",
+                                   yanchor = "bottom"),
+                 margin = list(t = top))
 }
 
 # `agro_params` is one class definition, or list(act =, pre =) for the Actual
@@ -1222,7 +1324,7 @@ generate_advanced_plot <- function(df, vars, group_col = NULL, plot_type = "qq",
   if (plot_type %in% c("parallel", "radar")) {
     p <- p + scale_x_discrete(labels = function(v) {
       text <- display_var_labels(v, labels)
-      if (plot_type == "radar") vapply(text, function(x) paste(strwrap(x, width = 16), collapse = "\n"), "", USE.NAMES = FALSE) else text
+      if (plot_type == "radar") wrap_lines(text, 16) else text
     }) + labs(x = "Variable", y = "Normalized value")
     if (length(unavailable)) p <- p + labs(caption = paste("No observed values:", paste(display_var_labels(unavailable, labels), collapse = ", ")))
     if (plot_type == "radar" && anyNA(p$data$value)) p <- p + labs(caption = paste(
@@ -1333,7 +1435,7 @@ generate_correlation_network <- function(df, vars, threshold = 0.3, method = "pe
     }
   }
   
-  p <- ggplot() + theme_void() + labs(title = paste("Correlation Network (threshold >", threshold, ")"))
+  p <- ggplot() + theme_void() + labs(title = paste0("Correlation Network (|r| ≥ ", threshold, ")"))
   
   if (nrow(edges) > 0) {
     p <- p + geom_segment(data = edges, aes(x=x, y=y, xend=xend, yend=yend, color=sign, linewidth=weight), alpha=0.6) +
@@ -1356,7 +1458,7 @@ generate_partial_correlation <- function(df, vars, control_vars = NULL, method =
   # table can never disagree about what "partial" means.
   pc <- compute_partial_correlation(df, vars, control_vars, method = method)
   refusal <- partial_correlation_refusal(pc, labels)
-  if (!is.null(refusal)) return(sci_placeholder(paste(strwrap(refusal, 70), collapse = "\n")))
+  if (!is.null(refusal)) return(sci_placeholder(wrap_lines(refusal, 70)))
   if (is.null(pc$cormat) || pc$n < 5) return(sci_placeholder("Insufficient data"))
 
   cormat <- pc$cormat
@@ -1395,7 +1497,11 @@ generate_correlogram <- function(df, vars, method = "pearson", cormat = NULL, la
   if (is.null(cormat)) {
     cormat <- cor(df_clean, method = method)
   }
-  
+  cormat <- align_cormat(cormat, vars)
+  # Same guard as the heatmap and network: a constant variable's NA cells
+  # would otherwise vanish from the plot without a word.
+  if (anyNA(cormat)) return(constant_var_plot())
+
   cormat_df <- melt_cormat(cormat, "Corr")
   
   cormat_df$Var1 <- factor(cormat_df$Var1, levels = vars)

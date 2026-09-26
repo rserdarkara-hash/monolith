@@ -106,7 +106,7 @@
       # previous file does not carry over to this one.
       session_state$crs_auto$crs_selection <- character(0)
       showNotification(paste0("Target Mapping CRS kept as ", crs_effective("crs_selection"),
-                              " from your previous selection. Maps, grid resolution, buffer distances and exports for this dataset will be produced in that system. The note under the selector says whether it suits the new data."),
+                              " from your previous selection. Maps and exports for this dataset will be produced in that system. The note under the selector says whether it suits the new data."),
                        type = "message", duration = 15)
     } else {
       clear_target_crs()
@@ -905,7 +905,7 @@
   # (Scientific Guide 2.1), written in the Auto modes only: in Fixed mode the
   # slider holds the user's own value.
   observeEvent(list(rv$user_data, input$map_x, input$map_y, input$map_crs, input$crs_selection, input$locality, input$res_mode), {
-    req(rv$user_data, input$map_x, input$map_y, input$map_crs, input$crs_selection, input$locality, input$res_mode)
+    req(rv$user_data, input$map_x, input$map_y, input$map_crs, input$crs_selection, input$res_mode)
     if (input$res_mode == "fixed") return()
     if (!(input$map_x %in% colnames(rv$user_data) && input$map_y %in% colnames(rv$user_data))) return()
 
@@ -951,7 +951,7 @@
   # the buffer then scales with the slider.
   observeEvent(list(rv$user_data, rv$mapping, input$locality, input$method, input$aux_vars,
                     input$value_type, input$subset), {
-    req(rv$user_data, input$locality)
+    req(rv$user_data)
     ud <- rv$user_data
     m <- rv$mapping
     cols_ok <- all(vapply(list(m$x, m$y, m$loc), function(col) {
@@ -1259,10 +1259,9 @@
     } else {
       NA_integer_
     }
-    # Both systems, each named. Every metric quantity the app reports - buffer
-    # and range in metres, cell size, area in hectares - is computed in the
-    # target CRS, so a strip that said only "CRS" and showed the input one
-    # invited those metres to be read against the wrong system.
+    # Both systems, each named: the input CRS the coordinates are read in (and,
+    # when it is metric, the models are computed in) and the target CRS the
+    # outputs are produced in. A strip that said only "CRS" left open which.
     crs_in <- normalize_crs_input(input$map_crs)
     crs_out <- normalize_crs_input(input$crs_selection)
     item <- function(label, value) {

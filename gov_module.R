@@ -6,17 +6,16 @@
 # MSE, in the target's squared units; the model-quality row is a percentage.
 # The scaled column is the same increase divided by its standard error across
 # trees (randomForest's %IncMSE): unitless, and it grows with the tree count.
-# Values are unrounded; the display formats them.
+# Values are unrounded; the display formats them. `labels` is the suite's
+# display-label map (desc_var_labels); NULL shows the column names.
 GOV_IMPORTANCE_UNIT <- "Increase in out-of-bag MSE (target units squared)"
 GOV_SCALED_COL <- "Scaled (÷ SE)"
-gov_summary_df <- function(res, vars_metadata = NULL) {
+gov_summary_df <- function(res, labels = NULL) {
   if (is.null(res) || is.null(res$importance)) return(NULL)
   vip <- res$importance
   vip <- vip[order(vip$mse_increase, decreasing = TRUE), , drop = FALSE]
   out <- data.frame(
-    `Governing Factor / Metric` = vapply(as.character(vip$variable),
-                                         function(v) get_var_label(v, vars_metadata),
-                                         character(1), USE.NAMES = FALSE),
+    `Governing Factor / Metric` = display_var_labels(as.character(vip$variable), labels),
     Value = as.numeric(vip$mse_increase),
     Unit = GOV_IMPORTANCE_UNIT,
     check.names = FALSE, stringsAsFactors = FALSE
@@ -84,7 +83,7 @@ gov_factors_ui <- function(id) {
             shiny::div(id = ns("gov_idle_content"), style = "text-align: center; padding: 120px 50px; color: var(--mn-text-3);",
               shiny::icon("brain", class = "fa-4x", style = "margin-bottom: 20px; color: var(--mn-line-2);"),
               shiny::h3("Awaiting Machine Learning Analysis", style = "font-weight: 300; margin-bottom: 10px;"),
-              shiny::p("Configure target and predictors on the left pane and click 'Run Analysis' to discover governing agronomical factors.")
+              shiny::p("Configure target and predictors on the left pane and click 'Run Analysis' to discover the factors governing the target.")
             )
           ),
           
@@ -139,7 +138,12 @@ gov_factors_ui <- function(id) {
 gov_factors_server <- function(id, data_reactive, vars_metadata_reactive) {
   shiny::moduleServer(id, function(input, output, session) {
     ns <- session$ns
-    
+
+    # The suite's display labels (Variable naming toggle included): labels
+    # shared by two columns carry their column name, as on the other tabs.
+    display_labels <- shiny::reactive(desc_var_labels(colnames(data_reactive()), vars_metadata_reactive()))
+    lab <- function(v) display_var_labels(v, display_labels())
+
     gov_rv <- shiny::reactiveValues(res = NULL, ready = "no", cancelling = FALSE)
 
     # Cooperative cancellation, mirroring the classification module: the flag is
@@ -175,10 +179,8 @@ gov_factors_server <- function(id, data_reactive, vars_metadata_reactive) {
       shiny::req(df)
       cols <- colnames(df)
       num_cols <- cols[sapply(df, is.numeric)]
-      
-      num_named <- sapply(num_cols, function(v) get_var_label(v, vars_metadata_reactive()))
-      names(num_cols) <- num_named
-      
+      names(num_cols) <- lab(num_cols)
+
       shiny::selectInput(ns("gov_target"), "Target Parameter", choices = num_cols)
     })
     
@@ -187,10 +189,8 @@ gov_factors_server <- function(id, data_reactive, vars_metadata_reactive) {
       shiny::req(df)
       cols <- colnames(df)
       num_cols <- cols[sapply(df, is.numeric)]
-      
-      num_named <- sapply(num_cols, function(v) get_var_label(v, vars_metadata_reactive()))
-      names(num_cols) <- num_named
-      
+      names(num_cols) <- lab(num_cols)
+
       shinyWidgets::pickerInput(
         ns("gov_predictors"), "Governing Factors",
         choices = num_cols, multiple = TRUE,
@@ -354,10 +354,9 @@ gov_factors_server <- function(id, data_reactive, vars_metadata_reactive) {
       if (plot_type == "importance") {
         vip_df <- gov_rv$res$importance
         vip_df <- vip_df[order(vip_df$mse_increase, decreasing = FALSE), ]
-        vip_df$variable_label <- sapply(as.character(vip_df$variable), function(v) get_var_label(v, vars_metadata_reactive()))
-        # make.unique: two predictors sharing a metadata label would otherwise
-        # crash factor() with duplicated levels.
-        vip_df$variable_label <- make.unique(unname(vip_df$variable_label))
+        # make.unique: a run outlives the data it was fitted on, and labels of
+        # columns the current data no longer carries fall back to their names.
+        vip_df$variable_label <- make.unique(lab(as.character(vip_df$variable)))
         vip_df$variable_label <- factor(vip_df$variable_label, levels = vip_df$variable_label)
         # Both forms of the out-of-bag permutation importance, one panel each:
         # the increase in MSE, which orders the factors, and the same divided
@@ -384,7 +383,7 @@ gov_factors_server <- function(id, data_reactive, vars_metadata_reactive) {
           ggplot2::theme_minimal(base_size = base_size)
       } else if (plot_type == "interaction_a") {
         shap_df <- gov_rv$res$shap
-        top_var_label <- get_var_label(gov_rv$res$top_var, vars_metadata_reactive())
+        top_var_label <- lab(gov_rv$res$top_var)
         
         p <- ggplot2::ggplot(shap_df, ggplot2::aes(x = feature_value, y = contribution))
         if (expanded) {
@@ -397,7 +396,7 @@ gov_factors_server <- function(id, data_reactive, vars_metadata_reactive) {
         p + ggplot2::labs(title = paste("SHAP Dependence:", top_var_label), x = paste(top_var_label, "Value"), y = "SHAP Contribution") + 
             ggplot2::theme_minimal(base_size = base_size)
       } else if (plot_type == "effect") {
-        top_var_label <- get_var_label(gov_rv$res$top_var, vars_metadata_reactive())
+        top_var_label <- lab(gov_rv$res$top_var)
         lw <- if (expanded) 2 else 1
         
         if (!is.null(input$gov_effect_type) && input$gov_effect_type == "ale") {
@@ -422,8 +421,8 @@ gov_factors_server <- function(id, data_reactive, vars_metadata_reactive) {
         df <- gov_rv$res$analysis_df
         run_target <- gov_rv$res$target_col
         shiny::req(df, run_target)
-        top_var_label <- get_var_label(gov_rv$res$top_var, vars_metadata_reactive())
-        target_label <- get_var_label(run_target, vars_metadata_reactive())
+        top_var_label <- lab(gov_rv$res$top_var)
+        target_label <- lab(run_target)
 
         if (gov_rv$res$top_var %in% colnames(df) && run_target %in% colnames(df)) {
           p <- ggplot2::ggplot(df, ggplot2::aes(x = .data[[gov_rv$res$top_var]], y = .data[[run_target]]))
@@ -464,7 +463,7 @@ gov_factors_server <- function(id, data_reactive, vars_metadata_reactive) {
     
     output$gov_summary_table <- DT::renderDataTable({
       shiny::req(gov_rv$res)
-      df <- gov_summary_df(gov_rv$res, vars_metadata_reactive())
+      df <- gov_summary_df(gov_rv$res, display_labels())
       # paging off: dom = 't' shows no paging controls, so rows past the first
       # page would be unreachable on screen and missing from a copy. Values stay
       # numeric and are formatted at four significant digits for display, not

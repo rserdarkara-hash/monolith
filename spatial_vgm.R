@@ -519,7 +519,7 @@ robust_vgm_fit <- function(v_emp, v_data) {
   initial_psill <- max(initial_sill - initial_nugget, initial_sill * 0.1)
 
   ranges <- c(max_dist / 10, max_dist / 5, max_dist / 4, max_dist / 2)
-  models <- c("Sph", "Exp", "Gau", "Mat") # Added Matern
+  models <- c("Sph", "Exp", "Gau", "Mat")
 
   # gstat reports singular fits via attr(, "singular") but non-convergence
   # only as a C-level warning, so the warning itself is the detection signal.

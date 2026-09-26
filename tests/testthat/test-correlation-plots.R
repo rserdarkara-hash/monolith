@@ -312,6 +312,11 @@ test_that("a constant variable is named instead of blanking the panel", {
     as.character(p_net$layers[[1]]$aes_params$label %||% ""),
     "constant"
   )
+  p_gram <- suppressWarnings(generate_correlogram(df, vars))
+  expect_match(
+    as.character(p_gram$layers[[1]]$aes_params$label %||% ""),
+    "constant"
+  )
 })
 
 # ── generate_partial_correlation ───────────────────────────────────────────

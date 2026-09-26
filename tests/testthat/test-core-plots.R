@@ -316,3 +316,18 @@ test_that("expanded interactive parallel plots keep their Cartesian coordinates"
     }
   })
 })
+
+test_that("the expanded interactive view keeps a figure's subtitle and caption", {
+  # ggplotly() drops both; they carry the sample and the exclusions a figure
+  # rests on, and the camera button saves what the view shows.
+  p <- ggplot2::ggplot(make_test_df(10), ggplot2::aes(a, b)) + ggplot2::geom_point() +
+    ggplot2::labs(title = "PCA", subtitle = "Classical <estimator>",
+                  caption = "Excluded (no variance): c
+Complete cases: n = 10")
+  title <- plotly::plotly_build(ggplotly_smart(p))$x$layout$title$text
+  expect_match(title, "Classical &lt;estimator&gt;", fixed = TRUE)
+  expect_match(title, "Excluded (no variance): c<br>Complete cases", fixed = TRUE)
+  # Without notes the title is ggplotly's own.
+  bare <- plotly::plotly_build(ggplotly_smart(p + ggplot2::labs(subtitle = NULL, caption = NULL)))
+  expect_false(grepl("<sup>", bare$x$layout$title$text %||% "", fixed = TRUE))
+})

@@ -325,11 +325,10 @@ test_that("the header context strip names both coordinate systems", {
   skip_if(is.null(strip), "context strip absent (no dataset in session)")
 
   expect_true(grepl("Points", strip, fixed = TRUE))
-  # The strip is the only always-visible statement of coordinate system, and
-  # every metric quantity the app reports - buffer and range in metres, cell
-  # size, hectares - is computed in the TARGET system. A single item labelled
-  # "CRS" showing the input one invited those metres to be read against the
-  # wrong system, so both roles are named.
+  # The strip is the only always-visible statement of coordinate system: the
+  # input CRS the coordinates are read in and the target CRS the outputs are
+  # produced in. A single item labelled "CRS" left open which, so both roles
+  # are named.
   expect_true(grepl("Input CRS", strip, fixed = TRUE))
   expect_true(grepl("Target CRS", strip, fixed = TRUE))
   expect_false(grepl(">CRS<", strip, fixed = TRUE))

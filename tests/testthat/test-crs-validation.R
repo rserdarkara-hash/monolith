@@ -758,11 +758,13 @@ test_that("a run is refused VISIBLY until both CRS selectors are set", {
   expect_equal(length(gregexpr("if (!crs_selection_gate()) return()", exec,
                                fixed = TRUE)[[1]]), 2L)
   expect_match(exec, 'paste(missing, "Not Set")', fixed = TRUE)
-  # The observer that raises it must not req() the CRS out from under itself.
-  expect_match(exec, "req(rv$user_data, input$locality, rv$mapping$x, rv$mapping$y)",
+  # The observer that raises it must not req() the CRS out from under itself,
+  # nor the Locality box: an empty box means every locality.
+  expect_match(exec, "req(rv$user_data, rv$mapping$x, rv$mapping$y)\n",
                fixed = TRUE)
-  expect_false(grepl("req(rv$user_data, input$locality, rv$mapping$x, rv$mapping$y, rv$mapping$crs)",
+  expect_false(grepl("req(rv$user_data, rv$mapping$x, rv$mapping$y, rv$mapping$crs)",
                      exec, fixed = TRUE))
+  expect_false(grepl("req\\([^)]*input\\$locality", exec))
   # Nor may the column mapping be gated behind the CRS: rv$mapping$x would be
   # NULL for as long as the CRS is unset, and every guard that depends on it -
   # the landing-position caption included - would stay silent.
@@ -1404,8 +1406,9 @@ test_that("the suitability gate is advisory at selection time and enforced at ru
   expect_match(exec, "rv$run_config_summary$crs_gate_override <- crs_override", fixed = TRUE)
   expect_match(exec, "rv$run_config_summary$crs_scale_factor <- ", fixed = TRUE)
 
-  # The collinearity screen is asked once, from one place, after the CRS gate.
-  expect_equal(length(gregexpr("run_collinearity_gate()", exec, fixed = TRUE)[[1]]), 3L)
+  # The collinearity screen is one function, called after the CRS gate from
+  # exactly two places: the Run handler and the CRS override.
+  expect_equal(length(gregexpr("    run_collinearity_gate()\n", exec, fixed = TRUE)[[1]]), 2L)
   expect_equal(length(gregexpr("check_vif(df_aux, threshold = 10)", exec, fixed = TRUE)[[1]]), 1L)
 
   # Restoring an archived run must not be re-gated: it replays stored results

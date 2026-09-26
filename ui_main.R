@@ -164,7 +164,7 @@ ui <- fluidPage(
           # Circled glyphs, not bare letters: beside the sun/moon toggle a lone
           # "i" and "?" read as stray characters rather than as controls.
           actionButton("info_btn", "", icon = icon("circle-info"), class = "mn-iconbtn",
-                       "aria-label" = "Session information"),
+                       "aria-label" = "Documentation"),
           actionButton("about_btn", "", icon = icon("circle-question"), class = "mn-iconbtn",
                        "aria-label" = "About Monolith")
       )

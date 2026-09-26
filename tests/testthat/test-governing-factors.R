@@ -270,4 +270,13 @@ test_that("the governing-factors table keeps full precision and names its units"
   kept <- gov_summary_df(list(importance = res$importance, oob_rsq = 0.4213), NULL)
   expect_equal(kept$Value[1], 42.13)
   expect_equal(kept[[1]], df[[1]])
+
+  # Factors are named with the suite's display labels; a label two columns
+  # share carries its column name, as on the other analytics tabs.
+  labs <- desc_var_labels(c("som", "clay", "sand"), list(
+    list(actual = "som", label = "Organic matter"),
+    list(actual = "clay", label = "Texture"),
+    list(actual = "sand", label = "Texture")))
+  named <- gov_summary_df(res, labs)
+  expect_equal(named[[1]][-1], c("Organic matter", "Texture [sand]", "Texture [clay]"))
 })

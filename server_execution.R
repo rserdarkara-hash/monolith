@@ -270,9 +270,11 @@
 
   # The covariate-collinearity screen, factored out of observeEvent(input$run)
   # so the CRS gate in front of it can hand control back here after an override
-  # without the screen being written twice.
+  # without the screen being written twice. Every run screens again and asks
+  # again: the answer is handed to the run by rv$vif_choice_made, which the
+  # proceed_vif observer consumes and clears.
   run_collinearity_gate <- function() {
-    if (input$method %in% c("RK", "RFK", "CK") && length(input$aux_vars) > 1 && is.null(rv$vif_choice_made)) {
+    if (input$method %in% c("RK", "RFK", "CK") && length(input$aux_vars) > 1) {
        # Screen multicollinearity on the data the run will actually fit (the
        # selected localities), not the full table: covariates can be collinear
        # within one locality but not across all of them, and vice versa.
@@ -330,14 +332,6 @@
     rv$proceed_vif <- next_trigger(rv$proceed_vif)
   })
 
-  # Locality is part of the reset list because the VIF screen in
-  # run_collinearity_gate() runs on the SELECTED localities' data: a drop/keep
-  # decision made for one spatial context must not silently carry over to
-  # another.
-  observeEvent(list(input$method, input$aux_vars, input$locality), {
-    rv$vif_choice_made <- NULL
-  })
-
   observeEvent(input$run, {
     if (isTRUE(rv$model_running)) {
       showNotification("A model run is already in progress.", type = "warning")
@@ -350,7 +344,9 @@
       showNotification("An optimization is running; start the interpolation after it finishes.", type = "warning")
       return()
     }
-    req(rv$user_data, input$locality, rv$mapping$x, rv$mapping$y)
+    # No req() on input$locality: an empty Locality box means every locality
+    # (resolve_selected_localities), and req() would drop the click silently.
+    req(rv$user_data, rv$mapping$x, rv$mapping$y)
     if (!crs_selection_gate()) return()
 
     if (run_uses_covariates() && (is.null(input$aux_vars) || length(input$aux_vars) == 0)) {
@@ -476,7 +472,7 @@
       showNotification("An optimization is running; start the interpolation after it finishes.", type = "warning")
       return()
     }
-    req(rv$user_data, input$locality, rv$mapping$x, rv$mapping$y);
+    req(rv$user_data, rv$mapping$x, rv$mapping$y)
 
     # Re-asked here, not only at input$run: the archive/estimate confirmation
     # modal sits between the two observers.

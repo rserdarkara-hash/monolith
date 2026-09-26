@@ -958,7 +958,8 @@ apply_kriging_pipeline <- function(engine = c("OK", "RK", "RFK"), data, target_v
       if (!is.null(method_params$grid_aux)) {
         grid_aux <- method_params$grid_aux
       } else {
-        krig_cov <- krige_covariates(data, grid_p, aux_vars, lags, method_params)
+        krig_cov <- krige_covariates(data, grid_p, aux_vars, lags,
+                                     method_params$cov_params %||% method_params)
         grid_aux <- krig_cov$grid_aux
         res$log_msg <- paste0(res$log_msg, krig_cov$log_msg)
       }

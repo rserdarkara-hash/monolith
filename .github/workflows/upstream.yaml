@@ -65,7 +65,7 @@ jobs:
         # here. testthat is a TEST dependency: renv.lock carries it, but
         # global.R's required_packages declares what the APP needs, not what
         # runs the suite. The pinned job gets it from setup-renv; this job has
-        # no setup-renv by design, so it installs it directly. The app's own 59
+        # no setup-renv by design, so it installs it directly. The app's own packages
         # still come from global.R at current versions, which is the point of
         # this job. Repos is the P3M binary endpoint setup-r configured above.
         run: Rscript -e 'install.packages(c("testthat", "withr"))'
@@ -73,7 +73,7 @@ jobs:
       - name: Run the suite against the latest CRAN
         # Deliberately NO setup-renv step. The test harness sources global.R,
         # whose install branch - unlocked by MONOLITH_ALLOW_LATEST above - pulls
-        # today's versions of all 59 declared packages. That the app can still
+        # today's versions of every declared package. That the app can still
         # be assembled from a clean machine on current CRAN is itself part of
         # what this job checks.
         run: Rscript tests/testthat.R

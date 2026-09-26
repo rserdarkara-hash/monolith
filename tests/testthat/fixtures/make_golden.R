@@ -18,8 +18,8 @@
 #       categorical = "usda_class",
 #       soil = c("pH_lab", "ec", "caco3", "carbon", "sand", "silt", "clay",
 #                "tn", "p", "k", "ca", "mg", "na", "fe", "cu", "zn", "mn"),
-#       covariates = c("dem", "slope", "twi", "ndvi", "temp", "precip",
-#                      "tpi", "tri", "ndvi_s2", "temp_warm")
+#       covariates = c("temp", "temp_warm", "precip", "ndvi", "ndvi_s2",
+#                      "dem", "slope", "tpi", "tri", "twi")
 #     ))
 #
 # then point the suite at it and regenerate its baselines:
@@ -29,8 +29,9 @@
 #
 # The canonical column names are the shipped survey's own (`ph`, `v82`, …), so
 # the tests can read them literally and stay readable. `roles` is what makes
-# them portable: your `dem` is written out as `v82`. GOLDEN_MANIFEST.md carries
-# the full role table.
+# them portable: the soil, pred and covariates vectors are positional, so the
+# `dem` sixth in `covariates` is written out as `v82`. GOLDEN_MANIFEST.md
+# carries the full role table.
 #
 # The fixture is FROZEN on purpose. Its source is hand-edited; if the tests
 # derived their reference values from it at run time, an edit there would

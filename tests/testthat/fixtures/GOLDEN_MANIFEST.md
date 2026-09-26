@@ -127,7 +127,7 @@ depend on.
 
 These names are **canonical**, not survey-specific: the tests read them
 literally so they stay readable, and `make_golden.R`'s `roles` argument maps any
-source dataset onto them. Your elevation column becomes `v82`.
+source dataset onto them (see [the role table](#the-role-table)).
 
 Row order is fixed by `order(locality, x, y, sample_no)`. No RNG is used
 anywhere in the derivation, so the `core` and `tiny` scopes (every k-th row) are
@@ -148,9 +148,11 @@ you substitute your own data.
 
 **Requirements** — hardcoded, because the rest of the suite would test nothing
 without them: projected metric coordinates, no missing values, at least one
-covariate pair above `|r| = 0.99` with a VIF over 100, at least one class with
-fewer than 3 samples, at least 100 points across 2+ localities in `core` and 30
-in `tiny`, and a dictionary that labels every measured column.
+covariate pair above `|r| = 0.99` with a VIF over 100, a categorical column with
+3+ classes of which one has fewer than 3 samples and one more than 100, at least
+100 points across 2+ localities in `core` (each keeping 85 % of its locality's
+east-west extent) and 30 in `tiny`, and, when a dictionary ships, a label for
+every soil and covariate column.
 
 **Recorded identity** — from `golden_baselines.rds`: row and column counts,
 locality and class counts, coordinate ranges, scope sizes, dictionary
@@ -214,10 +216,32 @@ test independently verifies its case property. A missing property is a test
 failure: supply a suitable case or a fixture that covers it. No test is
 silently skipped and the recorder's full-suite gate remains mandatory.
 
-The example below maps the locality, coordinates, two soil properties and ten
-covariates. Every other required source column must already have its canonical
-name, or be mapped through the corresponding ordered role vector. A role name
-the generator does not define, such as a scalar `target`, is rejected.
+### The role table
+
+`roles` names, for each canonical column, the source column that fills it. A
+role left out means the source column already has the canonical name. The
+three vectors are **positional**: the k-th name you give fills the k-th
+canonical column, so an elevation column must sit sixth in `covariates` to
+become `v82`. A role name the generator does not define, such as a scalar
+`target`, is rejected, and each vector must have exactly the length shown.
+
+| Role | Fills, in this order |
+|---|---|
+| `sample_no`, `locality`, `subset`, `data_from` | the key columns of the same name |
+| `categorical` | `texture` (the class column) |
+| `x`, `y`, `crs` | coordinates and their EPSG code (projected, metres) |
+| `soil` (17) | `ph`, `ec`, `caco3`, `som`, `sand`, `silt`, `clay`, `tn`, `p`, `k`, `ca`, `mg`, `na`, `fe`, `cu`, `zn`, `mn` |
+| `pred` (6) | `tn_cve`, `tn_ss`, `p_cve`, `p_ss`, `k_cve`, `k_ss` |
+| `covariates` (10) | `v1` annual mean temperature, `v10` mean temperature of the warmest quarter, `v12` annual precipitation, `v43` Landsat NDVI, `v61` Sentinel-2 NDVI, `v82` elevation, `v83` slope, `v85` TPI, `v86` TRI, `v87` TWI |
+
+A variable of your survey need not be the one its slot is named after: the
+tests use the soil columns and covariates as numbers with the properties listed
+above, not as pH or elevation. Keeping the meaning where you can keeps the test
+names and messages readable.
+
+The example below maps the locality, the coordinates, the class column, two
+renamed soil properties and all ten covariates; the key columns and the
+prediction columns are assumed to carry their canonical names already.
 
 ```r
 source("tests/testthat/fixtures/make_golden.R")
@@ -230,8 +254,8 @@ make_golden(
     categorical = "usda_class",
     soil = c("pH_lab", "ec", "caco3", "carbon", "sand", "silt", "clay",
              "tn", "p", "k", "ca", "mg", "na", "fe", "cu", "zn", "mn"),
-    covariates = c("dem", "slope", "twi", "ndvi", "temp",
-                   "precip", "tpi", "tri", "ndvi_s2", "temp_warm")
+    covariates = c("temp", "temp_warm", "precip", "ndvi", "ndvi_s2",
+                   "dem", "slope", "tpi", "tri", "twi")
   ))
 ```
 

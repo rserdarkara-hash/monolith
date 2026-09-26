@@ -129,7 +129,8 @@ desc_exploratory_ui <- function(id) {
             shiny::wellPanel(
               shiny::h4("Data Grouping & Discretization"),
               shiny::fluidRow(
-                shiny::column(6, shiny::selectInput(ns("analytics_group_vars"), "Grouping Variables (Max 5)", choices = NULL, multiple = TRUE)),
+                shiny::column(6, shiny::selectizeInput(ns("analytics_group_vars"), "Grouping Variables (Max 5)", choices = NULL, multiple = TRUE,
+                                                       options = list(maxItems = 5))),
                 shiny::column(6, shiny::uiOutput(ns("analytics_group_types_ui")))
               ),
               shiny::uiOutput(ns("analytics_group_filter_ui"))
@@ -469,6 +470,7 @@ desc_exploratory_server <- function(id, data_reactive, vars_metadata_reactive,
       
       res <- compute_normality(val)
       res_suffix <- if (used_residuals) " (on residuals)" else if (!is.null(residual_err)) paste0(" (on raw values - Residual extraction failed: ", residual_err, ")") else " (on raw values)"
+      tested <- if (used_residuals) "Within-group residuals" else "Raw values"
       
       if (res$status == "insufficient") {
         icon_element <- shiny::icon("circle-question", style = "color: var(--mn-text-3); font-size: 13px; cursor: help;")
@@ -480,26 +482,28 @@ desc_exploratory_server <- function(id, data_reactive, vars_metadata_reactive,
       } else if (res$status == "normal") {
         icon_element <- shiny::icon("circle-check", style = "color: var(--mn-ok); font-size: 13px; cursor: help;")
         tooltip_title <- sprintf(
-          "Normality Passed: %s%s\nStatistic: %s = %.4f\np-value = %.4f\nSample Size: n = %d\nWithin-group residuals appear to be normally distributed (p >= 0.05).%s",
+          "Normality Passed: %s%s\nStatistic: %s = %.4f\np-value = %.4f\nSample Size: n = %d\n%s show no significant departure from normality (p >= 0.05).%s",
           res$method,
           res_suffix,
           ifelse(grepl("Shapiro-Wilk", res$method), "W", "D"),
           res$statistic,
           res$p_value,
           res$n,
+          tested,
           group_breakdown
         )
       } else {
         icon_element <- shiny::icon("circle-exclamation", style = "color: var(--mn-warn); font-size: 13px; cursor: help;")
         p_str <- if (res$p_value < 0.0001) "< 0.0001" else sprintf("= %.4f", res$p_value)
         tooltip_title <- sprintf(
-          "Normality Failed: %s%s\nStatistic: %s = %.4f\np-value %s\nSample Size: n = %d\nWithin-group residuals deviate significantly from normality (p < 0.05).%s",
+          "Normality Failed: %s%s\nStatistic: %s = %.4f\np-value %s\nSample Size: n = %d\n%s deviate significantly from normality (p < 0.05).%s",
           res$method,
           res_suffix,
           ifelse(grepl("Shapiro-Wilk", res$method), "W", "D"),
           res$statistic,
           p_str,
           res$n,
+          tested,
           group_breakdown
         )
       }
@@ -1083,7 +1087,7 @@ desc_exploratory_server <- function(id, data_reactive, vars_metadata_reactive,
           p <- generate_pca_biplot_3d(displayed, aligned_df, pc_x = input$pca_pc_x, pc_y = input$pca_pc_y, pc_z = input$pca_pc_z, group_col="group_id")
        }
           # The columns left out for having no variance travel with the figure,
-          # including the PNG the expand modal downloads.
+          # including the PNG the expanded interactive view saves (ggplotly_smart).
           dc <- pca_rv$dropped_constant
           if (inherits(p, "ggplot") && length(dc)) {
             p <- p + labs(caption = paste(c(p$labels$caption,

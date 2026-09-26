@@ -72,6 +72,13 @@ All notable changes to Monolith are documented in this file.
 - **The sidebar's Auto-mode buffer preview is the buffer the run uses**: it is measured on the run's own point set (working CRS, co-located samples merged, the covariate-complete rows for RK and RFK), not on raw rows in the Target Mapping CRS.
 - **The RFK uncertainty option no longer claims calibration**: "Infinitesimal Jackknife" estimates the variance of the ensemble-mean prediction, and the ensemble spread measures model instability; neither is a calibrated interval.
 - **LOOCV and random folds are described as approximately unbiased for a simple random sample and conservative on a regular grid**, where a held-out point is a full grid spacing from its neighbours while map cells are closer (README, both guides, the CV-strategy tooltip).
+- **The expanded Interactive view keeps a figure's subtitle and caption**, wrapped under its title, so the PNG its camera icon saves carries the complete-case sample, the variables a PCA excluded and the estimator notes. Facet labels wrap to their panel's width, with room above each row (CK cross-variograms, RF variable importance, CV Distance Match).
+- **Grouping Variables accept at most five**, as labelled.
+- **Governing Factors uses the suite's display labels**: a label two columns share shows the column name in brackets, as on the other analytics tabs.
+- **The Correlogram names a constant variable** instead of dropping its cells; the Correlation Network title states the |r| ≥ threshold rule it applies, and the normality tooltip names whether raw values or within-group residuals were tested.
+- **An empty Locality box runs every locality.** Run Interpolation, OPTIMIZE ALL VARIOGRAMS, the resolution suggestion, the sidebar buffer table and the tuning-locality lists ignored a cleared box instead of treating it as all localities.
+- **The collinearity dialog is described as it behaves**: every RK, RFK or CK run is screened and asked again. The Target-CRS notification on a new upload no longer says grid resolution and buffer distances are produced in the target system; the header's documentation button is labelled as such.
+- **The README matches the interface and the code**: the tab names, the Point buffer boundary (a disc around each sample), the required locality column, heterotopic CK covariates, where run progress is shown, GeoTIFFs in the Target Mapping CRS, the Linux system libraries the CI installs, and the golden-fixture example.
 
 ### Testing
 - **New `test-knndm.R`** checks kNNDM against its definitions, brute force and an independent merge, and the cell tree against the exact Ward tree. It also covers the engines and the driver; the classification, Moran and app-smoke tests cover the suite's folds, the Moran reading and the selector.
@@ -82,7 +89,7 @@ All notable changes to Monolith are documented in this file.
 - **Classification by location**: every row repeated three times reproduces the run of its locations exactly under Standard, Spatial and kNNDM folds, with and without covariates; the majority and tie rules are checked on worked examples and, on random replicated labels, against their definition. **New `test-export-registry.R`** drives the export chunk: colliding names keep separate entries and Quick Export selects its own item.
 - **The covariate IDW fallback** under three row orders of a repeated location (gstat's own outcome there depends on LAPACK rounding), on a solve that returns no prediction, and per RK/RFK fold.
 - **Exported class legends**: a masked surface with an absent class, as one map and as Actual vs Predicted, under Agronomical and Binned styling.
-- **5,878 passed, 0 failed, 0 skipped (1 package-version warning)**
+- **5,884 passed, 0 failed, 0 skipped (1 package-version warning, takes 25-30 minutes in a low to mid-range device)**
 
 ## [1.1.3] - 2026-09-23 - Variogram auto-fit ranking and diagnostic range / Complete run archive and lifecycle restoration / Scientific metric precision and zero-span validation / Unified Actual-Predicted engine separation / GeoTIFF metadata tags and export packaging / PCA collinearity guards and DataTables alignment / Run dispatch latency and worker pool footprint / Session memory retention / Test-suite overhaul / Column names with units or spaces / Per-surface class breaks / Exact natural breaks / Out-of-bag Governing Factors importance / Seeded RFK forest
 

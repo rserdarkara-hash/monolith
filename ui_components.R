@@ -600,10 +600,8 @@ register_expanded_modal <- function(input, output, session, btn_id, mode_id, ui_
       }
       upper <- max(d$value, na.rm = TRUE)
       if (!is.finite(upper) || upper <= 0) upper <- 1
-      title <- htmltools::htmlEscape(p$labels$title)
-      if (nzchar(p$labels$caption %||% "")) title <- paste0(title, "<br><sup>",
-        gsub("\n", "<br>", htmltools::htmlEscape(p$labels$caption), fixed = TRUE), "</sup>")
-      fig <- plotly::layout(fig, 
+      title <- plotly_title_html(p)
+      fig <- plotly::layout(fig,
                             polar = list(radialaxis = list(visible = TRUE, range = c(0, upper))),
                             showlegend = TRUE, 
                             legend = list(title = list(text = htmltools::htmlEscape(p$labels$colour %||% "Group"))),

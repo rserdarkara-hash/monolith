@@ -225,7 +225,7 @@ output$idw_metrics_table <- renderTable({
 # would reset the user's pick to the first locality.
 tuning_selector_choices <- list()
 observeEvent(list(input$locality, rv$user_data, rv$mapping$loc), {
-  req(input$locality, rv$user_data, rv$mapping$loc)
+  req(rv$user_data, rv$mapping$loc)
   locs <- resolve_selected_localities(
     input$locality,
     rv$user_data,
@@ -529,7 +529,7 @@ output$tps_m_note <- renderUI({
 })
 
 observeEvent(input$auto_fit, {
-  req(rv$user_data, input$locality, rv$mapping$x, rv$mapping$y, rv$mapping$crs)
+  req(rv$user_data, rv$mapping$x, rv$mapping$y, rv$mapping$crs)
   locs <- resolve_selected_localities(
     input$locality,
     rv$user_data,
