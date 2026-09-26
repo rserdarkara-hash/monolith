@@ -22,7 +22,7 @@
 # fixed numbers, and skip rather than fail if a run does not complete in time.
 #
 # The whole file self-skips unless a Chromium-based browser and shinytest2 are
-# available (CI has neither, and CI expansion is a standing decision).
+# available. CI deliberately skips this file; local runs exercise the browser.
 
 skip_if_not_installed("shinytest2")
 skip_if_not_installed("chromote")

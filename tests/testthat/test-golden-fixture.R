@@ -16,6 +16,53 @@
 
 # ── Requirements every golden set must meet ────────────────────────────────
 
+test_that("property-based golden selectors are invariant to locality names", {
+  for (scope in c("full", "core", "tiny")) {
+    d <- golden_soil(scope)
+    names_map <- setNames(paste0("Renamed site ", seq_along(unique(d$locality))), unique(d$locality))
+    renamed <- d
+    renamed$locality <- unname(names_map[d$locality])
+    for (property in c("smallest", "largest", "compact")) {
+      original <- golden_locality(scope, property, data = d)
+      changed <- golden_locality(scope, property, data = renamed)
+      expect_identical(changed, unname(names_map[original]))
+      expect_identical(d$sample_no[d$locality == original], renamed$sample_no[renamed$locality == changed])
+    }
+  }
+  expect_error(golden_locality("tiny", min_n = nrow(golden_soil("full")) + 1L), "at least")
+  compact <- golden_locality("full", "compact")
+  expect_false(identical(golden_locality("full", "compact", exclude = compact), compact))
+})
+
+test_that("the fixture generator maps ordered role vectors and derives named scopes", {
+  generator <- new.env(parent = globalenv())
+  source(file.path(proj_root, "tests", "testthat", "fixtures", "make_golden.R"), local = generator)
+  withr::local_dir(proj_root)
+  d <- golden_soil("full")
+  sites <- unique(d$locality)
+  d$locality <- paste0("Site", match(d$locality, sites))
+  names(d)[names(d) == "ph"] <- "Laboratory pH"
+  names(d)[names(d) == "som"] <- "Carbon content"
+  roles <- generator$.golden_default_roles()
+  roles$soil[roles$soil == "ph"] <- "Laboratory pH"
+  roles$soil[roles$soil == "som"] <- "Carbon content"
+  roles$crs <- golden_meta()$crs
+  tmp <- withr::local_tempdir()
+  input <- file.path(tmp, "source.xlsx")
+  openxlsx::write.xlsx(d, input)
+  out <- file.path(tmp, "fixture")
+  generator$make_golden(input, src_meta = NULL, out_dir = out, roles = roles)
+  mapped <- readRDS(file.path(out, "golden_soil.rds"))
+  idx <- match(mapped$sample_no, d$sample_no)
+  expect_equal(mapped$ph, d[["Laboratory pH"]][idx], tolerance = 1e-12)
+  expect_equal(mapped$som, d[["Carbon content"]][idx], tolerance = 1e-12)
+  meta <- readRDS(file.path(out, "golden_meta.rds"))
+  expect_true(all(names(meta$scopes$core) %in% d$locality))
+  expect_true(all(names(meta$scopes$tiny) %in% d$locality))
+  expect_identical(meta$scopes, generator$.golden_default_scopes(mapped))
+  expect_error(generator$make_golden(input, out_dir = out, roles = list(target = "Laboratory pH")), "Unknown roles")
+})
+
 test_that("the golden table has the canonical columns and no missing values", {
   gs <- golden_soil("full")
   meta <- golden_meta()

@@ -199,11 +199,11 @@ test_that("clustered samples under a wide map get spatial folds at the minimum W
 })
 
 test_that("where no cluster partition beats random folds, kNNDM keeps the random folds", {
-  # Kale under the buffered boundary an Ordinary Kriging run draws (the
+  # The compact locality under the buffered boundary an Ordinary Kriging run draws (the
   # concave hull widened by the dynamic buffer, 3 x half the mean
   # nearest-neighbour spacing): the gate only just rejects, and every cut of
   # the published candidate set matches the map worse than random folds do.
-  pts <- golden_sf("full", localities = "Kale")
+  pts <- golden_sf("full", localities = golden_case("knndm_random")$locality)
   xy <- sf::st_coordinates(pts)[, 1:2]
   n <- nrow(xy)
   hull <- sf::st_geometry(concaveman::concaveman(pts))
@@ -458,7 +458,7 @@ test_that("every engine folds under kNNDM, IDW's nested selection included", {
 })
 
 test_that("the regional driver runs kNNDM against its boundary and logs the design", {
-  pts <- golden_sf("core", localities = "Altinova")
+  pts <- golden_sf("core", localities = golden_locality("core", "largest", min_n = 30L))
   co <- sf::st_coordinates(pts)
   pts_data <- data.frame(x = co[, 1], y = co[, 2], v = pts$ph, pv = NA_real_, Locality = "golden")
   item <- list(l = "golden", pts_data = pts_data,

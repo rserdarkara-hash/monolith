@@ -255,7 +255,7 @@ Two equally valid ways to obtain Monolith:
 
 ### 3. Package Dependencies
 
-Monolith depends on **64 packages** for its spatial engine, statistical analytics, and user interface, all pinned in `renv.lock` (see [Reproducible installation](#reproducible-installation-with-renv-optional)): 63 from CRAN, and `leaflet.extras` from its GitHub repository at a pinned commit.
+Monolith depends on **64 packages** for its spatial engine, statistical analytics, and user interface, all pinned in `renv.lock` (see [Reproducible installation](#reproducible-installation-with-renv-optional)): 63 from CRAN, and [leaflet.extras](https://github.com/leaflet-extras) from its GitHub repository at a pinned commit.
 
 > **Deciding to install the dependencies:** `global.R` checks the suite at startup, names anything missing, and offers two routes rather than installing on its own:
 
@@ -433,7 +433,7 @@ Sample datasets in [sample_data/](sample_data/) let you exercise every module wi
 
 ## Testing and Reproducibility
 
-Monolith ships with a `testthat` suite of 5,732 assertions across 36 test files, covering the interpolation pipeline, cross-validation metrics, variogram fitting, the classification engine, the descriptive/correlation/PCA plot builders, metadata matching and the Governing Factors module. Where a quantity has an external or closed-form reference, the tests assert against that rather than against the app's own output: IDW against the hand-written Shepard sum, Ordinary Kriging against its exactness and pure-nugget closed forms, RK and RFK against the trend-plus-kriged-residual decomposition, VIF against `1/(1 - R²)` from an actual regression, Moran's I against a hand-built weight matrix, the classification and agreement metrics against a hand-built confusion matrix, the agronomical class bins against `terra::classify`'s own output, the PCA spectrum against the eigenvalues of the correlation and covariance matrices, Lin's CCC against a value computed independently with `DescTools`, and the plotted variogram curves against `gstat::variogramLine`. Those tests run on a frozen extract of the sample survey (`tests/testthat/fixtures/`), so their inputs never move and a changed number means the code changed; that directory's `GOLDEN_MANIFEST.md` states what a green suite does and does not establish, and how to substitute your own golden dataset without editing a single test. A separate file boots the assembled application in a headless browser through `shinytest2` and checks the shell (server initialisation, input identifiers, tab wiring, documentation drawer); it skips itself when `shinytest2` or a Chromium-based browser is unavailable. The suite runs on every push through GitHub Actions against the pinned `renv.lock` environment, on Linux and on Windows - the platform is not incidental, since one recorded value was once resolved differently by the two platforms' floating-point paths. A second, weekly workflow (`upstream.yaml`) runs the same suite against the current CRAN releases instead of the pinned ones, so a change in an upstream package that moves one of the recorded values is reported as upstream news rather than being discovered months later; it never gates a pull request. To run everything from the project root:
+Monolith ships with a `testthat` suite of 5,878 assertions across 36 test files, covering the interpolation pipeline, cross-validation metrics, variogram fitting, the classification engine, the descriptive/correlation/PCA plot builders, metadata matching and the Governing Factors module. Where a quantity has an external or closed-form reference, the tests assert against that rather than against the app's own output: IDW against the hand-written Shepard sum, Ordinary Kriging against its exactness and pure-nugget closed forms, RK and RFK against the trend-plus-kriged-residual decomposition, VIF against `1/(1 - R²)` from an actual regression, Moran's I against a hand-built weight matrix, the classification and agreement metrics against a hand-built confusion matrix, the agronomical class bins against `terra::classify`'s own output, the PCA spectrum against the eigenvalues of the correlation and covariance matrices, Lin's CCC against a value computed independently with `DescTools`, and the plotted variogram curves against `gstat::variogramLine`. Those tests run on a frozen extract of the sample survey (`tests/testthat/fixtures/`), so their inputs never move and a changed number means the code changed; that directory's `GOLDEN_MANIFEST.md` states what a green suite does and does not establish, and the required properties and metadata for a replacement golden dataset. A separate file boots the assembled application in a headless browser through `shinytest2` and checks the shell (server initialisation, input identifiers, tab wiring, documentation drawer); it skips itself when `shinytest2` or a Chromium-based browser is unavailable. The suite runs on every push through GitHub Actions against the pinned `renv.lock` environment, on Linux and on Windows - the platform is not incidental, since one recorded value was once resolved differently by the two platforms' floating-point paths. A second, weekly workflow (`upstream.yaml`) runs the same suite against the current CRAN releases instead of the pinned ones, so a change in an upstream package that moves one of the recorded values is reported as upstream news rather than being discovered months later; it never gates a pull request. To run everything from the project root:
 
 ```bash
 Rscript tests/testthat.R
@@ -443,14 +443,18 @@ The first run is slow because the harness sources the full application (all 64 p
 
 ### Freezing your own dataset as the reference
 
-The numeric layer is not tied to the shipped sample data. For a thesis, a submission or a regional survey you can freeze your own survey as the golden set, so the suite proves that your published numbers and surfaces do not drift as the code or the packages move underneath them.
+Custom golden fixtures are a developer extension. They must supply the full canonical column schema and satisfy the structural requirements in [GOLDEN_MANIFEST.md](tests/testthat/fixtures/GOLDEN_MANIFEST.md). Tests select localities by population size or spatial extent, and the localities on which they draw hull or buffered boundaries must be sampled densely and evenly enough for them. Method-specific cases can be supplied through fixture metadata (`test_cases`); the tests verify their required TPS, kNNDM and variogram behavior rather than assuming it from a place name. The recorded baselines guard the quantities the suite exercises, not every result of an external analysis.
 
 ```r
 source("tests/testthat/fixtures/make_golden.R")
 make_golden(src_data = "my_survey.xlsx",
+            src_meta = NULL,
             out_dir  = "tests/testthat/fixtures_mine",
             roles    = list(locality = "site", x = "easting", y = "northing",
-                            crs = 25832, target = "pH_lab", ...))
+                            crs = 25832,
+                            soil = c("pH_lab", "ec", "caco3", "som", "sand",
+                                     "silt", "clay", "tn", "p", "k", "ca",
+                                     "mg", "na", "fe", "cu", "zn", "mn")))
 
 # Point the suite at your fixture, then record its baselines. Do both from the
 # project root, and set the variable rather than the option if you prefer to run
@@ -461,7 +465,7 @@ source("tests/testthat/fixtures/make_baselines.R")
 
 The recorder runs the whole suite first and refuses to record anything from a failing tree. It records the few quantities that have no closed form (Jenks breaks, the iterative VIF drop order, the end-to-end surface digest) together with the R and package versions they were measured under. Commit `tests/testthat/fixtures_mine/` with your analysis and archive the repository; a reader can re-run the suite and get the same values.
 
-Not one test is edited: the rest recompute their reference from whatever data they are handed. `roles` must name every column the fixture expects, 17 soil properties, 6 prediction columns and 10 covariates, and [GOLDEN_MANIFEST.md](tests/testthat/fixtures/GOLDEN_MANIFEST.md) carries the full role table.
+The example maps `pH_lab` to the canonical `ph` column and assumes every other required column, except the named locality and coordinates, already uses its canonical name. Set the ordered `roles$soil`, `roles$pred` and `roles$covariates` vectors to map all 17 soil properties, 6 prediction columns and 10 covariates; a role name the generator does not define, such as a scalar `target`, is rejected. Name in `test_cases` any method-specific case your survey carries under other localities or variables, keep independently defined numerical expectations, and never bypass the recorder's test gate.
 
 ## Scope and Limitations
 

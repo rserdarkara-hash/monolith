@@ -94,18 +94,20 @@ melt_cormat <- function(cormat, value_name = "Corr") {
 # (model.matrix keeps factor controls and awkward column names working) — the
 # same fit lm() would produce, but computed once for all variables.
 #
-# Returns list(cormat, n, k, method, failed). `cormat` is NULL when the partial
-# correlation could not be computed; `failed` then names the offending columns
-# so the caller can abort instead of silently reporting raw correlations under
-# a "partial" label.
+# Returns list(cormat, n, k, df, method, failed, reason). For Pearson/Spearman,
+# k is the control design's rank minus its intercept, and df = n - k - 2.
+# `cormat` is NULL when the partial correlation could not be computed; `failed`
+# then names the offending columns and `reason` says why, so the caller can
+# abort (partial_correlation_refusal() words it) instead of silently reporting
+# raw correlations under a "partial" label.
 compute_partial_correlation <- function(df, vars, control_vars = NULL,
                                         method = "pearson") {
   vars <- unique(vars)
   # A variable must never control for itself: residualizing v against a set
   # containing v yields ~zero residuals and a NaN row.
   ctrl <- setdiff(unique(control_vars), vars)
-  out <- list(cormat = NULL, n = 0L, k = length(ctrl), method = method,
-              failed = character(0))
+  out <- list(cormat = NULL, n = 0L, k = length(ctrl), df = NA_integer_, method = method,
+              failed = character(0), reason = NULL)
 
   cols <- c(vars, ctrl)
   missing_cols <- setdiff(cols, colnames(df))
@@ -116,6 +118,7 @@ compute_partial_correlation <- function(df, vars, control_vars = NULL,
 
   d <- stats::na.omit(df[, cols, drop = FALSE])
   out$n <- nrow(d)
+  out$df <- out$n - out$k - 2L
   if (length(vars) < 2 || out$n < 3) return(out)
 
   if (length(ctrl) == 0) {
@@ -149,17 +152,62 @@ compute_partial_correlation <- function(df, vars, control_vars = NULL,
 
   fit_df <- d
   if (identical(method, "spearman")) fit_df[] <- lapply(d, rank)
-  resid_mat <- tryCatch({
+  rank_tol <- 1e-7  # stats::lm / base::qr rank tolerance
+  centre_scale <- function(m) {
+    m <- sweep(m, 2, colMeans(m), "-")
+    scale <- apply(abs(m), 2, max)
+    scale[scale == 0] <- 1
+    sweep(m, 2, scale, "/")
+  }
+  fit <- tryCatch({
     X <- stats::model.matrix(~ ., data = fit_df[, ctrl, drop = FALSE])
-    qr.resid(qr(X), as.matrix(fit_df[, vars, drop = FALSE]))
+    # The intercept and fitted subspace are unchanged. Centering and scaling
+    # keep measurement units or a large offset from determining numerical rank.
+    X <- cbind(`(Intercept)` = 1, centre_scale(X[, -1, drop = FALSE]))
+    Y <- centre_scale(as.matrix(fit_df[, vars, drop = FALSE]))
+    q <- qr(X, tol = rank_tol)
+    list(q = q, residuals = qr.resid(q, Y), targets = Y)
   }, error = function(e) NULL)
-  if (is.null(resid_mat)) {
+  if (is.null(fit)) {
     out$failed <- vars
     return(out)
   }
+  out$k <- fit$q$rank - 1L
+  out$df <- out$n - fit$q$rank - 1L
+  if (out$df <= 0L) {
+    out$reason <- "the controls leave no residual degrees of freedom"
+    return(out)
+  }
+  resid_mat <- fit$residuals
   colnames(resid_mat) <- vars
+  # Roundoff residuals from an exactly explained target are not information.
+  # Compare their norm with the original CENTRED target at the QR tolerance.
+  # The common rescaling keeps both norms invariant to units and offsets.
+  explained <- vapply(seq_along(vars), function(i) {
+    y <- fit$targets[, i]
+    scale <- max(abs(y))
+    if (!is.finite(scale) || scale == 0) return(TRUE)
+    sqrt(sum((resid_mat[, i] / scale)^2)) <= rank_tol * sqrt(sum((y / scale)^2))
+  }, logical(1))
+  if (any(explained)) {
+    out$failed <- vars[explained]
+    out$reason <- "no residual variation remains after controlling for the selected variables"
+    return(out)
+  }
   out$cormat <- stats::cor(resid_mat, method = "pearson")
   out
+}
+
+# The user-facing refusal for a compute_partial_correlation() result that has no
+# estimate, naming the offending variables by their display labels; NULL when
+# there is nothing to refuse. Shared by the partial-correlation plot and table.
+partial_correlation_refusal <- function(pc, labels = NULL) {
+  named <- paste(display_var_labels(pc$failed, labels), collapse = ", ")
+  if (!is.null(pc$reason)) {
+    paste0("Partial correlation is undefined", if (length(pc$failed)) paste0(" for ", named), ": ", pc$reason, ".")
+  } else if (length(pc$failed)) {
+    paste0("Could not partial out the control variables for ", named, ".")
+  }
 }
 
 # Map Viewer view id -> the surfaces it shows (`base`) and the layer drawn from
@@ -1294,16 +1342,25 @@ fuzzy_match_column <- function(act_name, user_cols) {
   return(NULL)
 }
 
-apply_labels_to_df <- function(df, vars, vars_metadata) {
-  if (is.null(df) || length(vars) == 0) return(df)
-  
-  labels <- get_var_labels(vars, vars_metadata)
-  for (i in seq_along(vars)) {
-    if (vars[i] %in% colnames(df)) {
-      colnames(df)[colnames(df) == vars[i]] <- labels[i]
-    }
+# A presentation map, never a rename of analysis columns. Ambiguous labels
+# include their source identifier; even a user label containing that suffix
+# cannot collide with another variable's displayed name.
+desc_var_labels <- function(vars, vars_metadata = NULL) {
+  vars <- unique(vars)
+  labels <- unname(get_var_labels(vars, vars_metadata))
+  repeat {
+    dup <- duplicated(labels) | duplicated(labels, fromLast = TRUE)
+    if (!any(dup)) break
+    labels[dup] <- paste0(labels[dup], " [", vars[dup], "]")
   }
-  return(df)
+  stats::setNames(labels, vars)
+}
+
+display_var_labels <- function(vars, labels = NULL) {
+  if (is.null(labels)) return(vars)
+  text <- unname(labels[vars])
+  text[is.na(text)] <- vars[is.na(text)]
+  text
 }
 
 filter_active_groups <- function(df, active_groups) {
@@ -1550,13 +1607,13 @@ discretize_numeric_var <- function(x, method = "median", custom_breaks = NULL, v
   } else if (method == "tertiles") {
     q <- quantile(x, probs = c(0, 1/3, 2/3, 1), na.rm = TRUE)
     q <- unique(q)
-    if (length(q) < 4) return(factor(rep(paste0(prefix, "Low Variation"), length(x))))
+    if (length(q) < 4) return(factor(ifelse(is.na(x), NA_character_, paste0(prefix, "Low Variation"))))
     lbls <- paste0(prefix, c("Low", "Medium", "High"))
     return(cut(x, breaks = q, include.lowest = TRUE, labels = lbls))
   } else if (method == "quintiles") {
     q <- quantile(x, probs = seq(0, 1, by = 0.2), na.rm = TRUE)
     q <- unique(q)
-    if (length(q) < 6) return(factor(rep(paste0(prefix, "Low Variation"), length(x))))
+    if (length(q) < 6) return(factor(ifelse(is.na(x), NA_character_, paste0(prefix, "Low Variation"))))
     lbls <- paste0(prefix, c("Q1", "Q2", "Q3", "Q4", "Q5"))
     return(cut(x, breaks = q, include.lowest = TRUE, labels = lbls))
   } else if (method == "custom" && !is.null(custom_breaks)) {
@@ -1606,11 +1663,12 @@ process_grouping_vars <- function(df, vars, types) {
 # per-group trend fits and PCA. The module keeps the reactive reads and the
 # formatting; the arithmetic lives here so it is reachable from the test suite.
 
-# Per-group summary plus a TOTAL row, at full precision (the module formats).
-# `x` and `group` are parallel vectors. Groups are formed the way aggregate()'s
-# formula interface does (rows with an NA in either vector are dropped), so
-# every group statistic is computed on complete pairs, while the TOTAL row
-# summarises every non-NA x regardless of its group, with the same statistics.
+# Per-group summary plus a pooled row, at full precision (the module formats).
+# `x` and `group` are parallel vectors. Each group is summarised on its rows
+# with both values present, while the pooled row summarises every non-NA x
+# regardless of its group, with the same statistics. `is_pooled` identifies the
+# pooled row; it is labelled TOTAL, or "TOTAL (pooled)" when a real group
+# already carries that name.
 # Beside the mean and SD, which a few outliers can move a long way, the table
 # carries their robust counterparts: the median, the quartiles (quantile type 7,
 # R's default, so it agrees with summary() elsewhere in the app), the IQR
@@ -1621,21 +1679,24 @@ DESC_SUMMARY_STATS <- c("Mean", "SD", "Median", "Q1", "Q3", "IQR", "MAD", "Min",
 
 desc_summary_table <- function(x, group) {
   stats_of <- function(v) {
+    if (!length(v)) return(c(n = 0L, stats::setNames(rep(NA_real_, length(DESC_SUMMARY_STATS)), DESC_SUMMARY_STATS)))
     q <- stats::quantile(v, c(0.25, 0.5, 0.75), type = 7, names = FALSE)
     c(n = length(v), Mean = mean(v), SD = stats::sd(v), Median = q[2],
       Q1 = q[1], Q3 = q[3], IQR = q[3] - q[1], MAD = stats::mad(v),
       Min = min(v), Max = max(v))
   }
-  agg <- stats::aggregate(x ~ group, data = data.frame(x = x, group = group),
-                          FUN = stats_of)
-  # aggregate() stores a vector-valued FUN as ONE matrix column, one row per group.
+  observed <- !is.na(x) & !is.na(group)
+  grouped <- split(x[observed], droplevels(factor(group[observed])))
   ok <- !is.na(x)
-  m <- rbind(agg$x, stats_of(x[ok]))
+  m <- do.call(rbind, c(lapply(grouped, stats_of), list(stats_of(x[ok]))))
   # unname(): with a single group a column of the statistics matrix is a
   # length-1 vector that still carries the COLUMN name, which data.frame()
   # would then adopt as the row name - and DT renders row names, so the default
   # "All" grouping showed a leading column reading "mean".
-  res <- data.frame(Group = c(as.character(agg[, 1]), "TOTAL"),
+  pooled_label <- "TOTAL"
+  while (pooled_label %in% as.character(group)) pooled_label <- paste0(pooled_label, " (pooled)")
+  res <- data.frame(Group = c(names(grouped), pooled_label),
+                    is_pooled = c(rep(FALSE, length(grouped)), TRUE),
                     Count = as.integer(unname(m[, "n"])),
                     row.names = NULL, stringsAsFactors = FALSE)
   for (s in DESC_SUMMARY_STATS) res[[s]] <- unname(m[, s])
@@ -1643,8 +1704,8 @@ desc_summary_table <- function(x, group) {
 }
 
 # Trend statistic per group for the scatter panel's fitted curve.
-# `groups` is the label vector to report on, in order; the literal "TOTAL"
-# means the whole frame rather than a subset. Groups with fewer than `min_n`
+# `groups` is the label vector to report on, in order; `pooled` explicitly
+# identifies rows fitted on the whole frame. Groups with fewer than `min_n`
 # rows, and any fit that errors, return NA for both columns.
 #
 # What each fit reports, and why they are not interchangeable:
@@ -1655,15 +1716,20 @@ desc_summary_table <- function(x, group) {
 #                         F test to report with it.
 #   gam                 - summary(gam)$r.sq (adjusted) and the smooth's p-value.
 desc_group_fit_stats <- function(df, x_var, y_var, fit, groups,
-                                 group_col = "group_id", min_n = 5) {
+                                 group_col = "group_id", min_n = 5,
+                                 pooled = rep(FALSE, length(groups))) {
+  stopifnot(length(pooled) == length(groups), !anyNA(pooled))
   f_pval <- function(s) {
     if (is.null(s$fstatistic)) return(NA_real_)
     unname(stats::pf(s$fstatistic[1], s$fstatistic[2], s$fstatistic[3], lower.tail = FALSE))
   }
   none <- c(r2 = NA_real_, p = NA_real_)
 
-  out <- lapply(as.character(groups), function(g) {
-    sub_df <- if (identical(g, "TOTAL")) df else df[as.character(df[[group_col]]) == g, , drop = FALSE]
+  out <- lapply(seq_along(groups), function(i) {
+    g <- as.character(groups[i])
+    keep <- !is.na(df[[group_col]]) & !is.na(g) & as.character(df[[group_col]]) == g
+    sub_df <- if (pooled[i]) df else df[keep, , drop = FALSE]
+    sub_df <- sub_df[stats::complete.cases(sub_df[, c(x_var, y_var), drop = FALSE]), , drop = FALSE]
     if (nrow(sub_df) < min_n) return(none)
     tryCatch({
       form_lin  <- stats::as.formula(paste0("`", y_var, "` ~ `", x_var, "`"))
@@ -1698,7 +1764,7 @@ desc_group_fit_stats <- function(df, x_var, y_var, fit, groups,
              p  = vapply(out, function(v) unname(v[["p"]]), numeric(1)))
 }
 
-# Complete-case PCA on `vars`, with the fitted frame relabelled to `labels`.
+# Complete-case PCA on source identifiers `vars`; `labels` describe refusals.
 # Returns the prcomp object, the frame it was fitted on, the row mask (so the
 # caller can align a grouping vector to it) and how many rows the complete-case
 # filter removed. `scale = TRUE` is a correlation PCA, FALSE a covariance PCA;
@@ -1706,12 +1772,16 @@ desc_group_fit_stats <- function(df, x_var, y_var, fit, groups,
 # A column with exactly or effectively no variance over those rows (the
 # engines' own rule, .is_degenerate_covariate) carries no information and
 # cannot be standardised, so it is left out and named; the remaining columns
-# keep the requested scaling. Below two informative columns the PCA is refused:
-# `res` is NULL and `refusal` says why.
+# keep the requested scaling. Below five complete rows or two informative
+# columns the PCA is refused: `res` is NULL and `refusal` says why.
 desc_pca_fit <- function(df, vars, labels = vars, scale = TRUE) {
   keep <- stats::complete.cases(df[, vars, drop = FALSE])
   df_clean <- df[keep, vars, drop = FALSE]
-  colnames(df_clean) <- labels
+  if (nrow(df_clean) < 5L) {
+    return(list(res = NULL, data = df_clean, keep = keep, dropped = nrow(df) - nrow(df_clean),
+                dropped_constant = character(0),
+                refusal = sprintf("PCA needs at least 5 complete observations across the selected variables; %d remain.", nrow(df_clean))))
+  }
   informative <- vapply(df_clean, function(v) !.is_degenerate_covariate(v), logical(1))
   out <- list(res = NULL, data = df_clean[, informative, drop = FALSE], keep = keep,
               # `dropped` counts ROWS removed by the complete-case filter;

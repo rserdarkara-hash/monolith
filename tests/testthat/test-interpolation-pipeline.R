@@ -719,11 +719,12 @@ test_that("TPS and its GCV selection preserve geometry under rotation", {
 })
 
 test_that("TPS reports fitted smoothing, and GCV at the plane end says nothing lies beyond it", {
-  pts <- golden_sf("full", localities = "Tavas")
+  case <- golden_case("tps_plane")
+  pts <- golden_sf("full", localities = case$locality)
   dir <- tempfile("tps_report_"); dir.create(dir)
   withr::defer(unlink(dir, recursive = TRUE))
   withr::local_options(monolith_progress_dir = dir, monolith_session_id = "report")
-  res <- suppressWarnings(apply_TPS(pts, "ph", pts, list(tps_lambda = -1), "Tavas"))
+  res <- suppressWarnings(apply_TPS(pts, case$target, pts, list(tps_lambda = -1), "case"))
   expect_type(res$tps_fit$lambda, "double")
   expect_lt(res$tps_fit$eff_df, 3.5)
   # GCV's minimum is the grid's largest lambda, the least-squares plane.
@@ -736,7 +737,7 @@ test_that("TPS reports fitted smoothing, and GCV at the plane end says nothing l
   warnings <- list.files(dir, pattern = "^warn_", full.names = TRUE)
   expect_gt(length(warnings), 0)
   expect_match(paste(unlist(lapply(warnings, readLines)), collapse = " "), "GCV")
-  fixed <- suppressWarnings(apply_TPS(pts, "ph", pts, list(tps_lambda = 1e8), "Tavas"))
+  fixed <- suppressWarnings(apply_TPS(pts, case$target, pts, list(tps_lambda = 1e8), "case"))
   expect_match(fixed$log_msg, "Fixed lambda produced a near-planar TPS surface", fixed = TRUE)
   expect_false(grepl("GCV", fixed$log_msg))
   expect_null(fixed$tps_fit$gcv_end)
@@ -760,35 +761,37 @@ test_that("at GCV's least-smoothing end the run cross-validates exact interpolat
     }
     sqrt(mean((pts[[v]] - pred)^2))
   }
-  run <- function(loc, v) {
-    pts <- golden_sf("full", localities = loc)
-    list(pts = pts, res = suppressWarnings(apply_TPS(pts, v, pts, list(tps_lambda = -1, cv_strategy = "auto"), loc)))
+  run <- function(name) {
+    case <- golden_case(name)
+    pts <- golden_sf("full", localities = case$locality)
+    list(pts = pts, target = case$target,
+         res = suppressWarnings(apply_TPS(pts, case$target, pts, list(tps_lambda = -1, cv_strategy = "auto"), name)))
   }
 
-  # Acipayam CaCO3: the run's smoothing cross-validates better; a log line only.
-  a <- run("Acipayam", "caco3")
+  # The smoothing-better fixture case: the run's smoothing cross-validates better; a log line only.
+  a <- run("tps_smoothed_better")
   gcv <- a$res$tps_fit$gcv
   expect_equal(gcv$lambda[which.min(gcv$gcv)], min(gcv$lambda))
   expect_identical(a$res$tps_fit$gcv_end, "interpolation")
-  expect_equal(a$res$tps_fit$exact_cv_rmse, exact_cv(a$pts, "caco3"), tolerance = 1e-6)
+  expect_equal(a$res$tps_fit$exact_cv_rmse, exact_cv(a$pts, a$target), tolerance = 1e-6)
   expect_identical(a$res$tps_fit$run_cv_rmse, a$res$cv_metrics$rmse)
   expect_gt(a$res$tps_fit$exact_cv_rmse, a$res$tps_fit$run_cv_rmse)
-  expect_match(a$res$log_msg, "[TPS] Acipayam (Actual): GCV chose the least smoothing it can evaluate", fixed = TRUE)
+  expect_match(a$res$log_msg, "[TPS] tps_smoothed_better (Actual): GCV chose the least smoothing it can evaluate", fixed = TRUE)
   expect_match(a$res$log_msg, "this run's smoothing predicts them better", fixed = TRUE)
   expect_length(list.files(dir, pattern = "^warn_"), 0)
 
-  # Tavas Mn: exact interpolation cross-validates better; a warning on both channels.
-  t <- run("Tavas", "mn")
+  # The exact-better fixture case: exact interpolation cross-validates better; a warning on both channels.
+  t <- run("tps_exact_better")
   expect_identical(t$res$tps_fit$gcv_end, "interpolation")
-  expect_equal(t$res$tps_fit$exact_cv_rmse, exact_cv(t$pts, "mn"), tolerance = 1e-6)
+  expect_equal(t$res$tps_fit$exact_cv_rmse, exact_cv(t$pts, t$target), tolerance = 1e-6)
   expect_lt(t$res$tps_fit$exact_cv_rmse, t$res$tps_fit$run_cv_rmse)
-  expect_match(t$res$log_msg, "[WARN] Tavas (Actual): GCV chose the least smoothing", fixed = TRUE)
+  expect_match(t$res$log_msg, "[WARN] tps_exact_better (Actual): GCV chose the least smoothing", fixed = TRUE)
   expect_match(t$res$log_msg, "select Exact (λ = 0) under Smoothing (λ)", fixed = TRUE)
-  expect_match(paste(readLines(file.path(dir, "warn_end_Tavas_act.txt")), collapse = " "),
+  expect_match(paste(readLines(file.path(dir, "warn_end_tps_exact_better_act.txt")), collapse = " "),
                "select Exact (λ = 0)", fixed = TRUE)
 
   # A minimum inside the grid names no end and runs no comparison.
-  mid <- run("Acipayam", "ph")
+  mid <- run("tps_interior")
   expect_null(mid$res$tps_fit$gcv_end)
   expect_null(mid$res$tps_fit$exact_cv_rmse)
   expect_no_match(mid$res$log_msg, "least smoothing", fixed = TRUE)
@@ -1846,7 +1849,7 @@ test_that("covariate names that are not syntactic give the results of syntactic 
   # gstat (through sp) and randomForest's formula method re-read column names
   # through make.names(), so a lab header such as "Fe (mg/kg)" was "not found"
   # even when backticked: RK and RFK lost the locality, CK fell back to OK.
-  pts <- golden_sf("full", localities = "Kale")
+  pts <- golden_sf("full", localities = golden_locality("full", "compact", min_n = 30L))
   pts$v <- pts$ph
   grid <- make_test_grid_safe(pts, res = 150)
   lags <- calc_scientific_lags(pts)
@@ -1896,12 +1899,16 @@ test_that("an RFK surface does not depend on the other localities of the run", {
   }
   run <- function(items) {
     furrr::future_map(items, function(it) suppressWarnings(run_regional_interpolation(
-      it, "RFK", 32635, c("fe", "mg", "k"), NULL, "convex", "fixed", 200,
-      "fixed", 150, "EPSG:32635", FALSE, "actual")),
+      it, "RFK", golden_meta()$crs, c("fe", "mg", "k"), NULL, "convex", "fixed", 200,
+      "fixed", 150, paste0("EPSG:", golden_meta()$crs), FALSE, "actual")),
       .options = furrr::furrr_options(seed = 12345))
   }
-  alone <- run(list(item_of("Kale")))[[1]]
-  second <- run(list(item_of("Tavas"), item_of("Kale")))[[2]]
+  # Both localities are sampled densely and evenly enough for the convex
+  # boundary this run draws.
+  site <- golden_locality("full", "compact", min_n = 30L)
+  other <- golden_locality("core", "smallest", min_n = 30L, exclude = site)
+  alone <- run(list(item_of(site)))[[1]]
+  second <- run(list(item_of(other), item_of(site)))[[2]]
   va <- terra::values(terra::unwrap(alone$r_a))
   vb <- terra::values(terra::unwrap(second$r_a))
   expect_equal(vb, va, tolerance = 0)
@@ -2418,7 +2425,8 @@ test_that("an uploaded boundary works as points, without a .prj, and is refused 
 })
 
 test_that("shared unnamed boundaries fall back per locality and explicit names win", {
-  pts <- golden_sf("full", localities = c("Kale", "Yorga"))
+  site <- golden_locality("full", "compact", min_n = 30L)
+  pts <- golden_sf("full", localities = c(site, golden_locality("core", "smallest", min_n = 30L, exclude = site)))
   items <- lapply(split(pts, pts$locality, drop = TRUE), function(p) {
     xy <- sf::st_coordinates(p)
     list(l = as.character(p$locality[1]),

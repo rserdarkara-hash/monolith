@@ -1,7 +1,8 @@
 # make_golden.R — build a golden fixture from a source dataset.
 #
-# Run from the project root. With no arguments it rebuilds the shipped fixture
-# from sample_data/ byte-for-byte:
+# Run from the project root. With no arguments it rebuilds the shipped point
+# data deterministically from sample_data/; metadata records the current schema
+# and build date:
 #
 #   "C:/Program Files/R/R-4.5.2/bin/Rscript.exe" tests/testthat/fixtures/make_golden.R
 #
@@ -14,15 +15,17 @@
 #     out_dir  = "tests/testthat/fixtures_mine",
 #     roles = list(
 #       locality = "site", x = "easting", y = "northing", crs = 25832,
-#       target = "pH_lab", target2 = "carbon", categorical = "usda_class",
+#       categorical = "usda_class",
+#       soil = c("pH_lab", "ec", "caco3", "carbon", "sand", "silt", "clay",
+#                "tn", "p", "k", "ca", "mg", "na", "fe", "cu", "zn", "mn"),
 #       covariates = c("dem", "slope", "twi", "ndvi", "temp", "precip",
 #                      "tpi", "tri", "ndvi_s2", "temp_warm")
 #     ))
 #
 # then point the suite at it and regenerate its baselines:
 #
-#   options(monolith_golden_dir = "tests/testthat/fixtures_mine")
-#   "…/Rscript.exe" tests/testthat/fixtures/make_baselines.R
+#   Sys.setenv(MONOLITH_GOLDEN_DIR = "tests/testthat/fixtures_mine")
+#   source("tests/testthat/fixtures/make_baselines.R")
 #
 # The canonical column names are the shipped survey's own (`ph`, `v82`, …), so
 # the tests can read them literally and stay readable. `roles` is what makes
@@ -55,7 +58,6 @@ suppressPackageStartupMessages({
     sample_no = "sample_no", locality = "locality", subset = "subset",
     data_from = "data_from", categorical = "texture",
     x = "x", y = "y", crs = 32635,
-    target = "ph", target2 = "som",
     soil = .GOLDEN_SOIL, pred = .GOLDEN_PRED, covariates = .GOLDEN_COVAR
   )
 }
@@ -106,15 +108,25 @@ suppressPackageStartupMessages({
 #'   canonically).
 #' @param scopes Optional explicit scope spec, list(core = list(<loc> = k),
 #'   tiny = list(<loc> = k)). NULL derives it.
+#' @param test_cases Optional named method-specific cases (locality, target),
+#'   documented in GOLDEN_MANIFEST.md. The suite verifies each required property.
 make_golden <- function(src_data = "sample_data/samp_data_1.xlsx",
                         src_meta = "sample_data/samp_var_list.xlsx",
                         out_dir = "tests/testthat/fixtures",
                         roles = list(),
-                        scopes = NULL) {
+                        scopes = NULL, test_cases = NULL) {
   if (!file.exists("global.R")) {
     stop("run make_golden.R from the project root (the directory holding global.R)")
   }
   r <- utils::modifyList(.golden_default_roles(), roles)
+  unknown <- setdiff(names(roles), names(.golden_default_roles()))
+  if (length(unknown)) stop("Unknown roles: ", paste(unknown, collapse = ", "),
+                            ". Map measured variables with the ordered soil, pred and covariates vectors.")
+  if (length(r$soil) != length(.GOLDEN_SOIL) || length(r$pred) != length(.GOLDEN_PRED) ||
+      length(r$covariates) != length(.GOLDEN_COVAR)) {
+    stop("roles must name ", length(.GOLDEN_SOIL), " soil, ", length(.GOLDEN_PRED),
+         " prediction and ", length(.GOLDEN_COVAR), " covariate columns")
+  }
   dir.create(out_dir, showWarnings = FALSE, recursive = TRUE)
 
   raw <- as.data.frame(read_excel(src_data, sheet = 1))
@@ -149,10 +161,11 @@ make_golden <- function(src_data = "sample_data/samp_data_1.xlsx",
     crs = r$crs,
     roles = r,
     scopes = scopes,
+    test_cases = test_cases,
     columns = list(keys = .GOLDEN_KEYS, coords = c("x", "y"),
                    soil = .GOLDEN_SOIL, pred = .GOLDEN_PRED,
                    covariates = .GOLDEN_COVAR,
-                   target = "ph", target2 = "som",
+                   target = "ph",
                    covariate_main = "v82", categorical = "texture"),
     source = list(data = src_data, meta = src_meta,
                   md5_data = unname(md5sum(src_data)),
@@ -170,6 +183,8 @@ make_golden <- function(src_data = "sample_data/samp_data_1.xlsx",
     vl <- as.data.frame(read_excel(src_meta, sheet = 1))
     names(vl) <- c("vn", "vid", "cat")
     for (n in names(vl)) vl[[n]] <- as.character(vl[[n]])
+    mapped <- match(vl$vn, src_cols)
+    vl$vn[!is.na(mapped)] <- dst_cols[mapped[!is.na(mapped)]]
     saveRDS(vl, file.path(out_dir, "golden_varlist.rds"), version = 3)
   }
 
@@ -189,7 +204,7 @@ make_golden <- function(src_data = "sample_data/samp_data_1.xlsx",
                               winslash = "/", mustWork = FALSE))) {
     cat("  Rscript tests/testthat/fixtures/make_baselines.R\n")
   } else {
-    cat("  Sys.setenv(MONOLITH_GOLDEN_DIR = \"", out_dir, "\")\n",
+    cat("  Sys.setenv(MONOLITH_GOLDEN_DIR = \"", normalizePath(out_dir, winslash = "/"), "\")\n",
         "  source(\"tests/testthat/fixtures/make_baselines.R\")\n",
         "(both from the project root; the variable must reach the recorder's own\n",
         "process, so a bare Rscript call would record against the shipped fixture)\n",

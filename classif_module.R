@@ -920,7 +920,7 @@ classif_server <- function(id, data_reactive, vars_metadata_reactive, spatial_re
     }, ignoreInit = TRUE)
 
     launch_run <- function(preds, flagged = character(0), vif_threshold = NULL) {
-      df <- data_reactive(); sp <- spatial_reactive()
+      sp <- spatial_reactive()
       if (length(preds) > 0 && length(setdiff(preds, flagged)) < 1) {
         shiny::showNotification("No covariates left after the collinearity drop.", type = "error"); return()
       }
@@ -1704,10 +1704,7 @@ classif_server <- function(id, data_reactive, vars_metadata_reactive, spatial_re
     # Stand-in for the entropy / probability panels while the 1-NN surface is
     # shown: that surface has no probabilities to draw.
     nn_na_plot <- function() {
-      ggplot2::ggplot() +
-        ggplot2::annotate("text", x = 0, y = 0, size = 4.5,
-                          label = "Not available for Spatial 1-NN:\nit assigns hard classes, with no probabilities.") +
-        ggplot2::theme_void()
+      sci_placeholder("Not available for Spatial 1-NN:\nit assigns hard classes, with no probabilities.", size = 4.5)
     }
     plot_entropy_map <- function(rl, export = FALSE, maxcell = 5e4) {
       if (is.null(rl$entropy)) return(nn_na_plot())

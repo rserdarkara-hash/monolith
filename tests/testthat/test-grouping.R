@@ -84,3 +84,15 @@ test_that("filter_active_groups returns all rows when active_groups is NULL", {
 test_that("filter_active_groups handles NULL df gracefully", {
   expect_null(filter_active_groups(NULL, c("A")))
 })
+test_that("collapsed quantile groups preserve missing assignments", {
+  x <- c(1, 1, 1, 2, NA_real_)
+  for (method in c("tertiles", "quintiles")) {
+    out <- discretize_numeric_var(x, method)
+    expect_identical(is.na(out), is.na(x))
+    expect_equal(length(unique(na.omit(out))), 1L)
+    d <- process_grouping_vars(data.frame(x = x, y = 1:5), "x", paste0("numeric_", method))
+    selected <- filter_active_groups(d, levels(d$group_id))
+    expect_equal(selected$y, 1:4)
+    expect_equal(tail(desc_summary_table(selected$y, selected$group_id)$Count, 1), 4)
+  }
+})

@@ -437,6 +437,106 @@ test_that("compute_partial_correlation reports missing columns instead of guessi
   expect_equal(pc$failed, "nope")
 })
 
+test_that("partial correlation refuses targets fully explained by the controls", {
+  z <- 1:20
+  d <- data.frame(a = z, b = 2 * z, z = z)
+  for (method in c("pearson", "spearman")) {
+    for (unit in c(1e-9, 1, 1e9)) {
+      scaled <- d
+      scaled$a <- scaled$a * unit
+      pc <- compute_partial_correlation(scaled, c("a", "b"), "z", method)
+      expect_null(pc$cormat)
+      expect_setequal(pc$failed, c("a", "b"))
+      expect_match(pc$reason, "residual variation")
+    }
+    d$b <- sin(z)
+    pc <- compute_partial_correlation(d, c("a", "b"), "z", method)
+    expect_null(pc$cormat)
+    expect_equal(pc$failed, "a")
+    d$b <- 2 * z
+  }
+})
+
+test_that("partial control degrees of freedom use the fitted design rank", {
+  z <- seq_len(14)
+  d <- data.frame(a = z + sin(z), b = z + cos(z), z = z,
+                  duplicate = z, constant = 3)
+  for (method in c("pearson", "spearman")) {
+    fit_data <- if (method == "spearman") as.data.frame(lapply(d, rank)) else d
+    ref_a <- lm(a ~ z + duplicate + constant, fit_data)
+    ref_b <- lm(b ~ z + duplicate + constant, fit_data)
+    pc <- compute_partial_correlation(d, c("a", "b"), c("z", "duplicate", "constant"), method)
+    expect_equal(pc$k, ref_a$rank - 1L)
+    expect_equal(pc$df, df.residual(ref_a) - 1L)
+    if (sd(residuals(ref_a)) > 1e-7 && sd(residuals(ref_b)) > 1e-7) {
+      expect_equal(unname(pc$cormat[1, 2]), cor(residuals(ref_a), residuals(ref_b)), tolerance = 1e-10)
+    } else expect_null(pc$cormat)
+  }
+  saturated <- data.frame(a = 1:4, b = c(2, 4, 1, 3), z1 = c(1, 0, 0, 0), z2 = c(0, 1, 0, 0))
+  pc <- compute_partial_correlation(saturated, c("a", "b"), c("z1", "z2"))
+  expect_null(pc$cormat)
+  expect_match(pc$reason, "degrees of freedom")
+})
+
+test_that("partial estimability and control rank are invariant to offsets and units", {
+  d <- data.frame(a = (1:30) + (1:30) %% 4, b = 2 * (1:30) + (1:30) %% 7, z = 1:30)
+  ref <- cor(residuals(lm(a ~ z, d)), residuals(lm(b ~ z, d)))
+  changed <- d
+  changed$a <- changed$a + 1e10
+  changed$b <- changed$b * 1e-9
+  changed$z <- changed$z + 1e10
+  pc <- compute_partial_correlation(changed, c("a", "b"), "z")
+  expect_equal(pc$k, 1L)
+  expect_equal(unname(pc$cormat[1, 2]), ref, tolerance = 1e-7)
+  expect_length(pc$failed, 0L)
+})
+
+test_that("descriptive naming mode cannot change correlation inputs", {
+  d <- data.frame(a = 1:8, b = c(1, 4, 2, 8, 5, 3, 7, 6), z = c(3, 1, 4, 2, 8, 5, 6, 7))
+  for (labels in list(c("Value", "Value", "Value"), c("b", "B label", "group_id"), c("z", "group_id", "Control"))) {
+    metadata <- Map(function(v, label) list(actual = v, label = label), names(d), labels)
+    shiny::testServer(desc_exploratory_server, args = list(
+      data_reactive = shiny::reactive(d), vars_metadata_reactive = shiny::reactive(metadata)
+    ), {
+      session$setInputs(name_mode = "label", corr_vars_multi = c("a", "b"),
+                        corr_vars_control = "z", corr_method = "pearson", corr_plot_type = "heatmap")
+      labelled <- corr_matrix_reactive()
+      expect_equal(unname(labelled[1, 2]), cor(d$a, d$b))
+      session$setInputs(name_mode = "colname")
+      expect_equal(unname(corr_matrix_reactive()), unname(labelled))
+      session$setInputs(name_mode = "label", corr_plot_type = "partial")
+      p <- corr_plot_obj()
+      ref <- cor(residuals(lm(a ~ z, d)), residuals(lm(b ~ z, d)))
+      expect_equal(p$data$pCorr[as.character(p$data$Var1) != as.character(p$data$Var2)], rep(ref, 2))
+    })
+  }
+})
+
+test_that("the partial-correlation table uses effective control df and refuses undefined results", {
+  d <- with_seed(739, {
+    z <- rnorm(14); a <- z + rnorm(14)
+    data.frame(a = a, b = 0.5 * a + rnorm(14), z = z, copy = z, constant = 7)
+  })
+  data <- shiny::reactiveVal(d)
+  shiny::testServer(desc_exploratory_server, args = list(
+    data_reactive = data, vars_metadata_reactive = shiny::reactive(NULL)
+  ), {
+    session$setInputs(corr_vars_multi = c("a", "b"), corr_vars_control = c("z", "copy", "constant"),
+                      corr_method = "pearson", corr_plot_type = "partial")
+    values <- jsonlite::fromJSON(output$corr_summary_table)$x$data[, 1]
+    ref_a <- lm(a ~ z + copy + constant, d)
+    r <- cor(residuals(ref_a), residuals(lm(b ~ z + copy + constant, d)))
+    df <- df.residual(ref_a) - 1L
+    p <- 2 * pt(-abs(r * sqrt(df / (1 - r^2))), df)
+    expect_equal(as.numeric(values[4]), r)
+    expect_equal(values[5], format.pval(p, digits = 3, eps = 0.001))
+    data(data.frame(a = 1:14, b = 2 * (1:14), z = 1:14, copy = 1:14, constant = 7))
+    session$flushReact()
+    values <- jsonlite::fromJSON(output$corr_summary_table)$x$data
+    expect_true(any(grepl("no residual variation", values)))
+  })
+})
+
 # ── compute/generate_spatial_cross_correlogram ─────────────────────────────
 
 test_that("the spatial cross-correlogram bins by DISTANCE, not by row order", {

@@ -17,9 +17,9 @@ test_that("the summary table reports per-group statistics and a TOTAL row", {
   # Independent reference: split the vector and summarise each piece.
   sp <- split(d$ph, d$locality)
   expect_equal(as.character(res$Group), c(names(sp), "TOTAL"))
-  expect_equal(names(res), c("Group", "Count", DESC_SUMMARY_STATS))
+  expect_equal(names(res), c("Group", "is_pooled", "Count", DESC_SUMMARY_STATS))
 
-  g <- res[res$Group != "TOTAL", ]
+  g <- res[!res$is_pooled, ]
   expect_equal(g$Count, unname(vapply(sp, length, integer(1))))
   # Values are the statistics themselves: the display formats them, so a
   # small-unit variable is not quantized before it reaches the reader.
@@ -30,7 +30,7 @@ test_that("the summary table reports per-group statistics and a TOTAL row", {
 
   # The TOTAL row summarises the pooled vector, not the group summaries: its
   # SD carries the between-group spread that a mean of group SDs would lose.
-  tot <- res[res$Group == "TOTAL", ]
+  tot <- res[res$is_pooled, ]
   expect_equal(tot$Count, length(d$ph))
   expect_equal(tot$Mean, mean(d$ph))
   expect_equal(tot$SD, stats::sd(d$ph))
@@ -114,8 +114,9 @@ test_that("group trend R2 equals summary(lm)$r.squared and its F-test p", {
   d <- golden_soil("core")
   d$group_id <- d$locality
   groups <- c(sort(unique(d$locality)), "TOTAL")
+  pooled_rows <- c(rep(FALSE, length(groups) - 1L), TRUE)
 
-  fits <- desc_group_fit_stats(d, "som", "ph", "linear", groups)
+  fits <- desc_group_fit_stats(d, "som", "ph", "linear", groups, pooled = pooled_rows)
   expect_equal(fits$Group, groups)
 
   for (g in groups) {
@@ -133,7 +134,7 @@ test_that("group trend R2 equals summary(lm)$r.squared and its F-test p", {
   }
 
   # The quadratic fit explains at least as much as the linear one nested in it.
-  poly_fits <- desc_group_fit_stats(d, "som", "ph", "polynomial", groups)
+  poly_fits <- desc_group_fit_stats(d, "som", "ph", "polynomial", groups, pooled = pooled_rows)
   expect_true(all(poly_fits$r2 >= fits$r2 - 1e-12))
 
   # Groups below the 5-row minimum report NA rather than an unstable fit.
@@ -152,8 +153,9 @@ test_that("the loess column is cor(y, fitted)^2 and carries no p-value", {
   d <- golden_soil("core")
   d$group_id <- d$locality
   groups <- c(sort(unique(d$locality)), "TOTAL")
+  pooled_rows <- c(rep(FALSE, length(groups) - 1L), TRUE)
 
-  fits <- desc_group_fit_stats(d, "som", "ph", "loess", groups)
+  fits <- desc_group_fit_stats(d, "som", "ph", "loess", groups, pooled = pooled_rows)
 
   for (g in groups) {
     sub <- if (g == "TOTAL") d else d[d$group_id == g, ]
@@ -170,7 +172,7 @@ test_that("the loess column is cor(y, fitted)^2 and carries no p-value", {
   # A local regression is at least as flexible as the global straight line, so
   # its squared correlation cannot be lower. It is NOT an R2 (the residuals are
   # not orthogonal to the fit), which is why the module labels it differently.
-  lin <- desc_group_fit_stats(d, "som", "ph", "linear", groups)
+  lin <- desc_group_fit_stats(d, "som", "ph", "linear", groups, pooled = pooled_rows)
   expect_true(all(fits$r2 >= lin$r2 - 1e-12))
 
   # A group carrying missing values still reports a number. loess drops the
@@ -180,7 +182,7 @@ test_that("the loess column is cor(y, fitted)^2 and carries no p-value", {
   dna <- d
   dna$ph[c(2, 7)] <- NA
   dna$som[11] <- NA
-  na_fit <- desc_group_fit_stats(dna, "som", "ph", "loess", "TOTAL")
+  na_fit <- desc_group_fit_stats(dna, "som", "ph", "loess", "TOTAL", pooled = TRUE)
   cc <- stats::complete.cases(dna[, c("som", "ph")])
   ref <- stats::loess(ph ~ som, data = dna[cc, ], span = 0.7)
   expect_equal(na_fit$r2, stats::cor(dna$ph[cc], stats::fitted(ref))^2, tolerance = 1e-8)
@@ -190,6 +192,48 @@ test_that("the loess column is cor(y, fitted)^2 and carries no p-value", {
 
 
 # ── desc_pca_fit ──────────────────────────────────────────────────────────
+
+test_that("a real TOTAL group and the pooled row have separate trend identities", {
+  d <- data.frame(x = rep(1:16, 2), y = c(1:16, rev(1:16)) + rep(sin(1:16) / 10, 2),
+                  group_id = rep(c("TOTAL", "B"), each = 16))
+  summary <- desc_summary_table(d$x, d$group_id)
+  expect_equal(sum(summary$is_pooled), 1)
+  expect_false(anyDuplicated(summary$Group) > 0)
+  for (fit in c("linear", "polynomial", "loess", "gam")) {
+    fits <- without_partial_match_notices(desc_group_fit_stats(
+      d, "x", "y", fit, summary$Group, pooled = summary$is_pooled))
+    g <- d[d$group_id == "TOTAL", ]
+    expected <- switch(fit,
+      linear = summary(lm(y ~ x, g))$r.squared,
+      polynomial = summary(lm(y ~ poly(x, 2), g))$r.squared,
+      loess = cor(g$y, fitted(loess(y ~ x, g, span = 0.7)))^2,
+      gam = without_partial_match_notices(summary(mgcv::gam(y ~ s(x, bs = "cs"), data = g)))$r.sq)
+    expect_equal(fits$r2[fits$Group == "TOTAL"], expected, tolerance = 1e-8)
+    # Compare the pooled fit to its own independent call on an ordinary group.
+    ref <- d
+    ref$group_id <- "all"
+    pooled <- without_partial_match_notices(desc_group_fit_stats(ref, "x", "y", fit, "all"))
+    expect_equal(fits$r2[summary$is_pooled], pooled$r2)
+  }
+  d$group_id[1] <- NA
+  fits <- desc_group_fit_stats(d, "x", "y", "linear", c(NA, "TOTAL"))
+  expect_true(is.na(fits$r2[1]))
+  expect_equal(fits$r2[2], cor(d$x[2:16], d$y[2:16])^2)
+})
+
+test_that("PCA refuses an insufficient complete population before fitting", {
+  d <- data.frame(a = c(1:10, rep(NA, 10)), b = c(rep(NA, 10), 1:10), c = 1:20)
+  fit <- desc_pca_fit(d, names(d))
+  expect_null(fit$res)
+  expect_match(fit$refusal, "complete")
+  shiny::testServer(desc_exploratory_server, args = list(
+    data_reactive = shiny::reactive(d), vars_metadata_reactive = shiny::reactive(NULL)
+  ), {
+    session$setInputs(pca_vars = names(d), run_pca_btn = 1)
+    expect_null(pca_rv$res)
+    expect_match(pca_rv$refusal, "complete")
+  })
+})
 
 test_that("PCA eigenvalues and variance shares match the correlation/covariance spectrum", {
   d <- golden_soil("core")
@@ -221,10 +265,9 @@ test_that("PCA eigenvalues and variance shares match the correlation/covariance 
     expect_true(all(diff(shares) <= 1e-12))   # components ordered by variance
   }
 
-  # Display labels reach the fitted object, which is what the biplot and the
-  # loadings table read their variable names from.
-  expect_equal(colnames(sc$data), labs)
-  expect_equal(rownames(sc$res$rotation), labs)
+  # Fits retain source IDs. Only the plotting copy is labelled by the module.
+  expect_equal(colnames(sc$data), vars)
+  expect_equal(rownames(sc$res$rotation), vars)
   expect_equal(sc$dropped, 0L)
   expect_equal(nrow(sc$data), nrow(d))
 

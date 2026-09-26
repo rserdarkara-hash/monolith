@@ -144,7 +144,7 @@ test_that("calc_moran reports E[I] = -1/(n-1) exactly", {
   # One locality: a slice spanning two distant survey areas gives a
   # disconnected kNN graph, which is a real condition but not the one under
   # test here.
-  alt <- golden_sf("full", localities = "Altinova")
+  alt <- golden_sf("full", localities = golden_locality("full", "largest", min_n = 137L))
   for (n in c(12, 40, 137)) {
     pts <- alt[seq_len(n), ]
     got <- calc_moran(pts$ph, sf::st_coordinates(pts))
@@ -231,7 +231,7 @@ test_that("the all-pairs fallback reports the same permutation test on its own w
 })
 
 test_that("structure raises I above E[I] and shuffling collapses it back", {
-  pts <- golden_sf("core", localities = "Yorga")
+  pts <- golden_sf("core", localities = golden_locality("core", "smallest", min_n = 30L))
   co <- sf::st_coordinates(pts)
   # A smooth planar field is maximally autocorrelated at this scale.
   grad <- co[, 1] * 1e-3 + co[, 2] * 1e-3

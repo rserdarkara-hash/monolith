@@ -5,8 +5,8 @@
 #   "C:/Program Files/R/R-4.5.2/bin/Rscript.exe" tests/testthat/fixtures/make_baselines.R
 #
 # Most of the suite needs nothing from this script: those tests recompute their
-# reference from whatever data they are handed, so they are correct for any
-# golden set. A few quantities have no closed form to check against - Jenks
+# reference from the data they are handed (GOLDEN_MANIFEST.md lists the
+# properties some of them require). A few quantities have no closed form to check against - Jenks
 # breaks, the VIF pruning order, the fixture's own identity, the end-to-end
 # surface digest - and those are recorded here, for THIS golden set.
 #

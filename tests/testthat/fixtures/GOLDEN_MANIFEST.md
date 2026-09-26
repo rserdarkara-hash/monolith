@@ -64,11 +64,11 @@ That argument lives in `docs/scientific_guide.md`.
 
 Three concrete limits:
 
-1. Coverage stops at the reactive layer. The arithmetic behind the Agreement
+1. Reactive coverage is selective. The arithmetic behind the Agreement
    (kappa) table and the descriptive / PCA panels is now reachable
    (`compute_agreement_metrics`, `desc_summary_table`, `desc_group_fit_stats`,
-   `desc_pca_fit`), but the render blocks that call them are not: a test cannot
-   prove the right locality subset or the right binning mode reaches them.
+   `desc_pca_fit`), with module tests for naming invariance, partial-correlation tables and PCA
+   availability. These do not exercise every locality, binning and export path.
 2. The end-to-end lock runs sequentially, so it does not cover the
    `future` / PSOCK dispatch layer.
 3. Where a statistical quantity has no exact answer (variogram parameter
@@ -180,8 +180,44 @@ once) but not a defect.
 
 ## Using your own golden set
 
-Nothing in the suite is edited. Build a fixture from your data, point the suite
-at it, record its baselines:
+Custom fixtures require the full canonical schema and the structural
+requirements above. Locality selectors use the fixture's scopes, row counts
+and spatial extents, with coordinate tie-breaks. The shipped populations stay
+fixed: smallest core locality (Yorga: 40 rows in core, 198 in full), largest
+core locality (Altinova: 60 in core), largest full locality (Altinova: 355),
+compact full locality with at least 30 rows (Kale: 79), and smallest full
+localities with at least 8 or 80 rows (Tavas: 13, Acipayam: 83). Names are
+not selection criteria.
+
+Tests draw hull and buffered boundaries on the compact full locality, the
+smallest and largest core localities and the tiny scope. In a replacement set
+these must be sampled densely and evenly enough for such boundaries, as Kale,
+Yorga and Altinova are here; sparse or unevenly sampled localities (Tavas,
+Acipayam, Beyagac, Karacasu here) suit only point buffers and are used by no
+test that draws a hull.
+
+Some tests require particular method behavior. `make_golden(test_cases = ...)`
+can name `list(locality = "my site", target = "canonical_column")` for
+`tps_plane` (GCV at the plane end), `tps_exact_better` (least-smoothing end
+with Exact winning the independent CV comparison), `tps_smoothed_better`
+(the same end with the selected smoothing winning), `tps_interior`
+(an interior GCV optimum) and `vgm_zero_nugget` (a variable whose variogram
+candidates, without the zero-nugget smooth rule, would select a Gaussian or
+Matérn structure at nugget 0 whose kriged surface leaves the observed range;
+the test krigs it inside the locality's convex hull). `knndm_random` names a
+locality whose buffered hull makes the seeded random partition better than
+every spatial candidate; it needs only `locality`. Defaults use the smallest
+population with at least 8 rows (plane: ph; exact-better: mn), the smallest
+with at least 80 rows (smoothed-better: caco3; interior: ph), and the compact
+population with at least 30 rows (kNNDM; zero-nugget variogram: caco3). Each
+test independently verifies its case property. A missing property is a test
+failure: supply a suitable case or a fixture that covers it. No test is
+silently skipped and the recorder's full-suite gate remains mandatory.
+
+The example below maps the locality, coordinates, two soil properties and ten
+covariates. Every other required source column must already have its canonical
+name, or be mapped through the corresponding ordered role vector. A role name
+the generator does not define, such as a scalar `target`, is rejected.
 
 ```r
 source("tests/testthat/fixtures/make_golden.R")
@@ -191,25 +227,30 @@ make_golden(
   out_dir  = "tests/testthat/fixtures_mine",
   roles = list(
     locality = "site", x = "easting", y = "northing", crs = 25832,
-    target = "pH_lab", target2 = "carbon", categorical = "usda_class",
+    categorical = "usda_class",
+    soil = c("pH_lab", "ec", "caco3", "carbon", "sand", "silt", "clay",
+             "tn", "p", "k", "ca", "mg", "na", "fe", "cu", "zn", "mn"),
     covariates = c("dem", "slope", "twi", "ndvi", "temp",
                    "precip", "tpi", "tri", "ndvi_s2", "temp_warm")
   ))
 ```
 
+then point the suite at it and record its baselines, both from the project
+root and in the same R session:
+
 ```r
-options(monolith_golden_dir = "tests/testthat/fixtures_mine")
+Sys.setenv(MONOLITH_GOLDEN_DIR = "tests/testthat/fixtures_mine")
+source("tests/testthat/fixtures/make_baselines.R")
 ```
 
-(or set `MONOLITH_GOLDEN_DIR` in the environment), then
-
-```
-Rscript tests/testthat/fixtures/make_baselines.R
-```
+A separate `Rscript tests/testthat/fixtures/make_baselines.R` sees the fixture
+only when `MONOLITH_GOLDEN_DIR` is set in the shell that launches it; an option
+set in another R session does not reach it, and the recorder would then record
+against the shipped fixture.
 
 Most of the suite needs no baselines at all: those tests recompute their
-reference from whatever data they are handed, so they are correct for any golden
-set. Only four quantities are recorded, because they have no closed form to
+reference from the fixture, subject to each test's input requirements. Only
+four quantities are recorded, because they have no closed form to
 check against — the fixture's identity, the VIF pruning order, the Jenks breaks
 and the end-to-end surface digest. Until they are recorded those tests skip
 rather than fail.

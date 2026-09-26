@@ -216,7 +216,9 @@ select_idw_power <- function(xy, v, strategy, nmax, seed = CV_FOLD_SEED, powers 
 #' with |r| > `pairwise_threshold`, drops degenerate (constant) covariates, then
 #' drops the highest-VIF covariate one at a time while any VIF exceeds
 #' `vif_threshold` (`Inf` = keep all). Returns `list(has_collinearity, pairs,
-#' kept, dropped, dropped_constant, dropped_vif)`.
+#' kept, dropped, dropped_constant, dropped_vif)`. A pair without a finite
+#' correlation (under two shared finite rows, or no variation on them) has
+#' nothing to screen and is skipped, never read as r = 0.
 detect_multicollinearity_engine <- function(df, vars = NULL, vif_threshold = 10, pairwise_threshold = 0.95) {
   # sf's geometry column is sticky under `[ , ]`, so an sf input would carry an
   # sfc into the degenerate scan (is.finite() on an sfc errors) and, if it ever
@@ -259,15 +261,20 @@ detect_multicollinearity_engine <- function(df, vars = NULL, vif_threshold = 10,
         # Pairwise deletion is right here: each cell is read on its own against
         # the threshold, nothing inverts this matrix, and a covariate measured
         # on a subset of the samples should still be screened on what it has.
-        cormat <- cor(df_clean[, valid_vars], use = "pairwise.complete.obs")
-        
+        pair_data <- df_clean[, valid_vars, drop = FALSE]
+        pair_data[] <- lapply(pair_data, function(v) { v[!is.finite(v)] <- NA_real_; v })
+        cormat <- withCallingHandlers(cor(pair_data, use = "pairwise.complete.obs"),
+          warning = function(w) {
+            if (grepl("standard deviation is zero", conditionMessage(w), fixed = TRUE)) invokeRestart("muffleWarning")
+          })
         for (i in 1:(length(valid_vars) - 1)) {
           for (j in (i + 1):length(valid_vars)) {
-            if (abs(cormat[i, j]) > pairwise_threshold) {
+            r <- cormat[i, j]
+            if (is.finite(r) && abs(r) > pairwise_threshold) {
               collinear_pairs <- rbind(collinear_pairs, data.frame(
                 var1 = valid_vars[i], 
                 var2 = valid_vars[j], 
-                r = cormat[i, j],
+                r = r,
                 stringsAsFactors = FALSE
               ))
             }
@@ -303,6 +310,13 @@ detect_multicollinearity_engine <- function(df, vars = NULL, vif_threshold = 10,
       if (length(kept) < 2) break
       df_clean_vif <- na.omit(df[, kept, drop = FALSE])
       if (nrow(df_clean_vif) < 3) break
+      constants <- kept[vapply(df_clean_vif, .is_degenerate_covariate, logical(1))]
+      if (length(constants)) {
+        dropped <- c(dropped, constants)
+        dropped_constant <- union(dropped_constant, constants)
+        kept <- setdiff(kept, constants)
+        next
+      }
 
       # Complete cases (na.omit above), not pairwise: this matrix gets inverted,
       # and cells estimated on different subsamples need not form a positive

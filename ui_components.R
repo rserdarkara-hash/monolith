@@ -584,18 +584,30 @@ register_expanded_modal <- function(input, output, session, btn_id, mode_id, ui_
   output[[plot_plotly_id]] <- plotly::renderPlotly({
     p <- build_fn()
     shiny::req(p)
-    if (radar_special && inherits(p, "ggplot") && nrow(p$data) > 0 && "variable" %in% colnames(p$data)) {
+    if (radar_special && inherits(p, "ggplot") && inherits(p$coordinates, "CoordPolar") &&
+        nrow(p$data) > 0 && "variable" %in% colnames(p$data)) {
       d <- p$data
-      fig <- plotly::plot_ly(type = 'scatterpolar', mode = 'lines+markers')
+      fig <- plotly::plot_ly(type = 'scatterpolar')
+      axis_labels <- p$scales$get_scales("x")$labels
       for(g in unique(d$group)) {
           dg <- d[d$group == g, ]
-          dg <- rbind(dg, dg[1, ])
-          fig <- plotly::add_trace(fig, r = dg$value, theta = dg$variable, name = g, fill = 'toself')
+          complete <- all(is.finite(dg$value))
+          if (complete) dg <- rbind(dg, dg[1, ])
+          theta <- if (is.function(axis_labels)) axis_labels(dg$variable) else dg$variable
+          fig <- plotly::add_trace(fig, r = dg$value, theta = theta, name = g,
+            mode = if (complete) 'lines+markers' else 'markers',
+            fill = if (complete) 'toself' else 'none')
       }
+      upper <- max(d$value, na.rm = TRUE)
+      if (!is.finite(upper) || upper <= 0) upper <- 1
+      title <- htmltools::htmlEscape(p$labels$title)
+      if (nzchar(p$labels$caption %||% "")) title <- paste0(title, "<br><sup>",
+        gsub("\n", "<br>", htmltools::htmlEscape(p$labels$caption), fixed = TRUE), "</sup>")
       fig <- plotly::layout(fig, 
-                            polar = list(radialaxis = list(visible = TRUE, range = c(0, max(d$value, na.rm=TRUE)))), 
+                            polar = list(radialaxis = list(visible = TRUE, range = c(0, upper))),
                             showlegend = TRUE, 
-                            title = list(text = "Radar Chart (Normalized Means)<br><sup>Note: Native plotly style used for interactive mode</sup>", x = 0.5))
+                            legend = list(title = list(text = htmltools::htmlEscape(p$labels$colour %||% "Group"))),
+                            title = list(text = title, x = 0.5))
       return(fig)
     }
     if (inherits(p, "ggplot")) ggplotly_smart(p) else p

@@ -25,12 +25,13 @@ gstat_idw_cv <- function(pts, folds, p, nmax) {
 }
 
 test_that("the kernel reproduces gstat's IDW cross-validation", {
-  # Leave-one-out on golden tiny for every power and neighbourhood; on the 198
-  # Yorga samples leave-one-out once (krige.cv costs one gstat call per fold)
-  # and the random and block 10-fold designs for every combination. The two
-  # ends of the family are among the powers.
+  # Leave-one-out on golden tiny for every power and neighbourhood; on core
+  # smallest locality, Auto and spatial-block folds for every combination, plus an explicit
+  # leave-one-out check. Auto also resolves to leave-one-out when that scope
+  # has at most 50 rows; the separate partition test below uses 60 rows to
+  # exercise random 10-fold. Both ends of the IDW family are among the powers.
   tiny <- idw_fixture("tiny")
-  yorga <- idw_fixture("core", "Yorga")
+  core_site <- idw_fixture("core", golden_locality("core", "smallest", min_n = 30L))
   powers <- c(0, 0.5, 2, 4.75, IDW_MAX_FINITE_POWER, Inf)
   check <- function(f, folds, p, nmax, label) {
     ref <- gstat_idw_cv(f$pts, folds, p, nmax)
@@ -40,11 +41,11 @@ test_that("the kernel reproduces gstat's IDW cross-validation", {
   for (p in powers) for (nmax in c(4, 12)) {
     check(tiny, seq_len(nrow(tiny$xy)), p, nmax, sprintf("tiny LOO p=%s nmax=%s", p, nmax))
     for (strategy in c("auto", "block")) {
-      folds <- make_cv_folds(yorga$xy, strategy, nrow(yorga$xy), CV_FOLD_SEED)
-      check(yorga, folds, p, nmax, sprintf("Yorga %s p=%s nmax=%s", strategy, p, nmax))
+      folds <- make_cv_folds(core_site$xy, strategy, nrow(core_site$xy), CV_FOLD_SEED)
+      check(core_site, folds, p, nmax, sprintf("core %s p=%s nmax=%s", strategy, p, nmax))
     }
   }
-  check(yorga, seq_len(nrow(yorga$xy)), 2, 12, "Yorga LOO p=2 nmax=12")
+  check(core_site, seq_len(nrow(core_site$xy)), 2, 12, "core LOO p=2 nmax=12")
 
   # A test location on a sample takes that sample's value, as gstat does.
   hit <- idw_kernel_predict(tiny$xy[-1, ], tiny$v[-1], tiny$xy[2, , drop = FALSE], c(1, 3), 12)
@@ -102,7 +103,7 @@ test_that("the power selection leaves the caller's RNG stream untouched", {
 })
 
 test_that("Auto (CV) re-selects the power in every fold from its own training rows", {
-  f <- idw_fixture("core", "Yorga")
+  f <- idw_fixture("core", golden_locality("core", "smallest", min_n = 30L))
   pts <- f$pts
   grid <- make_test_grid_safe(pts, res = 1500)
   mp <- list(idw_p = -1, idw_nmax = 12, cv_strategy = "block")
@@ -307,7 +308,7 @@ test_that("a steep power is read like the nearest-neighbour limit, and the log s
 })
 
 test_that("an unseparated Predicted surface takes the power the measured values select", {
-  f <- idw_fixture("core", "Yorga")
+  f <- idw_fixture("core", golden_locality("core", "smallest", min_n = 30L))
   pts <- f$pts
   pts$pv <- pts$ph + with_seed(3, rnorm(nrow(pts), 0, 0.2))
   grid <- make_test_grid_safe(pts, res = 1500)

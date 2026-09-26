@@ -924,9 +924,9 @@ hide_x_labels_if_crowded <- function(p, df, group_col) {
 
 # Variable-name x axes (parallel coordinates): the names are NOT in the
 # legend, so rotate rather than hide when crowded
-rotate_x_labels_if_crowded <- function(p, df, group_col) {
+rotate_x_labels_if_crowded <- function(p, df, group_col, labels = NULL) {
   if (is.null(group_col) || !group_col %in% colnames(df)) return(p)
-  lv <- unique(as.character(df[[group_col]]))
+  lv <- unique(display_var_labels(as.character(df[[group_col]]), labels))
   lv <- lv[!is.na(lv)]
   if (length(lv) >= 6 || (length(lv) > 1 && max(nchar(lv)) > 12)) {
     p <- p + theme(axis.text.x = element_text(angle = 45, hjust = 1, vjust = 1))
@@ -934,7 +934,7 @@ rotate_x_labels_if_crowded <- function(p, df, group_col) {
   return(p)
 }
 
-generate_core_plot <- function(df, var_name, y_var = NULL, group_col = NULL, plot_type = "histogram", scatter_fit = "none", stat_test = NULL, stat_letter_pos = "above") {
+generate_core_plot <- function(df, var_name, y_var = NULL, group_col = NULL, plot_type = "histogram", scatter_fit = "none", stat_test = NULL, stat_letter_pos = "above", labels = NULL, group_label = "Group") {
 
 
   
@@ -943,9 +943,7 @@ generate_core_plot <- function(df, var_name, y_var = NULL, group_col = NULL, plo
     group_col <- "group_id"
   }
   
-  if (!"index_seq" %in% colnames(df)) df$index_seq <- seq_len(nrow(df))
-  
-  p <- ggplot() + theme_minimal()
+  df$index_seq <- seq_len(nrow(df))
   
   if (plot_type %in% c("boxplot", "violin") && !is.null(y_var) && y_var != "") {
 
@@ -956,8 +954,8 @@ generate_core_plot <- function(df, var_name, y_var = NULL, group_col = NULL, plo
     } else {
       p <- ggplot(df_long, aes(x = .data[[group_col]], y = Value, fill = .data[[group_col]])) + geom_violin(alpha = 0.7)
     }
-    p <- p + facet_wrap(~Variable, scales = "free_y") + theme_minimal() +
-         labs(title = paste(tools::toTitleCase(plot_type), "Comparison"), x = "Group", y = "Value", fill = "Group")
+    p <- p + facet_wrap(~Variable, scales = "free_y", labeller = as_labeller(function(v) display_var_labels(v, labels))) + theme_minimal() +
+         labs(title = paste(tools::toTitleCase(plot_type), "Comparison"), y = "Value")
     p <- add_stat_layer(p, df_long, "Value", group_col, stat_test, stat_letter_pos, facet_var = "Variable")
     p <- hide_x_labels_if_crowded(p, df_long, group_col)
   } else {
@@ -975,7 +973,6 @@ generate_core_plot <- function(df, var_name, y_var = NULL, group_col = NULL, plo
       if (!is.null(y_var) && y_var %in% colnames(df) && y_var != "") {
         p <- p + geom_point(aes(x = .data[[var_name]], y = .data[[y_var]], color = .data[[group_col]]), alpha = 0.8)
       } else {
-        df$index_seq <- seq_len(nrow(df))
         p <- p + geom_point(aes(x = .data[["index_seq"]], y = .data[[var_name]], color = .data[[group_col]]), alpha = 0.8)
       }
       
@@ -1004,14 +1001,18 @@ generate_core_plot <- function(df, var_name, y_var = NULL, group_col = NULL, plo
       p <- hide_x_labels_if_crowded(p, df, group_col)
     }
     
-    p <- p + labs(title = paste(tools::toTitleCase(plot_type), "of", var_name),
-                  fill = "Group", color = "Group")
+    p <- p + labs(title = paste(tools::toTitleCase(plot_type), "of", display_var_labels(var_name, labels)))
   }
-  
+  # Grouping and axis labels for every branch, from the selected context.
+  paired <- is_valid_col_ref(y_var)
+  p <- p + labs(fill = group_label, color = group_label,
+    x = if (plot_type %in% c("boxplot", "violin")) group_label else if (plot_type == "scatter" && !paired) "Observation index" else display_var_labels(var_name, labels))
+  if (plot_type == "scatter") p <- p + labs(y = display_var_labels(if (paired) y_var else var_name, labels))
+  if (plot_type %in% c("boxplot", "violin") && !paired) p <- p + labs(y = display_var_labels(var_name, labels))
   return(p)
 }
 
-generate_ghosted_plot <- function(df_global, df_local, var_name, y_var = NULL, group_col = NULL, plot_type = "histogram") {
+generate_ghosted_plot <- function(df_global, df_local, var_name, y_var = NULL, group_col = NULL, plot_type = "histogram", labels = NULL, group_label = "Group") {
 
   
   if (is.null(group_col) || !group_col %in% colnames(df_local)) {
@@ -1049,8 +1050,12 @@ generate_ghosted_plot <- function(df_global, df_local, var_name, y_var = NULL, g
              stat_ecdf(data = df_local, aes(x = .data[[var_name]], color = .data[[group_col]]), geom = "step", linewidth = 1)
   }
   
-  p <- p + labs(title = paste("Ghosted", tools::toTitleCase(plot_type), "of", var_name),
-                x = var_name, fill = "Group", color = "Group")
+  paired <- is_valid_col_ref(y_var)
+  p <- p + labs(title = paste("Ghosted", tools::toTitleCase(plot_type), "of", display_var_labels(var_name, labels)),
+    x = if (plot_type %in% c("boxplot", "violin")) group_label else if (plot_type == "scatter" && !paired) "Observation index" else display_var_labels(var_name, labels),
+    fill = group_label, color = group_label)
+  if (plot_type %in% c("boxplot", "violin", "scatter")) p <- p + labs(
+    y = display_var_labels(if (plot_type == "scatter" && paired) y_var else var_name, labels))
 
   if (plot_type %in% c("boxplot", "violin")) {
     p <- hide_x_labels_if_crowded(p, df_local, group_col)
@@ -1059,7 +1064,7 @@ generate_ghosted_plot <- function(df_global, df_local, var_name, y_var = NULL, g
   return(p)
 }
 
-generate_advanced_plot <- function(df, vars, group_col = NULL, plot_type = "qq", xyz_fit = "linear", stat_test = NULL, stat_letter_pos = "above") {
+generate_advanced_plot <- function(df, vars, group_col = NULL, plot_type = "qq", xyz_fit = "linear", stat_test = NULL, stat_letter_pos = "above", labels = NULL, group_label = "Group") {
 
 
   
@@ -1068,21 +1073,41 @@ generate_advanced_plot <- function(df, vars, group_col = NULL, plot_type = "qq",
     group_col <- "group_id"
   }
   
-  p <- ggplot() + theme_minimal()
+  p <- ggplot()
   v1 <- if(length(vars) > 0 && isTruthy(vars[1]) && vars[1] != "") vars[1] else NULL
   v2 <- if(length(vars) > 1 && isTruthy(vars[2]) && vars[2] != "") vars[2] else NULL
   v3 <- if(length(vars) > 2 && isTruthy(vars[3]) && vars[3] != "") vars[3] else NULL
+  unavailable <- character(0)
+  if (plot_type %in% c("parallel", "radar")) {
+    unavailable <- vars[!vapply(df[, vars, drop = FALSE], function(v) any(is.finite(v)), logical(1))]
+    minimum <- if (plot_type == "radar") 3L else 2L
+    if (length(vars) - length(unavailable) < minimum) {
+      return(sci_placeholder(paste0(
+        if (plot_type == "radar") "Radar" else "Parallel coordinates", " requires at least ", minimum,
+        " variables with observed values.",
+        if (length(unavailable)) paste0("\nNo observed values: ", paste(display_var_labels(unavailable, labels), collapse = ", ")))))
+    }
+  }
+  normalize <- function(values, reference) {
+    observed <- reference[is.finite(reference)]
+    out <- rep(NA_real_, length(values))
+    if (!length(observed)) return(out)
+    rng <- range(observed)
+    ok <- is.finite(values)
+    out[ok] <- if (diff(rng) > 0) (values[ok] - rng[1]) / diff(rng) else 0
+    out
+  }
   
   if (plot_type == "qq") {
     p <- ggplot(df, aes(sample = .data[[v1]], color = .data[[group_col]])) + 
          stat_qq() + stat_qq_line() + labs(x="Theoretical", y="Sample", title="QQ Plot")
   } else if (plot_type == "sinaplot") {
-    if (!is.null(v2) && v2 != "") {
+    if (!is.null(v2)) {
        df_long <- tidyr::pivot_longer(df, cols = c(all_of(v1), all_of(v2)), names_to = "Variable", values_to = "Value")
        p <- ggplot(df_long, aes(x = .data[[group_col]], y = Value, fill = .data[[group_col]])) + 
             geom_violin(alpha=0.5, color=NA) + 
             geom_jitter(aes(color = .data[[group_col]]), width = 0.2, alpha=0.7) +
-            facet_wrap(~Variable, scales="free_y") +
+            facet_wrap(~Variable, scales="free_y", labeller = as_labeller(function(v) display_var_labels(v, labels))) +
             labs(title="Sina-style Plot Comparison")
        
        p <- add_stat_layer(p, df_long, "Value", group_col, stat_test, stat_letter_pos, facet_var = "Variable")
@@ -1096,7 +1121,7 @@ generate_advanced_plot <- function(df, vars, group_col = NULL, plot_type = "qq",
        p <- add_stat_layer(p, df, v1, group_col, stat_test, stat_letter_pos)
        p <- hide_x_labels_if_crowded(p, df, group_col)
     }
-  } else if (plot_type %in% c("ridge", "joyplot")) {
+  } else if (plot_type == "ridge") {
     p <- ggplot(df, aes(x = .data[[v1]], fill = .data[[group_col]])) + 
          geom_density(alpha = 0.6) + 
          facet_grid(as.formula(paste(group_col, "~ ."))) +
@@ -1107,48 +1132,37 @@ generate_advanced_plot <- function(df, vars, group_col = NULL, plot_type = "qq",
            geom_density_2d_filled(alpha = 0.9) +
            labs(title="2D Density Heatmap")
     } else {
-      p <- ggplot() + annotate("text", x=0, y=0, label="Density Heatmap requires two numeric variables")
+      p <- sci_placeholder("Density Heatmap requires two numeric variables")
     }
   } else if (plot_type == "parallel") {
-    if (length(vars) > 1) {
-      df_sub <- df[, c(vars, group_col), drop=FALSE]
-      df_sub$id <- seq_len(nrow(df_sub))
-      long_df <- data.frame(id = integer(), variable = character(), value = numeric(), group = character())
-      for(v in vars) {
-        if(is.numeric(df_sub[[v]])) {
-          rng <- range(df_sub[[v]], na.rm=TRUE)
-          norm_val <- if(diff(rng) > 0) (df_sub[[v]] - rng[1]) / diff(rng) else 0
-          long_df <- rbind(long_df, data.frame(id=df_sub$id, variable=v, value=norm_val, group=as.character(df_sub[[group_col]])))
-        }
+    # At least two variables with observed values (checked above).
+    df_sub <- df[, c(vars, group_col), drop=FALSE]
+    long_df <- data.frame(id = integer(), variable = character(), value = numeric(), group = character())
+    for(v in vars) {
+      if(is.numeric(df_sub[[v]])) {
+        norm_val <- normalize(df_sub[[v]], df_sub[[v]])
+        long_df <- rbind(long_df, data.frame(id=seq_len(nrow(df_sub)), variable=v, value=norm_val, group=as.character(df_sub[[group_col]])))
       }
-      p <- ggplot(long_df, aes(x=variable, y=value, group=id, color=group)) +
-           geom_line(alpha=0.4) + labs(title="Parallel Coordinates")
-      p <- rotate_x_labels_if_crowded(p, long_df, "variable")
-    } else {
-      p <- ggplot() + annotate("text", x=0, y=0, label="Parallel coords requires >=2 vars")
     }
+    p <- ggplot(long_df, aes(x=variable, y=value, group=id, color=group)) +
+         geom_line(alpha=0.4) + labs(title="Parallel Coordinates")
+    p <- rotate_x_labels_if_crowded(p, long_df, "variable", labels = labels)
   } else if (plot_type == "radar") {
-    if (length(vars) > 2) {
-      agg <- aggregate(df[, vars, drop=FALSE], by=list(group=df[[group_col]]), FUN=mean, na.rm=TRUE)
-      long_df <- data.frame(group = character(), variable = character(), value = numeric())
-      for(v in vars) {
-        rng <- range(df[[v]], na.rm=TRUE)
-        norm_val <- if(diff(rng) > 0) (agg[[v]] - rng[1])/diff(rng) else 0
-        long_df <- rbind(long_df, data.frame(group=agg$group, variable=v, value=norm_val))
-      }
-      p <- ggplot(long_df, aes(x=variable, y=value, group=group, color=group, fill=group)) +
-           geom_polygon(alpha=0.2) + geom_point() + coord_polar() + 
-           theme_minimal() + labs(title="Radar Chart (Normalized Means)")
-    } else {
-      p <- ggplot() + annotate("text", x=0, y=0, label="Radar requires >=3 vars")
+    # At least three variables with observed values (checked above).
+    agg <- aggregate(df[, vars, drop=FALSE], by=list(group=df[[group_col]]), FUN=mean, na.rm=TRUE)
+    long_df <- data.frame(group = character(), variable = character(), value = numeric())
+    for(v in vars) {
+      norm_val <- normalize(agg[[v]], df[[v]])
+      long_df <- rbind(long_df, data.frame(group=agg$group, variable=v, value=norm_val))
     }
+    complete_groups <- names(which(vapply(split(long_df$value, long_df$group), function(v) all(is.finite(v)), logical(1))))
+    p <- ggplot(long_df, aes(x=variable, y=value, group=group, color=group, fill=group)) +
+         geom_polygon(data = long_df[long_df$group %in% complete_groups, ], alpha=0.2) + geom_point(na.rm = TRUE) + coord_polar(clip = "off") +
+         labs(title="Radar Chart (Normalized Means)")
   } else if (plot_type == "xyz_surface") {
     if (!is.null(v1) && !is.null(v2) && !is.null(v3)) {
       df_clean <- na.omit(df[, c(v1, v2, v3)])
       if(nrow(df_clean) > 10) {
-        grid_x <- seq(min(df_clean[[v1]]), max(df_clean[[v1]]), length.out=50)
-        grid_y <- seq(min(df_clean[[v2]]), max(df_clean[[v2]]), length.out=50)
-        grid <- expand.grid(x=grid_x, y=grid_y)
         df_safe <- df_clean
         colnames(df_safe) <- c("var1_safe", "var2_safe", "var3_safe")
         
@@ -1192,16 +1206,35 @@ generate_advanced_plot <- function(df, vars, group_col = NULL, plot_type = "qq",
                scale_fill_viridis_c() +
                labs(title=paste("XYZ Surface (", xyz_fit, ")", sep=""))
         } else {
-          p <- ggplot() + annotate("text", x=0, y=0, label="Model fitting failed")
+          p <- sci_placeholder("Model fitting failed")
         }
       } else {
-        p <- ggplot() + annotate("text", x=0, y=0, label="Not enough data for surface")
+        p <- sci_placeholder("Not enough data for surface")
       }
     } else {
-      p <- ggplot() + annotate("text", x=0, y=0, label="XYZ Surface requires 3 numeric variables.\nPlease select 3 variables in the sidebar.") + theme_void()
+      p <- sci_placeholder("XYZ Surface requires 3 numeric variables.\nSelect the Primary (X), Secondary (Y) and Tertiary (Z) variables.")
     }
   }
   
+  p <- p + (theme_minimal() + p$theme)
+  if (plot_type %in% c("qq", "sinaplot", "parallel", "radar")) p <- p + labs(color = group_label)
+  if (plot_type %in% c("sinaplot", "ridge", "radar")) p <- p + labs(fill = group_label)
+  if (plot_type %in% c("parallel", "radar")) {
+    p <- p + scale_x_discrete(labels = function(v) {
+      text <- display_var_labels(v, labels)
+      if (plot_type == "radar") vapply(text, function(x) paste(strwrap(x, width = 16), collapse = "\n"), "", USE.NAMES = FALSE) else text
+    }) + labs(x = "Variable", y = "Normalized value")
+    if (length(unavailable)) p <- p + labs(caption = paste("No observed values:", paste(display_var_labels(unavailable, labels), collapse = ", ")))
+    if (plot_type == "radar" && anyNA(p$data$value)) p <- p + labs(caption = paste(
+      c(p$labels$caption, "Groups with missing dimensions show available points only."), collapse = "\n"))
+  } else if (plot_type == "sinaplot") {
+    p <- p + labs(x = group_label, y = if (is.null(v2)) display_var_labels(v1, labels) else "Value")
+  } else if (plot_type %in% c("ridge", "density_heatmap", "xyz_surface")) {
+    p <- p + labs(x = display_var_labels(v1, labels))
+    if (!is.null(v2)) p <- p + labs(y = display_var_labels(v2, labels))
+    if (plot_type == "xyz_surface") p <- p + labs(fill = display_var_labels(v3, labels))
+    if (plot_type == "density_heatmap") p <- p + labs(fill = "Density level")
+  }
   return(p)
 }
 
@@ -1219,18 +1252,15 @@ align_cormat <- function(cormat, vars) {
 }
 
 constant_var_plot <- function() {
-  ggplot() +
-    annotate("text", x = 0, y = 0,
-             label = "A selected variable is constant;\ncorrelation is undefined for it.") +
-    theme_void()
+  sci_placeholder("A selected variable is constant;\ncorrelation is undefined for it.")
 }
 
-generate_correlation_heatmap <- function(df, vars, method = "pearson", cormat = NULL) {
+generate_correlation_heatmap <- function(df, vars, method = "pearson", cormat = NULL, labels = NULL) {
 
-  if (length(vars) < 2) return(ggplot() + annotate("text", x=0, y=0, label="Need >=2 variables"))
+  if (length(vars) < 2) return(sci_placeholder("Need >=2 variables"))
   
   df_clean <- na.omit(df[, vars, drop=FALSE])
-  if (nrow(df_clean) < 3) return(ggplot() + annotate("text", x=0, y=0, label="Insufficient data"))
+  if (nrow(df_clean) < 3) return(sci_placeholder("Insufficient data"))
   
   if (is.null(cormat)) {
     cormat <- cor(df_clean, method = method)
@@ -1256,16 +1286,18 @@ generate_correlation_heatmap <- function(df, vars, method = "pearson", cormat = 
     scale_fill_gradient2(low = "red", high = "blue", mid = "white", midpoint = 0, limits = c(-1,1), name=paste(tools::toTitleCase(method), "\nCorrelation")) +
     theme_minimal() + 
     theme(axis.text.x = element_text(angle = 45, vjust = 1, hjust = 1)) +
-    labs(x="", y="", title="Hierarchical Clustering Correlation Heatmap")
+    labs(x="", y="", title="Hierarchical Clustering Correlation Heatmap") +
+    scale_x_discrete(labels = function(v) display_var_labels(v, labels)) +
+    scale_y_discrete(labels = function(v) display_var_labels(v, labels))
   return(p)
 }
 
-generate_correlation_network <- function(df, vars, threshold = 0.3, method = "pearson", cormat = NULL) {
+generate_correlation_network <- function(df, vars, threshold = 0.3, method = "pearson", cormat = NULL, labels = NULL) {
 
-  if (length(vars) < 2) return(ggplot() + annotate("text", x=0, y=0, label="Need >=2 variables"))
+  if (length(vars) < 2) return(sci_placeholder("Need >=2 variables"))
   
   df_clean <- na.omit(df[, vars, drop=FALSE])
-  if (nrow(df_clean) < 3) return(ggplot() + annotate("text", x=0, y=0, label="Insufficient data"))
+  if (nrow(df_clean) < 3) return(sci_placeholder("Insufficient data"))
   
   if (is.null(cormat)) {
     cormat <- cor(df_clean, method = method)
@@ -1279,7 +1311,7 @@ generate_correlation_network <- function(df, vars, threshold = 0.3, method = "pe
   n <- length(vars)
   angles <- seq(0, 2*pi, length.out = n + 1)[1:n]
   nodes <- data.frame(
-    name = vars,
+    name = vars, label = display_var_labels(vars, labels),
     x = cos(angles),
     y = sin(angles)
   )
@@ -1310,24 +1342,22 @@ generate_correlation_network <- function(df, vars, threshold = 0.3, method = "pe
   }
   
   p <- p + geom_point(data = nodes, aes(x=x, y=y), size=10, color="lightblue") +
-           geom_text(data = nodes, aes(x=x, y=y, label=name), fontface="bold")
+           geom_text(data = nodes, aes(x=x, y=y, label=label), fontface="bold")
            
   return(p)
 }
 
-generate_partial_correlation <- function(df, vars, control_vars = NULL, method = "pearson") {
+generate_partial_correlation <- function(df, vars, control_vars = NULL, method = "pearson", labels = NULL) {
 
-  if (length(vars) < 2) return(ggplot() + annotate("text", x=0, y=0, label="Need >=2 variables to correlate"))
+  if (length(vars) < 2) return(sci_placeholder("Need >=2 variables to correlate"))
 
   # Residualization + the rank/kendall conventions live in
   # compute_partial_correlation() so this plot and the correlation summary
   # table can never disagree about what "partial" means.
   pc <- compute_partial_correlation(df, vars, control_vars, method = method)
-  if (length(pc$failed) > 0) {
-    return(ggplot() + annotate("text", x=0, y=0,
-      label="Could not partial out the control variables") + theme_void())
-  }
-  if (is.null(pc$cormat) || pc$n < 5) return(ggplot() + annotate("text", x=0, y=0, label="Insufficient data"))
+  refusal <- partial_correlation_refusal(pc, labels)
+  if (!is.null(refusal)) return(sci_placeholder(paste(strwrap(refusal, 70), collapse = "\n")))
+  if (is.null(pc$cormat) || pc$n < 5) return(sci_placeholder("Insufficient data"))
 
   cormat <- pc$cormat
   n_ctrl <- pc$k
@@ -1345,20 +1375,22 @@ generate_partial_correlation <- function(df, vars, control_vars = NULL, method =
     theme_minimal() + 
     theme(axis.text.x = element_text(angle = 45, vjust = 1, hjust = 1)) +
     labs(x="", y="",
-         title = if (n_ctrl == 0) "Standard Correlation Heatmap" else paste("Partial Correlation (Controlling for", n_ctrl, "vars)"),
+         title = if (n_ctrl == 0) "Standard Correlation Heatmap" else paste0("Partial Correlation (control df = ", n_ctrl, ")"),
          subtitle = if (n_ctrl == 0) NULL else switch(method,
            spearman = "Spearman: ranks residualized on the controls (ppcor convention)",
            kendall  = "Kendall: partial tau from the inverted tau matrix (ppcor convention)",
-           NULL))
+           NULL)) +
+    scale_x_discrete(labels = function(v) display_var_labels(v, labels)) +
+    scale_y_discrete(labels = function(v) display_var_labels(v, labels))
   return(p)
 }
 
-generate_correlogram <- function(df, vars, method = "pearson", cormat = NULL) {
+generate_correlogram <- function(df, vars, method = "pearson", cormat = NULL, labels = NULL) {
 
-  if (length(vars) < 2) return(ggplot() + annotate("text", x=0, y=0, label="Need >=2 variables"))
+  if (length(vars) < 2) return(sci_placeholder("Need >=2 variables"))
   
   df_clean <- na.omit(df[, vars, drop=FALSE])
-  if (nrow(df_clean) < 3) return(ggplot() + annotate("text", x=0, y=0, label="Insufficient data"))
+  if (nrow(df_clean) < 3) return(sci_placeholder("Insufficient data"))
   
   if (is.null(cormat)) {
     cormat <- cor(df_clean, method = method)
@@ -1375,7 +1407,9 @@ generate_correlogram <- function(df, vars, method = "pearson", cormat = NULL) {
     scale_color_gradient2(low = "red", high = "blue", mid = "white", midpoint = 0, limits = c(-1,1)) +
     theme_minimal() + 
     theme(axis.text.x = element_text(angle = 45, vjust = 1, hjust = 1)) +
-    labs(x="", y="", title="Correlogram")
+    labs(x="", y="", title="Correlogram") +
+    scale_x_discrete(labels = function(v) display_var_labels(v, labels)) +
+    scale_y_discrete(labels = function(v) display_var_labels(v, labels))
   return(p)
 }
 
@@ -1489,11 +1523,11 @@ compute_spatial_cross_correlogram <- function(df, var1, var2, x_col, y_col,
 
 generate_spatial_cross_correlogram <- function(df, var1, var2, x_col, y_col,
                                                src_crs, proj_crs = NULL,
-                                               n_bins = 15, method = "pearson") {
+                                               n_bins = 15, method = "pearson", labels = NULL) {
   res <- compute_spatial_cross_correlogram(df, var1, var2, x_col, y_col,
                                            src_crs, proj_crs, n_bins, method)
   if (is.null(res$bins)) {
-    return(ggplot() + annotate("text", x = 0, y = 0, label = res$message, size = 4.5) + theme_void())
+    return(sci_placeholder(res$message, size = 4.5))
   }
 
   b <- res$bins
@@ -1510,7 +1544,7 @@ generate_spatial_cross_correlogram <- function(df, var1, var2, x_col, y_col,
     scale_size_continuous(range = c(1.5, 6), name = "Pairs") +
     theme_minimal() +
     labs(
-      title = sprintf("Spatial Cross-Correlogram: %s vs %s", var1, var2),
+      title = sprintf("Spatial Cross-Correlogram: %s vs %s", display_var_labels(var1, labels), display_var_labels(var2, labels)),
       subtitle = sprintf("%srho(h) = r - gamma12(h) on standardised values | non-spatial r = %.3f | n = %d",
                          if (res$ranked) "Rank-based (Spearman-type). " else "",
                          res$r0, res$n),
@@ -1541,6 +1575,16 @@ check_collinearity <- function(df, vars, threshold = 0.95) {
        constant = res$dropped_constant %||% character(0))
 }
 
+pca_axis_refusal <- function(pca_res, axes, count = length(axes)) {
+  n <- ncol(pca_res$x)
+  if (count == 3L && n < 3L) return("3D PCA Scores requires at least three available components.")
+  if (!length(axes) || length(axes) != count || anyNA(axes) ||
+      any(!is.finite(axes) | axes != floor(axes) | axes < 1 | axes > n) || anyDuplicated(axes)) {
+    return(sprintf("Select distinct available components between 1 and %d.", n))
+  }
+  NULL
+}
+
 generate_pca_scree <- function(pca_res) {
 
   var_explained <- pca_res$sdev^2 / sum(pca_res$sdev^2)
@@ -1557,7 +1601,8 @@ generate_pca_scree <- function(pca_res) {
 }
 
 generate_pca_biplot <- function(pca_res, original_df, pc_x = 1, pc_y = 2, group_col = NULL) {
-
+  refusal <- pca_axis_refusal(pca_res, c(pc_x, pc_y), 2L)
+  if (!is.null(refusal)) return(sci_placeholder(refusal))
   scores <- as.data.frame(pca_res$x)
   
   if (!is.null(group_col) && group_col %in% colnames(original_df)) {
@@ -1617,10 +1662,14 @@ generate_pca_bar_plot <- function(values_named, val_name, title_text, y_label, f
 }
 
 generate_pca_loadings <- function(pca_res, pc = 1) {
+  refusal <- pca_axis_refusal(pca_res, pc, 1L)
+  if (!is.null(refusal)) return(sci_placeholder(refusal))
   generate_pca_bar_plot(pca_res$rotation[, pc], "Loading", paste("Loadings for PC", pc), "Loading Weight")
 }
 
 generate_pca_contribution <- function(pca_res, pc = 1) {
+  refusal <- pca_axis_refusal(pca_res, pc, 1L)
+  if (!is.null(refusal)) return(sci_placeholder(refusal))
   loadings <- pca_res$rotation[, pc]
   contrib <- (loadings^2) * 100
   generate_pca_bar_plot(contrib, "Contribution", paste("Variable Contribution to PC", pc), "Contribution (%)", "coral", 100 / length(contrib))
@@ -1636,6 +1685,8 @@ generate_pca_contribution <- function(pca_res, pc = 1) {
 # cos2. Normalising makes the quantity mean the same thing (bounded [0, 1],
 # factoextra's definition) in both modes and changes nothing for a scaled PCA.
 generate_pca_cos2 <- function(pca_res, axes = 1:2) {
+  refusal <- pca_axis_refusal(pca_res, axes)
+  if (!is.null(refusal)) return(sci_placeholder(refusal))
   coord <- sweep(pca_res$rotation, 2, pca_res$sdev, "*")
   total_var <- rowSums(coord^2)
   cos2 <- rowSums(coord[, axes, drop = FALSE]^2) / total_var
@@ -1702,7 +1753,8 @@ generate_pca_mahalanobis <- function(pca_res) {
 }
 
 generate_pca_biplot_3d <- function(pca_res, df, pc_x=1, pc_y=2, pc_z=3, group_col=NULL) {
-
+  refusal <- pca_axis_refusal(pca_res, c(pc_x, pc_y, pc_z), 3L)
+  if (!is.null(refusal)) return(sci_placeholder(refusal))
   
   scores <- as.data.frame(pca_res$x)
   if (!is.null(group_col) && group_col %in% colnames(df)) {
@@ -1716,7 +1768,7 @@ generate_pca_biplot_3d <- function(pca_res, df, pc_x=1, pc_y=2, pc_z=3, group_co
   p <- plot_ly(scores, x = ~get(paste0("PC", pc_x)), y = ~get(paste0("PC", pc_y)), z = ~get(paste0("PC", pc_z)), 
                color = ~Group, type = "scatter3d", mode = "markers",
                marker = list(size = 4, opacity = 0.8)) %>%
-       layout(title = "3D PCA Biplot",
+       layout(title = "3D PCA Scores",
               scene = list(
                 xaxis = list(title = paste0("PC", pc_x, " (", var_exp[pc_x], "%)")),
                 yaxis = list(title = paste0("PC", pc_y, " (", var_exp[pc_y], "%)")),

@@ -179,7 +179,7 @@ test_that("compute_governing_factors is unchanged when no cancel file is given",
 # ── Numeric contract: what the explanation plots actually show ─────────────
 
 test_that("the PDP is the mean prediction with the feature held fixed", {
-  d <- sf::st_drop_geometry(golden_sf("core", localities = "Yorga"))[
+  d <- sf::st_drop_geometry(golden_sf("core", localities = golden_locality("core", "smallest", min_n = 30L)))[
     , c("ph", "v82", "v87", "v43")]
   res <- compute_governing_factors(d, "ph", c("v82", "v87", "v43"),
                                    rf_ntree = 60,
@@ -202,7 +202,7 @@ test_that("the PDP is the mean prediction with the feature held fixed", {
 })
 
 test_that("the SHAP sample is the documented deterministic draw", {
-  d <- sf::st_drop_geometry(golden_sf("core", localities = "Yorga"))[
+  d <- sf::st_drop_geometry(golden_sf("core", localities = golden_locality("core", "smallest", min_n = 30L)))[
     , c("ph", "v82", "v87", "v43")]
   res <- compute_governing_factors(d, "ph", c("v82", "v87", "v43"),
                                    rf_ntree = 60,

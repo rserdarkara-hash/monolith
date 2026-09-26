@@ -654,10 +654,9 @@
       "CK"  = paste0("Co-Kriging | Aux: ", paste(input$aux_vars, collapse=", "), " | Nmax: ", input$ck_nmax %||% 15)
     )
     method_params_str <- method_params_list[[input$method]] %||% ""
-    # The RFK trend forest has no sidebar control; it runs at randomForest's
-    # package default via apply_kriging_pipeline. Pinning it here makes the
-    # dispatch explicit and lets the run record state what was actually used
-    # (identical numerically - the engine falls back to this same 200).
+    # The RFK trend forest has no sidebar control; the app uses 200 trees,
+    # matching apply_kriging_pipeline's fallback. Pinning it here makes the
+    # dispatch explicit and records the count actually used.
     rfk_ntree_val <- 200
     # Repeated CV is opt-in (it costs one extra full CV pass per repeat) and
     # collapses to 1 wherever the resolved plan is LOOCV, which is deterministic.
@@ -1009,7 +1008,7 @@
       # dead cluster's size and the guard below would skip building a live one.
       future::plan(future::sequential)
       # Auto (Global) needs every locality's boundary before any locality runs:
-      # the shared cell size is the Auto resolution of the largest one. Built
+      # it shares the finest of their Auto cell sizes. Build those boundaries
       # here, in the worker, so the interface stays responsive.
       if (identical(run_params$res_mode, "global")) {
         run_params$shared_res <- shared_auto_resolution(df_list, run_params)

@@ -56,10 +56,10 @@ if (!exists(".monolith_sourced") || !isTRUE(.monolith_sourced)) {
 # setup.R sets warnPartialMatchArgs = TRUE so that a partial argument match in
 # Monolith's own code is an alarm. Two dependencies trip it from inside their
 # own source and cannot be fixed here: randomForest calls seq(along = ...) and
-# mgcv hands contrasts = to model.matrix. Left alone they are the large
+# mgcv uses seq(length = ...) and hands contrasts = to model.matrix. Left alone they are the large
 # majority of the suite's warning output, which buries a genuine new one.
 #
-# Muffle those two notices BY MESSAGE at the call sites that raise them, rather
+# Muffle those dependency notices BY MESSAGE at the call sites that raise them, rather
 # than wrapping the call in suppressWarnings(), so every other warning the
 # expression raises still reaches the reporter - a partial match in Monolith's
 # own code included.
@@ -67,7 +67,7 @@ without_partial_match_notices <- function(expr) {
   withCallingHandlers(
     expr,
     warning = function(w) {
-      if (grepl("'along' to 'along.with'|'contrasts' to 'contrasts.arg'", conditionMessage(w))) {
+      if (grepl("'along' to 'along.with'|'contrasts' to 'contrasts.arg'|'length' to 'length.out'", conditionMessage(w))) {
         invokeRestart("muffleWarning")
       }
     }
@@ -343,7 +343,9 @@ make_mixed_vgm_input <- function(n = 60, seed = 4) {
 
 #' Every candidate robust_vgm_fit's screen produces for `h`, classified the way
 #' the screen classifies it, re-derived independently so a selection test does
-#' not read its expectation off the function under test.
+#' not read its expectation off the function under test. `admissible` applies
+#' every eligibility rule except the zero-nugget smooth one, which
+#' `smooth_zero_nugget` reports on its own; `valid` combines the two.
 screen_vgm_candidates <- function(h) {
   max_dist <- max(h$v_emp$dist, na.rm = TRUE)
   init_sill <- var(h$v_data)
@@ -365,14 +367,16 @@ screen_vgm_candidates <- function(h) {
       if (is.null(f)) next
       sse <- attr(f, "SSErr")
       prange <- f$range[2] * .vgm_practical_range_factor(f$model[2], f$kappa[2])
+      admissible <- length(sse) == 1L && is.finite(sse) &&
+        is.finite(f$psill[2]) && f$psill[2] > 0 &&
+        is.finite(prange) && prange > 0 &&
+        is.finite(f$psill[1]) && f$psill[1] >= 0
+      smooth_zero_nugget <- isTRUE(vgm_smooth_nugget_share(f) <= 1e-8)
       out[[length(out) + 1]] <- list(
         fit = f, sse = sse,
         flawed = flawed || isTRUE(attr(f, "singular")),
-        valid = length(sse) == 1L && is.finite(sse) &&
-                is.finite(f$psill[2]) && f$psill[2] > 0 &&
-                is.finite(prange) && prange > 0 &&
-                is.finite(f$psill[1]) && f$psill[1] >= 0 &&
-                !isTRUE(vgm_smooth_nugget_share(f) <= 1e-8),
+        admissible = admissible, smooth_zero_nugget = smooth_zero_nugget,
+        valid = admissible && !smooth_zero_nugget,
         resolved = prange > (max_dist / 100) && prange < max_dist * 2)
     }
   }
@@ -392,12 +396,14 @@ screen_vgm_candidates <- function(h) {
 # samples of a coordinate-sorted table, so they are stable across R versions
 # and spatially spread by construction.
 #
-# A different golden set can be substituted without touching a single test:
-# build one with fixtures/make_golden.R, point `monolith_golden_dir` at it, and
-# regenerate its baselines with fixtures/make_baselines.R. Only the handful of
-# tests that pin recorded values need those baselines; every other test
-# recomputes its reference from whatever data it is given and is therefore
-# fixture-agnostic by construction.
+# A different golden set can be substituted without editing a test: build one
+# with fixtures/make_golden.R, point `monolith_golden_dir` at it, and regenerate
+# its baselines with fixtures/make_baselines.R. Only the handful of tests that
+# pin recorded values need those baselines; the others recompute their
+# reference from the data they are given. Tests select localities by property
+# (golden_locality) and method-specific cases through golden_case, which a
+# replacement set can name in its metadata; GOLDEN_MANIFEST.md lists what each
+# requires, including which selections must suit hull and buffered boundaries.
 
 .golden_cache <- new.env(parent = emptyenv())
 
@@ -469,6 +475,49 @@ golden_sf <- function(scope = c("core", "full", "tiny"),
   pts <- sf::st_as_sf(df, coords = c("x", "y"), crs = native, remove = FALSE)
   if (!is.null(crs) && !identical(crs, native)) pts <- sf::st_transform(pts, crs)
   pts
+}
+
+# Select a locality by a required fixture property, never by a survey name.
+# Coordinate tie-breaks keep the same population when only names change.
+# `exclude` keeps a second selection distinct from one already made.
+golden_locality <- function(scope = "full", property = c("smallest", "largest", "compact"),
+                            min_n = 1L, data = golden_soil(scope), exclude = character(0)) {
+  property <- match.arg(property)
+  data <- data[!data$locality %in% exclude, , drop = FALSE]
+  groups <- split(data, data$locality, drop = TRUE)
+  groups <- groups[vapply(groups, nrow, integer(1)) >= min_n]
+  if (!length(groups)) stop("Golden fixture needs a ", scope, " locality with at least ", min_n, " rows.")
+  size <- vapply(groups, nrow, integer(1))
+  span <- vapply(groups, function(d) max(diff(range(d$x)), diff(range(d$y))), numeric(1))
+  x <- vapply(groups, function(d) min(d$x), numeric(1))
+  y <- vapply(groups, function(d) min(d$y), numeric(1))
+  score <- switch(property, smallest = size, largest = -size, compact = span)
+  names(groups)[order(score, x, y, method = "radix")][1]
+}
+
+# Method-specific cases are part of the fixture contract. Tests independently
+# verify the advertised GCV/geometry/variogram property; no matching case means
+# a failure, never a skip. A replacement survey may supply these cases in its
+# metadata.
+golden_case <- function(name) {
+  custom <- golden_meta()$test_cases[[name]]
+  defaults <- list(
+    tps_plane = list(property = "smallest", min_n = 8L, target = "ph"),
+    tps_exact_better = list(property = "smallest", min_n = 8L, target = "mn"),
+    tps_smoothed_better = list(property = "smallest", min_n = 80L, target = "caco3"),
+    tps_interior = list(property = "smallest", min_n = 80L, target = "ph"),
+    knndm_random = list(property = "compact", min_n = 30L),
+    vgm_zero_nugget = list(property = "compact", min_n = 30L, target = "caco3"))
+  spec <- defaults[[name]]
+  if (is.null(spec)) stop("Unknown golden test case: ", name)
+  out <- custom %||% list(locality = golden_locality("full", spec$property, spec$min_n), target = spec$target)
+  d <- golden_soil("full")
+  if (length(out$locality) != 1L || !out$locality %in% d$locality ||
+      sum(d$locality == out$locality) < (if (is.null(custom)) spec$min_n else 8L) ||
+      (!is.null(spec$target) && (length(out$target) != 1L || !out$target %in% names(d)))) {
+    stop("Invalid golden test_cases$", name, ": supply an observed locality and canonical target with enough rows.")
+  }
+  out
 }
 
 #' The frozen variable dictionary (id, label, category), or NULL if the fixture

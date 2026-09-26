@@ -19,10 +19,11 @@ test_that("run_locality_rows filters locality and subset without introducing NA 
   expect_identical(run_locality_rows(df, "loc", "A", "Test")$id, 1L)
   expect_identical(run_locality_rows(df, "loc", "A", "all")$id, c(1L, 2L, 5L))
   full <- golden_soil("full")
+  locality <- golden_locality("full", "compact", min_n = 30L)
   for (subset in c("Test", "all")) {
-    expected <- full[which(full$locality == "Kale" &
+    expected <- full[which(full$locality == locality &
       (subset == "all" | full$subset == subset)), , drop = FALSE]
-    expect_identical(run_locality_rows(full, "locality", "Kale", subset), expected)
+    expect_identical(run_locality_rows(full, "locality", locality, subset), expected)
   }
 })
 

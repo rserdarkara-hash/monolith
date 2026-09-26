@@ -280,3 +280,19 @@ test_that("an infinite threshold keeps every covariate however collinear", {
   # reason to stop telling the user the covariates are collinear.
   expect_true(res$has_collinearity)
 })
+test_that("pairs without a finite correlation are skipped, not read as uncorrelated or fatal", {
+  # a and b share 0 or 1 rows, so no correlation exists for them; each tracks
+  # c exactly on its own rows, and those two pairs must still be screened.
+  for (overlap in 0:1) {
+    d <- data.frame(a = c(1:10, rep(NA, 10)), b = c(rep(NA, 10 - overlap), seq_len(10 + overlap)), c = 1:20)
+    out <- detect_multicollinearity_engine(d, vif_threshold = Inf)
+    expect_false(any(out$pairs$var1 == "a" & out$pairs$var2 == "b"))
+    expect_setequal(paste(out$pairs$var1, out$pairs$var2), c("a c", "b c"))
+    expect_setequal(out$kept, c("a", "b", "c"))
+  }
+  # a varies overall but is constant on the rows complete across all three,
+  # which the VIF stage inverts: it is dropped as constant there.
+  d <- data.frame(a = c(1, 2, 3, 3, 3), b = c(NA, NA, 1, 2, 3), c = 1:5)
+  expect_warning(out <- detect_multicollinearity_engine(d), "only one covariate remains")
+  expect_true("a" %in% out$dropped_constant)
+})

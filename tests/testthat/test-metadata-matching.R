@@ -1,4 +1,4 @@
-# test-metadata-matching.R — tests for match_metadata_columns, apply_labels_to_df,
+# test-metadata-matching.R — tests for match_metadata_columns, desc_var_labels,
 # get_var_label, and get_var_labels.
 
 # ── get_var_label / get_var_labels ─────────────────────────────────────────
@@ -46,28 +46,16 @@ test_that("get_var_labels vectorizes correctly", {
   expect_equal(as.character(result), c("Acidity", "Nitrogen", "Unknown"))
 })
 
-# ── apply_labels_to_df ────────────────────────────────────────────────────
-
-test_that("apply_labels_to_df renames columns using metadata labels", {
-  df <- data.frame(pH = 1:5, Clay = 6:10, Sand = 11:15)
-  metadata <- list(
-    list(actual = "pH", label = "Acidity", category = "Soil"),
-    list(actual = "Clay", label = "Clay %", category = "Soil")
-  )
-  result <- apply_labels_to_df(df, c("pH", "Clay"), metadata)
-  expect_true("Acidity" %in% colnames(result))
-  expect_true("Clay %" %in% colnames(result))
-  expect_true("Sand" %in% colnames(result))  # unchanged
-})
-
-test_that("apply_labels_to_df handles empty vars", {
-  df <- data.frame(a = 1:3)
-  result <- apply_labels_to_df(df, character(0), NULL)
-  expect_equal(colnames(result), "a")
-})
-
-test_that("apply_labels_to_df handles NULL df", {
-  expect_null(apply_labels_to_df(NULL, "x", NULL))
+test_that("descriptive display labels are unique without renaming source data", {
+  metadata <- list(list(actual = "a", label = "Value"), list(actual = "b", label = "Value"),
+                   list(actual = "c", label = "Value [a]"))
+  labels <- desc_var_labels(c("a", "b", "c", "other"), metadata)
+  expect_identical(names(labels), c("a", "b", "c", "other"))
+  expect_equal(anyDuplicated(labels), 0L)
+  expect_match(labels[["a"]], "a", fixed = TRUE)
+  expect_equal(labels[["other"]], "other")
+  expect_equal(display_var_labels(c("a", "missing"), labels), c(labels[["a"]], "missing"))
+  expect_equal(desc_var_labels(c("a", "b")), c(a = "a", b = "b"))
 })
 
 # ── match_metadata_columns ────────────────────────────────────────────────

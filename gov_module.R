@@ -437,7 +437,7 @@ gov_factors_server <- function(id, data_reactive, vars_metadata_reactive) {
           p + ggplot2::labs(title = paste("Target vs Top Factor:", top_var_label), x = top_var_label, y = target_label) + 
               ggplot2::theme_minimal(base_size = base_size)
         } else {
-          ggplot2::ggplot() + ggplot2::annotate("text", x=0, y=0, label="Data not available") + ggplot2::theme_void()
+          sci_placeholder("Data not available")
         }
       }
     }

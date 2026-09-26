@@ -330,25 +330,40 @@ test_that("auto-fit never returns a Gaussian or Matern structure at a zero nugge
   v_emp <- gstat::variogram(v ~ 1, pts, width = lags$width, cutoff = lags$cutoff)
   expect_false(isTRUE(vgm_smooth_nugget_share(robust_vgm_fit(v_emp, pts$v)) <= 1e-8))
 
-  # Golden Acipayam, available P (83 points): the lowest-SSErr clean candidate
-  # is a Gaussian at nugget 0, whose ordinary-kriging surface left the observed
-  # range by 0.32 of its span and went negative for a non-negative variable.
-  g <- golden_sf("full", "Acipayam")
-  g$v <- g$p
+  # Golden case vgm_zero_nugget: CaCO3 on the compact locality in the shipped
+  # fixture, 79 points whose sampling suits the convex hull drawn below. No
+  # candidate converges, and without the rule the lowest-SSErr one is a
+  # Gaussian at nugget 0 whose ordinary-kriging surface leaves the observed
+  # range by 0.3 of its span, going negative for a non-negative variable. The
+  # premise is re-derived with the selection's own tiers: converged candidates
+  # first, the others only when none converged.
+  case <- golden_case("vgm_zero_nugget")
+  g <- golden_sf("full", localities = case$locality)
+  g$v <- g[[case$target]]
   g <- dedup_valid_points(g, "v")
   lags <- calc_scientific_lags(g)
   v_emp <- gstat::variogram(v ~ 1, g, width = lags$width, cutoff = lags$cutoff)
-  fit <- suppressWarnings(robust_vgm_fit(v_emp, g$v))
-  expect_false(isTRUE(vgm_smooth_nugget_share(fit) <= 1e-8))
+  pool <- Filter(function(x) x$admissible,
+                 screen_vgm_candidates(list(v_emp = v_emp, v_data = g$v)))
+  tier <- Filter(function(x) !x$flawed, pool)
+  if (!length(tier)) tier <- pool
+  unguarded <- tier[[which.min(vapply(tier, function(x) x$sse, numeric(1)))]]
+  expect_true(unguarded$smooth_zero_nugget)
 
   hull <- sf::st_convex_hull(sf::st_union(g))
   grid <- sf::st_as_sf(sf::st_make_grid(hull, n = c(40, 40), what = "centers"))
   sf::st_geometry(grid) <- "geometry"
   grid <- grid[lengths(sf::st_intersects(grid, hull)) > 0, ]
-  pred <- gstat::krige(v ~ 1, g, grid, model = fit, debug.level = 0)$var1.pred
-  span <- diff(range(g$v))
-  expect_gte(min(pred), min(g$v) - 0.1 * span)
-  expect_lte(max(pred), max(g$v) + 0.1 * span)
+  bounds <- range(g$v) + c(-0.1, 0.1) * diff(range(g$v))
+  surface <- function(model) range(gstat::krige(v ~ 1, g, grid, model = model, debug.level = 0)$var1.pred)
+  left <- surface(unguarded$fit)
+  expect_true(left[1] < bounds[1] || left[2] > bounds[2])
+
+  fit <- suppressWarnings(robust_vgm_fit(v_emp, g$v))
+  expect_false(isTRUE(vgm_smooth_nugget_share(fit) <= 1e-8))
+  kept <- surface(fit)
+  expect_gte(kept[1], bounds[1])
+  expect_lte(kept[2], bounds[2])
 })
 
 test_that("flawed winner is tagged when no clean candidate exists", {
@@ -932,7 +947,7 @@ test_that("the fitted total sill tracks the sample variance", {
 })
 
 test_that("the four directional variograms pool back to the omnidirectional one", {
-  pts <- golden_sf("core", localities = "Yorga")
+  pts <- golden_sf("core", localities = golden_locality("core", "smallest", min_n = 30L))
   lags <- calc_scientific_lags(pts)
   omni <- as.data.frame(gstat::variogram(ph ~ 1, pts, width = lags$width,
                                          cutoff = lags$cutoff))

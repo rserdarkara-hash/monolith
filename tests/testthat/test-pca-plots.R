@@ -141,3 +141,40 @@ test_that("generate_pca_biplot_3d handles na.omit correctly when caller aligns d
   p <- generate_pca_biplot_3d(pca, aligned_df, pc_x = 1, pc_y = 2, pc_z = 3, group_col = "cat1")
   expect_s3_class(p, "plotly")
 })
+test_that("PCA views reject unavailable and stale component selections", {
+  d <- data.frame(a = 1:20, b = sin(1:20), constant = 1)
+  fit <- desc_pca_fit(d, names(d))
+  p <- generate_pca_biplot_3d(fit$res, d)
+  expect_s3_class(p, "ggplot")
+  expect_match(p$layers[[1]]$aes_params$label, "three")
+  for (axis in c(NA_real_, 0, 3, 1.5)) {
+    p <- generate_pca_biplot(fit$res, d, pc_x = axis)
+    expect_match(p$layers[[1]]$aes_params$label, "component")
+    p <- generate_pca_loadings(fit$res, pc = axis)
+    expect_match(p$layers[[1]]$aes_params$label, "component")
+  }
+  full <- prcomp(data.frame(a = 1:20, b = sin(1:20), c = cos(1:20)), scale. = TRUE)
+  p <- plotly::plotly_build(generate_pca_biplot_3d(full, d))
+  title <- p$x$layout$title
+  expect_match(if (is.list(title)) title$text else title, "3D PCA Scores")
+})
+
+test_that("a new PCA with fewer components keeps supported views available", {
+  d <- data.frame(a = 1:20, b = sin(1:20), c = cos(1:20), constant = 1)
+  shiny::testServer(desc_exploratory_server, args = list(
+    data_reactive = shiny::reactive(d), vars_metadata_reactive = shiny::reactive(NULL)
+  ), {
+    session$setInputs(pca_vars = c("a", "b", "c"), pca_scale = TRUE, run_pca_btn = 1,
+                      pca_plot_type = "3d_biplot", pca_pc_x = 1, pca_pc_y = 2, pca_pc_z = 3)
+    expect_s3_class(pca_plot_obj(), "plotly")
+    session$setInputs(pca_vars = c("a", "b", "constant"), run_pca_btn = 2)
+    expect_equal(ncol(pca_rv$res$x), 2L)
+    expect_match(pca_plot_obj()$layers[[1]]$aes_params$label, "three")
+    session$setInputs(pca_expand_plot_btn = 1)
+    expect_match(output$pca_expanded_ui$html, 'pca_main_plot_expanded"', fixed = TRUE)
+    session$setInputs(pca_plot_type = "loadings", pca_pc_single = 3)
+    expect_match(pca_plot_obj()$layers[[1]]$aes_params$label, "component")
+    session$setInputs(pca_pc_single = 2)
+    expect_equal(nrow(pca_plot_obj()$data), 2L)
+  })
+})

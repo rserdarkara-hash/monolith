@@ -78,7 +78,6 @@ test_that("every advanced plot type renders", {
     list(plot_type = "sinaplot",        vars = "a"),
     list(plot_type = "sinaplot",        vars = c("a", "b")),
     list(plot_type = "ridge",           vars = "a"),
-    list(plot_type = "joyplot",         vars = "a"),
     list(plot_type = "density_heatmap", vars = c("a", "b")),
     list(plot_type = "parallel",        vars = c("a", "b", "c", "d")),
     list(plot_type = "radar",           vars = c("a", "b", "c"))
@@ -110,13 +109,13 @@ test_that("a selection too small for the plot draws its own explanation", {
   # heatmap test passed exactly two and asserted nothing about the rule.
   expect_match(placeholder_label(generate_advanced_plot(df, vars = c("a", "b"),
                                                         plot_type = "radar")),
-               "Radar requires >=3 vars", fixed = TRUE)
+               "Radar requires at least 3 variables with observed values", fixed = TRUE)
   expect_match(placeholder_label(generate_advanced_plot(df, vars = "a",
                                                         plot_type = "density_heatmap")),
                "requires two numeric variables", fixed = TRUE)
   expect_match(placeholder_label(generate_advanced_plot(df, vars = "a",
                                                         plot_type = "parallel")),
-               "requires >=2 vars", fixed = TRUE)
+               "requires at least 2 variables with observed values", fixed = TRUE)
   expect_match(placeholder_label(generate_advanced_plot(df, vars = c("a", "b"),
                                                         plot_type = "xyz_surface")),
                "requires 3 numeric variables", fixed = TRUE)
@@ -261,4 +260,59 @@ test_that("sci_dt(NULL) renders an empty state and never a NULL payload", {
   dt_tips <- sci_dt(NULL, header_tooltips = c(RMSE = "Root mean square error."))
   expect_s3_class(dt_tips, "datatables")
   expect_equal(nrow(dt_tips$x$data), 1)
+})
+test_that("normalised plots preserve missing values and name unavailable dimensions", {
+  d <- data.frame(a = 1:6, b = c(2, NA, 4, 7, 3, 1), constant = c(4, NA, 4, 4, 4, 4),
+                  absent = rep(NA_real_, 6), group_id = factor(rep(c("A", "B"), each = 3)))
+  for (type in c("parallel", "radar")) {
+    p <- generate_advanced_plot(d, c("a", "b", "constant", "absent"), "group_id", type)
+    expect_true(all(is.na(p$data$value[p$data$variable == "absent"])))
+    expect_match(p$labels$caption, "absent")
+    expect_true(all(na.omit(p$data$value[p$data$variable == "constant"]) == 0))
+    if (type == "parallel") expect_true(is.na(p$data$value[p$data$variable == "constant" & p$data$id == 2]))
+  }
+  for (type in c("parallel", "radar")) {
+    p <- generate_advanced_plot(d, c("a", "absent"), "group_id", type)
+    expect_match(p$layers[[1]]$aes_params$label, "observed")
+  }
+})
+
+test_that("descriptive plot labels and final themes reflect the selected context", {
+  d <- make_test_df(30)
+  labels <- c(a = "Measurement A", b = "Measurement B", c = "Measurement C")
+  for (type in c("qq", "parallel", "radar", "xyz_surface")) {
+    p <- generate_advanced_plot(d, c("a", "b", "c"), "cat1", type,
+                                labels = labels, group_label = "Treatment")
+    built <- ggplot2::ggplot_build(p)
+    expect_s3_class(built$plot$theme$panel.background, "element_blank")
+    if (type != "xyz_surface") expect_equal(ggplot2::get_labs(p)$colour, "Treatment")
+    if (type %in% c("parallel", "radar")) {
+      expect_equal(built$layout$panel_scales_x[[1]]$get_labels(), unname(labels))
+    }
+  }
+  p <- generate_core_plot(d, "a", group_col = "cat1", plot_type = "boxplot", labels = labels, group_label = "Treatment")
+  expect_equal(ggplot2::get_labs(p)$x, "Treatment")
+  expect_equal(ggplot2::get_labs(p)$y, "Measurement A")
+})
+
+test_that("expanded interactive parallel plots keep their Cartesian coordinates", {
+  d <- make_test_df(30)
+  d$absent <- NA_real_
+  shiny::testServer(desc_exploratory_server, args = list(
+    data_reactive = shiny::reactive(d), vars_metadata_reactive = shiny::reactive(NULL)
+  ), {
+    session$setInputs(desc_vars_multi = c("a", "b", "c"), desc_plot_type = "parallel",
+                      desc_expand_mode = "interactive", desc_expand_plot_btn = 1)
+    widget <- jsonlite::fromJSON(output$desc_main_plot_expanded_plotly, simplifyVector = FALSE)
+    types <- vapply(widget$x$data, function(x) x$type %||% "", "")
+    expect_false(any(types == "scatterpolar"))
+    session$setInputs(desc_plot_type = "radar", desc_vars_multi = c("a", "b", "c", "absent"))
+    widget <- jsonlite::fromJSON(output$desc_main_plot_expanded_plotly, simplifyVector = FALSE)
+    for (trace in widget$x$data) {
+      expect_identical(trace$mode, "markers")
+      # Plotly omits default-valued properties when serializing a widget;
+      # scatterpolar's default fill is none.
+      expect_identical(trace$fill %||% "none", "none")
+    }
+  })
 })

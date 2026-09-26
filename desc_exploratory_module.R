@@ -209,7 +209,7 @@ desc_exploratory_ui <- function(id) {
                     shiny::selectInput(ns("pca_plot_type"), "Plot Type",
                       choices = c("Scree Plot" = "scree",
                                   "Biplot (2D)" = "biplot",
-                                  "Biplot (3D)" = "3d_biplot",
+                                  "3D PCA Scores" = "3d_biplot",
                                   "Loadings" = "loadings",
                                   "Contribution" = "contrib",
                                   "Quality of Rep. (Cos2)" = "cos2",
@@ -253,9 +253,16 @@ desc_exploratory_server <- function(id, data_reactive, vars_metadata_reactive,
 
     # Naming-mode switch: "label" feeds the uploaded variable metadata to every
     # dropdown/plot/table builder; "colname" feeds NULL, which makes
-    # get_var_label()/apply_labels_to_df() fall back to raw column names.
+    # get_var_labels() fall back to raw column names.
     vmeta <- shiny::reactive({
       if (identical(input$name_mode, "colname")) NULL else vars_metadata_reactive()
+    })
+
+    display_labels <- shiny::reactive(desc_var_labels(colnames(data_reactive()), vmeta()))
+    lab <- function(v) display_var_labels(v, display_labels())
+    group_label <- shiny::reactive({
+      vars <- input$analytics_group_vars
+      if (length(vars)) paste(lab(vars), collapse = " × ") else "Group"
     })
 
     shiny::observe({
@@ -264,12 +271,7 @@ desc_exploratory_server <- function(id, data_reactive, vars_metadata_reactive,
       cols <- colnames(df)
       valid_cols <- cols[!is_coord_col(cols)]
       
-      vars_metadata <- vmeta()
-      if (!is.null(vars_metadata)) {
-        choices_named <- setNames(valid_cols, get_var_labels(valid_cols, vars_metadata))
-      } else {
-        choices_named <- valid_cols
-      }
+      choices_named <- setNames(valid_cols, lab(valid_cols))
       
       curr_sel <- intersect(shiny::isolate(input$analytics_group_vars), choices_named)
       shiny::updateSelectInput(session, "analytics_group_vars", choices = choices_named, selected = curr_sel)
@@ -345,14 +347,8 @@ desc_exploratory_server <- function(id, data_reactive, vars_metadata_reactive,
       num_cols <- cols[sapply(df, is.numeric)]
       valid_cols <- cols[!is_coord_col(cols)]
       
-      vars_metadata <- vmeta()
-      if (!is.null(vars_metadata)) {
-        valid_named <- setNames(valid_cols, get_var_labels(valid_cols, vars_metadata))
-        num_named <- setNames(num_cols, get_var_labels(num_cols, vars_metadata))
-      } else {
-        valid_named <- valid_cols
-        num_named <- num_cols
-      }
+      valid_named <- setNames(valid_cols, lab(valid_cols))
+      num_named <- setNames(num_cols, lab(num_cols))
       
       p_type <- input$desc_plot_type %||% "histogram"
       # isolate: selections are restored on re-render (plot type / data change) but
@@ -535,20 +531,8 @@ desc_exploratory_server <- function(id, data_reactive, vars_metadata_reactive,
         df_local <- data.frame(rv_filtered_analytics_data(), check.names = FALSE)
       
       if (nrow(df_local) == 0) {
-        p <- ggplot() + annotate("text", x=0, y=0, label="No data selected") + theme_void()
+        p <- sci_placeholder("No data selected")
         return(p)
-      }
-      
-      var_x_label <- get_var_label(input$desc_var_x, vmeta())
-      var_y_label <- get_var_label(input$desc_var_y, vmeta())
-      
-      if(!is.null(input$desc_var_x) && input$desc_var_x != "") {
-          colnames(df_global)[colnames(df_global) == input$desc_var_x] <- var_x_label
-          colnames(df_local)[colnames(df_local) == input$desc_var_x] <- var_x_label
-      }
-      if(!is.null(input$desc_var_y) && input$desc_var_y != "") {
-          colnames(df_global)[colnames(df_global) == input$desc_var_y] <- var_y_label
-          colnames(df_local)[colnames(df_local) == input$desc_var_y] <- var_y_label
       }
       
       core_types <- c("histogram", "density", "boxplot", "violin", "scatter", "ecdf")
@@ -556,44 +540,31 @@ desc_exploratory_server <- function(id, data_reactive, vars_metadata_reactive,
       if (p_type %in% core_types) {
         if (isTruthy(input$desc_ghosting) && nrow(df_local) < nrow(df_global)) {
           p <- generate_ghosted_plot(df_global, df_local, 
-                                     var_name = var_x_label, 
-                                     y_var = var_y_label, 
+                                     var_name = input$desc_var_x,
+                                     y_var = input$desc_var_y,
                                      group_col = "group_id", 
-                                     plot_type = p_type)
+                                     plot_type = p_type, labels = display_labels(), group_label = group_label())
         } else {
           p <- generate_core_plot(df_local,
-                                  var_name = var_x_label,
-                                  y_var = var_y_label,
+                                  var_name = input$desc_var_x,
+                                  y_var = input$desc_var_y,
                                   group_col = "group_id",
                                   plot_type = p_type,
                                   scatter_fit = input$desc_scatter_fit,
                                   stat_test = input$desc_stat_tests,
-                                  stat_letter_pos = input$desc_stat_letter_pos)
+                                  stat_letter_pos = input$desc_stat_letter_pos, labels = display_labels(), group_label = group_label())
         }
       } else {
-        var_z_label <- get_var_label(input$desc_var_z, vmeta())
-        if(!is.null(input$desc_var_z) && input$desc_var_z != "") {
-            colnames(df_global)[colnames(df_global) == input$desc_var_z] <- var_z_label
-            colnames(df_local)[colnames(df_local) == input$desc_var_z] <- var_z_label
-        }
-        
-        multi_labels <- get_var_labels(input$desc_vars_multi, vmeta())
-        if(!is.null(input$desc_vars_multi)) {
-            df_global <- apply_labels_to_df(df_global, input$desc_vars_multi, vmeta())
-            df_local <- apply_labels_to_df(df_local, input$desc_vars_multi, vmeta())
-        }
-        
         vars <- switch(p_type,
-                       "qq" = var_x_label,
-                       "sinaplot" = if(isTruthy(input$desc_var_y)) c(var_x_label, get_var_label(input$desc_var_y, vmeta())) else var_x_label,
-                       "ridge" = var_x_label,
-                       "density_heatmap" = c(var_x_label, var_y_label),
-                       "xyz_surface" = c(var_x_label, var_y_label, var_z_label),
-                       "parallel" = unname(multi_labels),
-                       "radar" = unname(multi_labels),
-                       var_x_label)
-        
-        p <- generate_advanced_plot(df_local, vars = vars, group_col = "group_id", plot_type = p_type, xyz_fit = input$desc_xyz_fit, stat_test = input$desc_stat_tests, stat_letter_pos = input$desc_stat_letter_pos)
+          qq = input$desc_var_x,
+          sinaplot = c(input$desc_var_x, if (isTruthy(input$desc_var_y)) input$desc_var_y),
+          ridge = input$desc_var_x,
+          density_heatmap = c(input$desc_var_x, input$desc_var_y),
+          xyz_surface = c(input$desc_var_x, input$desc_var_y, input$desc_var_z),
+          parallel = input$desc_vars_multi, radar = input$desc_vars_multi,
+          input$desc_var_x)
+
+        p <- generate_advanced_plot(df_local, vars = vars, group_col = "group_id", plot_type = p_type, xyz_fit = input$desc_xyz_fit, stat_test = input$desc_stat_tests, stat_letter_pos = input$desc_stat_letter_pos, labels = display_labels(), group_label = group_label())
       }
       
       # Only the XYZ surface has a continuous fill; the 2D density heatmap's
@@ -641,7 +612,7 @@ desc_exploratory_server <- function(id, data_reactive, vars_metadata_reactive,
       if (input$desc_plot_type == "scatter" && !is.null(input$desc_scatter_fit) && input$desc_scatter_fit != "none") {
         y_var <- if(!is.null(input$desc_var_y) && input$desc_var_y != "") input$desc_var_y else NULL
         if (!is.null(y_var)) {
-           fits <- desc_group_fit_stats(df, var, y_var, input$desc_scatter_fit, res$Group)
+           fits <- desc_group_fit_stats(df, var, y_var, input$desc_scatter_fit, res$Group, pooled = res$is_pooled)
 
            if (input$desc_scatter_fit == "loess") {
                res$`Squared Correlation (Not true R²)` <- as.numeric(fits$r2)
@@ -654,6 +625,7 @@ desc_exploratory_server <- function(id, data_reactive, vars_metadata_reactive,
         }
       }
 
+      res$is_pooled <- NULL
       # rownames default to TRUE here, so the column indexes shift by one.
       DT::datatable(res, options = list(pageLength = 10, dom = 'tip', scrollX = TRUE,
                                         columnDefs = sig_render_defs(res, num_cols,
@@ -668,10 +640,7 @@ desc_exploratory_server <- function(id, data_reactive, vars_metadata_reactive,
       cols <- colnames(df)
       num_cols <- cols[sapply(df, is.numeric)]
       
-      vars_metadata <- vmeta()
-      num_named <- if (!is.null(vars_metadata)) {
-        setNames(num_cols, get_var_labels(num_cols, vars_metadata))
-      } else { num_cols }
+      num_named <- setNames(num_cols, lab(num_cols))
       
       p_type <- input$corr_plot_type %||% "heatmap"
       curr_multi <- isolate(input$corr_vars_multi)
@@ -709,9 +678,7 @@ desc_exploratory_server <- function(id, data_reactive, vars_metadata_reactive,
       req(vars)
       if (length(vars) < 2) return(NULL)
       method <- input$corr_method %||% "pearson"
-      df_labeled <- apply_labels_to_df(df, vars, vmeta())
-      vars_lab <- get_var_labels(vars, vmeta())
-      df_clean <- na.omit(df_labeled[, vars_lab, drop=FALSE])
+      df_clean <- na.omit(df[, vars, drop=FALSE])
       if (nrow(df_clean) < 3) return(NULL)
       cor(df_clean, method = method)
     })
@@ -721,7 +688,7 @@ desc_exploratory_server <- function(id, data_reactive, vars_metadata_reactive,
       df <- rv_filtered_analytics_data()
       
       if (nrow(df) == 0) {
-        p <- ggplot() + annotate("text", x=0, y=0, label="No data selected") + theme_void()
+        p <- sci_placeholder("No data selected")
         return(p)
       }
       
@@ -731,39 +698,34 @@ desc_exploratory_server <- function(id, data_reactive, vars_metadata_reactive,
       if (p_type == "spatial_ccf") {
         req(input$corr_var_1, input$corr_var_2)
         sp <- spatial_reactive()
-        v1_lab <- get_var_label(input$corr_var_1, vmeta())
-        v2_lab <- get_var_label(input$corr_var_2, vmeta())
-        colnames(df)[colnames(df) == input$corr_var_1] <- v1_lab
-        colnames(df)[colnames(df) == input$corr_var_2] <- v2_lab
+        v1 <- input$corr_var_1
+        v2 <- input$corr_var_2
         p <- generate_spatial_cross_correlogram(
-          df, v1_lab, v2_lab,
+          df, v1, v2,
           x_col = sp$x, y_col = sp$y, src_crs = sp$src_crs, proj_crs = sp$proj_crs,
-          n_bins = input$corr_n_bins %||% 15, method = method)
+          n_bins = input$corr_n_bins %||% 15, method = method, labels = display_labels())
       } else {
         req(input$corr_vars_multi)
         vars <- input$corr_vars_multi
-        if (length(vars) < 2) return(ggplot() + annotate("text", x=0, y=0, label="Need >=2 variables"))
+        if (length(vars) < 2) return(sci_placeholder("Need >=2 variables"))
         
-        df <- apply_labels_to_df(df, vars, vmeta())
-        vars_lab <- get_var_labels(vars, vmeta())
-        cc_vars <- vars_lab
+        # Labels are applied only to completed plots and tables.
+        cc_vars <- vars
 
         if (p_type == "heatmap") {
-          p <- generate_correlation_heatmap(df, vars_lab, method = method, cormat = corr_matrix_reactive())
+          p <- generate_correlation_heatmap(df, vars, method = method, cormat = corr_matrix_reactive(), labels = display_labels())
         } else if (p_type == "network") {
-          p <- generate_correlation_network(df, vars_lab, threshold = input$corr_net_thresh %||% 0.3, method = method, cormat = corr_matrix_reactive())
+          p <- generate_correlation_network(df, vars, threshold = input$corr_net_thresh %||% 0.3, method = method, cormat = corr_matrix_reactive(), labels = display_labels())
         } else if (p_type == "partial") {
           c_vars <- input$corr_vars_control
           if(!is.null(c_vars) && length(c_vars) > 0) {
-             df <- apply_labels_to_df(df, c_vars, vmeta())
-             c_vars_lab <- get_var_labels(c_vars, vmeta())
-             cc_vars <- unique(c(vars_lab, c_vars_lab))
+             cc_vars <- unique(c(vars, c_vars))
           } else {
-             c_vars_lab <- NULL
+             c_vars <- NULL
           }
-          p <- generate_partial_correlation(df, vars_lab, control_vars = c_vars_lab, method = method)
+          p <- generate_partial_correlation(df, vars, control_vars = c_vars, method = method, labels = display_labels())
         } else if (p_type == "correlogram") {
-          p <- generate_correlogram(df, vars_lab, method = method, cormat = corr_matrix_reactive())
+          p <- generate_correlogram(df, vars, method = method, cormat = corr_matrix_reactive(), labels = display_labels())
         }
         # These four panels are one matrix, estimated on the rows complete across
         # every variable involved (controls included). Carrying that n on the
@@ -792,10 +754,8 @@ desc_exploratory_server <- function(id, data_reactive, vars_metadata_reactive,
       if (p_type == "spatial_ccf") {
         req(input$corr_var_1, input$corr_var_2)
         sp <- spatial_reactive()
-        v1 <- get_var_label(input$corr_var_1, vmeta())
-        v2 <- get_var_label(input$corr_var_2, vmeta())
-        colnames(df)[colnames(df) == input$corr_var_1] <- v1
-        colnames(df)[colnames(df) == input$corr_var_2] <- v2
+        v1 <- input$corr_var_1
+        v2 <- input$corr_var_2
         # Same computation the plot uses, so the table can never disagree with it.
         res <- compute_spatial_cross_correlogram(
           df, v1, v2, x_col = sp$x, y_col = sp$y,
@@ -821,55 +781,46 @@ desc_exploratory_server <- function(id, data_reactive, vars_metadata_reactive,
         vars <- input$corr_vars_multi
         if (length(vars) < 2) return(desc_empty_dt("Select at least two variables."))
 
-        df <- apply_labels_to_df(df, vars, vmeta())
-        vars_lab <- get_var_labels(vars, vmeta())
+        # Labels are applied only to completed plots and tables.
         
         n_controls <- 0
         pcor <- NULL
         if (p_type == "partial") {
           c_vars <- input$corr_vars_control
           if(!is.null(c_vars) && length(c_vars) > 0) {
-             df <- apply_labels_to_df(df, c_vars, vmeta())
-             c_vars_lab <- get_var_labels(c_vars, vmeta())
 
              # Shared with the Partial Correlation heatmap: raw residuals for
              # pearson, rank residuals for spearman, inverted tau matrix for
              # kendall (ppcor conventions, matching the p-values below).
-             pcor <- compute_partial_correlation(df, vars_lab, c_vars_lab, method = method)
+             pcor <- compute_partial_correlation(df, vars, c_vars, method = method)
              if (is.null(pcor$cormat) || length(pcor$failed) > 0) {
                  # Never fall back to raw correlations while the table is
                  # labelled partial: abort and say so.
-                 if (length(pcor$failed) > 0) {
-                   showNotification(paste0("Partial correlation table aborted: could not partial out the control variables for ",
-                                           paste(pcor$failed, collapse = ", "), "."),
-                                    type = "error", duration = 8)
-                   return(desc_empty_dt(paste0("Could not partial out the control variables for ",
-                                               paste(pcor$failed, collapse = ", "), ".")))
-                 }
-                 return(desc_empty_dt("Partial correlation could not be computed for this selection."))
+                 return(desc_empty_dt(partial_correlation_refusal(pcor, display_labels()) %||%
+                                      "Partial correlation could not be computed for this selection."))
              }
              if (pcor$n < 5) return(desc_empty_dt("Insufficient complete observations for partial correlation (n < 5)."))
-             if (pcor$k == 0) {
+             if (!length(setdiff(c_vars, vars))) {
                # Every named control is also one of the correlated variables, so
                # nothing is left to partial out (a variable never controls for
                # itself): report the plain correlations, with their own tests.
                pcor <- NULL
-               df_clean <- na.omit(df[, vars_lab, drop = FALSE])
+               df_clean <- na.omit(df[, vars, drop = FALSE])
              } else {
-               df_clean <- na.omit(df[, unique(c(vars_lab, c_vars_lab)), drop = FALSE])
+               df_clean <- na.omit(df[, unique(c(vars, c_vars)), drop = FALSE])
                n_controls <- pcor$k
              }
           } else {
-             df_clean <- na.omit(df[, vars_lab, drop=FALSE])
+             df_clean <- na.omit(df[, vars, drop=FALSE])
           }
         } else {
-          df_clean <- na.omit(df[, vars_lab, drop=FALSE])
+          df_clean <- na.omit(df[, vars, drop=FALSE])
         }
 
         if(nrow(df_clean) < 3) return(desc_empty_dt("Insufficient complete observations (fewer than 3 rows without missing values)."))
 
         if (p_type %in% c("heatmap", "network", "correlogram", "partial")) {
-           pair_vars <- if (!is.null(pcor)) vars_lab else colnames(df_clean)
+           pair_vars <- if (!is.null(pcor)) vars else colnames(df_clean)
            n_v <- length(pair_vars)
            res_list <- list()
            for(i in 1:(n_v-1)) {
@@ -881,7 +832,7 @@ desc_exploratory_server <- function(id, data_reactive, vars_metadata_reactive,
                  }
                  if(!is.null(ct)) {
                     p_val <- ct$p.value
-                    if (n_controls > 0) {
+                    if (!is.null(pcor)) {
                        # The partial estimate carries no test of its own, and a
                        # cor.test on residuals would use df = n - 2, ignoring the
                        # k control variables partialled out. The p-value uses the
@@ -896,15 +847,15 @@ desc_exploratory_server <- function(id, data_reactive, vars_metadata_reactive,
                              p_val <- 2 * pnorm(-abs(z_stat))
                           } else p_val <- NA_real_
                        } else {
-                          df_t <- n_obs - 2 - n_controls
+                          df_t <- pcor$df
                           if (df_t > 0) {
                              p_val <- if (abs(r_est) >= 1) 0 else 2 * pt(-abs(r_est * sqrt(df_t / (1 - r_est^2))), df_t)
                           } else p_val <- NA_real_
                        }
                     }
                     res_list[[length(res_list)+1]] <- data.frame(
-                        Variable_1 = pair_vars[i],
-                        Variable_2 = pair_vars[j],
+                        Variable_1 = lab(pair_vars[i]),
+                        Variable_2 = lab(pair_vars[j]),
                         Correlation = unname(ct$estimate),
                         p_raw = p_val,
                         stringsAsFactors = FALSE
@@ -929,6 +880,7 @@ desc_exploratory_server <- function(id, data_reactive, vars_metadata_reactive,
 
         cormat <- corr_matrix_reactive()
         req(cormat)
+        dimnames(cormat) <- lapply(dimnames(cormat), lab)
         cormat_df <- as.data.frame(cormat)
 
         # paging off: dom = 't' shows no paging controls, so a matrix of more
@@ -947,10 +899,7 @@ desc_exploratory_server <- function(id, data_reactive, vars_metadata_reactive,
       cols <- colnames(df)
       num_cols <- cols[sapply(df, is.numeric)]
       
-      vars_metadata <- vmeta()
-      num_named <- if (!is.null(vars_metadata)) {
-        setNames(num_cols, get_var_labels(num_cols, vars_metadata))
-      } else { num_cols }
+      num_named <- setNames(num_cols, lab(num_cols))
       
       shiny::tagList(
         shiny::selectInput(ns("pca_vars"), "Variables for PCA (Min 3)", choices = num_named, multiple = TRUE, selected = head(num_cols, 5)),
@@ -969,8 +918,7 @@ desc_exploratory_server <- function(id, data_reactive, vars_metadata_reactive,
     # filter, the zero-variance exclusion and prcomp live in desc_pca_fit
     # (ui_formatting.R).
     run_pca <- function(df) {
-      vars_lab <- get_var_labels(input$pca_vars, vmeta())
-      fit <- tryCatch(desc_pca_fit(df, input$pca_vars, vars_lab, scale = input$pca_scale),
+      fit <- tryCatch(desc_pca_fit(df, input$pca_vars, lab(input$pca_vars), scale = input$pca_scale),
                       error = function(e) {
                         showNotification(paste("PCA Failed:", e$message), type = "error")
                         NULL
@@ -999,12 +947,17 @@ desc_exploratory_server <- function(id, data_reactive, vars_metadata_reactive,
       req(rv_analytics_data(), input$pca_vars)
       df <- rv_filtered_analytics_data()
 
-      if(nrow(df) < 5 || length(input$pca_vars) < 3) {
-        showNotification("Insufficient data or variables for PCA.", type="error")
+      pca_rv$res <- NULL
+      pca_rv$guard <- NULL
+      pca_rv$refusal <- NULL
+      shiny::updateTextInput(session, "pca_ready_flag", value = "no")
+      complete <- stats::complete.cases(df[, input$pca_vars, drop = FALSE])
+      if (sum(complete) < 5L || length(input$pca_vars) < 3L) {
+        pca_rv$refusal <- if (length(input$pca_vars) < 3L) "Select at least 3 variables for PCA." else sprintf(
+          "PCA needs at least 5 complete observations across the selected variables; %d remain.", sum(complete))
         return()
       }
-
-      col_check <- check_collinearity(df, input$pca_vars, threshold = 0.95)
+      col_check <- check_collinearity(df[complete, , drop = FALSE], input$pca_vars, threshold = 0.95)
 
       if (col_check$has_collinearity) {
         # Near-duplicate pairs are a judgement call: stop and ask.
@@ -1023,7 +976,6 @@ desc_exploratory_server <- function(id, data_reactive, vars_metadata_reactive,
     # anyway. The same slot carries a refusal, or, once a PCA is shown, the
     # standing note naming the columns it left out.
     output$pca_collinearity_warning_ui <- shiny::renderUI({
-      lab <- function(v) get_var_labels(v, vmeta())
       if (!is.null(pca_rv$refusal)) {
         return(shiny::div(class = "alert alert-danger",
           shiny::h4(shiny::icon("ban"), "PCA not run"),
@@ -1076,6 +1028,7 @@ desc_exploratory_server <- function(id, data_reactive, vars_metadata_reactive,
              shiny::numericInput(ns("pca_pc_y"), "Y-Axis (PC)", value = 2, min = 1, max = n_pcs)
           )
        } else if (p_type == "3d_biplot") {
+          if (n_pcs < 3L) return(shiny::helpText("3D PCA Scores requires at least three available components."))
           shiny::tagList(
              shiny::numericInput(ns("pca_pc_x"), "X-Axis (PC)", value = 1, min = 1, max = n_pcs),
              shiny::numericInput(ns("pca_pc_y"), "Y-Axis (PC)", value = 2, min = 1, max = n_pcs),
@@ -1100,32 +1053,34 @@ desc_exploratory_server <- function(id, data_reactive, vars_metadata_reactive,
        req(pca_rv$res)
        shiny::withProgress(message = "Generating PCA plot...", value = 0.5, {
          p_type <- input$pca_plot_type %||% "scree"
+         displayed <- pca_rv$res
+         rownames(displayed$rotation) <- lab(rownames(displayed$rotation))
   
        if (p_type == "scree") {
-          p <- generate_pca_scree(pca_rv$res)
+          p <- generate_pca_scree(displayed)
        } else if (p_type == "biplot") {
           req(input$pca_pc_x, input$pca_pc_y)
           aligned_df <- data.frame(group_id = pca_rv$groups %||% factor(rep("All", nrow(pca_rv$res$x))))
-          p <- generate_pca_biplot(pca_rv$res, aligned_df, pc_x = input$pca_pc_x, pc_y = input$pca_pc_y, group_col = "group_id")
+          p <- generate_pca_biplot(displayed, aligned_df, pc_x = input$pca_pc_x, pc_y = input$pca_pc_y, group_col = "group_id")
        } else if (p_type == "loadings") {
           req(input$pca_pc_single)
-          p <- generate_pca_loadings(pca_rv$res, pc = input$pca_pc_single)
+          p <- generate_pca_loadings(displayed, pc = input$pca_pc_single)
        } else if (p_type == "contrib") {
           req(input$pca_pc_single)
-          p <- generate_pca_contribution(pca_rv$res, pc = input$pca_pc_single)
+          p <- generate_pca_contribution(displayed, pc = input$pca_pc_single)
        } else if (p_type == "cos2") {
           req(input$pca_cos2_axes)
-          p <- generate_pca_cos2(pca_rv$res, axes = as.numeric(input$pca_cos2_axes))
+          p <- generate_pca_cos2(displayed, axes = as.numeric(input$pca_cos2_axes))
        } else if (p_type == "cumvar") {
-          p <- generate_pca_cumvar(pca_rv$res)
+          p <- generate_pca_cumvar(displayed)
        } else if (p_type == "mahalanobis") {
-          p <- generate_pca_mahalanobis(pca_rv$res)
+          p <- generate_pca_mahalanobis(displayed)
        } else if (p_type == "3d_biplot") {
           # Same guard as the 2-D biplot: switching straight to 3D before the
           # axis controls render would otherwise throw a transient error.
-          req(input$pca_pc_x, input$pca_pc_y, input$pca_pc_z)
+          if (ncol(displayed$x) >= 3L) req(input$pca_pc_x, input$pca_pc_y, input$pca_pc_z)
           aligned_df <- data.frame(group_id = pca_rv$groups %||% factor(rep("All", nrow(pca_rv$res$x))))
-          p <- generate_pca_biplot_3d(pca_rv$res, aligned_df, pc_x = input$pca_pc_x, pc_y = input$pca_pc_y, pc_z = input$pca_pc_z, group_col="group_id")
+          p <- generate_pca_biplot_3d(displayed, aligned_df, pc_x = input$pca_pc_x, pc_y = input$pca_pc_y, pc_z = input$pca_pc_z, group_col="group_id")
        }
           # The columns left out for having no variance travel with the figure,
           # including the PNG the expand modal downloads.
@@ -1213,7 +1168,7 @@ desc_exploratory_server <- function(id, data_reactive, vars_metadata_reactive,
       plot_plotly_id = "pca_main_plot_expanded_plotly",
       title_text = "PCA",
       build_fn = pca_plot_obj,
-      pca_3d_special = shiny::reactive({ input$pca_plot_type == "3d_biplot" })
+      pca_3d_special = shiny::reactive({ inherits(pca_plot_obj(), "plotly") })
     )
     
     gov_factors_server("gov", data_reactive = shiny::reactive(rv_analytics_data()), vars_metadata_reactive = vmeta)

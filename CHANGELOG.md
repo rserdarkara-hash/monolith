@@ -2,7 +2,7 @@
 
 All notable changes to Monolith are documented in this file.
 
-## [1.1.4] - 2026-09-25 - kNNDM cross-validation / CV Distance Match panel / IDW Auto (CV) power over the whole family / TPS GCV range ends / Nested power and lambda selection / Heterotopic co-kriging / Pooled within-locality variograms / Variable units / Complete session configuration / Co-located sample averaging / Density-based Auto grids / Permutation Moran p-values / Full-fold classification CV / Classification by sampled location / Palettes kept per variable
+## [1.1.4] - 2026-09-26 - kNNDM cross-validation / CV Distance Match panel / IDW Auto (CV) power over the whole family / TPS GCV range ends / Nested power and lambda selection / Heterotopic co-kriging / Pooled within-locality variograms / Variable units / Complete session configuration / Co-located sample averaging / Density-based Auto grids / Permutation Moran p-values / Full-fold classification CV / Classification by sampled location / Palettes kept per variable / Partial correlation effective control range / PCA and Parallel/Radar chart optimizations / Method and locality specific Golden Fixture
 
 ### Added
 - **kNNDM cross-validation (Linnenbrink et al. 2024)** for all six engines and the Classification Suite: folds matched to the map's distances within its boundary, random where those already match (the Standard folds in the Classification Suite). Defaults unchanged.
@@ -42,6 +42,10 @@ All notable changes to Monolith are documented in this file.
 - **Dead code:** `agro_colors`, `rv$desc_vars_state`, `rv$pt_style_palette`, the UK method label, `cv_type_label()`, `.ck_standardize()`, the VIF-at-drop record and a CSV-to-PNG extension rewrite.
 
 ### Fixed
+- **Descriptive labels change presentation only**, with source identifiers beside ambiguous names; a real group named TOTAL keeps its own trend statistics and a distinct pooled summary row.
+- **Partial correlations require estimable residuals.** Pearson and Spearman use the effective control rank for test degrees of freedom and name fully explained targets instead of reporting roundoff correlations.
+- **Missing values remain missing** in normalized parallel/radar plots and collapsed quantile groups. The shared covariate collinearity screen skips a pair with no finite correlation (too few shared observations, or no variation on them) instead of failing, which had stopped the RK/RFK/CK run gate and hidden the Classification Suite's collinearity note for covariates measured on different samples. PCA checks its complete population before the advisory, validates component selections, and names the scores-only view **3D PCA Scores**. Advanced plots share the descriptive theme and selected grouping labels, and every empty state uses the app's standard notice.
+- **Golden-fixture tests select localities by property and method-specific cases through fixture metadata**, never by survey name, with mandatory checks of each case's premise; tests that draw hull or buffered boundaries use evenly sampled localities (Kale, Yorga, Altinova). The generator maps ordered column-role vectors and dictionary identifiers, and the custom-fixture instructions give the full column mappings. The recorder's full-suite gate remains required.
 - **In the Classification Suite one sampled location is one sample.** Co-located rows are merged before the target is built (numeric values averaged, a class by majority), so no location sits on both sides of a cross-validation split; a location whose classes tie is left out and counted in a warning.
 - **A covariate surface is never empty or arbitrary when two samples share a location**: a repeated location, or a kriging solve that returns no prediction, falls back to IDW like a kriging error, on every platform and in any row order. The Classification Suite reports each fallback, per fold and on the map, and the RK/RFK run log counts the cross-validation folds that used it.
 - **Export and progress keys no longer collide** for names that differ only in punctuation or non-Latin letters; the progress panel and the run log show locality names as written, and Quick Export works for column names with spaces or symbols.
@@ -78,7 +82,7 @@ All notable changes to Monolith are documented in this file.
 - **Classification by location**: every row repeated three times reproduces the run of its locations exactly under Standard, Spatial and kNNDM folds, with and without covariates; the majority and tie rules are checked on worked examples and, on random replicated labels, against their definition. **New `test-export-registry.R`** drives the export chunk: colliding names keep separate entries and Quick Export selects its own item.
 - **The covariate IDW fallback** under three row orders of a repeated location (gstat's own outcome there depends on LAPACK rounding), on a solve that returns no prediction, and per RK/RFK fold.
 - **Exported class legends**: a masked surface with an absent class, as one map and as Actual vs Predicted, under Agronomical and Binned styling.
-- **5,732 passed, 0 failed, 0 skipped (1 package-version warning)**
+- **5,878 passed, 0 failed, 0 skipped (1 package-version warning)**
 
 ## [1.1.3] - 2026-09-23 - Variogram auto-fit ranking and diagnostic range / Complete run archive and lifecycle restoration / Scientific metric precision and zero-span validation / Unified Actual-Predicted engine separation / GeoTIFF metadata tags and export packaging / PCA collinearity guards and DataTables alignment / Run dispatch latency and worker pool footprint / Session memory retention / Test-suite overhaul / Column names with units or spaces / Per-surface class breaks / Exact natural breaks / Out-of-bag Governing Factors importance / Seeded RFK forest
 
