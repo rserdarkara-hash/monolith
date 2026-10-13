@@ -1,7 +1,5 @@
-# Checked before anything is attached. The README states R >= 4.5.0 as a
-# requirement, and without this the requirement is only documentation: an older
-# session fails much later, with an error from whichever package breaks first
-# rather than one naming the actual cause.
+# Checked before anything is attached, so an older R fails here with the cause
+# named instead of later inside whichever package breaks first.
 if (getRversion() < "4.5.0") {
   stop("Monolith requires R 4.5.0 or higher; this session is R ", getRversion(),
        ". See README, System Prerequisites.", call. = FALSE)
@@ -11,8 +9,7 @@ required_packages <- c(
   "shiny", "shinyjs", "shinyWidgets", "shinyFiles", "shinycssloaders", "DT",
   "sf", "terra", "tidyterra", "leaflet", "leaflet.extras", "ggspatial", "fields",
   "classInt", "gstat", "concaveman", "spdep", "FNN",
-  # Exact Jenks natural breaks over every raster cell (natural_breaks(),
-  # spatial_pipeline.R). Called through ::, never attached.
+  # Exact Jenks breaks (natural_breaks(), spatial_pipeline.R); called via ::.
   "Ckmeans.1d.dp",
   "dplyr", "tidyr", "jsonlite", "readxl", "openxlsx", "officer", "zip",
   "ggplot2", "plotly", "RColorBrewer", "viridis",
@@ -21,44 +18,26 @@ required_packages <- c(
   "parsnip", "recipes", "workflows", "tune", "rsample", "dials",
   "spatialsample", "hardhat", "ranger", "xgboost", "nnet",
   "future", "furrr", "promises", "nortest", "data.table", "fs",
-  # DBI + RSQLite read PROJ's own proj.db catalogue (crs_registry(),
-  # global_utils.R) to shortlist candidate CRS by area of use. Called through
-  # ::, never attached; their absence degrades Tier 3 to the zone family
-  # instead of failing.
+  # Read PROJ's proj.db for the CRS candidate shortlist (crs_registry());
+  # called via ::. Without them the shortlist falls back to crs_zone_candidates().
   "DBI", "RSQLite",
-  # Called through :: and never attached. Other packages above install them,
-  # but the app calls them directly, so a missing copy is named here rather
-  # than at its first call: parallelly (nested worker clusters), units (area
-  # and distance units), rlang (column symbols), htmltools (HTML escaping),
-  # tibble and viridisLite (Classification Suite frames and colour tables).
+  # Installed by other packages but called directly via ::, so a missing copy
+  # is named here: parallelly (nested clusters), units, rlang, htmltools,
+  # tibble and viridisLite (Classification Suite).
   "parallelly", "units", "rlang", "htmltools", "tibble", "viridisLite"
 )
 
 missing_packages <- required_packages[!(required_packages %in% installed.packages()[, "Package"])]
 if (length(missing_packages) > 0) {
-  # WHY THIS DOES NOT SIMPLY INSTALL. install.packages() fetches whatever CRAN
-  # publishes today, and the numeric test layer (tests/testthat/fixtures/) pins
-  # values measured under the versions in renv.lock: a change in gstat's
-  # variogram fit or fields' GCV moves them. Installing without asking is
-  # therefore the one action that can invalidate a recorded baseline with
-  # nothing in the repository having changed.
-  #
-  # It does NOT follow that everyone should be sent through renv::restore().
-  # Every locked version CRAN has since superseded is restored from source, which
-  # needs a C/C++/Fortran toolchain (Rtools on Windows), and that share grows
-  # with the lockfile's age. Those pins
-  # matter for reproducing the recorded test values, not for analysing your own
-  # data. So both routes are named with their real cost, and nothing installs
-  # without an explicit yes.
-  #
-  # MONOLITH_ALLOW_LATEST=true skips the question. It exists for the
-  # upstream-drift CI job (.github/workflows/upstream.yaml), which runs against
-  # newer packages on purpose; it is not a convenience switch.
+  # Never installed silently: the recorded test baselines were measured under
+  # the renv.lock versions, while renv::restore() rebuilds superseded versions
+  # from source (needs a compiler). Both routes are named and nothing installs
+  # without an explicit yes. MONOLITH_ALLOW_LATEST=true skips the question for
+  # the upstream-drift CI job (.github/workflows/upstream.yaml).
   allow_latest <- isTRUE(as.logical(Sys.getenv("MONOLITH_ALLOW_LATEST", "false")))
 
   if (!allow_latest) {
-    # The A/B lettering earns its place only when there is a B: a stripped copy
-    # of the repository carries no lockfile, and there is then one route.
+    # Without renv.lock there is only one route, so no A/B lettering.
     has_lock <- file.exists("renv.lock")
     routes <- paste0(
       length(missing_packages), " package(s) are missing: ",
@@ -78,8 +57,7 @@ if (length(missing_packages) > 0) {
         "\n   reproduce the recorded test values, not to analyse your own data.")
     }
 
-    # Never prompt when non-interactive: the test harness sources this file, and
-    # a prompt there would hang the suite.
+    # Never prompt non-interactively: the test harness sources this file.
     if (!interactive()) {
       stop(routes, "\n\nSee README, section 3.", call. = FALSE)
     }
@@ -142,9 +120,8 @@ library(agricolae)
 library(mgcv)
 library(nortest)
 
-# Classification suite backbone (tidymodels). Engine packages (ranger, xgboost,
-# nnet) are installed via required_packages and loaded on demand by parsnip at
-# fit time, so they are not attached here.
+# Classification backbone (tidymodels); parsnip loads the engine packages
+# (ranger, xgboost, nnet) at fit time.
 library(parsnip)
 library(recipes)
 library(workflows)
@@ -158,17 +135,14 @@ library(future)
 library(furrr)
 library(promises)
 
-# Single source of the app version for anything the UI displays. DESCRIPTION is
-# the authority (README/CHANGELOG are release documents maintained by hand), so
-# a release only has to touch the version in one place that the code reads.
+# App version shown in the UI; DESCRIPTION is the single authority.
 app_version <- tryCatch(
   unname(read.dcf("DESCRIPTION", fields = "Version")[1, 1]),
   error = function(e) "unknown"
 )
 if (is.na(app_version)) app_version <- "unknown"
 
-# The three guides of the docs drawer, rendered once per app start and served
-# to every session (server_run_config.R).
+# The docs drawer's three guides, rendered once per app start.
 DOCS_HTML <- lapply(c(user = "docs/user_guide.md", desc = "docs/desc_exploratory_guide.md",
                       sci = "docs/scientific_guide.md"), function(f) {
   HTML(commonmark::markdown_html(paste(readLines(f, warn = FALSE), collapse = "\n"),
@@ -179,28 +153,20 @@ showtext_auto()
 
 addResourcePath("assets", file.path(getwd(), "assets"))
 
-# Shiny rejects any upload above its request cap (5 MB by default) before a
-# handler runs, which would leave the 30 MB checks on the data and metadata
-# tables in server_data_setup.R unreachable and refuse ordinary boundary
-# shapefile sets. The cap covers a whole .shp set in one request; tables keep
-# their 30 MB limit.
+# Shiny's default 5 MB cap would refuse uploads before the handlers' own 30 MB
+# table limits apply; 200 MB admits a whole boundary shapefile set.
 options(shiny.maxRequestSize = 200 * 1024^2)
 
-# The test helper opts in before sourcing; setup.R runs too late to prevent
-# an otherwise unused startup pool from failing its Windows socket handshake.
+# The test helper opts in before sourcing, so no unused startup pool is spawned
+# (its Windows socket handshake can fail).
 if (isTRUE(getOption("monolith_test_sequential", FALSE))) {
   future::plan(future::sequential)
 } else if (!inherits(future::plan(), "multisession")) {
-  # The outer pool holds one worker per CONCURRENT user-initiated async task
-  # (a run, an optimizer, a classification, governing factors, the CRS
-  # search), not one per core: the compute parallelism lives in the nested
-  # PSOCK clusters those tasks own. Sized to cores, it would spawn a worker
-  # per core eagerly at load, and a worker that has served one interpolation
-  # sits at ~470 MB it does not give back: rm(ls()) + gc(full=TRUE) in it returns
-  # under a fifth, because the rest is package DLLs and the GDAL/GEOS/PROJ
-  # arenas rather than R heap. Measured on 16 cores, a fully exercised pool
-  # held 7.5 GB at one worker per core against 2.9 GB at six. A task beyond
-  # the sixth queues in future_promise, which is what that queue is for.
+  # One outer worker per CONCURRENT async task (run, optimizer, classification,
+  # Governing Factors, CRS search); compute parallelism lives in the nested
+  # PSOCK clusters. A used worker keeps ~470 MB (DLLs, GDAL/GEOS/PROJ arenas):
+  # on 16 cores a per-core pool held 7.5 GB against 2.9 GB at six. Further
+  # tasks queue in future_promise.
   future::plan(future::multisession,
                workers = min(6L, future::availableCores()))
 }

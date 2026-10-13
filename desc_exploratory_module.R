@@ -1,10 +1,9 @@
 
-# Caveat shown with the Contribution / cos2 controls when the PCA was run
-# without scaling. The two panels need DIFFERENT wording: contribution is a
-# share of a COMPONENT, so an unscaled run makes it a ranking of raw variances;
-# cos2 is normalised per variable (see generate_pca_cos2) and so stays a true
-# quality-of-representation in both modes - what carries over there is that the
-# components themselves are driven by the high-variance variables.
+# Caveat beside the Contribution / cos2 controls for an unscaled PCA, worded
+# per panel: contribution (a share of a COMPONENT) becomes a ranking of raw
+# variances; cos2 is normalised per variable (generate_pca_cos2()) and stays a
+# true quality of representation, but the components are driven by the
+# high-variance variables.
 unscaled_pca_note <- function(panel = c("contrib", "cos2")) {
   panel <- match.arg(panel)
   shiny::helpText(
@@ -17,9 +16,8 @@ unscaled_pca_note <- function(panel = c("contrib", "cos2")) {
   )
 }
 
-# Empty-state table for the module's DT outputs. Never hand a widget output
-# NULL (the app-wide convention behind sci_dt's placeholder, ui_components.R);
-# a silent blank table also hides WHY there is nothing to show.
+# Empty-state table for the module's DT outputs: never hand a widget NULL, and
+# say why there is nothing to show.
 desc_empty_dt <- function(msg = "No data for this selection.") {
   # mn-status-table: the copy button reports the message instead of copying it
   DT::datatable(data.frame(Message = msg), options = list(dom = "t"), rownames = FALSE,
@@ -83,15 +81,10 @@ compute_normality <- function(x) {
   })
 }
 
-#' The normality verdict as one sentence, for reading and for copying.
-#'
-#' A verdict held only in an icon's `title` could not be copied into a report
-#' or read without hovering; the tooltip keeps the long
-#' explanation and the per-group breakdown, this is the line on the page. It
-#' names the test, its statistic with the symbol that test reports (W for
-#' Shapiro-Wilk, D for Lilliefors), the p-value through the app's own
-#' format_p_value(), the significance stars and n, and states the conclusion
-#' at alpha = 0.05 in words.
+#' The normality verdict as one sentence on the page (copyable; the tooltip
+#' keeps the long explanation and per-group breakdown): the test, its
+#' statistic (W for Shapiro-Wilk, D for Lilliefors), format_p_value(), stars
+#' and n, and the conclusion at alpha = 0.05 in words.
 normality_verdict_text <- function(res, on_residuals = FALSE) {
   what <- if (isTRUE(on_residuals)) "within-group residuals" else "raw values"
   if (identical(res$status, "insufficient")) {
@@ -243,10 +236,9 @@ desc_exploratory_ui <- function(id) {
   )
 }
 
-# `spatial_reactive` carries the confirmed coordinate mapping (x/y column names,
-# source CRS, target mapping CRS) for the Spatial Cross-Correlogram panel, which
-# bins point pairs by ground distance. It defaults to NULL so the module still
-# runs headless (tests) and so every other panel stays independent of it.
+# `spatial_reactive` carries the confirmed coordinate mapping (x/y columns,
+# source and target CRS) for the Spatial Cross-Correlogram; NULL by default so
+# the module runs headless (tests) and the other panels stay independent.
 desc_exploratory_server <- function(id, data_reactive, vars_metadata_reactive,
                                     spatial_reactive = shiny::reactive(NULL)) {
   shiny::moduleServer(id, function(input, output, session) {
@@ -352,9 +344,8 @@ desc_exploratory_server <- function(id, data_reactive, vars_metadata_reactive,
       num_named <- setNames(num_cols, lab(num_cols))
       
       p_type <- input$desc_plot_type %||% "histogram"
-      # isolate: selections are restored on re-render (plot type / data change) but
-      # must not themselves invalidate this renderUI, or every click rebuilds the
-      # inputs mid-interaction and fights the user (add/remove feedback loop)
+      # isolate: selections are restored on re-render but must not invalidate
+      # this renderUI, or every click rebuilds the inputs mid-interaction.
       sel_state <- shiny::isolate(shiny::reactiveValuesToList(desc_vars_state))
       sel_x <- if(isTruthy(sel_state$x)) sel_state$x else valid_named[1]
       
@@ -374,16 +365,11 @@ desc_exploratory_server <- function(id, data_reactive, vars_metadata_reactive,
           shiny::div(style="background-color: var(--mn-surface-2); padding: 10px; border-radius: 6px; border: 1px solid var(--mn-line); margin-bottom: 10px;",
               shiny::h5(style="margin-top:0; color: var(--mn-text);",
                   "Statistical Significance Tests"),
-              # Its own line, not inside the heading: the verdict is a full
-              # sentence now, and a heading is the wrong place to wrap one.
+              # Its own line: the verdict is a full sentence.
               shiny::uiOutput(ns("desc_normality_indicator")),
-              # radioButtons, not a checkbox group: only ONE test is ever used
-              # (add_stat_layer takes stat_test[1], which is CHOICE order, not
-              # click order), so a multi-select control silently discarded the
-              # user's second pick - and it did so in the direction that
-              # matters, substituting a parametric post-hoc for a deliberately
-              # chosen Kruskal-Wallis. "None" is the empty string, which
-              # add_stat_layer/get_stat_letters treat as "draw nothing".
+              # radioButtons, not a checkbox group: only ONE test is used
+              # (add_stat_layer() takes stat_test[1]). "None" is the empty
+              # string, which draws nothing.
               shiny::div(class = "mn-seg-grid",
                 shinyWidgets::radioGroupButtons(ns("desc_stat_tests"),
                                  shiny::HTML(paste0("Group comparison test", info_tooltip(ns("desc_stat_test_info"), "For non-normal data distributions, the non-parametric Kruskal-Wallis test is recommended. Duncan is liberal: it controls the comparison-wise, not the family-wise, error rate."), ":")),
@@ -508,10 +494,8 @@ desc_exploratory_server <- function(id, data_reactive, vars_metadata_reactive,
         )
       }
       
-      # The verdict is TEXT on the page, not only a hover: it is what a reader
-      # copies into a report, so it has to be a complete sentence and to survive
-      # a copy. The icon stays as the severity cue and the tooltip keeps the
-      # long explanation and the per-group breakdown.
+      # The verdict is TEXT on the page (copyable); the icon is the severity
+      # cue and the tooltip keeps the long explanation and per-group breakdown.
       shiny::tags$span(
         style = "margin-left: 5px; display: inline-block; vertical-align: middle;",
         title = tooltip_title,
@@ -731,9 +715,9 @@ desc_exploratory_server <- function(id, data_reactive, vars_metadata_reactive,
         } else if (p_type == "correlogram") {
           p <- generate_correlogram(df, vars, method = method, cormat = corr_matrix_reactive(), labels = display_labels())
         }
-        # These four panels are one matrix, estimated on the rows complete across
-        # every variable involved (controls included). Carrying that n on the
-        # figure keeps it with the plot when the plot is exported.
+        # These four panels share one matrix, estimated on the rows complete
+        # across every variable involved (controls included); n travels with
+        # the exported figure.
         if (inherits(p, "ggplot") && all(cc_vars %in% colnames(df))) {
           p <- p + labs(caption = complete_case_note(
             sum(stats::complete.cases(df[, cc_vars, drop = FALSE])), nrow(df)))
@@ -837,10 +821,8 @@ desc_exploratory_server <- function(id, data_reactive, vars_metadata_reactive,
                  if(!is.null(ct)) {
                     p_val <- ct$p.value
                     if (!is.null(pcor)) {
-                       # The partial estimate carries no test of its own, and a
-                       # cor.test on residuals would use df = n - 2, ignoring the
-                       # k control variables partialled out. The p-value uses the
-                       # partial-correlation df = n - 2 - k (same convention as
+                       # A residual cor.test would use df = n - 2, ignoring the
+                       # k controls; the partial df is n - 2 - k (as in
                        # ppcor::pcor.test).
                        r_est <- unname(ct$estimate)
                        n_obs <- pcor$n
@@ -869,9 +851,8 @@ desc_exploratory_server <- function(id, data_reactive, vars_metadata_reactive,
            }
            if(length(res_list) > 0) {
               res_df <- do.call(rbind, res_list)
-              # Benjamini-Hochberg adjustment across all tested pairs (decided
-              # 2026-07-05, user sign-off): raw p-values stay visible, the BH
-              # column controls the false discovery rate over the whole table
+              # Benjamini-Hochberg adjustment across all tested pairs: raw
+              # p-values stay visible, the BH column controls the FDR.
               res_df$P_Value <- format.pval(res_df$p_raw, digits = 3, eps = 0.001)
               res_df$P_Adj <- format.pval(p.adjust(res_df$p_raw, method = "BH"), digits = 3, eps = 0.001)
               res_df$p_raw <- NULL
@@ -887,8 +868,7 @@ desc_exploratory_server <- function(id, data_reactive, vars_metadata_reactive,
         dimnames(cormat) <- lapply(dimnames(cormat), lab)
         cormat_df <- as.data.frame(cormat)
 
-        # paging off: dom = 't' shows no paging controls, so a matrix of more
-        # than ten variables lost its lower rows on screen and in a copy.
+        # paging off: dom = 't' shows no paging controls.
         return(DT::datatable(cormat_df, options = list(dom = 't', paging = FALSE, scrollX = TRUE,
                                                        columnDefs = sig_render_defs(cormat_df, names(cormat_df), rownames = TRUE)),
                              caption = complete_case_note(nrow(df_clean), nrow(df))))
@@ -918,9 +898,7 @@ desc_exploratory_server <- function(id, data_reactive, vars_metadata_reactive,
                                     guard = NULL, refusal = NULL, dropped_constant = NULL,
                                     scaled = TRUE)
 
-    # One path for Run PCA and for continuing past the guard. Complete-case
-    # filter, the zero-variance exclusion and prcomp live in desc_pca_fit
-    # (ui_formatting.R).
+    # One path for Run PCA and for continuing past the guard (desc_pca_fit()).
     run_pca <- function(df) {
       fit <- tryCatch(desc_pca_fit(df, input$pca_vars, lab(input$pca_vars), scale = input$pca_scale),
                       error = function(e) {
@@ -974,11 +952,10 @@ desc_exploratory_server <- function(id, data_reactive, vars_metadata_reactive,
       }
     })
 
-    # Two kinds of finding, each under its own heading and sentence. Only the
-    # near-duplicate pairs are advisory, so the button to continue follows
-    # them; a constant column is never a reason to stop, because it is excluded
-    # anyway. The same slot carries a refusal, or, once a PCA is shown, the
-    # standing note naming the columns it left out.
+    # Two kinds of finding: near-duplicate pairs are advisory (the continue
+    # button follows them); a constant column never stops the PCA (it is
+    # excluded). The same slot carries a refusal, or, once a PCA is shown, the
+    # note naming the columns it left out.
     output$pca_collinearity_warning_ui <- shiny::renderUI({
       if (!is.null(pca_rv$refusal)) {
         return(shiny::div(class = "alert alert-danger",
@@ -1080,14 +1057,13 @@ desc_exploratory_server <- function(id, data_reactive, vars_metadata_reactive,
        } else if (p_type == "mahalanobis") {
           p <- generate_pca_mahalanobis(displayed)
        } else if (p_type == "3d_biplot") {
-          # Same guard as the 2-D biplot: switching straight to 3D before the
-          # axis controls render would otherwise throw a transient error.
+          # Same guard as the 2-D biplot (axis controls may not have rendered).
           if (ncol(displayed$x) >= 3L) req(input$pca_pc_x, input$pca_pc_y, input$pca_pc_z)
           aligned_df <- data.frame(group_id = pca_rv$groups %||% factor(rep("All", nrow(pca_rv$res$x))))
           p <- generate_pca_biplot_3d(displayed, aligned_df, pc_x = input$pca_pc_x, pc_y = input$pca_pc_y, pc_z = input$pca_pc_z, group_col="group_id")
        }
-          # The columns left out for having no variance travel with the figure,
-          # including the PNG the expanded interactive view saves (ggplotly_smart).
+          # Columns left out for no variance travel with the figure (and its
+          # interactive PNG, ggplotly_smart()).
           dc <- pca_rv$dropped_constant
           if (inherits(p, "ggplot") && length(dc)) {
             p <- p + labs(caption = paste(c(p$labels$caption,
@@ -1124,8 +1100,7 @@ desc_exploratory_server <- function(id, data_reactive, vars_metadata_reactive,
        var_explained <- pca_rv$res$sdev^2 / sum(pca_rv$res$sdev^2)
        cum_var <- cumsum(var_explained)
   
-       # Unrounded: a covariance PCA of small-unit variables has eigenvalues
-       # that fixed decimals print as 0. The display formats them.
+       # Unrounded: small eigenvalues would print as 0; the display formats them.
        df_res <- data.frame(
           PC = paste0("PC", 1:length(var_explained)),
           Eigenvalue = pca_rv$res$sdev^2,
@@ -1133,8 +1108,7 @@ desc_exploratory_server <- function(id, data_reactive, vars_metadata_reactive,
           Cumulative_Variance_Pct = cum_var * 100
        )
 
-       # paging off: dom = 't' shows no paging controls (components past the
-       # tenth were unreachable on screen and missing from a copy)
+       # paging off: dom = 't' shows no paging controls.
        DT::datatable(df_res, options = list(dom = 't', paging = FALSE, scrollX = TRUE,
                                             columnDefs = sig_render_defs(df_res, names(df_res)[-1])),
                      rownames = FALSE)

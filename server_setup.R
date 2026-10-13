@@ -1,15 +1,12 @@
-# server_setup.R (sourced with local = TRUE inside server) - session infra,
-# raster caches, diagnostics closures, decoupled module wiring, session_state,
-# map_overlay_rev/overlay_map_ids and the central `rv` reactiveValues.
-# This file MUST be sourced first: every later chunk reads names defined here.
+# server_setup.R (chunk A, sourced first with local = TRUE inside server):
+# session dirs, raster caches, diagnostics closures, module wiring,
+# session_state, map_overlay_rev/overlay_map_ids and the central `rv`.
 
   session_id <- paste0("session_", substr(session$token, 1, 16))
   session_progress_dir <- file.path(tempdir(), "monolith_progress", session_id)
   
   dir.create(session_progress_dir, recursive = TRUE, showWarnings = FALSE)
-  # One directory per session, removed when the session ends: on a multi-user
-  # deployment they would otherwise accumulate for the lifetime of the R
-  # process. Same idiom as the shapefile upload (server_data_setup.R).
+  # One directory per session, removed when it ends.
   session$onSessionEnded(function() {
     unlink(session_progress_dir, recursive = TRUE)
   })
@@ -24,11 +21,9 @@
     rm(list = ls(envir = area_calc_cache), envir = area_calc_cache)
   }
 
-  # Display cap for the Leaflet viewer: every styling change re-encodes the
-  # raster layers (leaflet reprojects + PNG-encodes on the main thread), so
-  # very fine interpolation grids would make each styling tick take seconds
-  # and block the whole UI. DISPLAY-ONLY: exports, area statistics and
-  # GeoTIFFs always use the full-resolution rasters.
+  # Display cap for the Leaflet viewer (every styling change re-encodes the
+  # rasters on the main thread). DISPLAY-ONLY: exports, area statistics and
+  # GeoTIFFs use the full-resolution rasters.
   LEAFLET_DISPLAY_MAX_CELLS <- 5e5
 
   get_projected_raster <- function(r, cache_key) {
@@ -38,14 +33,9 @@
       fact <- ceiling(sqrt(terra::ncell(r) / LEAFLET_DISPLAY_MAX_CELLS))
       r <- tryCatch(terra::aggregate(r, fact = fact, fun = "mean", na.rm = TRUE), error = function(e) r)
     }
-    # Project straight to the Leaflet display CRS (EPSG:3857) and cache that:
-    # addRasterImage is then called with project = FALSE, so each styling tick
-    # only re-colours + PNG-encodes instead of re-resampling every locality
-    # layer (addRasterImage's own projectRasterForLeaflet call is uncached and
-    # runs per layer per tick). A single resample, native -> 3857, with no
-    # EPSG:4326 intermediate.
-    # The NULL result is cached too, so this notifies once per layer instead
-    # of silently leaving the map empty.
+    # Project once to EPSG:3857 and cache it, so addRasterImage(project =
+    # FALSE) only re-colours on each styling tick. A failure is cached too
+    # (NULL), so it notifies once per layer.
     r_proj <- tryCatch(leaflet::projectRasterForLeaflet(r, method = "bilinear"), error = function(e) {
       showNotification(paste("Map layer could not be projected for display:", conditionMessage(e)), type = "error")
       NULL
@@ -54,15 +44,12 @@
     r_proj
   }
 
-  # Build closure factory for the CV residual variograms; render_resid_plot
-  # wraps the same closure in the cached in-page renderer, register_sci_plot
-  # reuses it for the expand modal and PNG download.
+  # Builder of the CV residual variogram plots, shared by the cached in-page
+  # renderer (render_resid_plot()) and register_sci_plot() (expand, PNG).
   build_resid_vgm_diag <- function(cv_data_reactive, title_suffix = "") {
-    # A locality's scored CV residuals as sf, NULL when there are none. Every
-    # engine returns CV objects as sf in the locality's projected CRS; anything
-    # else has no knowable metric CRS for a variogram. gstat::variogram() stops
-    # on an NA response, which a failed CV fold leaves behind, so only the
-    # scored samples are kept.
+    # A locality's scored CV residuals as sf (NULL otherwise): engines return
+    # CV objects as sf in the projected CRS, and the NA residuals of a failed
+    # fold are dropped because gstat::variogram() stops on them.
     cv_residuals <- function(cv_obj) {
       if (!inherits(cv_obj, "sf") && !inherits(cv_obj, "Spatial")) return(NULL)
       if (inherits(cv_obj, "Spatial")) cv_obj <- sf::st_as_sf(cv_obj)
@@ -102,9 +89,8 @@
         lags <- calc_scientific_lags(cv_obj)
         v_res <- variogram(residual ~ 1, cv_obj, width = lags$width, cutoff = lags$cutoff)
         v_fit <- robust_vgm_fit(v_res, cv_obj$residual)
-        # Residuals with no usable variance: every empirical point sits at the
-        # numerical noise floor, so the points are drawn with the reason and
-        # no curve (build_fitted_variogram_plot).
+        # A residual set without usable variance is drawn as points plus the
+        # reason (build_fitted_variogram_plot()).
         build_fitted_variogram_plot(v_res, v_fit,
                                     title = paste("Residual Variogram:", loc, title_suffix))
       }, error = function(e) {
@@ -117,19 +103,17 @@
     renderCachedPlot({
       p <- build_fn(); req(p); p
     }, cacheKeyExpr = {
-      # cv data only changes at run completion (rv$results_rev); the names()
-      # component invalidates the cache when the lists are reset at dispatch
-      # so a running model shows a blank panel, not the previous run's plot.
+      # CV data change at run completion (rv$results_rev); names() also
+      # invalidates when the lists are reset at dispatch, so a running model
+      # shows a blank panel.
       list("resid_vgm", title_suffix, input$sel_loc_stats, rv$results_rev,
            names(cv_data_reactive()))
     }, cache = "session")
   }
 
-  # RK and RFK krige the residuals of their trend. Where a locality's trend
-  # step failed, apply_kriging_pipeline's OK fallback kriged, and stored the
-  # variogram of, the measured values instead; the trend object (summary.lm for
-  # RK, the forest for RFK) exists for exactly the localities whose trend step
-  # succeeded. `keys` are v_fits names ("<locality>_act" / "_pre").
+  # RK/RFK krige trend residuals; where a locality's trend step failed, the OK
+  # fallback stored the measured values' variogram and no trend object exists.
+  # `keys` are v_fits names ("<locality>_act" / "_pre").
   disp_trend_fallback <- function(keys) {
     m <- rv$disp$method %||% ""
     trend <- if (m == "RFK") rv$rf_models else rv$model_summaries
@@ -143,9 +127,8 @@
     ifelse(disp_trend_fallback(names(fits)), VGM_OF_FALLBACK, VGM_OF_RESIDUALS)
   }
 
-  # method is passed in from the run that produced the assets: reading
-  # input$method here would mis-register diagnostics if the user changed the
-  # sidebar while the run was still executing.
+  # `method` comes from the run that produced the assets, never input$method,
+  # which may have changed during the run.
   register_locality_assets <- function(l, meta, comp_mode, val_type, method) {
      # The per-locality Descriptive Statistics card's own frame and builder
      # (uploaded rows of this locality, not the deduplicated rv$sf).
@@ -158,10 +141,7 @@
      if(!is.null(rv$sf)) {
        if(comp_mode || val_type != "actual") {
          df_l_perf <- rv$sf %>% st_drop_geometry() %>% filter(loc == !!l, !is.na(v), !is.na(pv))
-         # Same builder as the on-screen Prediction Performance card, so the
-         # export carries all eleven statistics rather than a six-metric
-         # subset under its own labels. Per-locality n is small (8-30), which
-         # is exactly where the two CCC estimators diverge most.
+         # Same builder as the on-screen Prediction Performance card.
          perf_l <- pred_perf_df(df_l_perf$v, df_l_perf$pv)
          if(!is.null(perf_l)) {
            register_export_item(paste0("table_perf_loc_", l), paste(meta$label, "-", l, "- Prediction Performance"), "table", perf_l, meta$category)
@@ -170,14 +150,12 @@
        }
      }
 
-     # Model CV metrics export: the same wide row the Model Performance card
-     # shows, with the fold plan and Moran's null expectation as columns of
-     # their own.
+     # Model CV metrics export: the Model Performance row, with the fold plan
+     # and the Moran reading as columns.
      if(!is.null(rv$cv_metrics_act[[l]])) {
        n_obs_l <- if(!is.null(rv$cv_data_act[[l]])) nrow(rv$cv_data_act[[l]]) else NA
-       # The APPLIED fold plan, so a locality scored by LOOCV below
-       # CV_BLOCK_MIN_N is not exported as Spatial Block CV, and the Moran
-       # reading that goes with it decides whether a p-value is reported.
+       # The APPLIED fold plan (LOOCV below CV_BLOCK_MIN_N is not exported as
+       # Spatial Block), which also decides whether Moran's p is reported.
        plan_l <- applied_cv_plan(n_obs_l, rv$cv_strategy_sel, rv$cv_metrics_act[[l]])
        cv_table <- cv_metrics_export_df(rv$cv_metrics_act[[l]], "Actual Model",
                                         plan_l$label, rv$cv_info_act[[l]],
@@ -194,8 +172,7 @@
        register_export_item(paste0("table_cv_pre_loc_", l), paste(meta$label, "-", l, "- Model CV Metrics (Predicted)"), "table", cv_table_p, meta$category)
      }
 
-     # Fold-realization stability (opt-in repeated CV): reported on screen,
-     # never exportable before.
+     # Fold-realization stability (opt-in repeated CV).
      rep_l_a <- rv$cv_repeats_act$per_loc[[l]]
      if(!is.null(rep_l_a)) {
        register_export_item(paste0("table_cv_repeats_loc_", l), paste(meta$label, "-", l, "- Fold-Realization Stability (Actual)"), "table", cv_repeats_export_df(rep_l_a, "Actual Model"), meta$category)
@@ -207,15 +184,10 @@
        }
      }
 
-     # Per-locality class-area coverage is registered by the classification
-     # observer in server_sci_analysis.R, not here: the classification is
-     # usually applied after the run, and a table registered at run completion
-     # would miss it. That observer covers both surfaces and re-registers on
-     # every re-classification.
+     # Class-area coverage is registered by the classification observer in
+     # server_sci_analysis.R (classification is usually applied after the run).
 
-
-     # Variogram exports register the same ggplot builders the Scientific
-     # Analysis tab renders (former lattice look retired; numbers unchanged).
+     # Variogram exports reuse the Scientific Analysis builders.
      if(!is.null(rv$disp$v_emps[[paste0(l, "_act")]])) {
        v_emp <- rv$disp$v_emps[[paste0(l, "_act")]]
        v_fit <- rv$disp$v_fits[[paste0(l, "_act")]]
@@ -265,11 +237,8 @@
        }
      }
      
-     # Like the variogram above, the smoothing and power selections export as
-     # BOTH the Scientific Analysis figure and the grid it was drawn from - the
-     # numeric record of how lambda or p was chosen. Only a selecting run
-     # (Auto (GCV) / Auto (CV)) has one. The CV Distance Match follows the same
-     # pattern for every run.
+     # Selection records export as figure plus data (selecting runs only:
+     # Auto (GCV) / Auto (CV)); the CV Distance Match likewise, for every run.
      surfaces <- c(act = "Actual", pre = "Predicted")
      for (tgt in if (comp_mode || val_type != "actual") names(surfaces) else "act") {
        sfx <- if (tgt == "act") "" else "pre_"
@@ -300,10 +269,8 @@
        }
      }
 
-     # RF importance exports reuse the labeled SA-tab builder (metadata labels
-     # instead of raw column names; every importance measure gets a panel).
-     # The data-table export (rf_importance_df, ui_formatting.R) keeps raw
-     # column names and carries EVERY importance measure the forest recorded.
+     # RF importance: the labelled plot and the raw-name data table with every
+     # recorded measure (rf_importance_df()).
      if(method == "RFK" && !is.null(rv$rf_models[[paste0(l, "_act")]])) {
        rf_mod <- rv$rf_models[[paste0(l, "_act")]]
        p_imp <- build_rf_importance_plot(rf_mod, paste("Variable Importance (Actual):", l), rv$mapping$vars)
@@ -317,9 +284,7 @@
        register_export_item(paste0("table_rf_imp_pre_", l), paste(meta$label, "-", l, "- RF Variable Importance Data (Predicted)"), "table", rf_importance_df(rf_mod_p), meta$category)
      }
 
-     # The coefficient table the RK trend panel shows (labelled terms, CI,
-     # significance codes), in its numeric export flavour, plus the fit
-     # statistics that panel puts in chips.
+     # The RK trend panel's coefficient table (numeric flavour) and fit statistics.
      register_rk_trend <- function(lm_sum, tgt, tgt_label) {
        coef_df <- rk_coef_export_df(lm_sum, rv$mapping$vars)
        if(!is.null(coef_df)) {
@@ -337,8 +302,8 @@
        register_rk_trend(rv$model_summaries[[paste0(l, "_pre")]], "pre", "Predicted")
      }
 
-     # CK exports use the same faceted ggplot + metadata labels as the SA tab,
-     # on the empirical variogram the LMC was fitted to (stored with the fit).
+     # CK exports: the SA tab's faceted plot on the empirical variogram stored
+     # with the LMC fit.
      ck_export_plot <- function(g, title) {
        vm <- attr(g, "monolith_vm")
        if (is.null(vm)) return(NULL)
@@ -382,9 +347,8 @@
     d <- rv$disp
     prediction_active <- !is.null(d) && (isTRUE(d$comp_mode) || !identical(d$value_type, "actual"))
     has_interp <- prediction_active || rv$has_predictions
-    # Pre-run only: auto-fit already fitted predicted-side variograms, so the
-    # Predicted Data Structure card must be visible for manual tuning of the
-    # "pre" target before the first interpolation.
+    # Before the first run, auto-fit may already hold predicted-side
+    # variograms to tune, so the Predicted Data Structure card shows.
     prerun_pre_vgm <- is.null(d) && any(grepl("_pre$", names(rv$v_emp_list)))
     shinyjs::toggle(id = "predicted_data_structure_ui", condition = has_interp || prerun_pre_vgm)
     shinyjs::toggle(id = "rk_pred_ui", condition = has_interp)
@@ -399,11 +363,9 @@
     shinyjs::toggle(id = "loc_pred_col", condition = has_interp)
     shinyjs::toggle(id = "area_total_pred_col", condition = has_interp)
     
-    # Only show the uploaded-prediction statistics when the DISPLAYED run's
-    # variable actually has an uploaded prediction column (detect_pred_column
-    # stores NA - not NULL - when none exists, hence is_valid_col_ref) AND the
-    # run mapped a prediction side. An Actual-only run reads no prediction
-    # column, so these two tables would score an empty set.
+    # Uploaded-prediction statistics only when the DISPLAYED run mapped a
+    # prediction side and its variable has a prediction column (NA, not NULL,
+    # when none: is_valid_col_ref()).
     has_upl_pred <- !is.null(d) && has_interp &&
       (is_valid_col_ref(d$pred) || is_valid_col_ref(d$pred_ss))
     shinyjs::toggle(id = "prediction_performance_ui", condition = has_upl_pred)
@@ -433,29 +395,20 @@
       proj_crs = if (isTruthy(input$crs_selection)) input$crs_selection else NULL,
       loc = rv$mapping$loc
     )),
-    # Polygons (map-drawn + uploaded shapefile) enable the module's polygon
-    # scope. get_drawn_sf is defined later in this server function - reactives
-    # only look the binding up at evaluation time, after server setup
-    # completes. Localities, boundary, buffer, and grid resolution are
-    # module-local controls: the interpolation sidebar is hidden on the
-    # Classification Suite tab and never affects classification runs.
+    # Polygons (drawn + uploaded) enable the polygon scope. get_drawn_sf() is
+    # defined in a later chunk; reactives resolve it at evaluation time. The
+    # interpolation sidebar never affects classification runs.
     polygons_reactive = reactive(list(drawn = get_drawn_sf(),
                                       shp = shp_assume_crs(rv$shp_bound, rv$mapping$crs)))
   )
 
-  # No theme wiring here: there is one theme, its light and dark variants are
-  # two token blocks in the single stylesheet emitted from ui_main.R, and the
-  # toggle flips a data-theme attribute client-side, with no server round trip.
-  # The Map Viewer's default basemap is the selectInput's own `selected` value
-  # in ui_main_tabs.R.
+  # No theme wiring: the light/dark toggle is client-side (ui_main.R). The
+  # default basemap is the selectInput's `selected` value (ui_main_tabs.R).
 
-  # CARTO's Positron and Dark Matter raster basemaps require a free API key
-  # (ui_plotting.R, add_base_tiles); the field only appears in the Map Viewer
-  # toolbar while one of them is selected. Defined here, in the first chunk, so
-  # the Data Setup validation minimap (chunk D) and the Map Viewer (chunk H)
-  # read one value. Debounced because a textInput reports every keystroke, and
-  # each report would otherwise send a half-typed key to CARTO as a fresh tile
-  # request. Session-scoped: never persisted to a run config or an export.
+  # CARTO basemap API key (add_base_tiles()), shown only while a CARTO layer is
+  # selected. Defined in chunk A so the Data Setup minimap and the Map Viewer
+  # read one value; debounced so half-typed keys are not sent as tile
+  # requests. Session-scoped: never saved to a config or export.
   carto_api_key <- shiny::debounce(
     reactive(trimws(input$carto_api_key %||% "")), 800)
 
@@ -476,18 +429,14 @@
   # the zone ordering rebuilds the dropdowns.
   session_state$crs_last <- list()
 
-  # Bumped by every map renderLeaflet. Overlay observers depend on it so
-  # proxy-managed layers (points, borders, controls) are re-applied after each
-  # full re-render; leafletProxy defers until after the flush, so the calls
-  # land on the freshly rendered widget.
+  # Bumped by every map renderLeaflet, so proxy-managed overlays (points,
+  # borders, controls) are re-applied after each full re-render.
   map_overlay_rev <- reactiveVal(0L)
   overlay_map_ids <- c("main_map", "comp_map_left", "comp_map_right")
 
-  # The Map Viewer's view menu, split into the surfaces shown and the layer
-  # drawn from them (parse_map_view). reactiveVals invalidate only on a real
-  # change, so moving between a surface and its SE/variance view restyles the
-  # live widgets through the proxy (zoom and pan kept) instead of rebuilding
-  # them. Written by the observer in server_map_viewer.R.
+  # The view menu split into surfaces and layer (parse_map_view()), written by
+  # server_map_viewer.R. reactiveVals invalidate only on change, so switching
+  # between a surface and its SE/variance view restyles through the proxy.
   map_view_base <- reactiveVal("view_act")
   map_view_layer <- reactiveVal("value")
 
@@ -498,9 +447,8 @@
     drawn_polygons = list(), # Stores drawn polygons from Leaflet
     shp_bound = NULL, # Custom shapefile boundary
     mapping = list(
-      # crs stays NULL until the user confirms one (or it is identified from
-      # evidence in the file): a default zone would silently georeference
-      # everyone else's data into the wrong country.
+      # crs stays NULL until confirmed or identified from evidence: a default
+      # zone would georeference other users' data into the wrong country.
       x = NULL, y = NULL, loc = NULL, crs = NULL,
       vars = list() # List of actual/pred pairs
     ),
@@ -551,26 +499,20 @@
     run_token = 0L # Incremental run token for async cancellation
   )
 
-  # The displayed run's pooled "Total (Combined)" cross-validation metrics, per
-  # surface. Their residual Moran test permutes every pooled sample MORAN_NSIM
-  # times in this session, so each pool is computed once per run or restore and
-  # read by both the Model Performance card and the export.
+  # The displayed run's pooled "Total (Combined)" CV metrics per surface,
+  # computed once per run or restore (the pooled Moran permutations are
+  # costly) and read by the Model Performance card and the export.
   pooled_cv_metrics <- list(
     act = reactive(perform_pooled_cv(rv$cv_data_act, rv$cv_metrics_act)),
     pre = reactive(perform_pooled_cv(rv$cv_data_pre, rv$cv_metrics_pre))
   )
 
   # ── The display state of one run ──────────────────────────────────────────
-  # Everything the Map Viewer and Scientific Analysis tabs render for a run,
-  # besides its configuration and export registry. Archive and restore move all
-  # of it together: moving only the configuration and the registry left the
-  # maps, metrics, fits and CV tables of the newer run under the archived run's
-  # configuration. The list is the dispatch reset (server_execution.R) plus
-  # what the completion handler assembles; a field reset at dispatch but
-  # missing here survives a restore from the wrong run. rv$disp carries the
-  # committed context with the run's own fits, grids and regional parameters.
-  # Rasters are referenced, not copied: R shares the objects the export
-  # registry already holds, so an archived surface is not stored twice.
+  # Everything the Map Viewer and Scientific Analysis render for a run besides
+  # its configuration and registry; archive and restore move all of it
+  # together. It must cover every field the dispatch reset clears
+  # (server_execution.R), or a restore would keep the newer run's value.
+  # Rasters are shared with the export registry, not copied.
   DISPLAY_STATE_FIELDS <- c(
     "disp", "has_predictions",
     "rast", "rast_pred", "rast_res", "rast_point_res",
@@ -591,11 +533,9 @@
          state = lapply(stats::setNames(nm = DISPLAY_STATE_FIELDS), function(f) rv[[f]]))
   }
 
-  # Put an archived run back on screen. The raster and area caches are keyed on
-  # rv$run_counter, which a restore does not change, so they are cleared or the
-  # maps would show the newer run's surfaces; rv$results_rev keys the cached
-  # Scientific Analysis plots. rv$run_token is deliberately untouched: it is
-  # the abort token of a run in flight, not a display key.
+  # Put an archived run back on screen. The raster caches are keyed on
+  # rv$run_counter, which a restore keeps, so they are cleared; rv$results_rev
+  # keys the cached plots. rv$run_token (a running run's abort token) is left.
   restore_display_state <- function(entry) {
     clear_raster_caches()
     for (f in names(entry$state)) rv[[f]] <- entry$state[[f]]

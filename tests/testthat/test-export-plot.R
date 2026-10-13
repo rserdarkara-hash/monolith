@@ -1,4 +1,5 @@
-# test-export-plot.R — tests for export_plot_to_file from theme_helpers.R.
+# test-export-plot.R: export_plot_to_file() (theme_helpers.R), the
+# downloadHandler contract and showtext's device resolution.
 
 # ── Mock Shiny input object ────────────────────────────────────────────────
 mock_input <- list(
@@ -66,7 +67,7 @@ test_that("export_plot_to_file uses default dimensions when input fields missing
   p <- ggplot2::ggplot(mtcars, ggplot2::aes(wt, mpg)) +
     ggplot2::geom_point()
 
-  # input with no styler fields — should fall back to defaults via %||%
+  # Input with no styler fields falls back to the defaults via %||%.
   empty_input <- list()
   export_plot_to_file(p, tmp, "png", empty_input)
   expect_true(file.exists(tmp))
@@ -76,14 +77,10 @@ test_that("export_plot_to_file uses default dimensions when input fields missing
 # ── downloadHandler contract ───────────────────────────────────────────────
 
 test_that("no downloadHandler content function returns without writing its file", {
-  # A downloadHandler cannot decline a request: by the time `content` runs the
-  # browser has already opened the download URL. Returning early without
-  # writing `file` therefore leaves the user on a blank page at
-  # /session/<id>/download/<id>?w= with the app behind them, and a
-  # showNotification fired from there arrives on a page they have just left.
-  # The supported way to refuse is stop(safeError(msg)), which shiny turns into
-  # a readable text response. Guard the whole app: scan each downloadHandler(
-  # call's parenthesis-balanced body for a bare `return(NULL)`.
+  # By the time `content` runs the browser has opened the download URL, so an
+  # early return without writing `file` strands the user on a blank download
+  # page; a refusal goes through stop(safeError(msg)) instead. Scans every
+  # downloadHandler( call's parenthesis-balanced body for a bare `return(NULL)`.
   root <- normalizePath(file.path(testthat::test_path(), "..", ".."),
                         winslash = "/")
   files <- list.files(root, pattern = "\\.R$", full.names = TRUE)
@@ -119,14 +116,14 @@ test_that("with_showtext_dpi applies the setting and restores it", {
 
 test_that("exported text is sized by the theme, not by the export DPI", {
   skip_if_not_installed("png")
-  # setup.R disables showtext for the suite; the app runs with it on
-  # (global.R), and that is the only state in which this defect exists.
+  # setup.R disables showtext for the suite; the app runs with it on (global.R),
+  # the only state in which text can be sized against the wrong DPI.
   showtext::showtext_auto(TRUE)
   on.exit(showtext::showtext_auto(FALSE), add = TRUE)
 
-  # theme_minimal (what every builder in the app uses) is the state showtext
-  # actually intercepts; theme_void is drawn by the device itself and would
-  # pass this test even unfixed.
+  # theme_minimal (what every builder in the app uses) is text showtext
+  # intercepts; theme_void is drawn by the device itself and would pass even if
+  # the export ignored the device DPI.
   p <- ggplot2::ggplot() +
     ggplot2::labs(title = "Title Width Probe") +
     ggplot2::theme_minimal(base_size = 12)
@@ -149,9 +146,8 @@ test_that("exported text is sized by the theme, not by the export DPI", {
   w150 <- title_width(150)
   w300 <- title_width(300)
   expect_gt(w150, 0)
-  # A 12 pt title is 12 pt on the page whatever the resolution, so doubling the
-  # DPI must double its pixel width. showtext sizes text against its own dpi
-  # option unless told the device's: unfixed, this ratio came out near 3.1 and
-  # raising the DPI silently shrank the type.
+  # A 12 pt title is 12 pt on the page at any resolution, so doubling the DPI
+  # doubles its pixel width. showtext sizes text against its own dpi option
+  # unless given the device's, which shrinks the type as the DPI rises.
   expect_equal(w300 / w150, 2, tolerance = 0.05)
 })

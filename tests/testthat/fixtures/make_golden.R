@@ -1,4 +1,4 @@
-# make_golden.R — build a golden fixture from a source dataset.
+# make_golden.R: build a golden fixture from a source dataset.
 #
 # Run from the project root. With no arguments it rebuilds the shipped point
 # data deterministically from sample_data/; metadata records the current schema

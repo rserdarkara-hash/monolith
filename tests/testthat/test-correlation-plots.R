@@ -1,6 +1,6 @@
-# test-correlation-plots.R — tests for melt_cormat, generate_correlation_heatmap,
-# generate_correlation_network, generate_partial_correlation, generate_correlogram,
-# generate_lagged_correlation, and check_collinearity.
+# The correlation suite: auxiliary-correlation ranking, melt_cormat, the
+# heatmap, network, partial and correlogram panels, compute_partial_correlation,
+# the spatial cross-correlogram and check_collinearity.
 
 test_that("auxiliary ranks use the mapped target and SS partition", {
   df <- data.frame(
@@ -176,8 +176,6 @@ test_that("melt_cormat produces correct melted format", {
   expect_setequal(colnames(df), c("Var1", "Var2", "Corr"))
 })
 
-# ── generate_correlation_heatmap ───────────────────────────────────────────
-
 # ── The four correlation panels ────────────────────────────────────────────
 #
 # expect_s3_class(p, "ggplot") does not build the plot, and every one of these
@@ -260,10 +258,9 @@ test_that("a selection too small for a correlation says so", {
 })
 
 test_that("a supplied correlation matrix is aligned to the plotted variables", {
-  # Both panels index the matrix POSITIONALLY (cormat[i, j] against vars[i], and
-  # vars[hc$order]), which was only correct because the caller happened to build
-  # it over the same variables in the same order. A superset or a re-ordered
-  # matrix would have mislabelled every cell.
+  # Both panels index the matrix positionally (cormat[i, j] against vars[i],
+  # and vars[hc$order]), so a superset or a reordered matrix must be aligned to
+  # the plotted variables first.
   df <- make_test_df(20)
   vars <- c("c", "a")
   full <- cor(df[, c("a", "b", "c", "d")])
@@ -288,7 +285,7 @@ test_that("a supplied correlation matrix is aligned to the plotted variables", {
 test_that("a constant variable is named instead of blanking the panel", {
   # cor() returns an NA row/column for a zero-variance column. as.dist() then
   # feeds those NAs to hclust ("NA/NaN/Inf in foreign function call") and the
-  # network's `if (abs(w) >= threshold)` gets a missing value — both abort the
+  # network's `if (abs(w) >= threshold)` gets a missing value; both abort the
   # render, so the panel vanishes with no message.
   df <- make_test_df(20)
   df$flat <- 1
@@ -358,7 +355,7 @@ test_that("spearman partial correlation residualizes RANKS (ppcor convention)", 
   pc <- compute_partial_correlation(df, c("a", "b"), "d", method = "spearman")
 
   # ppcor::pcor(method = "spearman") inverts the Spearman matrix, which is the
-  # Pearson matrix of the ranks — algebraically the same as residualizing ranks.
+  # Pearson matrix of the ranks, algebraically the same as residualizing ranks.
   ranked <- as.data.frame(lapply(df[, c("a", "b", "d")], rank))
   ref <- sapply(c("a", "b"), function(v) {
     residuals(lm(as.formula(paste(v, "~ d")), data = ranked))
@@ -369,7 +366,7 @@ test_that("spearman partial correlation residualizes RANKS (ppcor convention)", 
     tolerance = 1e-10
   )
 
-  # ...and it is NOT the old behaviour (spearman correlation of raw residuals).
+  # ...which is not the Spearman correlation of raw residuals.
   raw_resid <- sapply(c("a", "b"), function(v) {
     residuals(lm(as.formula(paste(v, "~ d")), data = df))
   })
@@ -545,9 +542,8 @@ test_that("the partial-correlation table uses effective control df and refuses u
 # ── compute/generate_spatial_cross_correlogram ─────────────────────────────
 
 test_that("the spatial cross-correlogram bins by DISTANCE, not by row order", {
-  # This is the regression that retired stats::ccf() from this panel: its lag k
-  # meant "k rows down the uploaded table", so simply re-sorting the upload
-  # changed the published curve. Distance binning cannot depend on row order.
+  # A row lag (stats::ccf()) would make the curve depend on the upload's row
+  # order; distance binning cannot.
   df <- make_xcorr_df(200)
   res <- compute_spatial_cross_correlogram(
     df,
@@ -719,10 +715,8 @@ test_that("a high VIF without a near-duplicate pair does not stop a PCA", {
 })
 
 test_that("desc_empty_dt returns a renderable placeholder, never NULL", {
-  # The desc module's DT outputs used to return NULL on their empty states,
-  # against the app-wide "never hand a widget output NULL" convention (the
-  # reason sci_dt(NULL) renders a placeholder), and a silent blank table also
-  # hid WHY there was nothing to show.
+  # As sci_dt(NULL): a widget output is never NULL, and the empty state says why
+  # there is nothing to show.
   w <- desc_empty_dt("nothing here")
   expect_s3_class(w, "datatables")
   expect_true(any(grepl("nothing here", unlist(w$x$data))))

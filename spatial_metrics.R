@@ -1,8 +1,5 @@
-# spatial_metrics.R - CV plans/folds (resolve_cv_plan, make_cv_folds), CV
-# execution (perform_cv, perform_kriging_loocv), error metrics (calc_ccc,
-# augment_metrics, calc_moran) and CV pooling. Sourced via spatial_helpers.R -
-# see the worker contract note there before moving anything.
-
+# spatial_metrics.R - CV plans and folds, CV execution, error metrics and CV
+# pooling. Sourced via spatial_helpers.R (see its worker contract).
 
 #' Prediction and observation column names in a CV object (gstat's `var1.*`
 #' names first, then any `*.pred` / `*.observed`). Returns `list(pred,
@@ -33,15 +30,9 @@ calc_ccc <- function(observed, predicted) {
   mean_obs <- mean(observed)
   mean_pred <- mean(predicted)
 
-  # Lin (1989) defines CCC on POPULATION second moments. Using the sample (n-1)
-  # variances and covariance while leaving the squared bias (mean_obs -
-  # mean_pred)^2 unscaled is a different statistic: the two agree only when the
-  # means are equal, and elsewhere the (n-1) form is optimistic - it discounts
-  # exactly the systematic offset CCC exists to penalise. Measured against
-  # DescTools::CCC, the reference the known-answer fixture cites: +0.17% at
-  # n = 30 and +0.66% at n = 12 on a biased fixture, and the (n-1)/n rescaling
-  # below reproduces DescTools to 1e-10. Excess shrinks as 1/n, so it is under
-  # 0.1% at the reference dataset's n = 632.
+  # Lin (1989) uses POPULATION moments; the sample (n - 1) form with an
+  # unscaled bias term is optimistic about exactly the offset CCC penalises.
+  # Matches DescTools::CCC to 1e-10.
   scale_pop <- (n - 1) / n
   var_obs <- var(observed) * scale_pop
   var_pred <- var(predicted) * scale_pop
@@ -63,15 +54,9 @@ calc_ccc <- function(observed, predicted) {
   return(ccc)
 }
 
-# Degenerate cases return NA rather than +/-Inf: every metric here is a ratio,
-# and each has an input configuration that zeroes its denominator (constant
-# observations, a zero-mean variable, a perfect fit). Inf/-Inf would flow
-# straight into the Model Performance table, the metrics CSV and the pooled
-# Total (Combined) diagnostics; NA states "undefined here", which is what these
-# quantities actually are. Same convention as calc_ccc's constant-vector branch.
-# Values are returned at full precision; the display layer formats them
-# (format_sig() / mnFormatSig), so a small value never becomes 0 before it
-# reaches a table or an exported file.
+# Degenerate cases (constant observations, zero mean, perfect fit) return NA,
+# not +/-Inf, which would flow into the tables, exports and pooled row. Values
+# are returned at full precision; the display layer formats them.
 augment_metrics <- function(obs, pre) {
   res <- list(nse = NA, nrmse_mean = NA, nrmse_sd = NA, rpd = NA, rpiq = NA,
               smape = NA, signed_target = NA)
@@ -89,30 +74,22 @@ augment_metrics <- function(obs, pre) {
   # NSE is undefined when the observations carry no variance (0/0).
   res$nse <- if (is.finite(sst) && sst > 0) 1 - (sse / sst) else NA
 
-  # Mean-normalised and percentage errors need a ratio scale. A target whose
-  # observed values span zero has an arbitrary origin: the same fit reported
-  # against a differently centred version of the variable gives a different
-  # NRMSE, and sMAPE's |obs| + |pred| denominator collapses at the crossing,
-  # so a single sign disagreement contributes its maximum term however small
-  # both values are. Report NA rather than a number with no interpretation.
-  # The observed sign crossing is the rule because the variable list carries
-  # no scale metadata. |mean| < sd is NOT used: a positive ratio-scale variable
-  # can have sd > mean and still normalise correctly.
+  # Mean-normalised and percentage errors need a ratio scale: when the observed
+  # values span zero the origin is arbitrary (NRMSE changes with recentring and
+  # sMAPE's denominator collapses at the crossing), so they are NA. The sign
+  # crossing is the rule because the variable list carries no scale metadata;
+  # |mean| < sd is not (a ratio-scale variable can have sd > mean).
   res$signed_target <- all(is.finite(rng_obs)) && rng_obs[1] < 0 && rng_obs[2] > 0
 
-  # NRMSE (mean) = CV(RMSE). Normalised by |mean|, not the signed mean: RMSE is
-  # non-negative, so a negative-mean variable would otherwise report a
-  # negative percentage. The zero-mean guard is a numerical-stability branch,
-  # separate from the sign-crossing rule above.
+  # NRMSE (mean) = CV(RMSE), normalised by |mean| so a negative-mean variable
+  # does not report a negative percentage.
   res$nrmse_mean <- if (!res$signed_target && is.finite(mean_obs) && abs(mean_obs) > 0) {
     (rmse / abs(mean_obs)) * 100
   } else NA
 
-  # NRMSE (SD): RMSE in units of the observed spread. Invariant to recentring
-  # (SD(y + c) = SD(y)), so it stays defined for anomaly and interval scales.
-  # With rmse on divisor n and sd on n - 1 it equals sqrt((1 - NSE)(n - 1)/n)
-  # and 1/RPD exactly: it adds no evidence beyond NSE, it restates the error on
-  # a scale-free axis.
+  # NRMSE (SD): RMSE in units of the observed spread, invariant to recentring.
+  # With RMSE on n and SD on n - 1 it equals sqrt((1 - NSE)(n - 1)/n) and
+  # 1/RPD: a scale-free restatement, no evidence beyond NSE.
   res$nrmse_sd <- if (is.finite(sd_obs) && sd_obs > 0) rmse / sd_obs else NA
 
   # RPD / RPIQ are spread-to-error ratios (Chang et al. 2001): undefined at
@@ -138,17 +115,13 @@ MORAN_NSIM <- 999L
 MORAN_PERM_SEED <- 12345L
 
 #' Two-sided permutation p-value by doubling the smaller tail, with the
-#' (b + 1) / (m + 1) correction (Davison & Hinkley 1997; Phipson & Smyth 2010):
-#' the observed arrangement counts as one of the m + 1, so the p-value is never
-#' 0 and the smallest attainable value is 2 / (m + 1). NA when the observed
-#' statistic is not finite.
+#' (b + 1) / (m + 1) correction (Davison & Hinkley 1997; Phipson & Smyth 2010),
+#' so p is never 0. NA when the observed statistic is not finite.
 #'
 #' A permuted statistic within `tol` of the observed one is a tie and counts in
-#' both tails. Two arrangements with the same exact I are summed in a different
-#' order and differ in the last bits; without the tolerance a degenerate
-#' distribution would get an arbitrary p. It is not hypothetical: the kNN graph
-#' of nine samples or fewer is complete, every arrangement then has
-#' I = -1/(n-1) exactly, and the right answer is p = 1.
+#' both tails: equal I values summed in another order differ in the last bits
+#' (e.g. the complete kNN graph of nine or fewer samples, where every
+#' arrangement has I = -1/(n-1) and p must be 1).
 moran_perm_p <- function(obs, sim, tol = sqrt(.Machine$double.eps) * max(1, abs(obs))) {
   if (length(obs) != 1L || !is.finite(obs)) return(NA_real_)
   m <- length(sim)
@@ -157,14 +130,11 @@ moran_perm_p <- function(obs, sim, tol = sqrt(.Machine$double.eps) * max(1, abs(
   min(1, 2 * min(upper, lower))
 }
 
-#' Moran cross-products z' W z of MORAN_NSIM permutations of `zc` (centred
-#' residuals), for weights given as an edge list: w[e] between zc[ei[e]] and
-#' zc[ej[e]]. The permutations are drawn under with_seed(MORAN_PERM_SEED), one
-#' sample() per permutation as spdep::moran.mc draws them, so they are its
-#' draws; centring and the sum of squares do not change under a permutation,
-#' so the caller scales these sums by its own n / (S0 * sum(zc^2)).
-#' Permutations are scored in blocks of at most `block_cells` gathered values,
-#' which bounds memory at any n.
+#' Moran cross-products z' W z of MORAN_NSIM permutations of the centred
+#' residuals `zc`, for weights as an edge list (w[e] between zc[ei[e]] and
+#' zc[ej[e]]). Drawn under with_seed(MORAN_PERM_SEED) as spdep::moran.mc draws
+#' them; the caller scales by n / (S0 * sum(zc^2)). Scored in blocks of at
+#' most `block_cells` values to bound memory.
 .moran_perm_crossprods <- function(zc, ei, ej, w, block_cells = 2e6) {
   nsim <- MORAN_NSIM
   b <- max(1L, as.integer(block_cells %/% max(1L, length(ei))))
@@ -183,20 +153,12 @@ moran_perm_p <- function(obs, sim, tol = sqrt(.Machine$double.eps) * max(1, abs(
 
 #' Residual Moran's I with its null expectation and significance.
 #'
-#' Returns `list(i, e_i, p)`: the statistic, its expectation under the null of
-#' no spatial autocorrelation (E[I] = -1/(n-1)), and a two-sided permutation
-#' p-value. Reporting I alone is misleading, because E[I] is negative rather
-#' than zero: an I of, say, +0.01 at n = 30 sits barely above E[I] = -0.034 and
-#' is no evidence of clustering at all. Every "cannot compute" branch returns
-#' all-NA - NA here means the statistic was not computable for this point set,
-#' never "no spatial structure was found".
-#'
-#' The p-value is a permutation test (MORAN_NSIM seeded permutations of the
-#' residuals over the fixed weights): exact under the randomisation null and
-#' free of any distributional assumption, where the normal approximations need
-#' Gaussian residuals (or at least the observed kurtosis) and cross-validation
-#' residuals are often heavy-tailed. spdep's own two-sided moran.mc is not used:
-#' it returns p = 0 when the observed I is the most extreme of the draws.
+#' Returns `list(i, e_i, p)`: the statistic, E[I] = -1/(n-1) (negative, so I
+#' alone misleads at small n) and a two-sided permutation p-value (MORAN_NSIM
+#' seeded permutations; free of the normality the analytical tests assume,
+#' which CV residuals often violate). spdep::moran.mc is not used for p: it
+#' returns 0 when the observed I is the most extreme draw. All-NA means "not
+#' computable", never "no spatial structure".
 calc_moran <- function(residuals, coords) {
   na_res <- list(i = NA_real_, e_i = NA_real_, p = NA_real_)
   if (is.null(residuals) || is.null(coords)) return(na_res)
@@ -206,21 +168,10 @@ calc_moran <- function(residuals, coords) {
   tryCatch({
     coords_matrix <- as.matrix(coords)
     if (any(duplicated(coords_matrix))) {
-      # Separate duplicates under a sandboxed RNG so Moran's I is
-      # reproducible and the caller's RNG stream is not perturbed.
-      # The displacement has to clear two bars: large enough to actually
-      # separate two identical doubles at THIS data's coordinate magnitude, and
-      # small enough to leave the neighbour graph untouched. A fixed 1e-8 fails
-      # the first one — at a UTM northing of ~4.5e6 one ULP is ~9.3e-10, so
-      # 1e-8 buys about ten representable steps and is one coordinate-magnitude
-      # change away from rounding to a silent no-op. A no-op would send the
-      # duplicates into knearneigh(), which errors on them, dropping the whole
-      # calculation into the all-pairs fallback with a different neighbour
-      # definition. Scale to the field instead: 1e-9 of the coordinate span,
-      # floored at 1e-12 of the coordinate magnitude (~4500 ULPs, which keeps
-      # small-extent fields at large projected offsets separable), never below
-      # the historical 1e-8. All three are orders of magnitude below any real
-      # sample spacing, so the kNN contiguity is unchanged.
+      # Separate duplicates (knearneigh() errors on them) under a seeded
+      # sandbox. The jitter must exceed the coordinates' ULP (~9.3e-10 at a UTM
+      # northing of 4.5e6) yet leave the neighbour graph unchanged: 1e-9 of the
+      # span, floored at 1e-12 of the magnitude and at 1e-8.
       coords <- with_seed(12345, {
         span <- suppressWarnings(max(diff(range(coords_matrix[, 1], na.rm = TRUE)),
                                      diff(range(coords_matrix[, 2], na.rm = TRUE))))
@@ -234,16 +185,11 @@ calc_moran <- function(residuals, coords) {
       })
     }
     
-    # Residual Moran's I uses a symmetric k-nearest-neighbour contiguity
-    # (k = 8, a common default), capped at n - 1 for small samples. kNN is
-    # scale-stable and avoids an arbitrary distance-band multiplier (such as
-    # mean-NN x 5), which, being a wide band, dilutes local autocorrelation
-    # toward zero. The reported I is contingent
-    # on this neighbour definition (documented in scientific_guide.md).
+    # Symmetric kNN contiguity (k = 8, capped at n - 1): scale-stable, unlike a
+    # wide distance band that dilutes local autocorrelation. I is contingent on
+    # this definition (scientific_guide.md).
     k_nn <- min(8L, nrow(coords) - 1L)
-    # For small n, k=8 exceeds n/3 and spdep emits an expected informational
-    # warning ("k greater than one-third of the number of data points"); muffle
-    # only that known message, let anything unrecognized propagate.
+    # Muffle only spdep's expected "k greater than one-third" note at small n.
     nb <- withCallingHandlers(
       spdep::knn2nb(spdep::knearneigh(as.matrix(coords), k = k_nn), sym = TRUE),
       warning = function(w) {
@@ -253,14 +199,9 @@ calc_moran <- function(residuals, coords) {
 
     lw <- spdep::nb2listw(nb, style = "W", zero.policy = TRUE)
 
-    # I itself is spdep's moran(), the statistic moran.test reports. Its
-    # permutation distribution reproduces spdep::moran.mc's draws (to rounding),
-    # without moran.mc's refusal of nsim > n!, which would push every point set
-    # of six samples or fewer onto the fallback's different weights; drawing
-    # with replacement from fewer distinct arrangements than MORAN_NSIM keeps
-    # the (b + 1) / (m + 1) p-value valid. Two-sided: a strongly NEGATIVE
-    # residual autocorrelation (checkerboard error pattern) is as much a
-    # misspecification signal as a positive one.
+    # I is spdep::moran(); the permutation draws reproduce moran.mc's without
+    # its refusal of nsim > n! (which would push n <= 6 to the fallback).
+    # Two-sided: strong negative autocorrelation is a misspecification signal too.
     cards <- spdep::card(lw$neighbours)
     n_eff <- n - sum(cards == 0L)
     s0 <- spdep::Szero(lw)
@@ -276,8 +217,7 @@ calc_moran <- function(residuals, coords) {
     weights <- 1 / dists
     weights[is.infinite(weights)] <- 0
     diag(weights) <- 0
-    # Row-standardize (decided 2026-07-05, user sign-off) so this fallback
-    # matches the primary spdep path's nb2listw(style = "W") convention
+    # Row-standardised, as the primary path's nb2listw(style = "W").
     row_sums <- rowSums(weights, na.rm = TRUE)
     row_sums[row_sums == 0] <- 1
     weights <- weights / row_sums
@@ -311,34 +251,25 @@ calc_moran <- function(residuals, coords) {
 }
 
 # ── Coordinate-column names (single source of truth) ────────────────────────
-# One list per axis, shared by perform_cv's coordinate detection below and by
-# is_coord_col(). This lives in a spatial fragment, NOT in ui_formatting.R or
-# global_utils.R, because PSOCK workers source only spatial_helpers.R.
+# Shared by perform_cv() and is_coord_col(); kept in a spatial fragment because
+# PSOCK workers source only spatial_helpers.R.
 .coord_names_x <- c("x", "lon", "long", "lng", "longitude", "easting")
 .coord_names_y <- c("y", "lat", "latitude", "northing")
 
-# A column counts as a coordinate column only when its whole (trimmed) name is
-# a recognised coordinate token. Substring matching ("lon"/"lat" anywhere in
-# the name) silently excluded legitimate variables like Precipitation_cumulative
-# ("lat" in cumulative), correlation_index, or along_slope from variable
-# mapping, grouping, and plotting choices. Vectorised over `x`.
+# A coordinate column is one whose whole (trimmed) name is a coordinate token;
+# substring matching would catch variables like "Precipitation_cumulative".
 is_coord_col <- function(x) {
   tolower(trimws(x)) %in% c(.coord_names_x, .coord_names_y)
 }
 
-#' Error metrics for one cross-validation object.
+#' Error metrics for one cross-validation object, at full precision.
 #'
-#' `moran = FALSE` skips the residual Moran's I block (leaving moran_i/e/p at
-#' NA). Repeated CV calls this once per fold realization and reports the spread
-#' of the deterministic error metrics only: Moran's I is a spatial diagnostic of
-#' ONE residual field, is the most expensive term here (an spdep neighbour
-#' search), and is reported for the reference realization in the main table.
-#' Every value is returned at full precision (see augment_metrics).
-#' `signed_target` is TRUE when the scored observations span zero (NRMSE (mean)
-#' and SMAPE are then NA by definition, not by failure); `block_fallback` is
-#' TRUE when a Spatial Block request fell back to random folds (make_cv_folds);
-#' `knndm_branch` is the fold design a kNNDM request chose (knndm_folds:
-#' "random", "spatial", "fallback" or "none"), NA under any other strategy.
+#' `moran = FALSE` skips residual Moran's I (repeated CV reports it for the
+#' reference realization only: it diagnoses one residual field and is the
+#' costliest term). `signed_target` is TRUE when the observations span zero
+#' (NRMSE (mean) and SMAPE are then NA by definition); `block_fallback` when a
+#' Spatial Block request fell back to random folds; `knndm_branch` is the fold
+#' design a kNNDM request chose ("random", "spatial", "fallback", "none").
 perform_cv <- function(cv_obj, moran = TRUE) {
   # n = predicted pairs, n_expected = rows with an observed value; metrics use
   # the predicted pairs only, and coverage says how many rows that is.
@@ -380,10 +311,8 @@ perform_cv <- function(cv_obj, moran = TRUE) {
   res$rmse <- sqrt(mean(residuals^2, na.rm = TRUE))
   res$me <- mean(residuals, na.rm = TRUE)
   res$mae <- mean(abs(residuals), na.rm = TRUE)
-  # cor() on a constant vector already returns NA, but it emits "the standard
-  # deviation is zero" on the way — and inside a PSOCK worker that warning
-  # surfaces in the run log as an unexplained condition. Guard explicitly, the
-  # way augment_metrics() and calc_ccc() do for the same degenerate case.
+  # Guard constant vectors explicitly: cor() would warn, and in a worker the
+  # warning reaches the run log unexplained.
   res$r2 <- if (isTRUE(stats::sd(obs) > 0) && isTRUE(stats::sd(pre) > 0)) {
     tryCatch(cor(obs, pre)^2, error = function(e) NA_real_)
   } else NA_real_
@@ -398,11 +327,8 @@ perform_cv <- function(cv_obj, moran = TRUE) {
   res$smape <- aug$smape
   res$signed_target <- aug$signed_target
   
-  # Exact-name matching first, on the SAME token lists is_coord_col() uses:
-  # prefix matching let a covariate named e.g. "Longitude_deg" win over the
-  # guaranteed x/y columns, because [1] takes the first match in COLUMN order,
-  # not pattern order. .cv_to_df() always supplies x/y for sf and Spatial
-  # inputs, so the exact names normally settle it.
+  # Exact names first, on is_coord_col()'s token lists: prefix matching could
+  # let a covariate like "Longitude_deg" beat the x/y that .cv_to_df() supplies.
   pick_coord <- function(cn, exact, fallback) {
     hit <- cn[tolower(cn) %in% exact]
     if (length(hit)) return(hit[1])
@@ -425,25 +351,15 @@ perform_cv <- function(cv_obj, moran = TRUE) {
 }
 
 # ── Class-agreement metrics (the "Agreement (Kappa)" table) ──────────────────
-# Bins a continuous observed/predicted pair into ordered classes and reports the
-# confusion-matrix agreement statistics. Two binning conventions, deliberately
-# DIFFERENT in interval closure:
-#   "agro"     - the applied agronomical/binned class limits, right = FALSE, so
-#                classes are [low, high) exactly as terra::classify(rcl_mat,
-#                right = FALSE) paints them on the map. A value sitting on a
-#                break must get the same class in this table as on the map.
-#   "quartile" - the observed quartiles, cut()'s default right = TRUE. These
-#                breaks are data order statistics with no map counterpart, so
-#                there is nothing to align with and the conventional
-#                right-closed reading applies.
-# `params` is the classification_params() snapshot (rcl_mat + labels); it is
-# only read for method = "agro". The UI-level question of whether agro styling
-# is selected and applied belongs to the caller, not here.
-#
-# Returns a list whose `status` is a non-NULL message when the metrics are not
-# computable (too few points, no variance for quartiles, nothing left after
-# binning) and NULL otherwise; the binned factors travel back alongside the
-# metrics so a caller can inspect the classification it was scored on.
+# Bins observed/predicted into ordered classes and reports confusion-matrix
+# agreement. Interval closure differs on purpose:
+#   "agro"     - the applied class limits, [low, high) (right = FALSE) exactly
+#                as terra::classify paints them, so table and map agree;
+#   "quartile" - observed quartiles, cut()'s default right-closed reading (no
+#                map counterpart).
+# `params` (classification_params(): rcl_mat + labels) is read only for "agro".
+# `status` is a message when not computable, else NULL; the binned factors are
+# returned too.
 compute_agreement_metrics <- function(actual, predicted,
                                       method = c("quartile", "agro"),
                                       params = NULL) {
@@ -487,9 +403,7 @@ compute_agreement_metrics <- function(actual, predicted,
     predicted_bin = pred_bin,
     accuracy      = safe(yardstick::accuracy_vec(act_bin, pred_bin)),
     bal_accuracy  = safe(yardstick::bal_accuracy_vec(act_bin, pred_bin)),
-    # Off-by-one accuracy: the classes are ORDERED, so a prediction landing in
-    # an adjacent class is a different kind of error from one landing two
-    # classes away. Counts |rank(actual) - rank(predicted)| <= 1 as agreement.
+    # Off-by-one accuracy: classes are ordered, so |rank difference| <= 1 counts.
     off_by_one    = safe(sum(abs(as.integer(act_bin) - as.integer(pred_bin)) <= 1) / length(act_bin)),
     mcc           = safe(yardstick::mcc_vec(act_bin, pred_bin)),
     kappa         = safe(yardstick::kap_vec(act_bin, pred_bin)),
@@ -498,26 +412,22 @@ compute_agreement_metrics <- function(actual, predicted,
 }
 
 # ── Cross-validation fold planning ──────────────────────────────────────────
-# Single source of truth for the CV strategy so the fold builder
-# (make_cv_folds) and the UI label (applied_cv_plan, ui_formatting.R) can never
-# drift.
-#   "auto"  : LOOCV for n <= 50, seeded random 10-fold above (historical default)
-#   "loocv" : full leave-one-out regardless of n
-#   "knndm" : 10 folds matched to the map's prediction distances (kNNDM,
-#             knndm_folds below); degrades to LOOCV below CV_KNNDM_MIN_N.
-#   "block" : 10 spatially-clustered (k-means) folds; degrades to LOOCV when
-#             n is too small for the blocks to be meaningful.
+# One authority for the CV strategy, shared by make_cv_folds() and the UI label
+# (applied_cv_plan(), ui_formatting.R):
+#   "auto"  : LOOCV for n <= 50, seeded random 10-fold above
+#   "loocv" : leave-one-out regardless of n
+#   "knndm" : 10 folds matched to the map's prediction distances (knndm_folds);
+#             LOOCV below CV_KNNDM_MIN_N
+#   "block" : 10 k-means spatial folds; LOOCV below CV_BLOCK_MIN_N
 CV_BLOCK_MIN_N <- 30L
 
-# kNNDM (Linnenbrink, Mila, Ludwig & Meyer 2024). CV_KNNDM_MIN_N: the Spatial
-# Block floor, at least 3 samples per fold at k = 10. KNNDM_MAXP, the domain
-# sample, the candidate count and the gate level are the reference
-# implementation's defaults (CAST::knndm: maxp 0.5, samplesize 1000 regular,
-# nk_len 100, KS p 0.05). Up to KNNDM_EXACT_MAX samples the Ward tree is built
-# on the samples themselves (its distance matrix holds 16 MB at 2000); above it
-# on at most KNNDM_MAX_CELLS square cells of samples, which bounds the memory
-# at any n, with KNNDM_NQ_CELLS candidate cuts (the same W as 100 cuts at 20k
-# and 100k samples, three times faster).
+# kNNDM (Linnenbrink, Mila, Ludwig & Meyer 2024). CV_KNNDM_MIN_N is the Spatial
+# Block floor (>= 3 samples per fold at k = 10). maxp, the domain sample, the
+# candidate count and the gate level are CAST::knndm's defaults (maxp 0.5,
+# 1000 regular points, nk_len 100, KS p 0.05). Up to KNNDM_EXACT_MAX samples
+# the Ward tree is built on the samples (16 MB distance matrix at 2000); above
+# it on at most KNNDM_MAX_CELLS square cells, with KNNDM_NQ_CELLS candidate
+# cuts (the same W as 100 cuts at 20k and 100k samples, three times faster).
 CV_KNNDM_MIN_N <- 30L
 KNNDM_MAXP <- 0.5
 KNNDM_DOMAIN_N <- 1000L
@@ -541,10 +451,8 @@ CV_FOLD_K <- 10L
 # labels them identically, including the small-n degradations to LOOCV.
 resolve_cv_plan <- function(strategy = "auto", n) {
   if (is.null(strategy) || length(strategy) != 1 || !nzchar(strategy)) strategy <- "auto"
-  # Degrade rather than throw on an unrecognised strategy: a stale or
-  # hand-edited run-config upload carrying an old key would otherwise raise
-  # match.arg's error inside a PSOCK worker and surface as the generic
-  # "Parallel Interpolation Failed" modal.
+  # An unknown strategy (stale or hand-edited config) degrades to "auto"
+  # instead of failing inside a worker.
   if (!strategy %in% c("auto", "loocv", "knndm", "block")) strategy <- "auto"
   if (is.null(n) || length(n) == 0 || is.na(n)) return(list(type = "loocv", k = NA_integer_, label = "CV"))
   if (strategy == "loocv") return(list(type = "loocv", k = n, label = "Full LOOCV"))
@@ -568,15 +476,10 @@ cv_random_folds <- function(n, k = CV_FOLD_K, seed = CV_FOLD_SEED) {
   with_seed(seed, sample(rep(seq_len(k), length.out = n)))
 }
 
-# Returns an integer fold-id vector of length n. `coords` is an n x 2 matrix of
-# projected (metric) coordinates, used by Spatial Block (k-means) and kNNDM.
-# Seeded (CV_FOLD_SEED) under a two-sided RNG sandbox so folds are
-# reproducible and the caller's .Random.seed is preserved (same convention as
-# calc_moran). `seed` is varied ONLY by repeated CV, which needs alternative
-# fold realizations of the same plan; every reported single-realization run
-# keeps the default. `domain_xy` holds the map's prediction locations
-# (knndm_domain_points); only kNNDM reads it, and without it kNNDM returns the
-# random folds.
+# Integer fold ids of length n. `coords` is an n x 2 projected matrix (Spatial
+# Block and kNNDM). Seeded under the RNG sandbox; only repeated CV varies
+# `seed`. `domain_xy` (knndm_domain_points()) is read by kNNDM only, which
+# returns the random folds without it.
 make_cv_folds <- function(coords, strategy = "auto", n = NULL, seed = CV_FOLD_SEED,
                           domain_xy = NULL) {
   if (is.null(n)) n <- nrow(coords)
@@ -592,11 +495,9 @@ make_cv_folds <- function(coords, strategy = "auto", n = NULL, seed = CV_FOLD_SE
         km <- stats::kmeans(cm, centers = plan$k, nstart = 5, iter.max = 50)
         as.integer(km$cluster)
       }, error = function(e) NULL)
-      # Degenerate geometry (e.g. many duplicate coordinates) can make k-means
-      # fail or collapse; fall back to a seeded random k-fold rather than
-      # losing CV entirely. The folds say so: they are not spatial blocks, and
-      # no metric scored on them may be reported as Spatial Block CV. The draw
-      # continues the k-means stream, so it is not cv_random_folds().
+      # Degenerate geometry can make k-means fail or collapse: fall back to a
+      # seeded random k-fold, flagged so it is never reported as Spatial Block.
+      # The draw continues the k-means stream, so it is not cv_random_folds().
       if (is.null(folds) || length(unique(folds)) < 2) {
         folds <- sample(rep(seq_len(plan$k), length.out = n))
         attr(folds, "block_fallback") <- TRUE
@@ -606,22 +507,17 @@ make_cv_folds <- function(coords, strategy = "auto", n = NULL, seed = CV_FOLD_SE
 }
 
 # ── kNNDM (k-fold nearest-neighbour distance matching) ──────────────────────
-# A cross-validation error estimates the map's error when held-out samples are
-# predicted from the distances at which the map predicts its cells (Mila et al.
-# 2022). kNNDM (Linnenbrink, Mila, Ludwig & Meyer 2024, Geosci. Model Dev.
-# 17:5897) builds the k folds whose held-out-to-training nearest-neighbour
-# distances best match the distances from the map's locations to the samples,
-# following the reference implementation (CAST::knndm, geographic space,
-# hierarchical clustering with Ward's ward.D2 linkage). Three distributions:
+# CV estimates the map's error when held-out samples are predicted from the
+# distances at which the map predicts its cells (Mila et al. 2022). kNNDM
+# (Linnenbrink et al. 2024, Geosci. Model Dev. 17:5897; CAST::knndm, Ward
+# ward.D2 clustering) picks the k folds whose distributions match best:
 #   Gj   each sample's distance to its nearest other sample,
 #   Gij  each map location's distance to its nearest sample,
 #   Gj*  each sample's distance to the nearest sample outside its fold.
-# Three app conventions (Scientific Guide 5.1): the first principal axis's sign
-# is fixed, so the folds are the same on every platform; above
-# KNNDM_EXACT_MAX samples the tree is built on square cells of samples; and
-# the random partition kNNDM would otherwise return (Auto's seeded random
-# folds; the class-stratified random k-fold in the Classification Suite) is
-# always a candidate, so the folds never match the map worse than it does.
+# App conventions (Scientific Guide 5.1): the first principal axis's sign is
+# fixed (same folds on every platform); above KNNDM_EXACT_MAX samples the tree
+# is built on square cells; the random partition is always a candidate, so
+# the folds never match the map worse than it.
 
 #' Wasserstein-1 distance between the empirical distributions of `a` and `b`:
 #' the integral of |F_a(t) - F_b(t)| dt over the pooled support, i.e. the area
@@ -648,15 +544,11 @@ cv_heldout_nnd <- function(xy, folds) {
 }
 
 #' The map's locations as kNNDM reads them: a regular square lattice of about
-#' `n_target` points inside the boundary the surface is clipped to, spaced
-#' sqrt(area / n_target) and cell-centred on the boundary's bounding box. A
-#' thin or fragmented boundary that catches fewer than half of them is
-#' resampled with the spacing divided by sqrt(2), up to five times. The lattice
-#' depends on the boundary only, never on the grid's cell size, so the folds
-#' follow the boundary and buffer but not the resolution. Without a usable
-#' boundary, a regular thinning of the prediction grid `grid_xy` to at most
-#' `n_target` rows; NULL without either. KNNDM_DOMAIN_N is the reference
-#' implementation's default domain sample (1000 regular points).
+#' `n_target` points inside the clipping boundary (spacing
+#' sqrt(area / n_target), divided by sqrt(2) while a thin boundary catches
+#' fewer than half, five attempts at most). It depends on the boundary only,
+#' never on the grid resolution. Without a boundary, a regular thinning of
+#' `grid_xy`; NULL without either.
 knndm_domain_points <- function(bound = NULL, grid_xy = NULL, n_target = KNNDM_DOMAIN_N) {
   if (!is.null(bound)) {
     pts <- tryCatch(.knndm_lattice(bound, n_target), error = function(e) NULL)
@@ -670,10 +562,8 @@ knndm_domain_points <- function(bound = NULL, grid_xy = NULL, n_target = KNNDM_D
   NULL
 }
 
-# Lattice cells tested at a time: terra marks the cells whose centre lies inside
-# the boundary, a band of lattice rows at a time, so a boundary that covers a
-# small share of its bounding box (distant point buffers) never allocates the
-# whole box at once.
+# Lattice cells rasterised per band of rows, so a boundary covering a small
+# share of its bounding box (distant point buffers) never allocates the box.
 .KNNDM_LATTICE_BLOCK <- 4e6
 
 .knndm_lattice <- function(bound, n_target) {
@@ -720,15 +610,11 @@ knndm_domain_points <- function(bound = NULL, grid_xy = NULL, n_target = KNNDM_D
   match(key, unique(key))
 }
 
-#' Ward's tree above the cell level, from the cells' centroids `cen` and sizes
-#' `cnt`. Ward's merge cost between groups A and B, in the Lance-Williams form
-#' hclust tracks, is 2 nA nB / (nA + nB) |cA - cB|^2 (ward.D2 squares its
-#' input), so with those dissimilarities and the sizes as `members` the tree
-#' reproduces every Ward merge above the cell level (Lance & Williams 1967);
-#' plain centroid distances do not. The weights are applied to the distance
-#' vector one column at a time, so no U x U matrix is built; the vector is
-#' unclassed while it is weighted, because a sub-assignment into a classed
-#' "dist" object copies the whole vector every time.
+#' Ward's tree above the cell level, from cell centroids `cen` and sizes `cnt`.
+#' With dissimilarities sqrt(2 nA nB / (nA + nB)) |cA - cB| and the sizes as
+#' `members`, hclust's ward.D2 reproduces every Ward merge above the cell level
+#' (Lance & Williams 1967). Weighted one column at a time on the unclassed
+#' vector (sub-assigning a classed "dist" copies it), so no U x U matrix exists.
 .knndm_cell_tree <- function(cen, cnt) {
   U <- nrow(cen)
   cnt <- as.numeric(cnt)
@@ -777,29 +663,19 @@ knndm_domain_points <- function(bound = NULL, grid_xy = NULL, n_target = KNNDM_D
 }
 
 #' kNNDM fold assignment for the samples `xy` (n x 2, projected) against the
-#' map's locations `domain_xy`. Returns an integer fold vector with
-#' attr(, "knndm") = list(branch, q, k, W, W_random, ks_p, n_domain, units,
-#' exact). `branch`:
-#'   "random"   random folds match the map best: the one-sided KS test does
-#'              not find the map's distances larger than the sample spacing
-#'              (p >= alpha), or no cluster partition matched them better than
-#'              the random partition did; the folds are the random partition;
+#' map's locations `domain_xy`. Returns integer folds with attr(, "knndm") =
+#' list(branch, q, k, W, W_random, ks_p, n_domain, units, exact). `branch`:
+#'   "random"   the one-sided KS test does not find the map's distances larger
+#'              than the sample spacing (p >= alpha), or no cluster partition
+#'              beat the random partition;
 #'   "spatial"  a cluster partition won (q clusters merged into k folds);
 #'   "fallback" no candidate partition was valid; the random partition;
 #'   "none"     no prediction domain; the random partition.
-#' The random partition is `random_folds` when supplied (the Classification
-#' Suite's class-stratified random k-fold), else cv_random_folds(n, k, seed),
-#' Auto's folds above 50 samples. It must hold k folds: W depends on the fold
-#' count, so only partitions into the same k are compared.
-#' The candidates are the reference implementation's (CAST) plus the random
-#' partition, which CAST considers only through the gate: kNNDM keeps the
-#' smallest W, so it never returns folds that match the map worse than the
-#' random partition it would otherwise use (author decision 2026-09-24). W
-#' belongs to one partition, so where the best cut and random folds match
-#' about equally the seed's draw decides between them. The spatial branch
-#' draws no random numbers; W is the Wasserstein-1 distance of the chosen
-#' folds' held-out distances from the map's, W_random that of the random
-#' partition.
+#' The random partition is `random_folds` (the Classification Suite's
+#' class-stratified k-fold) or cv_random_folds(n, k, seed); it must hold k
+#' folds, since W depends on the fold count. Candidates are CAST's plus the
+#' random partition, and the smallest W wins. W (W_random) is the Wasserstein-1
+#' distance of the chosen (random) folds' held-out distances from the map's.
 knndm_folds <- function(xy, domain_xy, k = CV_FOLD_K, maxp = KNNDM_MAXP, seed = CV_FOLD_SEED,
                         exact_max = KNNDM_EXACT_MAX, max_cells = KNNDM_MAX_CELLS,
                         nq_exact = KNNDM_NQ_EXACT, nq_cells = KNNDM_NQ_CELLS,
@@ -828,11 +704,10 @@ knndm_folds <- function(xy, domain_xy, k = CV_FOLD_K, maxp = KNNDM_MAXP, seed = 
   exact <- n <= exact_max
   unit <- if (exact) seq_len(n) else .knndm_cell_units(xy, max_cells)
   U <- max(unit)
-  # The published candidate set, plus the random partition: a gate that only
-  # just rejects can leave every cluster partition matching the map worse than
-  # this partition does, and the cell path cuts off the fine end of the tree,
-  # where the partitions approach random folds. A cluster partition has to beat
-  # it strictly. Balanced folds break the cap only when maxp < 1/k.
+  # Candidates: the published cuts plus the random partition, which a cluster
+  # partition must beat strictly (a gate that only just rejects, or the cell
+  # path's missing fine end, can leave every cut worse). Balanced folds break
+  # the cap only when maxp < 1/k.
   rnd_ok <- !any(tabulate(rnd, nbins = k) / n > maxp)
   best <- if (rnd_ok) list(folds = rnd, W = W_rnd, q = NA_integer_) else list(folds = NULL, W = Inf, q = NA_integer_)
   # The tree is built only when it has cuts to score: below k + 2 units (every
@@ -857,18 +732,13 @@ knndm_folds <- function(xy, domain_xy, k = CV_FOLD_K, maxp = KNNDM_MAXP, seed = 
   tag(best$folds, if (is.na(best$q)) "random" else "spatial", best$W, W_rnd, best$q, ks_p, U, exact)
 }
 
-#' What the CV Distance Match panel draws for one CV population: the quantiles
-#' (`probs`) of the three nearest-neighbour distance distributions - `sample`
-#' (Gj), `map` (Gij) and `cv` (Gj* under `folds`) - with W for these folds
-#' (`W_cv`) and for the random reference partition (`W_random`), in the
-#' coordinates' units (`units`, the CRS's unit symbol when known). The
-#' reference is `random_folds` when supplied (the Classification Suite's
-#' class-stratified random k-fold), else the seeded random k-fold
-#' cv_random_folds(n, k, seed); `reference` names it and `k` is its fold count.
-#' Plain data, so it crosses the future boundary cheaply. NULL without a
-#' domain, below 3 samples, when the folds do not fit the samples, or when it
-#' cannot be computed: it is a diagnostic, and never stops the
-#' cross-validation it describes.
+#' What the CV Distance Match panel draws for one CV population: quantiles
+#' (`probs`) of the `sample` (Gj), `map` (Gij) and `cv` (Gj* under `folds`)
+#' distances, with W for these folds (`W_cv`) and for the random reference
+#' (`W_random`: `random_folds` or cv_random_folds(), named by `reference`, `k`
+#' folds), in the coordinates' `units`. Plain data for the future boundary.
+#' NULL without a domain, below 3 samples, on mismatched folds or on error: a
+#' diagnostic never stops the CV it describes.
 cv_distance_summary <- function(xy, folds, domain_xy, k = CV_FOLD_K, seed = CV_FOLD_SEED,
                                 probs = seq(0, 1, by = 0.01), units = NA_character_,
                                 random_folds = NULL, reference = NULL) {
@@ -899,11 +769,9 @@ crs_unit_label <- function(x) {
 }
 
 #' The run-log line of a kNNDM request for one surface of locality `loc`, from
-#' knndm_folds()'s record `info`: which fold design it chose, and why. `n` is
-#' the CV population's size: below CV_KNNDM_MIN_N the plan is LOOCV and there
-#' is no record. `units` labels the distances. Formatted without
-#' ui_formatting.R, which workers do not load. NULL when there is nothing to
-#' report.
+#' knndm_folds()'s record `info`, or the LOOCV note when `n` < CV_KNNDM_MIN_N.
+#' Formatted without ui_formatting.R (workers do not load it). NULL when there
+#' is nothing to report.
 knndm_log_line <- function(info, loc, surface, n, units = NA_character_) {
   head <- sprintf("[CV] %s (%s): ", loc, surface)
   if (is.null(info)) {
@@ -934,14 +802,11 @@ knndm_log_line <- function(info, loc, surface, n, units = NA_character_) {
 # at dispatch. Direct engine calls have none and number their rows 1..n.
 CV_ROW_ID_COL <- ".mn_row_id"
 
-#' The cross-validation plan of one population: its row ids and one fold vector
-#' per realization, from the same make_cv_folds() call (and seeds) the engines
-#' always used, so a population's folds do not depend on which engine scores it.
-#' `domain_xy` is the map's locations (knndm_domain_points): kNNDM folds are
-#' built against it, and `design` (cv_distance_summary, NULL without it) records
-#' how closely realization 1's folds match the map, under every strategy. A
-#' kNNDM realization 1 with spatial folds is deterministic, so the plan keeps
-#' that one realization, as for LOOCV.
+#' The CV plan of one population: its row ids and one fold vector per
+#' realization from make_cv_folds(), so the folds do not depend on the engine.
+#' `domain_xy` (knndm_domain_points()) drives kNNDM, and `design`
+#' (cv_distance_summary(), NULL without it) records how realization 1 matches
+#' the map. A kNNDM plan with spatial folds is deterministic: one realization.
 build_cv_plan <- function(pts, strategy = "auto", repeats = 1L, domain_xy = NULL) {
   n <- nrow(pts)
   row_id <- if (CV_ROW_ID_COL %in% names(pts)) as.integer(pts[[CV_ROW_ID_COL]]) else seq_len(n)
@@ -957,15 +822,14 @@ build_cv_plan <- function(pts, strategy = "auto", repeats = 1L, domain_xy = NULL
                                     units = crs_unit_label(pts)))
 }
 
-#' Run one kriging cross-validation realization fold by fold.
+#' Run one kriging CV realization fold by fold.
 #'
-#' `fold_fun(train, newdata, i)` fits from the fold's training rows and returns
-#' `list(pred, var = NULL, meta = NULL)` for `newdata`, which carries the
-#' held-out rows' coordinates only. A fold that errors, or returns the wrong
-#' number of predictions, gives NA rows and a note; it is never filled from
-#' another engine. Folds run sequentially (the nested worker already holds the
-#' cores). Returns the common kriging CV schema, in population row order, with
-#' `attr(, "cv_notes")` and `attr(, "cv_fold_meta")` (per fold label).
+#' `fold_fun(train, newdata, i)` fits on the fold's training rows and returns
+#' `list(pred, var = NULL, meta = NULL)` for `newdata` (held-out coordinates
+#' only). A failing fold gives NA rows and a note, never another engine's
+#' values. Folds run sequentially (the nested worker already holds the cores).
+#' Returns the common kriging CV schema in population order, with
+#' `attr(, "cv_notes")` and `attr(, "cv_fold_meta")`.
 run_kriging_folds <- function(pop, target_var, row_id, folds, fold_fun,
                               cancel_file = NULL, progress = NULL) {
   n <- nrow(pop)
@@ -1023,19 +887,14 @@ run_kriging_folds <- function(pop, target_var, row_id, folds, fold_fun,
 }
 
 # ── Repeated cross-validation (opt-in) ──────────────────────────────────────
-# A k-fold estimate is ONE realization of a random partition: at moderate n the
-# spread across alternative splits can rival the difference between two methods.
-# Repeating the CV under alternative fold assignments and reporting mean +/- SD
-# separates model skill from split luck. It is opt-in because it costs one full
-# CV pass per extra repeat, and it never touches the reported reference run
-# (repeat 1 keeps CV_FOLD_SEED) nor the prediction surface.
+# A k-fold estimate is ONE realization of a random partition; repeating it
+# under alternative folds and reporting mean +/- SD separates model skill from
+# split luck. Repeat 1 keeps CV_FOLD_SEED, so the reference run and the
+# surface never change.
 
-# How many fold realizations to run for this point set. Deterministic plans
-# (LOOCV, kNNDM spatial folds) would return the identical partition in every
-# "repeat": LOOCV plans always collapse to 1 here, regardless of the user's
-# setting, and a kNNDM plan whose first realization chose spatial folds is cut
-# to one by build_cv_plan / add_cv_repeats, which see the folds. Guards a
-# nonsense request (0, NA, huge) into a sane range.
+# How many fold realizations to run, clamped to 1..25. LOOCV is deterministic
+# and always gets 1; a kNNDM plan with spatial folds is cut to 1 by
+# build_cv_plan() / add_cv_repeats(), which see the folds.
 cv_repeat_count <- function(n_repeats, strategy = "auto", n = NULL) {
   if (is.null(n_repeats) || length(n_repeats) != 1) return(1L)
   n_repeats <- suppressWarnings(as.integer(n_repeats))
@@ -1045,12 +904,9 @@ cv_repeat_count <- function(n_repeats, strategy = "auto", n = NULL) {
   n_repeats
 }
 
-# Reduce a CV object to the minimum every downstream consumer needs (observed,
-# prediction, geometry) under FIXED column names. Repeats are pooled across
-# localities with pool_cv_sf(), whose rbind fails on a column mismatch, and the
-# engines still emit different column sets (the kriging schema vs the TPS/IDW
-# frame) - normalising here makes the pooled repeat set structurally safe by
-# construction. Metrics are unaffected: perform_cv reads only these columns.
+# A CV object reduced to observed, prediction and geometry under fixed names,
+# so the CV frames of different engines rbind safely in pool_cv_sf().
+# perform_cv() reads only these columns.
 cv_repeat_frame <- function(cv_obj) {
   if (is.null(cv_obj)) return(NULL)
   if (inherits(cv_obj, "Spatial")) cv_obj <- tryCatch(sf::st_as_sf(cv_obj), error = function(e) NULL)
@@ -1063,30 +919,24 @@ cv_repeat_frame <- function(cv_obj) {
   out
 }
 
-# Metrics that carry a meaningful spread across fold realizations. Moran's I is
-# deliberately absent (see perform_cv's `moran` argument). NRMSE (mean) is the
-# mean-normalised RMSE, CV(RMSE); NRMSE (SD) sits beside it because it is the
-# form that stays defined for a target whose values span zero.
+# Metrics with a meaningful spread across fold realizations (Moran's I is
+# excluded, see perform_cv()). NRMSE (SD) stays defined for zero-spanning
+# targets.
 CV_REPEAT_METRICS <- c(rmse = "RMSE", nrmse_mean = "NRMSE (mean, %)",
                        nrmse_sd = "NRMSE (SD)", mae = "MAE",
                        r2 = "R² (Corr)", nse = "R² (NSE/Trad)", me = "Bias (ME)",
                        ccc = "Lin's CCC (Agree)", rpd = "RPD (Prec)",
                        rpiq = "RPIQ", smape = "SMAPE (%)")
 
-# Column order and labels of the Model Performance table and its export: the
-# repeat dictionary plus the three Moran fields. Built FROM CV_REPEAT_METRICS so
-# the Fold-Realization Stability table cannot relabel a metric the Model
-# Performance table still shows under its old name. It lives here rather than in
-# ui_formatting.R because global.R sources ui_helpers.R BEFORE spatial_helpers.R,
-# so a top-level reference from there would not resolve.
+# Labels of the Model Performance table and its export, built from
+# CV_REPEAT_METRICS so the two tables cannot disagree. Kept here because
+# global.R sources ui_helpers.R before spatial_helpers.R.
 CV_METRIC_LABELS <- c(CV_REPEAT_METRICS,
                       moran_i = "Moran's I", moran_e = "Moran E[I]",
                       moran_p = "Moran p")
 
-# mean / SD across fold realizations. A metric that is undefined in ANY repeat
-# (NA by the augment_metrics convention) is reported as NA rather than averaged
-# over the subset where it happened to exist - a mean over a varying number of
-# repeats is not the quantity the column claims to be.
+# Mean / SD across fold realizations; a metric undefined in ANY repeat is NA
+# rather than averaged over a varying subset.
 summarise_cv_repeats <- function(reps) {
   if (is.null(reps) || length(reps) < 2) return(NULL)
   if (any(vapply(reps, is.null, logical(1)))) return(NULL)
@@ -1114,15 +964,10 @@ summarise_cv_repeats <- function(reps) {
        sd = vapply(agg, function(a) unname(a["sd"]), numeric(1)))
 }
 
-# Main-session assembly of a run's repeated-CV report.
-#   reps_by_loc : locality -> list of CV frames (length R, or length 1 for a
-#                 locality whose plan is deterministic: LOOCV, kNNDM spatial
-#                 folds)
-# Localities carrying a single frame are RECYCLED into every pooled repeat:
-# under deterministic plans (LOOCV, kNNDM spatial folds) their out-of-fold
-# predictions are identical in every realization, so this is exact, and it
-# keeps the pooled repeat rows built from the same locality set as the pooled
-# row of the main metrics table.
+# Main-session assembly of a run's repeated-CV report from `reps_by_loc`
+# (locality -> list of CV frames). A locality with one frame has a
+# deterministic plan (LOOCV, kNNDM spatial) and is recycled into every pooled
+# repeat, which is exact and keeps the pooled locality set unchanged.
 build_cv_repeat_summary <- function(reps_by_loc) {
   reps_by_loc <- Filter(function(x) length(x) > 0, reps_by_loc %||% list())
   if (!length(reps_by_loc)) return(NULL)
@@ -1145,15 +990,12 @@ build_cv_repeat_summary <- function(reps_by_loc) {
 }
 
 #' Cross-validation for RK (`model_type = "lm"`) and RFK (`"rf"`). Every fold
-#' re-screens the covariates, refits the covariate surfaces, the trend and the
-#' residual variogram on its training rows, and predicts the held-out rows as
-#' trend + kriged residual, through run_kriging_folds(). `candidates` is the
-#' full selected covariate list the screen chooses from (defaults to
-#' `aux_vars`, the surface's own kept set). `folds` / `row_id` come from the
-#' run's CV plan and must align with the complete-case rows; with `folds =
-#' NULL` they are built from `cv_strategy`, `fold_seed` and, for kNNDM, the
-#' map's locations `cv_domain_xy`. Returns the common kriging CV schema
-#' (`var1.var` NA), or NULL below 3 complete-case rows.
+#' re-screens the covariates (from `candidates`, default `aux_vars`) and refits
+#' the covariate surfaces, the trend and the residual variogram on its training
+#' rows, predicting trend + kriged residual (run_kriging_folds()). `folds` /
+#' `row_id` come from the run's CV plan; with `folds = NULL` they are built
+#' from `cv_strategy`, `fold_seed` and `cv_domain_xy`. Returns the common
+#' kriging CV schema (`var1.var` NA), or NULL below 3 complete-case rows.
 perform_kriging_loocv <- function(pts, target_var, aux_vars, lags_func, vgm_fit_func, model_type = c("lm", "rf"), l = "region", prefix = "act", rf_ntree = 200, cv_strategy = "auto", fold_seed = CV_FOLD_SEED, cov_params = list(),
                                   folds = NULL, row_id = NULL, cancel_file = NULL, progress = NULL,
                                   candidates = NULL, vif_threshold = 10, cv_domain_xy = NULL) {
@@ -1163,9 +1005,8 @@ perform_kriging_loocv <- function(pts, target_var, aux_vars, lags_func, vgm_fit_
   n <- nrow(pts)
   if (n < 3) return(NULL)
 
-  # `fold_seed` moves only under repeated CV; each fold's model draws below are
-  # seeded from its own fold LABEL, so a repeat varies the PARTITION and
-  # nothing else.
+  # `fold_seed` moves only under repeated CV; per-fold model draws are seeded
+  # from the fold label, so a repeat varies the partition only.
   if (is.null(folds)) {
     folds <- make_cv_folds(sf::st_coordinates(pts), cv_strategy, n, fold_seed, cv_domain_xy)
   } else if (length(folds) != n) {
@@ -1175,14 +1016,10 @@ perform_kriging_loocv <- function(pts, target_var, aux_vars, lags_func, vgm_fit_
     row_id <- if (CV_ROW_ID_COL %in% names(pts)) as.integer(pts[[CV_ROW_ID_COL]]) else seq_len(n)
   }
 
-  # Rank guard. Every fold refits the trend on n - |fold| rows; below
-  # (covariates + intercept) + 1 rows that fit is rank-deficient, predict()
-  # hands back NA for the held-out points, kriging carries the NAs through and
-  # the reported CV metrics degrade to NA with nothing saying why. Fail loudly
-  # instead — safe_run_cv turns this into a visible "<engine> CV Error" log
-  # line. Only the lm trend is checked: randomForest has no rank requirement.
-  # (Factor covariates expand to more coefficients than this count, so the
-  # guard is conservative, not exhaustive.)
+  # Rank guard: a fold's lm trend needs more training rows than coefficients
+  # (covariates + 1); otherwise it is rank-deficient or saturated and the CV
+  # metrics degrade silently, so fail loudly (safe_run_cv logs it). Factor
+  # covariates add coefficients, so the check is necessary, not sufficient.
   if (model_type == "lm") {
     n_coef <- length(aux_vars) + 1L
     min_train <- n - max(table(folds))
@@ -1198,9 +1035,7 @@ perform_kriging_loocv <- function(pts, target_var, aux_vars, lags_func, vgm_fit_
   # `newdata` holds the held-out coordinates only: their covariates are kriged
   # from the training rows, exactly as the map kriges its grid.
   fold_fn <- function(train, newdata, i) {
-    # The covariate screen is a data-driven step like any other, so it runs on
-    # the fold's training rows: otherwise the held-out rows' own measured
-    # covariates help decide which covariates their prediction uses.
+    # The covariate screen is data-driven, so it runs on the training rows only.
     kept <- screen_covariates(train, candidates, vif_threshold)$kept
     if (!length(kept)) stop("the covariate screen removed every covariate in this fold")
     if (model_type == "lm" && nrow(train) < length(kept) + 2L) {
@@ -1218,14 +1053,10 @@ perform_kriging_loocv <- function(pts, target_var, aux_vars, lags_func, vgm_fit_
       train$residuals <- residuals(lm_mod)
       pred_trend <- predict(lm_mod, newdata = test_cov)
     } else {
-      # Each fold's forest is drawn from its OWN seed. A forest's number of RNG
-      # draws depends on the data it is grown on, so one stream over the whole
-      # loop let earlier folds — which train on fold i's rows — decide where
-      # fold i's forest started, and a held-out row moved its own prediction.
-      # The seed follows the fold LABEL, not the realization, so a repeated-CV
-      # repeat still varies the partition and nothing else. Matrix interface,
-      # as for the map's forest (apply_kriging_pipeline): the formula method
-      # cannot find a covariate whose name is not syntactic.
+      # Each fold's forest has its own seed (from the fold label): a shared
+      # stream would let earlier folds' draw counts move fold i's forest. Matrix
+      # interface, as for the map's forest: the formula method cannot handle
+      # non-syntactic covariate names.
       rf_mod <- with_seed(CV_FOLD_SEED + as.integer(i),
                           randomForest::randomForest(x = sf::st_drop_geometry(train)[kept],
                                                      y = train[[target_var]], ntree = rf_ntree))
@@ -1236,9 +1067,7 @@ perform_kriging_loocv <- function(pts, target_var, aux_vars, lags_func, vgm_fit_
     v_emp <- variogram(residuals ~ 1, train, width = lags$width, cutoff = lags$cutoff)
     v_fit <- vgm_fit_func(v_emp, train$residuals)
     res_krig <- krige(residuals ~ 1, train, newdata, model = v_fit, debug.level = 0)
-    # The residual variogram is refitted per fold like OK's, so it reports the
-    # same fit state and the run log can name a fold that took a degraded one;
-    # likewise the covariates whose held-out values are the IDW fallback.
+    # Per-fold fit state and covariate fallbacks, for the run log.
     list(pred = as.numeric(pred_trend) + res_krig$var1.pred,
          meta = list(kept = kept, vgm_status = vgm_fit_status(v_fit),
                      cov_fallback = kc$fallback))
@@ -1267,19 +1096,12 @@ get_cv_residuals <- function(cv_obj, n_rows) {
   return(df[[obs_col]] - df[[pre_col]])
 }
 
-# Pool per-locality CV objects into ONE sf object in a common METRIC CRS for
-# the "Total (Combined)" diagnostics. Each locality's CV object travels in its
-# own local UTM zone, so pooling reprojects everything to the auto-UTM zone of
-# the combined centroid (same zone rule as validate_and_project_sf) — never
-# Web Mercator: EPSG:3857 distances are inflated by 1/cos(latitude) (~40% at
-# 45°N), which systematically stretched the pooled residual-variogram lag axis
-# and the pooled Moran's I neighbour distances. Entries that are neither sf
-# nor Spatial are skipped: every current engine returns its CV object as sf in
-# the locality CRS, and a bare data.frame's x/y columns carry no knowable CRS.
-# Every spatial entry is reduced to cv_repeat_frame()'s fixed columns first, so
-# localities whose engines (or fallbacks) produced different CV schemas still
-# pool; a spatial entry that cannot be reduced or reprojected makes the pool
-# NULL, so a subset is never reported as the pool.
+# Pool per-locality CV objects into ONE sf in a common METRIC CRS for the
+# "Total (Combined)" diagnostics: the UTM zone of the combined centroid (as in
+# validate_and_project_sf()), never Web Mercator, whose distances are inflated
+# by 1/cos(latitude). Non-spatial entries are skipped (no knowable CRS); every
+# spatial entry is reduced to cv_repeat_frame() columns, and one that cannot be
+# reduced or reprojected makes the pool NULL, so a subset is never reported.
 pool_cv_sf <- function(df_list) {
   if (is.null(df_list) || length(df_list) == 0) return(NULL)
   sf_list <- list()
@@ -1305,9 +1127,7 @@ pool_cv_sf <- function(df_list) {
   if (lat_c < 0) utm_crs <- paste0(utm_crs, " +south")
 
   proj_list <- lapply(ll_list, function(x) sf::st_transform(x, utm_crs))
-  # If the localities' CV objects cannot be row-bound (column mismatch),
-  # return NULL so the UI shows its empty state — silently returning only the
-  # first locality as "Total (Combined)" would be scientifically wrong.
+  # NULL rather than a partial pool reported as "Total (Combined)".
   tryCatch(do.call(rbind, proj_list), error = function(e) NULL)
 }
 

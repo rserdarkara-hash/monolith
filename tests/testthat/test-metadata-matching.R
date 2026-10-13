@@ -1,5 +1,5 @@
-# test-metadata-matching.R — tests for match_metadata_columns, desc_var_labels,
-# get_var_label, and get_var_labels.
+# Variable metadata: column matching, display labels, units in legend titles,
+# the subset column and the Context panel's default variable.
 
 # ── get_var_label / get_var_labels ─────────────────────────────────────────
 
@@ -104,9 +104,8 @@ test_that("match_metadata_columns reads a Unit column into each variable", {
 })
 
 test_that("a variable list without a Unit column gives every variable an empty unit", {
-  # The shipped list's identifier headers must not be read as a unit column,
-  # nor a header that merely contains the letters "unit".
-  # Headers as the shipped samp_var_list.xlsx has them.
+  # Headers as samp_var_list.xlsx has them, plus "Community": neither an
+  # identifier header nor one merely containing "unit" is a unit column.
   m_df <- data.frame(`Variable Number (VN)` = c("pH", "K"),
                      `Variable ID (VID)` = c("Soil pH", "K (mg/kg)"),
                      `Variable Category` = "Soil", Community = c("a", "b"),

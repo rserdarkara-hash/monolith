@@ -1,20 +1,14 @@
-# theme_helpers.R — the single Monolith theme.
+# theme_helpers.R: the single Monolith theme, light and dark.
 #
-# One theme, two variants (light and dark). Every colour in the interface
-# resolves to one of the fourteen roles in monolith_tokens(); the variants
-# differ only in the values bound to those roles, never in the rules that use
-# them. That is why the per-theme contrast workarounds this file used to carry
-# (a body colour forced light because one theme's content background was dark,
-# and so on) are gone: there is one set of rules to keep readable, not ten.
-#
-# The variant is a `data-theme` attribute on <html>, flipped client-side and
-# remembered in localStorage. Nothing round-trips through the server, so
-# switching is instant and stays responsive while a run occupies the session.
+# Every interface colour resolves to a role in monolith_tokens(); the variants
+# differ only in the values bound to those roles, never in the rules. The
+# variant is a `data-theme` attribute on <html>, flipped client-side and
+# remembered in localStorage, so switching never waits on the server.
 
 #' Design tokens for both variants.
 #'
 #' Named vectors of CSS custom properties. Both variants define exactly the
-#' same names — a rule may reference any token without checking which variant
+#' same names, so a rule may reference any token without checking which variant
 #' is active. Contrast: every text role clears 4.5:1 against the surface it is
 #' used on, and `on-accent` clears 4.5:1 against `accent`, in both variants.
 monolith_tokens <- function() {
@@ -1367,12 +1361,8 @@ monolith_theme_boot_js <- function() {
   ))
 }
 
-#' Light / dark toggle.
-#'
-#' Client-side only: the variant is a presentation choice with no server-side
-#' consequence, so flipping it never queues a Shiny message and stays instant
-#' while a run holds the session. `id` namespaces the button so it can be
-#' placed more than once.
+#' Light / dark toggle, client-side only (never queues a Shiny message, so it
+#' stays instant during a run). `id` namespaces the button for reuse.
 theme_switcher_ui <- function(id) {
   ns <- shiny::NS(id)
   btn_id <- ns("toggle")
@@ -1411,9 +1401,8 @@ export_plot_to_file <- function(p, filepath, ext, input,
   if (is.null(height)) height <- if(isTruthy(input$styler_height)) input$styler_height else 8
   if (is.null(dpi))    dpi    <- input$styler_dpi %||% 300
 
-  # PDF is a vector device measured in points; the raster devices carry the
-  # requested resolution. Either way showtext has to be told which, or the point
-  # sizes in the theme are not the point sizes on the page (see with_showtext_dpi).
+  # PDF is measured in points, raster devices carry the requested dpi; showtext
+  # must be told which (with_showtext_dpi()).
   with_showtext_dpi(if (ext == "pdf") 72 else dpi, {
     ggplot2::ggsave(
       filename = filepath,

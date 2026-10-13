@@ -1,4 +1,5 @@
-# Tests for the Classification Suite engine (classif_helpers.R).
+# The Classification Suite: engine (classif_helpers.R) and module
+# (classif_module.R).
 
 test_that("classification refuses non-metre targets and removes session files", {
   shiny::testServer(classif_server, args = list(
@@ -100,8 +101,8 @@ test_that("normalised Shannon entropy hits its analytic bounds", {
 })
 
 test_that("vectorised entropy is bit-identical to the per-row reference", {
-  # Guards the apply() -> rowSums() rewrite, including the p == 0 terms the old
-  # code dropped via p[p > 0] and the new code zeroes.
+  # The vectorised form must equal the per-row definition, with 0 log 0 taken
+  # as 0 for the p == 0 terms.
   set.seed(11)
   m <- matrix(runif(300), ncol = 3)
   m <- m / rowSums(m)
@@ -207,8 +208,7 @@ test_that("a fold that never sees a class still pools its predictions", {
   # A singleton class lands in exactly ONE fold of any class-stratified
   # partition, so that fold's analysis rows hold none of it. ranger (and
   # nnet::multinom) then drop the unused outcome level and return one fewer
-  # .pred_ column, which used to abort the pooled rbind with "numbers of columns
-  # of arguments do not match".
+  # .pred_ column, which the pooled rbind must absorb.
   soil <- as.character(sf::st_drop_geometry(pts)$soil)
   soil[1] <- "Rare"
   pts$soil <- factor(soil, levels = c("Low", "Med", "High", "Rare"))
@@ -225,13 +225,13 @@ test_that("a fold that never sees a class still pools its predictions", {
   # The gap is reported by fold and class rather than silently absorbed.
   expect_false(is.null(cv$class_gaps))
   expect_true("Rare" %in% cv$class_gaps$class)
-  # A fold with no Rare training rows assigns Rare exactly zero mass — the
+  # A fold with no Rare training rows assigns Rare exactly zero mass, the
   # model's genuine posterior, not an imputed share.
   gap_fold <- cv$class_gaps$fold[cv$class_gaps$class == "Rare"][1]
   expect_true(all(cv$predictions$.pred_Rare[cv$predictions$.fold == gap_fold] == 0))
 
-  # Out-of-fold importance survives the gap: matching truth against the missing
-  # probability column used to turn every importance value NA.
+  # Out-of-fold importance survives the gap instead of turning NA against the
+  # missing probability column.
   expect_false(is.null(cv$importance))
   expect_true(all(is.finite(cv$importance$importance)))
 })
@@ -240,7 +240,7 @@ test_that("target levels with no samples are dropped before modelling", {
   pts <- make_classif_points(n = 60)
   # classif_build_target() carries every bin label as a level, so an equal-
   # interval or Jenks break enclosing no samples reaches the engine as an empty
-  # class — as does a class whose every row lacks a covariate value.
+  # class, as does a class whose every row lacks a covariate value.
   pts$soil <- factor(as.character(sf::st_drop_geometry(pts)$soil),
                      levels = c("Low", "Med", "High", "Absent"))
 
@@ -252,8 +252,8 @@ test_that("target levels with no samples are dropped before modelling", {
   expect_false(".pred_Absent" %in% names(cv$predictions))
   expect_false("Absent" %in% cv$per_class$class)
   expect_equal(sum(cv$conf_mat$table), nrow(pts))
-  # An empty level leaves yardstick's macro recall undefined, which propagated
-  # into a silently NA balanced accuracy.
+  # An empty level would leave yardstick's macro recall undefined and the
+  # balanced accuracy silently NA.
   ba <- cv$metrics$.estimate[cv$metrics$.metric == "bal_accuracy"]
   expect_length(ba, 1)
   expect_false(is.na(ba))
@@ -331,9 +331,8 @@ test_that("the argmax class agrees with a direct type = 'class' prediction", {
 })
 
 test_that("a cancel flag stops the surface stage instead of running to completion", {
-  # The regression this pins: cancellation used to be checked only BEFORE the
-  # surface stage, so a cancel pressed while the grid was being classified (the
-  # longest part of a run) was never seen and the run completed anyway.
+  # Cancellation is checked inside the surface stage, the longest part of a
+  # run, not only before it.
   pts <- make_classif_points(n = 40)
   mod <- fit_classification_model(pts, "soil", c("elev", "slope"), method = "rf")
   nd <- data.frame(elev = seq(0, 30, length.out = 40), slope = 7)
@@ -382,8 +381,8 @@ test_that("the progress ladder is monotone and gives the map stages real room", 
   # The caption travels with the bar, so the UI stops claiming
   # "cross-validation" while the grid is being classified.
   expect_equal(readLines(stage_file, warn = FALSE)[1], "Finishing...")
-  # Regression: under the old folds+2 denominator everything from the end of CV
-  # onward collapsed into ~92%-100%. The map-building stages now own ~40 points.
+  # The map-building stages own about 40 points of the bar, not a sliver at its
+  # end.
   expect_gt(pcts[7] - pcts[3], 35)
 })
 
@@ -777,10 +776,9 @@ test_that("replicated rows give exactly the run their locations give", {
 })
 
 test_that("co-located samples no longer collapse the covariate surfaces or the map", {
-  # Dataset 05's shape: 80 locations, 8 of them sampled twice, one twin with
-  # another class. As uploaded, gstat's singular solve made every kriged
-  # covariate NA, the recipe imputed one median everywhere and the map came
-  # out as one class.
+  # 80 locations, 8 of them sampled twice, one twin with another class.
+  # Unmerged, gstat's singular solve would make every kriged covariate NA, the
+  # recipe would impute one median everywhere and the map would be one class.
   f <- with_seed(11, {
     x <- runif(80, 450000, 452000); y <- runif(80, 5800000, 5802000)
     data.frame(x = x, y = y, loc = "A",
@@ -999,11 +997,10 @@ test_that("classif_build_grid honours the wrapped boundary and resolve_scope thr
 })
 
 test_that("a manual grid resolution is capped at the candidate-cell budget and says so", {
-  # The Auto path has carried this floor since 2026-07-10; the Manual
-  # Resolution slider had none, and it is the path that can ask for the finest
-  # grid. Its 5 m minimum over a multi-locality scope of 20 x 20 km is 1.6e7
-  # candidate nodes, inside the classification worker, where an allocation
-  # failure reaches the user only as a generic run failure.
+  # The Manual Resolution slider can ask for the finest grid: its 5 m minimum
+  # over a multi-locality scope of 20 x 20 km is 1.6e7 candidate nodes inside
+  # the classification worker, where an allocation failure reaches the user
+  # only as a generic run failure. Auto carries the same budget.
   pts <- make_classif_points(n = 50)
 
   # Below the budget: the requested resolution is used verbatim, no note.
@@ -1087,10 +1084,9 @@ test_that("the classification prediction grid is invariant to the clip block siz
                    sf::st_coordinates(many_blocks$grid_p))
   expect_identical(one_block$grid_p$x, many_blocks$grid_p$x)
   expect_identical(one_block$grid_p$y, many_blocks$grid_p$y)
-  # ... and identical to the single-pass terra::as.points form it replaced, so
-  # the memory rewrite provably keeps the same cells. terra::crds returns the
-  # same centres in the same cell order; the predicate stays st_within (not
-  # st_intersects: a node exactly on the boundary is outside the scope).
+  # ... and identical to an independent single pass (terra::as.points over the
+  # bounding box, kept by st_within: a node exactly on the boundary is outside
+  # the scope).
   bnd <- sf::st_as_sf(sf::st_sfc(
     sf::st_union(sf::st_geometry(.classif_scope_hulls(pts, group = NULL, style = "concave"))),
     crs = sf::st_crs(pts)))
@@ -1289,11 +1285,11 @@ test_that("covariate lift reproduces hand-computed accuracies and McNemar pairin
 })
 
 test_that("covariate lift switches from exact binomial to chi-square at 25 discordant pairs", {
-  # 2026-08-23 audit, Tier 2: mcnemar.test is the continuity-corrected
-  # chi-square APPROXIMATION and is unreliable on few discordant pairs, which
-  # is the common case for this panel. Build a frame with an exact discordant
-  # tally: n_conc rows where model and baseline are both right, b rows where
-  # only the baseline is right, c_ rows where only the model is right.
+  # mcnemar.test is the continuity-corrected chi-square APPROXIMATION and is
+  # unreliable on few discordant pairs, the common case for this panel. Build a
+  # frame with an exact discordant tally: n_conc rows where model and baseline
+  # are both right, b rows where only the baseline is right, c_ rows where only
+  # the model is right.
   levs <- c("A", "B")
   mk <- function(b, c_, n_conc = 40) {
     truth <- rep("A", b + c_ + n_conc)
@@ -1348,7 +1344,7 @@ test_that("the lift interpretation reads direction from lift_abs and significanc
   expect_match(classif_lift_interpretation(mk(0.2, -0.05)), "no significant difference")
   up <- classif_lift_interpretation(mk(0.01, 0.08))
   expect_match(up, "significantly MORE accurate")
-  # The previous wording called a significant NEGATIVE lift an "improvement".
+  # A significant NEGATIVE lift is a loss, never an "improvement".
   down_cat <- classif_lift_interpretation(mk(0.01, -0.08), "cat")
   expect_match(down_cat, "significantly LESS accurate")
   expect_match(down_cat, "Spatial 1-NN map")
@@ -1423,7 +1419,7 @@ test_that("confidence threshold abstains low-certainty cells into Unclassified",
     .entropy = 0.5
   )
 
-  # Threshold 0: byte-identical behaviour to the pre-feature rasteriser.
+  # Threshold 0: no cell abstains.
   rl0 <- classif_surface_to_rasters(grid, res = 200, crs_wkt = sf::st_crs(32633)$wkt,
                                     levels_order = levs, conf_threshold = 0)
   expect_false("Unclassified" %in% rl0$area$class)
@@ -1463,7 +1459,7 @@ test_that("pipeline persists a reusable model bundle and reports lift/importance
     make_surface = FALSE, model_rds_path = rds
   )
 
-  # New result fields: baseline lift, importance, weight flags, CV predictions.
+  # Result fields: baseline lift, importance, weight flags, CV predictions.
   expect_s3_class(res$lift, "data.frame")
   expect_true(all(c("model_acc", "baseline_acc", "majority_acc", "lift_abs",
                     "mcnemar_p") %in% names(res$lift)))
@@ -1519,8 +1515,7 @@ test_that("classification reports the rows used for CV and the final fit", {
 
 test_that("a missing covariate value does not stop the classification maps", {
   # The covariate surfaces are kriged from the scoped rows, and gstat refuses a
-  # missing value: one incomplete row failed the default map stage after CV
-  # and the final fit had run. They are built from the covariate-complete rows.
+  # missing value, so they are built from the covariate-complete rows.
   d <- make_classif_scope_df(nA = 35, nB = 30)
   d$elev[1:5] <- NA
   # The binary target is fitted by glm, and on this fixture one fold's training
@@ -1598,8 +1593,8 @@ test_that("a covariate surface that fell back to IDW is reported, per fold and o
 })
 
 test_that("a covariate name that is not syntactic gives the results of its twin", {
-  # krige_covariates builds the held-out and grid covariates; gstat re-read
-  # "Elevation (m)" through make.names() and could not find it.
+  # krige_covariates builds the held-out and grid covariates through gstat
+  # formulas, which read a name through make.names().
   d <- make_classif_scope_df(nA = 35, nB = 30)
   args <- list(target = "soil", x_col = "x", y_col = "y", src_crs = 32633,
                proj_crs = "EPSG:32633", method = "rf", strategy = "standard",
@@ -1738,13 +1733,11 @@ test_that("classif_build_target never labels an interval as a single point", {
 })
 
 test_that("the final classification model tunes under the run's CV strategy", {
-  # fit_classification_model hardcoded "standard" folds for its own tuning
-  # search while run_classification_cv honoured the user's strategy. The class
-  # map, entropy surface, permutation importance and exported .rds bundle are
-  # all built from the FINAL model, so under Spatial CV every one of them
-  # shipped hyperparameters chosen under random stratified folds -- exactly the
-  # optimism spatial CV exists to remove -- while the metrics table advertised
-  # a leakage-free estimate.
+  # The class map, entropy surface, permutation importance and exported .rds
+  # bundle are all built from the FINAL model, so its tuning search must use
+  # the run's CV strategy: hyperparameters chosen under random stratified folds
+  # would carry the optimism spatial CV exists to remove, behind a metrics
+  # table advertising a leakage-free estimate.
   pts <- make_classif_points(60)
 
   seen <- character(0)
@@ -1843,16 +1836,12 @@ test_that("out-of-fold importance is scored on held-out rows and labelled", {
 })
 
 test_that("the out-of-fold importance sandbox leaves the fold RNG stream untouched", {
-  # .classif_perm_delta burns n_rep x n_predictors sample.int() draws. Before the
-  # sandbox those draws landed on the fold loop's own stream, so every LATER
-  # fold's fit started from a different random state and a purely diagnostic
-  # toggle could move the reported CV metrics. It bites whenever the learner
-  # consumes RNG: with the shipped registry that is xgboost at depth "full",
-  # which tunes sample_size / mtry (subsampling and colsample are random) —
-  # multinom (nnet rang = 0), ranger (seed = 12345L) and xgboost at
-  # none/light (sample_size = 1) all fit deterministically. This pins the
-  # property that makes the fold loop invariant regardless of learner, which
-  # matters as the tuning registry and learner list are meant to grow.
+  # .classif_perm_delta burns n_rep x n_predictors sample.int() draws. On the
+  # fold loop's own stream they would shift every LATER fold's fit, so a purely
+  # diagnostic toggle could move the reported CV metrics whenever the learner
+  # consumes RNG (in the shipped registry, xgboost at depth "full", which
+  # subsamples rows and columns; multinom, ranger and xgboost at none/light fit
+  # deterministically). This pins the fold loop's invariance for any learner.
   pts <- make_classif_points(60)
   df <- as.data.frame(sf::st_drop_geometry(pts))
   mod <- suppressWarnings(fit_classification_model(
@@ -1893,13 +1882,13 @@ test_that("out-of-fold importance is not computed unless asked for", {
 })
 
 test_that("the baked-block fast path reproduces the re-bake-per-shuffle deltas", {
-  # Identity pin for the permutation-importance fast path. The reference below
-  # IS the pre-2026-08-14 implementation (permute the raw column, predict through
-  # the workflow, which re-bakes the recipe on every shuffle). The fast path
-  # bakes once and permutes the baked block; it must return the same numbers from
-  # the same seed, or the equivalence argument in .classif_perm_fast_path is
-  # wrong for this recipe. The fixture carries a nominal predictor (dummy block)
-  # and NAs (imputation) so both non-trivial steps are exercised.
+  # The reference below is the direct definition: permute the raw column and
+  # predict through the workflow, re-baking the recipe on every shuffle. The
+  # fast path bakes once and permutes the baked block; it must return the same
+  # numbers from the same seed, or the equivalence argument in
+  # .classif_perm_fast_path is wrong for this recipe. The fixture carries a
+  # nominal predictor (dummy block) and NAs (imputation) so both non-trivial
+  # steps are exercised.
   perm_delta_reference <- function(wf, df, target, predictors, n_rep) {
     truth <- as.factor(df[[target]])
     log_loss_of <- function(newdata) {
@@ -2170,11 +2159,11 @@ test_that("pooled metrics reproduce a hand-built 3x3 confusion matrix", {
 })
 
 test_that("macro averages keep a never-predicted class in the denominator", {
-  # The F13 case: the model assigns class C to nothing. yardstick's multiclass
-  # precision finds 0/0 there, warns inside the worker where nothing sees it,
-  # and drops C from the average - so precision and F1 were averaged over two
-  # classes while recall was averaged over three, and a macro F1 could exceed
-  # both of its own components. Every number below is written out by hand.
+  # The model assigns class C to nothing. yardstick's multiclass precision finds
+  # 0/0 there, warns inside the worker where nothing sees it, and drops C from
+  # the average, which would take precision and F1 over two classes and recall
+  # over three, letting a macro F1 exceed both of its own components. Every
+  # number below is written out by hand.
   cm <- matrix(c(5, 1, 0,        # truth A: 5 -> A, 1 -> B
                  2, 4, 0,        # truth B: 2 -> A, 4 -> B
                  1, 2, 0),       # truth C: 1 -> A, 2 -> B, none -> C
@@ -2196,8 +2185,7 @@ test_that("macro averages keep a never-predicted class in the denominator", {
   # All three over the SAME three classes, and the table says so.
   expect_true(all(m$.n_classes[m$.metric %in% c("precision", "recall", "f_meas")] == 3))
   # Each class's F1 is a harmonic mean, so it cannot exceed that class's
-  # arithmetic mean; averaging preserves it. The violation of this inequality
-  # is what proved the denominators differed.
+  # arithmetic mean, and averaging over one class set preserves the bound.
   expect_lte(get("f_meas"), (get("precision") + get("recall")) / 2 + 1e-12)
 
   # The estimator label carries the denominator into the table and the CSV.
@@ -2236,8 +2224,8 @@ test_that("two-class runs keep the binary estimator and its numbers", {
   expect_equal(get("f_meas"), yardstick::f_meas_vec(truth, pred))
   expect_equal(classif_label_metrics(m)$.estimator_label[1], "Binary (event: Yes)")
 
-  # The one case that moves: no predicted events. yardstick returns NA with a
-  # warning; the zero-division rule scores it 0, as it does for multiclass.
+  # No predicted events: yardstick returns NA with a warning; the zero-division
+  # rule scores it 0, as it does for multiclass.
   none <- classif_macro_metrics(truth, factor(rep("No", 12), levels = levs))
   expect_equal(none$.estimate[none$.metric == "precision"], 0)
   expect_equal(none$.estimate[none$.metric == "f_meas"], 0)

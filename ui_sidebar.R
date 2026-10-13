@@ -1,13 +1,9 @@
 # ui_sidebar.R - sidebar panel as a plain variable assignment (no function
 # wrapper), consumed by ui_main.R inside sidebarLayout().
 ui_sidebar_panel <- sidebarPanel(width = 3,
-      # The suite tabs are matched on their value= ids (tab_desc / tab_classif),
-      # never on their titles, so a title can be reworded without touching these
-      # conditions.
-      # Neither suite reads the Context selections - the Exploratory module is
-      # handed the raw dataset and picks its own variables, and Classification
-      # configures target/predictors in its own panel - so the section is only
-      # shown for the tabs it actually drives.
+      # Suite tabs are matched on their value= ids, never titles. Neither suite
+      # reads the Context selections, so the section shows only for the tabs it
+      # drives.
       conditionalPanel(
         condition = "input.main_tabs !== 'tab_desc' && input.main_tabs !== 'tab_classif'",
       div(class = "mn-section",
@@ -24,11 +20,9 @@ ui_sidebar_panel <- sidebarPanel(width = 3,
                        condition = "input.value_type == 'pred_ss'",
                        selectInput("subset", HTML(paste0("Data Subset", info_tooltip("data_subset_info", "Restricts the Single Split (_ss) view to one data partition (e.g. Train/Test/Validation), read from a 'subset' column in the uploaded data. Available choices are detected when a dataset containing such a column is loaded."))), choices = c("All" = "all"), selected = "all")
                      ),
-                     # The three boxes below are not sub-options of Primary View:
-                     # they configure one thing between them - whether the actual
-                     # and predicted surfaces are compared, how each is fitted and
-                     # how the two are coloured. Same hr() + h5() grouping the Map
-                     # Styling section uses for Uncertainty Mapping.
+                     # The three boxes below configure one thing together: whether
+                     # the actual and predicted surfaces are compared, how each is
+                     # fitted and how they are coloured.
                      conditionalPanel(
                        condition = "['pred', 'pred_ss', 'resid'].includes(input.value_type)",
                        hr(),
@@ -37,13 +31,11 @@ ui_sidebar_panel <- sidebarPanel(width = 3,
                        # Every prediction or residual view kriges a predicted
                        # surface, so this governs it with or without Comparison Mode.
                        checkboxInput("sep_fit", HTML(paste0("Fit Actual/Predicted Separately", info_tooltip("sep_fit_info", "Checked (recommended): the Predicted surface gets its own model - its own variogram under Ordinary Kriging, its own power under IDW, its own lambda under TPS. Unchecked: it reuses the model fitted to the measured values - the Actual variogram (the run's own Actual fit under Auto-Fit, the applied Actual model under Manual), the Actual power, and the Actual lambda (on Auto, the one GCV selects for the measured values) - and per-locality values are set for the Actual target only. RK, RFK and CK always fit each surface on its own."))), TRUE)
-                     ),          # Also shown while the Map Viewer displays a comparison, so the
-                     # option stays reachable for the maps it styles after the
-                     # sidebar is set up for a non-comparison next run. That arm
-                     # also requires the DISPLAYED run to have a prediction side:
-                     # the view menu's value alone can outlive the comparison.
-                     # The server applies Match Scales only while this holds
-                     # (match_scales_shown, ui_formatting.R): change both together.
+                     ),
+                     # Also shown while the Map Viewer displays a comparison from a run
+                     # with a prediction side, so it still reaches the maps it styles.
+                     # The server applies Match Scales under the same condition
+                     # (match_scales_shown(), ui_formatting.R): change both together.
                      conditionalPanel(condition = "(input.comp_mode && ['pred', 'pred_ss'].includes(input.value_type)) || (output.disp_has_pred == 'yes' && /^view_comp/.test(input.map_view || ''))",
                            checkboxInput("match_scales", HTML(paste0("Match Scales", info_tooltip("match_info", "Forces the map legends for Actual and Predicted data to use the same color range, for the surfaces and for their standard-error or variance maps. Under Binned or Agronomical Jenks/K-Means styling it also classifies both surfaces with one set of class breaks computed from the two together; otherwise each surface's classes come from its own values."))), FALSE))
         ))
@@ -77,10 +69,8 @@ ui_sidebar_panel <- sidebarPanel(width = 3,
               helpText(HTML("<em style='color: var(--mn-text-3); font-size: 0.9em; font-style: normal;'>Each fold refits the model from its own training samples. Scientific Guide §5.</em>"))
             ),
 
-            # Which samples Ordinary Kriging is cross-validated on. RK and RFK
-            # can only use the covariate-complete rows, so comparing OK with
-            # them on OK's larger sample is comparing two experiments. CK is
-            # scored on the Native population.
+            # OK's CV population: RK/RFK can only use the covariate-complete rows,
+            # so Comparable scores OK on those too (CK uses Native).
             conditionalPanel(condition = "input.method == 'OK'",
               shinyWidgets::radioGroupButtons("cv_population",
                 HTML(paste0("CV Population", info_tooltip("cv_population_info", "Which samples Ordinary Kriging is cross-validated on. Native (default): every sample with a measured target value; Co-Kriging is scored on these same samples. Comparable: only the samples that also have every selected auxiliary variable, deduplicated and folded exactly as RK and RFK use them, so the metrics of the three engines describe the same experiment. OK is TRAINED AND SCORED on those samples under Comparable; the map always uses every sample either way. The CV population ID shown in the Model Performance hover and written to the metrics export confirms that two runs on the same uploaded table scored the same rows in the same folds."))),
@@ -88,10 +78,8 @@ ui_sidebar_panel <- sidebarPanel(width = 3,
                 selected = "native", size = "sm", justified = TRUE)
             ),
 
-            # Repeated CV. Hidden under Standard LOOCV, whose folds are
-            # deterministic (every "repeat" is the same partition). A locality
-            # still keeps a single realization where its plan is deterministic
-            # (Auto at n <= 50, kNNDM spatial folds), which the run log reports.
+            # Repeated CV, hidden under LOOCV (deterministic). Localities whose
+            # plan is deterministic keep one realization (logged).
             conditionalPanel(condition = "input.cv_strategy != 'loocv'",
               checkboxInput("cv_repeat_on",
                 HTML(paste0("Repeated CV (fold-realization stability)", info_tooltip("cv_repeat_info", "OFF (default): metrics come from ONE fold assignment (fixed seed 12345), which is reproducible and keeps method comparisons paired. ON: the cross-validation is re-run under additional fold assignments (seeds 12346, 12347, ...) and an extra table reports each metric as mean ± SD across realizations, so you can see whether a difference between two methods is larger than the split-to-split noise. The reported single-realization numbers and the interpolated map are IDENTICAL either way - realization 1 is the reference run. Cost: one extra full cross-validation per repeat, and every kriging engine refits its model in each fold, so 5 repeats is roughly 5x the CV time. Each RFK fold draws its forest from its own seed, so a repeat varies the partition and nothing else. Leave-one-out plans, and kNNDM plans that group samples spatially, are deterministic and are never repeated."))),
@@ -158,11 +146,8 @@ ui_sidebar_panel <- sidebarPanel(width = 3,
                     sliderInput("m_psill", "Partial Sill", min = 0, max = 1, value = 1, step = 0.01, ticks = FALSE),
                     sliderInput("m_range", "Range", min = 1, max = 1000, value = 100),
                     actionButton("apply_manual", "Apply manual model", class = "btn-default btn-block"),
-                    # A hand-tuned fit describes the VALUE-scale variogram, so
-                    # it is only meaningful for OK. RK/RFK model the residual
-                    # variogram after the trend is removed and CK fits an LMC;
-                    # imposing a value-scale model on either would be wrong, so
-                    # they refit, and the note below says so.
+                    # A manual model is a VALUE-scale variogram, used by OK only:
+                    # RK/RFK fit residual variograms and CK an LMC.
                     conditionalPanel(condition = "['RK', 'RFK', 'CK'].includes(input.method)",
                       tags$p(class = "mn-note-warn",
                              tags$b("Not used by the selected method. "),
@@ -172,13 +157,11 @@ ui_sidebar_panel <- sidebarPanel(width = 3,
               )
             ),
             
-            # Power and smoothing are set for all localities or per locality.
-            # Auto (CV) and Auto (GCV) are selected inside the run, and again
-            # inside every CV fold; the stored per-locality values use the
-            # encoding the server writes (-1 Auto, 0 exact TPS or equal-weight
-            # IDW, > 0 fixed). A Fixed p is typed over the range Auto (CV)
-            # searches (0 to IDW_MAX_FINITE_POWER), so a power Auto selects can
-            # be fixed as it is.
+            # IDW power and TPS smoothing, for all localities or per locality.
+            # Auto (CV)/(GCV) are selected in the run and again in every CV
+            # fold. Stored encoding: -1 Auto, 0 exact TPS / equal-weight IDW,
+            # > 0 fixed. A Fixed p spans Auto (CV)'s range (0 to
+            # IDW_MAX_FINITE_POWER).
             conditionalPanel(condition = "input.method == 'IDW'",
                 tuning_ui(
                     id = "idw", label = "Power (p)",
@@ -260,19 +243,15 @@ ui_sidebar_panel <- sidebarPanel(width = 3,
                          choices = c("Auto (Per Locality)" = "local", "Auto (Global)" = "global", "Fixed" = "fixed"),
                          size = "sm", direction = "vertical", justified = TRUE),
             conditionalPanel(condition = "input.res_mode == 'fixed'",
-              # 1 m floor, the same frame server_data_setup.R rebuilds the
-              # slider with once a Target Mapping CRS is set. The ~4M candidate
-              # cell cap in the run (spatial_pipeline.R) is what bounds memory,
-              # not this minimum.
+              # 1 m floor, as server_data_setup.R rebuilds it once a Target CRS
+              # is set; the run's ~4M candidate-cell cap bounds memory.
               sliderInput("grid_res", "Manual Resolution", min = 1, max = 500, value = 50, step = 1)
             ),
             
             div(class = "mn-subsection",
-                # The table describes the settings above, i.e. the NEXT run. In
-                # the Auto modes the cell size follows the boundaries the run
-                # builds, so the column names that instead of printing a figure
-                # no grid will use; the Map Viewer's resolution overlay lists
-                # the sizes the displayed run gridded at.
+                # Describes the NEXT run. In the Auto modes the cell size follows
+                # the boundaries the run builds, so the column says so; the Map
+                # Viewer's resolution overlay lists the displayed run's sizes.
                 p(style = "font-size: 0.78em; margin: 0 0 4px 0; color: var(--mn-text-3);",
                   "Grid and buffer for the next run:"),
                 tableOutput("loc_res_table"),
@@ -307,9 +286,8 @@ ui_sidebar_panel <- sidebarPanel(width = 3,
               helpText(HTML("<em style='color: var(--mn-text-3); font-size: 0.9em; font-style: normal;'>The Actual and Predicted maps are each classified from their own values, so their class limits can differ. Tick Match Scales (Context) for one set of limits across both.</em>"))),
             hr(),
             h5("Uncertainty Mapping"),
-            # Keyed to the method of the DISPLAYED run (disp_method): the maps
-            # live in the Map Viewer's view menu for that run, so picking a
-            # non-kriging method for the next run must not change this note.
+            # Keyed to the DISPLAYED run's method (disp_method), not the next
+            # run's.
             conditionalPanel(condition = "['OK', 'RK', 'RFK', 'CK'].includes(output.disp_method)",
               p(style="font-size: 0.8em; opacity: 0.8; margin-bottom: 0;", "Standard-error and variance maps of the displayed run are in the Map Viewer's view menu. SE shares the variable's unit; variance is in its squared units. Both always use a continuous sequential palette (a diverging palette choice is replaced by Viridis); Agronomical/Binned classes apply to concentration maps only.")
             ),

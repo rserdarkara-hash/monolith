@@ -1,4 +1,4 @@
-# test-pca-plots.R — tests for the PCA plotting functions.
+# test-pca-plots.R: tests for the PCA plotting functions.
 
 # ── Shared fixture ─────────────────────────────────────────────────────────
 
@@ -75,7 +75,7 @@ test_that("generate_pca_biplot handles na.omit correctly when caller aligns data
   # Without alignment, it should error
   expect_error(generate_pca_biplot(pca, df, pc_x = 1, pc_y = 2, group_col = "cat1"))
   
-  # With caller alignment (the fix applied in the module)
+  # Aligned by the caller, as the module does.
   aligned_df <- df[rownames(pca$x), , drop = FALSE]
   p <- generate_pca_biplot(pca, aligned_df, pc_x = 1, pc_y = 2, group_col = "cat1")
   expect_s3_class(p, "ggplot")
@@ -85,11 +85,10 @@ test_that("generate_pca_biplot handles na.omit correctly when caller aligns data
 
 test_that("cos2 is a bounded quality of representation in BOTH PCA modes", {
   # cos2 = share of a variable's own variance captured by the selected PCs, so
-  # it must sit in [0, 1] and reach exactly 1 across all components. Before
-  # 2026-08-14 the unscaled branch plotted an unnormalised absolute variance
-  # (Var(x_j) in the variable's own squared units) on an axis labelled cos2.
+  # it lies in [0, 1] and reaches exactly 1 across all components, whether the
+  # PCA is scaled or not.
   df <- make_test_df(40, seed = 7)[, c("a", "b", "c", "d", "e")]
-  # give the variables wildly different scales — the case that made it visible
+  # Very different scales: an unnormalised cos2 would leave [0, 1] here.
   df$a <- df$a * 1000
   df$b <- df$b / 500
 
@@ -105,8 +104,8 @@ test_that("cos2 is a bounded quality of representation in BOTH PCA modes", {
 })
 
 test_that("cos2 for a scaled PCA is unchanged by the normalisation", {
-  # For scale. = TRUE the denominator is 1 for every variable, so the panel that
-  # users have been reading is numerically where it was.
+  # With scale. = TRUE every variable has unit variance, so cos2 is the plain
+  # sum of squared coordinates.
   pca <- make_pca()
   axes <- 1:2
   coord <- sweep(pca$rotation[, axes, drop = FALSE], 2, pca$sdev[axes], "*")

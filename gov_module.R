@@ -1,13 +1,9 @@
-# The Tabular Data Metrics table of a governing-factors result: the model's own
-# quality first, then one row per covariate in decreasing importance.
-#
-# Value and Unit are separate columns because the two quantities are not the
-# same kind of number - permutation importance is an increase in out-of-bag
-# MSE, in the target's squared units; the model-quality row is a percentage.
-# The scaled column is the same increase divided by its standard error across
-# trees (randomForest's %IncMSE): unitless, and it grows with the tree count.
-# Values are unrounded; the display formats them. `labels` is the suite's
-# display-label map (desc_var_labels); NULL shows the column names.
+# The Tabular Data Metrics table of a governing-factors result: the model's
+# quality first, then one row per covariate in decreasing importance. Value
+# and Unit are separate because the rows differ in kind (importance = OOB MSE
+# increase in squared target units; quality = a percentage). The scaled column
+# is that increase over its SE across trees (%IncMSE; unitless, grows with
+# ntree). Unrounded; `labels` is the suite's display-label map (NULL = names).
 GOV_IMPORTANCE_UNIT <- "Increase in out-of-bag MSE (target units squared)"
 GOV_SCALED_COL <- "Scaled (÷ SE)"
 gov_summary_df <- function(res, labels = NULL) {
@@ -21,10 +17,8 @@ gov_summary_df <- function(res, labels = NULL) {
     check.names = FALSE, stringsAsFactors = FALSE
   )
   out[[GOV_SCALED_COL]] <- as.numeric(vip$mse_increase_scaled %||% NA_real_)
-  # Report the quality of the RF model behind the SHAP/importance results:
-  # OOB % variance explained (pseudo-R² on out-of-bag data). The module keeps
-  # `oob_rsq` and drops the forest once a run lands (see the completion
-  # handler); a direct call still hands over the whole result.
+  # Model quality: OOB % variance explained. The module keeps `oob_rsq` and
+  # drops the forest after a run; a direct call still passes the whole result.
   oob_rsq <- res$oob_rsq
   if (is.null(oob_rsq)) oob_rsq <- tryCatch(utils::tail(res$model$rsq, 1), error = function(e) NULL)
   if (!is.null(oob_rsq) && length(oob_rsq) == 1 && is.finite(oob_rsq)) {
@@ -59,11 +53,9 @@ gov_factors_ui <- function(id) {
           shiny::radioButtons(ns("gov_effect_type"), "Functional Effect Plot:", choices = c("ALE" = "ale", "PDP" = "pdp"), inline = TRUE)
         ),
         shiny::column(9,
-          # Driven by shinyjs::show/hide (custom messages), not a
-          # conditionalPanel on output$gov_ready: an output value does not
-          # reach the browser until the run observer returns, so the spinner
-          # has to be switched on by a message rather than by a reactive
-          # output.
+          # Shown by shinyjs custom messages, not a conditionalPanel on
+          # output$gov_ready, which would only reach the browser after the run
+          # observer returns.
           shinyjs::hidden(
             shiny::div(id = ns("gov_running_panel"),
               style = "text-align: center; padding: 100px 50px; background-color: var(--mn-surface); border-radius: 8px; border: 2px dashed var(--mn-text-3); margin-bottom: 20px; transition: all 0.3s ease;",
@@ -146,10 +138,8 @@ gov_factors_server <- function(id, data_reactive, vars_metadata_reactive) {
 
     gov_rv <- shiny::reactiveValues(res = NULL, ready = "no", cancelling = FALSE)
 
-    # Cooperative cancellation, mirroring the classification module: the flag is
-    # a file because the run lives in a future worker where Shiny reactives do
-    # not exist. Session-scoped so two browser sessions cannot cancel each
-    # other's runs.
+    # Cooperative cancellation through a session-scoped flag file (the run
+    # lives in a future worker), as in the classification module.
     gov_cancel_file <- file.path(tempdir(),
       paste0("gov_cancel_", substr(session$token, 1, 12), ".txt"))
 
@@ -230,13 +220,10 @@ gov_factors_server <- function(id, data_reactive, vars_metadata_reactive) {
       shinyjs::enable("gov_cancel_btn")
 
       shinyjs::disable("gov_run_btn")
-      # Must be updateActionButton, not shinyjs::html: Shiny 1.13 updates the
-      # label inside a .action-label child span, which raw innerHTML replacement
-      # destroys (later restores would append instead of replace).
+      # updateActionButton, not shinyjs::html, which would destroy Shiny's
+      # .action-label span.
       shiny::updateActionButton(session, "gov_run_btn", label = "Running...", icon = shiny::icon("spinner", class = "fa-spin"))
-      # Feedback by custom message, for the reason given at the panel's
-      # definition: nothing this observer writes reaches the browser until it
-      # returns.
+      # Feedback by custom message (see the panel's definition).
       shinyjs::hide("gov_idle_content")
       shinyjs::show("gov_running_panel")
 
@@ -245,9 +232,7 @@ gov_factors_server <- function(id, data_reactive, vars_metadata_reactive) {
       target_col <- input$gov_target
       ntree_val <- input$gov_ntree
       shap_size_val <- input$gov_shap_size
-      # Ship only the columns the worker uses: compute_governing_factors
-      # subsets to c(target, predictors) before complete.cases anyway, so this
-      # is numerically identical but much cheaper to serialize to the worker.
+      # Ship only the columns the worker uses (numerically identical).
       df <- df[, unique(c(target_col, preds)), drop = FALSE]
       # Read the core count here in the main session: inside the promise worker
       # availableCores() reports 1, which would suppress the SHAP escalation.
@@ -255,15 +240,10 @@ gov_factors_server <- function(id, data_reactive, vars_metadata_reactive) {
       cancel_file_ship <- gov_cancel_file
       proj_root_ship <- getwd()
 
-      # `globals =` is pinned to plain data and the worker builds the helper
-      # set itself, the way the interpolation and classification workers do.
-      # Left to automatic discovery this dispatch also shipped ten MASKED base
-      # generics - rbind (spam), nrow/mean/aggregate/as.data.frame/which.max
-      # (terra) - picked up from the main session's search path.
-      # compute_governing_factors() never reads them, because it resolves
-      # through its own globalenv, but deserializing their package references
-      # made every gov worker attach spam, terra, fields and sf for nothing,
-      # and put them in the export that `future.globals.maxSize` measures.
+      # `globals =` pinned to plain data; the worker builds the helper set
+      # itself, as the interpolation and classification workers do. Automatic
+      # discovery also shipped masked base generics (spam, terra), making every
+      # worker attach spam, terra, fields and sf for nothing.
       promises::future_promise({
         setwd(proj_root_ship)
         library(DALEX)
@@ -271,10 +251,8 @@ gov_factors_server <- function(id, data_reactive, vars_metadata_reactive) {
         # compute_governing_factors() and gov_shap_item() are top level in a
         # fragment registered in spatial_helpers.R, so the worker defines them.
         source("spatial_helpers.R", local = FALSE)
-        # Same reason as the run and optimizer dispatches: this pool worker is
-        # shared, and compute_governing_factors() decides whether to escalate
-        # SHAP by reading nbrOfWorkers(), which a leaked plan would answer with
-        # a dead cluster's size.
+        # Reset the shared pool worker's plan: compute_governing_factors()
+        # reads nbrOfWorkers() to decide on SHAP escalation.
         future::plan(future::sequential)
         compute_governing_factors(
           df = df,
@@ -291,29 +269,19 @@ gov_factors_server <- function(id, data_reactive, vars_metadata_reactive) {
                      ntree_val = ntree_val, shap_size_val = shap_size_val,
                      cores_hint_val = cores_hint_val,
                      cancel_file_ship = cancel_file_ship),
-      # Parallel-safe L'Ecuyer stream for the worker. Without it a fresh PSOCK
-      # process seeds itself from clock/PID entropy and future warns
-      # "UNRELIABLE VALUE: ... generated random numbers without specifying
-      # argument 'seed'". compute_governing_factors() then draws inside
-      # with_seed() (spatial_vgm.R), which NAMES the generator instead of
-      # inheriting this L'Ecuyer stream, so the importance and SHAP values a
-      # run produces here are the ones the same call produces in-process, in a
-      # script or in test-governing-factors.R. The worker's own stream is
-      # restored on the way out, so furrr's per-element independence holds.
+      # A parallel-safe L'Ecuyer stream for the worker (avoids future's
+      # "UNRELIABLE VALUE" warning); compute_governing_factors() draws under
+      # with_seed(), which names its generator, so its values match an
+      # in-process call or test-governing-factors.R.
       seed = TRUE) %...>% (function(res) {
         reset_gov_run_ui()
         if (!is.null(res)) {
-          # Commit the run's display context (T24 convention): the scatter
-          # panel must keep describing THIS run's target and data even if the
-          # sidebar target or the underlying table changes afterwards.
+          # Commit the run's display context: the scatter panel keeps
+          # describing THIS run's target and data whatever changes later.
           res$target_col <- target_col
           res$analysis_df <- df
-          # The panels read the importance and SHAP frames, the ALE/PDP
-          # profiles and the forest's OOB R^2 - never the forest itself, and
-          # never the DALEX explainer. Both are kept for the life of the tab
-          # otherwise: the forest is ~5 MB at 1,035 rows and 200 trees and
-          # ~32 MB at 3,000 rows and 500 trees, and the explainer holds a
-          # reference to it. Keep the one number, drop the objects.
+          # The panels never read the forest or the DALEX explainer (~5-32 MB
+          # kept for the tab's life), so keep the OOB R^2 and drop both.
           res$oob_rsq <- tryCatch(utils::tail(res$model$rsq, 1), error = function(e) NULL)
           res$model <- NULL
           res$explainer <- NULL
@@ -414,10 +382,8 @@ gov_factors_server <- function(id, data_reactive, vars_metadata_reactive) {
             ggplot2::theme_minimal(base_size = base_size)
         }
       } else if (plot_type == "interaction_b") {
-        # Committed run context only — never live input$gov_target or
-        # data_reactive(): changing the Target dropdown after a run must not
-        # silently swap this panel's y-axis while the importance/SHAP/ALE
-        # panels still describe the completed run.
+        # Committed run context only, never live input$gov_target or
+        # data_reactive(), so this panel matches the other panels' run.
         df <- gov_rv$res$analysis_df
         run_target <- gov_rv$res$target_col
         shiny::req(df, run_target)
@@ -464,10 +430,8 @@ gov_factors_server <- function(id, data_reactive, vars_metadata_reactive) {
     output$gov_summary_table <- DT::renderDataTable({
       shiny::req(gov_rv$res)
       df <- gov_summary_df(gov_rv$res, display_labels())
-      # paging off: dom = 't' shows no paging controls, so rows past the first
-      # page would be unreachable on screen and missing from a copy. Values stay
-      # numeric and are formatted at four significant digits for display, not
-      # printed as raw doubles such as 2.001495588850122.
+      # paging off: dom = 't' shows no paging controls. Values stay numeric,
+      # displayed at four significant digits.
       DT::datatable(df, options = list(dom = 't', paging = FALSE, scrollX = TRUE,
                                        columnDefs = sig_render_defs(df, c("Value", GOV_SCALED_COL))),
                     rownames = FALSE)

@@ -1,12 +1,6 @@
-# helper.R — sourced automatically by testthat before each test file.
-#
-# This file:
-#   1. Sources all application R files so every function is available.
-#   2. Provides shared factory functions for synthetic test fixtures.
-#   3. Sets up test-local options (timezone, seed policy, etc.).
-#
-# Individual test files should NOT re-source the app; helper.R handles it
-# once per session so repeated `source()` calls are avoided.
+# Sourced by testthat before the test files: loads the app once per session and
+# defines the shared fixtures (synthetic factories, golden-fixture accessors,
+# known-answer pairs).
 
 # ── Source application code (idempotent guard) ──────────────────────────────
 if (!exists(".monolith_sourced") || !isTRUE(.monolith_sourced)) {
@@ -15,15 +9,14 @@ if (!exists(".monolith_sourced") || !isTRUE(.monolith_sourced)) {
     winslash = "/"
   )
 
-  # global.R calls addResourcePath("assets", ...) which uses getwd().
-  # It also calls source() for helpers using relative paths.  Both require
-  # the working directory to be the project root.
+  # global.R sources its files and registers assets by relative path, so the
+  # app is loaded from the project root.
   old_wd <- getwd()
   setwd(proj_root)
   on.exit(setwd(old_wd), add = TRUE)
 
-  # Helpers load before setup.R, so request sequential startup for both app
-  # sources. Restore the option afterward so normal Shiny startup is unchanged.
+  # Sequential future plan for both loads of global.R (setup.R runs only after
+  # this file); with_options() restores the option.
   withr::with_options(list(monolith_test_sequential = TRUE), {
     suppressPackageStartupMessages({
       suppressMessages({
@@ -31,9 +24,8 @@ if (!exists(".monolith_sourced") || !isTRUE(.monolith_sourced)) {
       })
     })
 
-    # monolith.R sources global_utils.R and ui_main.R and defines server()
-    # and the Shiny app. Source it with shinyApp temporarily no-opped so it
-    # doesn't launch.
+    # monolith.R re-sources global.R, defines server() and calls shinyApp(),
+    # no-opped here so nothing launches.
     if (requireNamespace("shiny", quietly = TRUE)) {
       .real_shinyApp <- shiny::shinyApp
       utils::assignInNamespace("shinyApp", function(ui, server, ...) {}, "shiny")
@@ -53,16 +45,10 @@ if (!exists(".monolith_sourced") || !isTRUE(.monolith_sourced)) {
 
 # ── Third-party partial-match notices ──────────────────────────────────────
 #
-# setup.R sets warnPartialMatchArgs = TRUE so that a partial argument match in
-# Monolith's own code is an alarm. Two dependencies trip it from inside their
-# own source and cannot be fixed here: randomForest calls seq(along = ...) and
-# mgcv uses seq(length = ...) and hands contrasts = to model.matrix. Left alone they are the large
-# majority of the suite's warning output, which buries a genuine new one.
-#
-# Muffle those dependency notices BY MESSAGE at the call sites that raise them, rather
-# than wrapping the call in suppressWarnings(), so every other warning the
-# expression raises still reaches the reporter - a partial match in Monolith's
-# own code included.
+# setup.R turns a partial argument match into a warning, so one in Monolith's
+# own code is caught. randomForest (seq(along = )) and mgcv (seq(length = ),
+# contrasts = ) trip it inside their own source; this muffles exactly those
+# messages and, unlike suppressWarnings(), lets every other warning through.
 without_partial_match_notices <- function(expr) {
   withCallingHandlers(
     expr,
@@ -199,7 +185,7 @@ make_mock_vgm <- function(model = "Sph", psill = 0.5, range = 200, nugget = 0.1)
 #'
 #' @param n Number of rows.
 #' @param seed RNG seed.
-#' @return data.frame with columns `a`, `b`, `c`, `d`, `e`.
+#' @return data.frame with numeric `a`-`e` and factors `cat1`, `cat2`.
 make_test_df <- function(n = 50, seed = 123) {
   set.seed(seed)
   data.frame(
@@ -247,20 +233,16 @@ make_ccc_known <- function() {
   list(
     observed  = c(10, 20, 30, 40, 50),
     predicted = c(12, 19, 31, 38, 52),
-    # CCC computed externally with DescTools::CCC(obs, pre)$rho.c$est
-    # (re-derived 2026-09-01 to full precision: the previous 0.9937 was wrong in
-    # the 4th decimal and the 0.01 tolerance it was asserted under could not
-    # tell Lin's population-moment definition from the sample-moment variant.)
+    # Lin's population-moment CCC, as DescTools::CCC(obs, pre)$rho.c$est; the
+    # sample-moment variant (0.99306) differs in the 4th decimal.
     expected  = 0.9929789368
   )
 }
 
-#' Create a known-answer pair for the WHOLE error-metric dictionary.
-#' The pair is make_ccc_known()'s, so one fixture anchors every statistic
-#' perform_cv() reports. Every value below was derived from the definition
-#' (2026-09-03), not read off this implementation, and RMSE/RPD/RPIQ were
-#' additionally cross-checked against yardstick, which agrees on those three
-#' conventions:
+#' Known answers for the whole error-metric dictionary, on make_ccc_known()'s
+#' pair, so one fixture anchors every statistic perform_cv() reports. Each value
+#' is derived from the definition, not read off this implementation; RMSE, RPD
+#' and RPIQ also agree with yardstick:
 #'   RMSE      = sqrt(mean(r^2))                    r = observed - predicted
 #'   MAE       = mean(|r|)          ME  = mean(r)   (perform_cv's direction)
 #'   R2(corr)  = cor(observed, predicted)^2
@@ -269,9 +251,8 @@ make_ccc_known <- function() {
 #'   RPD       = sd(observed) / RMSE     (sample sd; Chang et al. 2001)
 #'   RPIQ      = IQR(observed) / RMSE
 #'   sMAPE     = mean(2|r| / (|observed| + |predicted|)) * 100
-#' A perfect pair alone (the old fixture) cannot separate sqrt(mean(r^2)) from
-#' sqrt(sum(r^2)/(n-1)), nor NSE from SSE/SST - both are trivially right at zero
-#' residual - so it is kept only as the degenerate companion. If a formula ever
+#' A perfect pair cannot separate sqrt(mean(r^2)) from sqrt(sum(r^2)/(n-1)), nor
+#' NSE from SSE/SST, so it is only the degenerate companion. If a formula
 #' changes, re-derive these externally; never adjust them to make a test pass.
 make_metrics_known <- function() {
   list(
@@ -292,10 +273,9 @@ make_metrics_known <- function() {
   )
 }
 
-#' Create an empirical variogram + data vector whose candidate fits reliably
-#' trigger gstat non-convergence/singular screening warnings under
-#' robust_vgm_fit's 4-model x 4-range grid (seeds verified 2026-07-04:
-#' seed 1 = all 16 candidates flawed; seed 12 = clean Gau winner).
+#' An empirical variogram + data vector whose candidate fits trigger gstat
+#' non-convergence/singular warnings under robust_vgm_fit's 4-model x 4-range
+#' screen: seed 1 flaws all 16 candidates, seed 12 gives a clean Gau winner.
 make_hostile_vgm_input <- function(n = 9, seed = 1) {
   set.seed(seed)
   df <- data.frame(
@@ -310,12 +290,11 @@ make_hostile_vgm_input <- function(n = 9, seed = 1) {
 }
 
 #' A field carrying a strong linear trend: its empirical variogram keeps rising
-#' to the cutoff, so every converged candidate reaches its sill far beyond the
-#' observed lag window and every in-window candidate is non-converged. Seed 3
-#' verified 2026-09-19: 16 candidates, 0 converged and range-resolved, 4
-#' converged and range-unresolved, 12 non-converged - and NONE of the
-#' non-converged ones is range-resolved either, so the old eligibility rule
-#' found nothing eligible at all and returned the heuristic.
+#' to the cutoff, so every converged candidate reaches its sill beyond the lag
+#' window and every in-window candidate is non-converged. Seed 3: 16
+#' candidates, 0 converged and range-resolved, 4 converged and range-unresolved,
+#' 12 non-converged, none of them range-resolved, so a rule admitting only
+#' resolved fits finds nothing eligible.
 make_trend_vgm_input <- function(n = 60, seed = 3) {
   set.seed(seed)
   df <- data.frame(x = runif(n, 0, 1000), y = runif(n, 0, 1000))
@@ -326,11 +305,11 @@ make_trend_vgm_input <- function(n = 60, seed = 3) {
   list(v_emp = v_emp, v_data = df$v, pts = pts)
 }
 
-#' A periodic structure plus a weak trend, on which the screen yields BOTH a
-#' converged candidate whose range the lags resolve and a converged one whose
-#' range they do not - and the unresolved one fits better. Seed 4 verified
-#' 2026-09-19: best resolved Gau SSErr 1.064e-4, best unresolved Mat 6.53e-5
-#' (ratio 1.63). A hard resolved-first tier picks the poorer Gau here.
+#' A periodic structure plus a weak trend: the screen yields BOTH a converged
+#' candidate whose range the lags resolve and a converged one whose range they
+#' do not, and the unresolved one fits better (seed 4: best resolved Gau SSErr
+#' 1.064e-4, best unresolved Mat 6.53e-5, ratio 1.63). A hard resolved-first
+#' tier picks the poorer Gau here.
 make_mixed_vgm_input <- function(n = 60, seed = 4) {
   set.seed(seed)
   df <- data.frame(x = runif(n, 0, 1000), y = runif(n, 0, 1000))
@@ -540,17 +519,15 @@ golden_baseline <- function(key) {
 
 # ── The environment a baseline was recorded in ───────────────────────────────
 #
-# A recorded baseline means "same code + same data + same packages -> same
-# numbers". The data is frozen in this fixture and the code is in git; the
-# package versions were the one leg nothing recorded, which made a moved value
-# indistinguishable from an upstream change and left the reader bisecting.
+# A baseline means "same code + same data + same packages -> same numbers". The
+# data is frozen here and the code is in git; the package versions are recorded
+# with the baselines so a moved value can be told from an upstream change.
 #
-# These are the packages that can actually move one of the four recorded values:
-# gstat (the empirical variogram and the kriging solve), sf and terra
-# (projection, grid construction, rasterisation, the ellipsoidal areas),
-# Ckmeans.1d.dp (the exact Jenks natural breaks). Moran diagnostics are not
-# recorded. Extend the list only when a NEW baseline brings a new package in -
-# an entry that cannot move a value would report drift that means nothing.
+# The packages that can move one of the four recorded values: gstat (empirical
+# variogram, kriging solve), sf and terra (projection, grid construction,
+# rasterisation, ellipsoidal areas), Ckmeans.1d.dp (exact Jenks breaks). Add one
+# only when a new baseline depends on it; an entry that cannot move a value
+# reports drift that means nothing.
 GOLDEN_BASELINE_PKGS <- c("gstat", "sf", "terra", "Ckmeans.1d.dp")
 
 #' TRUE when this session is deliberately running on unpinned package versions.
@@ -589,7 +566,7 @@ golden_env_snapshot <- function(pkgs = GOLDEN_BASELINE_PKGS) {
 }
 
 #' The environment `golden_baselines.rds` was recorded in, or NULL when the
-#' fixture ships no baselines (or carries none recorded before this was added).
+#' fixture ships no baselines or they carry no provenance.
 golden_provenance <- function() {
   if (isTRUE(getOption("monolith_golden_baselines_bypass", FALSE))) return(NULL)
   b <- .golden_read("golden_baselines.rds", required = FALSE)
@@ -603,9 +580,8 @@ golden_provenance <- function() {
 #'
 #' PLATFORM IS DELIBERATELY NOT COMPARED. Baselines are recorded on Windows and
 #' CI runs Linux, so comparing it would be permanently red there; it is carried
-#' for the message only - and the platform difference is real enough to matter
-#' (it moved `ok_surface_digest` once), which is exactly why the reader needs to
-#' see it rather than have the suite shout about it on every run.
+#' for the message only, because a platform difference can move
+#' `ok_surface_digest` and the reader needs to see it.
 #'
 #' Versions are compared as `package_version()`, never as strings: gstat reports
 #' "2.1-5" where `packageVersion()` normalises it to 2.1.5, and a string test
@@ -671,10 +647,8 @@ renv_lock_drift <- function(pkgs = NULL) {
     pkgs <- if (exists("required_packages", inherits = TRUE)) required_packages else names(lock)
   }
   out <- character(0)
-  # A declared package the lockfile has never heard of is the same class of
-  # problem as a version difference, and the one the intersect() below would
-  # otherwise hide: renv.lock has not been regenerated since it was added, so
-  # `global.R` and the lockfile no longer describe the same dependency set.
+  # A declared package missing from the lockfile is drift too (renv.lock not
+  # regenerated after it was added), and the intersect() below would hide it.
   absent <- setdiff(pkgs, names(lock))
   if (length(absent)) {
     out <- c(out, sprintf("%s: declared in global.R, absent from renv.lock", absent))
@@ -760,8 +734,8 @@ golden_pin_boundary <- function(pts, res = 300, reach = 600) {
 #' it produced before", not "the surface is wrong". Its standing rests on the
 #' component tests above, which establish that each engine computes what its
 #' method defines; this only pins that the whole driver still assembles them the
-#' same way. Ordinary Kriging on purpose - it is fully seed-sandboxed, whereas
-#' RFK's forest is unseeded and would not reproduce.
+#' same way. Ordinary Kriging on purpose: it is fully seed-sandboxed, with no
+#' covariate surfaces or forest in its path.
 #'
 #' The variogram is pinned by golden_pin_vgm() rather than fitted, so the digest
 #' measures the driver and not the screening tie-break; the vgm_* entries are

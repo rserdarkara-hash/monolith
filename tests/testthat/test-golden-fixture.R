@@ -1,18 +1,13 @@
 # The golden fixture's contract.
 #
-# Two kinds of assertion live here, and the difference matters.
+# REQUIREMENTS are hardcoded: the properties the rest of the suite depends on
+# (projected metres, no missing values, a severely collinear covariate pair, a
+# rare class, enough points per scope). Any golden set, including one substituted
+# for the shipped survey, must meet them, or the tests needing them test nothing.
 #
-# REQUIREMENTS are hardcoded. They are the properties the rest of the suite
-# depends on: projected metres, no missing values, a severely collinear
-# covariate pair, a rare class, enough points per scope. Any golden set must
-# meet them, including one you substitute for the shipped survey. If your data
-# fails here, the tests that need those properties would not have been testing
-# anything.
-#
-# IDENTITY comes from the fixture's own baseline file. Row counts, locality
-# sizes, coordinate ranges: facts about this particular survey, recorded by
-# make_baselines.R. They fail loudly if the fixture is refreshed, which is the
-# point - a refresh should be explained, not absorbed.
+# IDENTITY comes from the fixture's own baselines (row counts, locality sizes,
+# coordinate ranges), recorded by make_baselines.R. It fails loudly when the
+# fixture is refreshed, so a refresh is explained rather than absorbed.
 
 # ── Requirements every golden set must meet ────────────────────────────────
 
@@ -179,11 +174,8 @@ test_that("the variable dictionary labels every measured column", {
   gs <- golden_soil("full")
   cols <- golden_meta()$columns
   measured <- c(cols$soil, cols$covariates)
-  # Every measured column is labelled. Sodium was the one gap - the shipped
-  # dictionary held 100 covariates + 16 soil variables against the data's 17 -
-  # and it was closed in samp_var_list.xlsx on 2026-09-05. Asserted as
-  # "nothing is unlabelled" rather than as a count, so a covariate added to the
-  # data without a dictionary row fails here too.
+  # Asserted as "nothing is unlabelled" rather than as a count, so a measured
+  # column added without a dictionary row fails here.
   expect_equal(setdiff(measured, vl$vn), character(0))
 })
 
@@ -219,13 +211,11 @@ test_that("the baselines record the environment they were taken in", {
   expect_true(all(GOLDEN_BASELINE_PKGS %in% names(prov$packages)))
   expect_false(any(is.na(prov$packages)))
 
-  # THIS is the assertion with teeth, and it is a failure rather than a note on
-  # purpose: a session whose gstat/sf/terra/Ckmeans.1d.dp differs from the one
-  # the baselines were taken in cannot say whether a moved value is a code
-  # change or an upstream one. Two legitimate answers - restore the recorded
-  # versions, or re-record after confirming for yourself that the values did not
-  # move. It cannot deadlock make_baselines.R: that script sets the bypass while
-  # it runs the gate, so golden_provenance() is NULL and this test skips there.
+  # A failure, not a note: with gstat/sf/terra/Ckmeans.1d.dp differing from the
+  # recording session, a moved value cannot be told from an upstream change.
+  # Restore the recorded versions, or re-record after confirming the values did
+  # not move. make_baselines.R sets the bypass while it runs the gate, so this
+  # test skips there instead of deadlocking it.
   expect_equal(golden_provenance_drift(prov), character(0),
                info = golden_baseline_info())
 })
@@ -235,13 +225,10 @@ test_that("this session's packages are the versions renv.lock pins", {
   skip_if(is.null(drift), "renv.lock is not readable from here")
   skip_if(monolith_unpinned_run(), "deliberately unpinned run (upstream drift job)")
 
-  # Reported as a SKIP, not a failure. renv is not activated in this project by
-  # design, so the lockfile is an authority the session is not forced to obey; a
-  # deliberate local upgrade is a choice, not a defect. What it buys is that
-  # "FAIL 0 | SKIP 0" now also means "this environment is the one renv.lock
-  # describes", which is the half of an activated renv that costs nothing. The
-  # test above is the one that refuses when a version difference reaches a
-  # recorded number.
+  # A SKIP, not a failure: renv is not activated by design, so a deliberate local
+  # upgrade is a choice, not a defect. "FAIL 0 | SKIP 0" then also means "this is
+  # the environment renv.lock describes"; the test above is the one that fails
+  # when a baseline package differs from the recording session.
   if (length(drift)) {
     skip(paste0("session differs from renv.lock (renv::restore() realigns it): ",
                 paste(drift, collapse = "; ")))
@@ -250,19 +237,16 @@ test_that("this session's packages are the versions renv.lock pins", {
 })
 
 test_that("a missing package never installs without an explicit yes", {
-  # The guard that protects the recorded baselines: install.packages() fetches
-  # whatever CRAN publishes today, which is the one action that can move a
-  # recorded value with nothing in the repository having changed. What the block
-  # owes is NOT a refusal to install - most locked versions are no longer
-  # current, and sending every user through a source build of 76 compiled
-  # packages would be the wrong trade - but three properties:
+  # install.packages() fetches whatever CRAN publishes today, the one action that
+  # can move a recorded value with nothing in the repository changed. Refusing to
+  # install would push users into source builds of superseded locked versions, so
+  # global.R's block owes three properties instead:
   #   (a) it never installs without an explicit yes,
-  #   (b) it never prompts non-interactively (helper.R sources this file, and a
-  #       prompt there would hang the suite),
+  #   (b) it never prompts non-interactively (helper.R sources global.R, and a
+  #       prompt would hang the suite),
   #   (c) it names both routes, so the choice is informed.
-  # Asserted by EVALUATING global.R's own block against a package that cannot
-  # exist - a source-text match would pass just as happily on a branch that can
-  # never be reached.
+  # Asserted by EVALUATING the block against a package that cannot exist; a
+  # source-text match would also pass on an unreachable branch.
   root <- normalizePath(file.path(testthat::test_path(), "..", ".."), mustWork = TRUE)
   src <- readLines(file.path(root, "global.R"), warn = FALSE)
   i <- grep("if (length(missing_packages) > 0) {", src, fixed = TRUE)

@@ -1,7 +1,7 @@
-# test-base-plot-styler.R — tests for generate_base_plot and apply_styler_theme
-# from ui_helpers.R.  These functions depend on Shiny's `input` reactive list;
-# we mock it as a plain named list since both functions only read from it with
-# `$` / `%||%` (never rely on reactivity).
+# The export styler and writers: generate_base_plot() and apply_styler_theme()
+# (ui_plotting.R), registry payloads, sheet and file names, GeoTIFF and vector
+# export. `input` is mocked as a plain list, which these functions only read
+# with `$` / `%||%`.
 
 # ── Mock input ─────────────────────────────────────────────────────────────
 
@@ -96,7 +96,7 @@ fill_scale_of <- function(p) {
 }
 
 test_that("an exported map's legend names the variable, its unit and its layer", {
-  # The export used to leave the legend untitled while the Map Viewer names it.
+  # The exported legend names the variable as the Map Viewer does.
   expect_equal(map_legend_title("Soil pH", ""), "Soil pH")
   expect_equal(map_legend_title("Total N", "%"), "Total N %")
   expect_equal(map_legend_title("Total N", "%", "se"), "SE: Total N %")
@@ -339,8 +339,7 @@ styler_plot <- function() {
 
 test_that("apply_styler_theme uses the slider point sizes verbatim", {
   # No export-time rescaling: a point in the styler is a point on the page, so
-  # the theme must carry the slider values themselves (the former `calibration`
-  # multiplier existed only to offset showtext's fixed-dpi text rendering).
+  # the theme carries the slider values themselves.
   res <- apply_styler_theme(styler_plot(), mock_input_full,
                             item_label = "Test Label", item_type = "plot")
   th <- res$theme
@@ -547,8 +546,8 @@ test_that("a derived item whose source lacks the band yields no payload", {
 })
 
 test_that("export_sheet_name drops exactly the variable-label prefix", {
-  # a label that itself contains " - ": splitting at the first " - " kept the
-  # rest of the variable label and cut the locality and table name instead
+  # A variable label that itself contains " - ": the prefix dropped must be the
+  # whole label, not the text up to its first " - ".
   lab <- "Na - exchangeable (mg/kg)"
   full <- paste(lab, "- Kale - Model CV Metrics (Actual)")
   nm <- export_sheet_name(full, "table_cv_loc_Kale", character(0), lab)

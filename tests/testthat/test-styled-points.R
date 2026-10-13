@@ -1,5 +1,5 @@
-# test-styled-points.R — tests for the leaflet layer helpers in ui_helpers.R:
-# add_styled_points and add_base_tiles.
+# Leaflet layer helpers (ui_plotting.R): add_styled_points(), add_base_tiles(),
+# the raster image ids the restyler retires, and point pop-up rows.
 
 # ── Fixtures ───────────────────────────────────────────────────────────────
 
@@ -152,9 +152,9 @@ test_that("add_styled_points carries geometry, size, popups and labels through",
 
 # ── add_base_tiles ─────────────────────────────────────────────────────────
 #
-# Every map in the app adds its basemap through this one call, so what matters
-# is that all five providers come out on identical zoom terms: a switch that
-# left the new layer shallower than the map's current zoom used to blank it.
+# Every map in the app adds its basemap through this one call, so all five
+# providers must come out on identical zoom terms: a layer shallower than the
+# map's current zoom would draw blank after a switch.
 
 tile_call <- function(m) {
   hit <- Filter(function(c) identical(c$method, "addProviderTiles"), m$x$calls)
@@ -302,9 +302,8 @@ test_that("raster_img_layer_id is the id the restyler adds and retires", {
 
 # ── Points with no measured value ──────────────────────────────────────────
 # rv$sf is the DISPLAY set: deduplicated by coordinate but never NA-target
-# filtered, so it holds points the surface was not fitted from. Under the
-# default colouring every marker rendered identically, so those points read as
-# samples supporting the map.
+# filtered, so it holds points the surface was not fitted from. Drawn like the
+# rest, they would read as samples supporting the map.
 
 test_that("a point with no measured value renders hollow and names itself", {
   pts <- make_sf_points(6)

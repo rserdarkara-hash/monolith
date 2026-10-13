@@ -1,6 +1,6 @@
-# server_data_setup.R (sourced with local = TRUE inside server) - data/shp/
-# metadata upload, CRS parsing + plausibility guards, variable mapping and the
-# Setup-tab minimap.
+# server_data_setup.R (chunk D, sourced with local = TRUE inside server): data,
+# shapefile and metadata upload, CRS identification and plausibility guards,
+# variable mapping and the Setup-tab minimap.
   output$export_updated_data <- downloadHandler(
     filename = function() {
       paste0("updated_spatial_dataset_", format(Sys.time(), "%Y%m%d_%H%M%S"), ".xlsx")
@@ -11,21 +11,15 @@
     }
   )
   
-  # The dataset shipped in sample_data/, recognised by its OWN FILE NAME. Every
-  # preset below is gated on this and on nothing else, so none of them can ever
-  # reach a dataset of the user's: a file called anything else takes the normal
-  # route, whatever it happens to contain.
+  # The shipped sample dataset, recognised by its OWN FILE NAME only, so no
+  # preset can reach a user's dataset.
   is_sample_upload <- function() {
     nm <- isolate(input$user_file$name)
     isTruthy(nm) && grepl("^samp_data_1", tools::file_path_sans_ext(nm), ignore.case = TRUE)
   }
-  # The zone the sample data is on. It is NOT derivable from the file: bare
-  # eastings read the same in every UTM zone, and 34N, 35N and 36N each place
-  # these numbers inside their own span (22.9E, 28.9E and 34.9E). What settles
-  # it is the locality names - Acipayam, Beyagac, Kale, Karacasu, Tavas are
-  # Denizli districts, and only 35N puts them there. So this is a documented
-  # fact about one shipped file, not a guess about coordinates, which is why it
-  # is allowed to stand where identify_input_crs() correctly refuses to answer.
+  # The sample's zone cannot be derived from bare eastings (34N-36N each place
+  # them in their own span); its locality names (Denizli districts) settle it
+  # at 35N. A documented fact about one shipped file, not a coordinate guess.
   SAMPLE_CRS <- "EPSG:32635"
 
   observeEvent(input$user_file, {
@@ -55,10 +49,7 @@
     req(df); rv$user_data <- df
     
     cols <- colnames(df)
-    # Whole-name matching (pick_coord_column, ui_formatting.R) on the same token
-    # lists is_coord_col() uses; substring matching would pre-select columns
-    # like Longevity_index or Lateral_flow as X or Y. NULL when nothing matches
-    # leaves the first column selected.
+    # Whole-name matching (pick_coord_column()); NULL leaves the first column.
     updateSelectInput(session, "map_x", choices = cols, selected = pick_coord_column(cols, "x"))
     updateSelectInput(session, "map_y", choices = cols, selected = pick_coord_column(cols, "y"))
     loc_guess <- grep("loc|site|farm|id|group", cols, ignore.case=TRUE, value=TRUE)[1]
@@ -86,19 +77,12 @@
     # the freshly guessed column instead of the stale input.
     new_choices <- c("ALL", unique(df[[loc_guess]]))
     selected_locs <- intersect(curr_locs, new_choices)
-    # A new dataset is a new CRS question, so the Input Data CRS goes back to
-    # empty on EVERY upload and identification runs from scratch. That includes
-    # a CRS the user typed for the previous file: it was established for that
-    # file, never for this one, and leaving it standing over different
-    # coordinates is how a survey ends up silently in the wrong country. Within
-    # a dataset the rule is unchanged - once a CRS is set here, a boundary
-    # shapefile or a column remap never overrides it (crs_user_chose, in the
-    # identification observer).
-    # The Target Mapping CRS is not a property of the file: it names the system
-    # the outputs are produced in. A value the USER chose therefore stays, and
-    # the suitability readout under the selector judges it against the new data
-    # at once; a value the app filled is cleared and re-identified. The shipped
-    # sample's preset below still sets both.
+    # A new dataset is a new CRS question: the Input Data CRS is cleared on
+    # EVERY upload (a CRS typed for the previous file was never established for
+    # this one); within a dataset a CRS the user set is never overridden. The
+    # Target Mapping CRS names the output system, so a USER choice stays (the
+    # suitability readout judges it against the new data) and an app-filled
+    # value is re-identified. The sample preset below sets both.
     keep_target <- crs_user_chose("crs_selection") && !is_sample_upload()
     clear_input_crs()
     if (keep_target) {
@@ -112,12 +96,10 @@
       clear_target_crs()
     }
 
-    # The one exception, and the only preset in the app: the dataset shipped in
-    # sample_data/ opens ready to run - the two localities the accompanying
-    # manuscript examines in detail rather than all seven, and the UTM zone
-    # those localities are actually on. Written with record = TRUE, so the
-    # standing CRS advisor still judges it and none of it counts as a user
-    # choice. Clearing the Locality box still means every locality.
+    # The app's only preset: the shipped sample opens ready to run, with the
+    # two localities the manuscript examines and its UTM zone. Recorded as the
+    # app's values (not user choices), so the CRS advisor still judges them;
+    # clearing the Locality box still means every locality.
     if (is_sample_upload()) {
       preset <- character(0)
       if (length(selected_locs) == 0) {
@@ -204,11 +186,9 @@
     }
   })
 
-  # Persistent readout under the boundary upload: whether the samples fall
-  # inside it. Re-evaluated when either side changes, so the order of the two
-  # uploads does not matter. A boundary that encloses no sample is not applied
-  # at run time (each locality falls back to its point-derived boundary), and
-  # saying so only then, in the run log, came too late.
+  # Readout under the boundary upload: whether the samples fall inside it,
+  # whatever the upload order. A boundary enclosing no sample is not applied
+  # at run time, so the user is told here, not only in the run log.
   output$shp_boundary_note <- renderUI({
     s <- rv$shp_bound
     req(s)
@@ -235,18 +215,12 @@
     if (ov$hull) note("info", hull_txt)
   })
 
-  # selectize refuses a value that is not one of its options, so any CRS the
-  # app sets programmatically (an identified EPSG code, a boundary's .prj, a
-  # normalised free-typed entry) has to travel with its own choice entry.
-  # Re-supplying `choices` re-creates the widget, which also means re-supplying
-  # its options.
-  # `record = FALSE` writes the value without claiming it as the app's own
-  # choice: promoting a typed `32633` to `EPSG:32633` is the USER's CRS in a
-  # parseable spelling, and recording it would let the identification observer
-  # overwrite it on the next upload.
-  # The EPSG codes of the UTM zones around the data, which crs_choice_groups()
-  # lists first. A reactiveVal, so the selectors are rebuilt only when the
-  # zones actually change, not on every input the position depends on.
+  # selectize refuses a value that is not an option, so a CRS the app sets
+  # travels with its own choice entry (re-supplying `choices` re-creates the
+  # widget). `record = FALSE` writes the value without claiming it as the
+  # app's: a typed `32633` promoted to `EPSG:32633` stays the user's choice.
+  # crs_near: the UTM zones around the data, listed first; a reactiveVal so
+  # the selectors rebuild only when the zones change.
   crs_near <- reactiveVal(integer(0))
   set_crs_choice <- function(id, value, placeholder, base, record = TRUE) {
     ch <- crs_choice_groups(base, isolate(crs_near()), extra = value)
@@ -260,42 +234,30 @@
     updateSelectizeInput(session, id, choices = ch, selected = value,
                          options = list(create = TRUE, placeholder = placeholder))
   }
-  # What the selector effectively holds, for the two predicates below.
-  #
-  # Neither can be answered from a plain `input$<id>` read. An
-  # updateSelectizeInput message has not round-tripped when the next read lands
-  # in the same flush, so after clear_crs_choice() the input still reports the
-  # PREVIOUS dataset's CRS - and taking that reading at face value is what would
-  # let a value established for one file silently govern the next. The cleared
-  # value is therefore remembered and read as empty until the browser confirms
-  # it, at which point the normalisation observers below drop the marker so a
-  # user who deliberately picks that same CRS again is heard.
+  # What a selector effectively holds. An update has not round-tripped within
+  # the same flush, so after a clear input$<id> still reports the PREVIOUS
+  # dataset's CRS; the cleared value reads as empty until the browser confirms
+  # it (the normalisation observers then drop the marker).
   crs_effective <- function(id) {
     v <- as.character(input[[id]] %||% "")
     if (nzchar(v) && identical(v, session_state$crs_stale[[id]] %||% "")) "" else v
   }
-  # Did the USER put the current value there, or did the app? The record is the
-  # set of every value the app has written, not the last one, for the same
-  # round-trip reason: the shapefile observer writes rv$shp_bound and then the
-  # .prj's CRS, and the identification observer that rv$shp_bound invalidates
-  # runs before either reaches the browser.
+  # Did the USER put the current value there? The app's record holds every
+  # value it wrote, not just the last, for the same round-trip reason.
   crs_user_chose <- function(id) {
     crs_chosen_by_user(input[[id]], session_state$crs_auto[[id]], session_state$crs_stale[[id]])
   }
   crs_has_value <- function(id) {
     nzchar(crs_effective(id)) || length(session_state$crs_auto[[id]]) > 0
   }
-  # Two base lists: Web Mercator is offered for the input side only. A saved
-  # config or a free-typed entry still travels with its own choice entry, so
-  # restoring a run made under any CRS keeps working; the suitability gate,
-  # not the dropdown, is what decides whether it may be run.
+  # Two base lists: Web Mercator is an input option only. Saved configs and
+  # typed entries still carry their own choice entry; the suitability gate
+  # decides whether a CRS may be run.
   set_input_crs  <- function(value, record = TRUE) set_crs_choice("map_crs", value, "Select the CRS your coordinates were recorded in", common_crs_input, record)
   set_target_crs <- function(value, record = TRUE) set_crs_choice("crs_selection", value, "Select the CRS for output maps and exports", common_crs_target, record)
-  # Back to the pristine state of the two selectors: base choices, nothing
-  # selected, placeholder showing. Not set_crs_choice(id, ""), which would
-  # append an empty option to the list. The recorded auto-values go with it so
-  # the next identification starts from a clean slate, and the value being
-  # cleared is remembered for crs_effective() above until the clear lands.
+  # Back to the pristine selector (base choices, nothing selected), clearing
+  # the recorded auto-values and remembering the cleared value for
+  # crs_effective() until the clear lands.
   clear_crs_choice <- function(id, placeholder, base) {
     session_state$crs_auto[[id]] <- character(0)
     cur <- as.character(isolate(input[[id]]) %||% "")
@@ -307,14 +269,9 @@
   clear_input_crs  <- function() clear_crs_choice("map_crs", "Select the CRS your coordinates were recorded in", common_crs_input)
   clear_target_crs <- function() clear_crs_choice("crs_selection", "Select the CRS for output maps and exports", common_crs_target)
 
-  # A bare EPSG number typed into either selector (`32633`) is rejected by
-  # sf::st_crs(); promote it to `EPSG:32633` in place so the free-text route
-  # works the way users expect. No-ops for anything already parseable, so the
-  # re-entry this update causes settles after one pass.
-  # These also retire the pending-clear marker. A clear lands as an empty value,
-  # which req() drops; a NON-empty value arriving afterwards is a real
-  # selection, so the marker has done its job and must not go on masking the
-  # user's own choice of the CRS the previous dataset happened to use.
+  # Promote a typed bare EPSG number (`32633`) to `EPSG:32633` in place; a
+  # no-op for parseable values, so the re-entry settles. A NON-empty value
+  # also retires the pending-clear marker: it is a real selection.
   observeEvent(input$map_crs, {
     session_state$crs_last$map_crs <- input$map_crs
     req(input$map_crs)
@@ -343,13 +300,10 @@
     }
     crs_near(if (is.null(pos)) integer(0) else crs_near_zone_codes(pos$lon, pos$lat))
   })
-  # Rebuild both selectors when the zones change. The selection is re-sent
-  # from crs_last (the value last written by the app or reported by the
-  # browser), not from input$: a value the app set in this flush has not
-  # round-tripped yet, and re-sending the browser's old reading would undo it.
-  # The two input observers above run at priority 10 so a user's own change
-  # is in crs_last before a rebuild it triggers (a new Input Data CRS moves
-  # the position, hence the zones) re-sends the selection.
+  # Rebuild both selectors when the zones change, re-sending the selection
+  # from crs_last rather than input$ (a value set in this flush has not
+  # round-tripped). The input observers run at priority 10 so a user's change
+  # reaches crs_last before the rebuild it triggers.
   observeEvent(crs_near(), {
     near <- crs_near()
     rebuild <- function(id, placeholder, base) {
@@ -363,11 +317,9 @@
   }, ignoreInit = TRUE)
 
   # Input-CRS identification. Degrees are self-evident; projected coordinates
-  # are identified ONLY from evidence carried by the upload (a companion
-  # lon/lat pair, or a boundary .prj that the points fall inside). With no
-  # evidence the app asks rather than guessing: a zone cannot be recovered
-  # from bare eastings, and a guessed one places the whole survey in the wrong
-  # country without raising a single error.
+  # are identified ONLY from evidence in the upload (companion lon/lat pair,
+  # boundary .prj containing the points). Otherwise the app asks: a guessed
+  # zone places the survey in the wrong country without any error.
   observeEvent(list(rv$user_data, input$map_x, input$map_y, rv$shp_bound), {
     req(rv$user_data, input$map_x, input$map_y)
     if (!(input$map_x %in% colnames(rv$user_data) && input$map_y %in% colnames(rv$user_data))) return()
@@ -388,18 +340,15 @@
       return()
     }
     if (is.null(ident)) {
-      # The shipped sample carries no evidence either - bare eastings, no
-      # boundary - but its zone is known from its documentation and the upload
-      # observer has already applied it. Asking the user to locate a study area
-      # the app has just filled in would contradict itself.
+      # The shipped sample has no evidence either, but its zone is already set
+      # by the upload preset.
       if (is_sample_upload() && crs_has_value("map_crs")) {
         crs_pick$no_evidence <- FALSE
         crs_pick$rows <- NULL
         return()
       }
-      # Tier 3 takes over: the picker below asks where the data is and lists
-      # the projections that put it there, instead of leaving the user to
-      # supply an EPSG code they may not know.
+      # Tier 3: the picker below lists the projections that put the data where
+      # the user says it is.
       crs_pick$no_evidence <- TRUE
       crs_pick$rows <- NULL
       showNotification(
@@ -409,10 +358,8 @@
     }
 
     crs_pick$no_evidence <- FALSE
-    # This observer re-fires on every upload and on every boundary shapefile,
-    # so it must not revert a CRS the user set deliberately - picking a datum
-    # sibling of the identified code (EPSG:25833 where the scoring reports
-    # EPSG:32633) is a defensible choice that must not be silently undone.
+    # Never revert a CRS the user set deliberately (e.g. a datum sibling of the
+    # identified code); this observer re-fires on uploads and boundaries.
     if (crs_user_chose("map_crs")) return()
     # A boundary upload re-runs this observer; when it confirms the CRS already
     # in place there is nothing new to announce.
@@ -428,21 +375,11 @@
   })
 
   # ── Tier 3: locate the study area, then confirm a place ───────────────────
-  # Monolith identifies your CRS when the file carries the evidence to prove
-  # it, narrows it to a short list when it does not, and never assumes a zone.
-  # This is the "narrows it" half. The zone is not recoverable from bare
-  # eastings, so the question is turned around: the user clicks roughly where
-  # the data was collected (or names a country) and the app reports which
-  # projections read those coordinates as a position there. The user confirms
-  # a PLACE, which they always know, instead of an EPSG code, which they often
-  # do not.
-  #
-  # The search prunes the whole EPSG catalogue arithmetically before it
-  # transforms anything (crs_candidate_shortlist(), global_utils.R), but the
-  # surviving transforms still cost about a second, so it runs in a
-  # future_promise: the tab stays live throughout, exactly as the optimizer
-  # buttons and the run pipeline do. Everything the promise needs is read out
-  # of the reactives BEFORE the call.
+  # Bare eastings do not reveal their zone, so the user clicks roughly where
+  # the data was collected (or names a country) and confirms a PLACE among the
+  # projections that put the data there. The search (crs_candidate_shortlist())
+  # takes about a second, so it runs in a future_promise with every input read
+  # BEFORE the call.
   crs_pick <- reactiveValues(no_evidence = FALSE, click = NULL, rows = NULL,
                              busy = FALSE, reopen = FALSE, degree_suggest = FALSE)
 
@@ -479,11 +416,8 @@
   })
 
   output$crs_locator_map <- renderLeaflet({
-    # A plain street basemap, not the satellite layer the other maps default
-    # to: this map is read for country outlines, not for ground detail. Fixed
-    # to OpenStreetMap rather than following the basemap switcher, because the
-    # other two label-bearing options either need a CARTO API key or show no
-    # borders at all - and this map is unusable without them.
+    # Fixed OpenStreetMap: this map is read for country borders, which the
+    # other basemaps lack or need a CARTO key for.
     leaflet(options = leafletOptions(minZoom = 1, worldCopyJump = TRUE)) %>%
       addProviderTiles("OpenStreetMap") %>%
       setView(lng = 10, lat = 25, zoom = 1)
@@ -608,10 +542,8 @@
                 "Plots at ", tags$b(rows$text[i]),
                 if (is.finite(d)) sprintf(" - %s from the point you indicated",
                                           if (d < 1) "under 1 km" else sprintf("%.0f km", d))),
-            # The fold is stated in metres. A grid's datum siblings land within a
-            # few hundred metres of each other - too close for a map click to
-            # separate, but not nothing - so the row says how far apart they
-            # are instead of implying they are interchangeable.
+            # Datum siblings land within a few hundred metres: the row states
+            # how far apart rather than implying they are interchangeable.
             if (length(eq)) div(style = "font-size: 11px; color: var(--mn-text-3); margin-bottom: 4px;",
                                 sprintf("Same place to within %.0f m: EPSG:%s",
                                         rows$spread_m[i], paste(eq, collapse = ", EPSG:"))),
@@ -656,20 +588,14 @@
       type = "message", duration = 12, id = "crs_ident")
   })
 
-  # Plausibility guard for the free-typed Input Data CRS: an unrecognized CRS,
-  # or one whose unit family (degrees vs metres) cannot match the mapped X/Y
-  # columns, is flagged immediately - before it silently corrupts every
-  # downstream projection. Warn-only: it never blocks a run and never alters
-  # any computed value.
+  # Plausibility guard for the Input Data CRS: an unrecognised CRS, or a unit
+  # family (degrees vs metres) the mapped X/Y cannot match, is flagged at once.
+  # Warn-only: never blocks a run or alters a value.
   observeEvent(list(rv$user_data, input$map_x, input$map_y, input$map_crs), {
     req(rv$user_data, input$map_x, input$map_y, input$map_crs)
     if (!(input$map_x %in% colnames(rv$user_data) && input$map_y %in% colnames(rv$user_data))) return()
-    # Coerce before measuring, exactly as the CRS-identification observers above
-    # already do: map_x/map_y offer EVERY column and pick_coord_column() matches
-    # whole names only, so a file with POINT_X / X_coord gets no match and Shiny
-    # falls back to the first column - often a character site/ID column. abs() on
-    # that raised an uncaught error inside this observer and replaced the
-    # guidance with a red Shiny error page.
+    # Coerce first: a file without recognisable coordinate names maps the
+    # first column, often character, and abs() on it would error here.
     df <- data.frame(
       x = suppressWarnings(as.numeric(as.character(rv$user_data[[input$map_x]]))),
       y = suppressWarnings(as.numeric(as.character(rv$user_data[[input$map_y]])))
@@ -709,12 +635,8 @@
                        type = "error", duration = 15, id = "crs_guard")
       return()
     }
-    # Where the data actually lands is NOT announced here. A wrong zone produces
-    # a perfectly plausible map in the wrong country and no error at all, so the
-    # position has to be stated in degrees - but output$crs_landing_note prints
-    # it permanently under the mini-map, two inches below, on every one of these
-    # four inputs. A toast saying the same thing only queues alongside
-    # crs_ident.
+    # The landing position is not toasted here: output$crs_landing_note states
+    # it permanently under the mini-map.
     removeNotification("crs_guard")
     removeNotification("input_crs_distortion")
     pos <- crs_sample_positions(rv$user_data, input$map_x, input$map_y, input$map_crs)
@@ -752,16 +674,11 @@
   observeEvent(input$crs_selection, {
     req(input$crs_selection)
 
-    # The metric-axis rule raises no toast of its own: it is one of the states
-    # of output$crs_target_note below, because it is not independent of the
-    # suitability verdict. A State Plane zone in US survey feet sits inside its
-    # own area of use with k ~ 1, so a suitability verdict of "ok" in one
-    # channel would announce that a refused CRS suits the area while the other
-    # channel refused it. One readout, one verdict.
+    # The metric-axis rule has no toast of its own: it is one state of
+    # output$crs_target_note, so one readout gives one verdict.
 
-    # In fixed mode the user chose the value deliberately, so only refresh the
-    # slider frame; in auto modes the suggestion observer overwrites the value
-    # right after anyway.
+    # Fixed mode keeps the user's value and refreshes only the slider frame; in
+    # the Auto modes the suggestion observer sets the value right after.
     if (isTRUE(input$res_mode == "fixed")) {
       updateSliderInput(session, "grid_res", label = "Resolution (m)",
                         min = 1, max = 500, step = 1)
@@ -771,19 +688,10 @@
     }
   })
   # ── Target Mapping CRS advisory ───────────────────────────────────────────
-  # ONE persistent readout under the selectors, not a toast, and it always
-  # names the CRS that IS right for the data.
-  #
-  # Separate toasts (identification, metric axis, suitability) would queue
-  # together, vanish after 20 seconds and prescribe nothing: a user whose data
-  # lies in Brandenburg with the target left on UTM 35N needs to be told
-  # EPSG:32633, which the app derives from the data's own longitude as it does
-  # for the Input Data CRS, not a bounding box in decimal degrees.
-  #
-  # crs_target_suitability() is the same judgement the run gate enforces
-  # (server_execution.R), so the two can never state different rules. Silent
-  # whenever the data's position cannot be computed: the gate never blocks, or
-  # nags, on "cannot answer".
+  # ONE persistent readout under the selectors (not toasts, which queue and
+  # vanish), always naming the CRS that IS right for the data, derived from
+  # its longitude. crs_target_suitability() is the run gate's own judgement
+  # (server_execution.R). Silent when the data's position cannot be computed.
   crs_target_note_box <- function(tone, title, body, rec = NULL, why = NULL) {
     div(class = paste0("alert alert-", tone),
         style = "margin-top: 12px; margin-bottom: 0; padding: 10px 12px;",
@@ -796,9 +704,8 @@
               tags$b(sprintf("%s (%s)", rec$crs, rec$label)),
               if (is.finite(rec$dev))
                 sprintf(", which measures to %+.3f%%.", 100 * (rec$k - 1)) else ".",
-              # One shared input id and a plain button, the same route the
-              # candidate picker above uses: the box is rebuilt on every input
-              # change, so an actionButton observer would accumulate.
+              # One shared input id and a plain button, as in the candidate
+              # picker: a rebuilt box would accumulate actionButton observers.
               tags$button(
                 type = "button", class = "btn btn-success btn-xs",
                 style = "margin-left: 8px;",
@@ -815,10 +722,8 @@
     rec <- crs_recommend_target(pos$lon, pos$lat)
     sel <- input$crs_selection
 
-    # Offer the recommendation only when it beats what is selected. A study
-    # area spanning three UTM zones has no zone inside tolerance at every
-    # corner, and offering one there would leave the advisory red after the
-    # button was pressed.
+    # Offer the recommendation only when it beats the selection (a study area
+    # spanning three zones has no zone within tolerance everywhere).
     offer <- function(cur_dev = NA_real_) {
       if (is.null(rec) || identical(rec$crs, normalize_crs_input(sel))) return(NULL)
       if (is.finite(cur_dev) && is.finite(rec$dev) && rec$dev >= cur_dev) return(NULL)
@@ -840,10 +745,9 @@
         rec = offer(), why = crs_measure_detail))
     }
 
-    # Ahead of the suitability verdict, because it is orthogonal to it: a State
-    # Plane zone in US survey feet sits inside its own area of use with k ~ 1
-    # and is still refused. validate_crs(require_metric = TRUE) is what
-    # enforces this at run time.
+    # Before the suitability verdict, which it is orthogonal to (a State Plane
+    # zone in US feet can have k ~ 1); validate_crs(require_metric = TRUE)
+    # enforces it at run time.
     unit_factor <- crs_metre_factor(sel)
     if (!is.na(unit_factor) && abs(unit_factor - 1) > 1e-9) {
       return(crs_target_note_box(
@@ -854,10 +758,8 @@
         rec = offer(), why = crs_measure_detail))
     }
 
-    # A geographic target is legitimate, and silence would teach the wrong
-    # lesson: that EPSG:4326 makes the warning go away, not that the pipeline
-    # picks the metric grid itself (run_regional_interpolation(),
-    # spatial_pipeline.R). Say so.
+    # A geographic target is answered, not met with silence: the pipeline
+    # picks the metric grid itself (run_regional_interpolation()).
     if (isTRUE(sf::st_is_longlat(co))) {
       return(crs_target_note_box(
         "info",
@@ -925,9 +827,8 @@
     }, error = function(e) NULL)
     req(pts)
 
-    # The grid_res slider is metric and interpolation always runs in a
-    # projected CRS, so the suggestion is measured in metres even when the
-    # analysis CRS is geographic (calc_metric_spacing handles the conversion).
+    # The slider is metric and runs are projected, so the suggestion is in
+    # metres even for a geographic analysis CRS (calc_metric_spacing()).
     spacing <- calc_metric_spacing(pts)
     req(is.finite(spacing$mean_nn))
 
@@ -942,13 +843,10 @@
     updateSliderInput(session, "grid_res", value = final_rec)
   })
 
-  # Per locality, the resolution the Auto-mode dynamic buffer scales with, for
-  # the sidebar's "Grid and buffer for the next run" table. Built as the run
-  # builds it, from the run's own inputs: .locality_points (projected to the
-  # working CRS, co-located samples merged, the covariate-complete rows for
-  # RK/RFK) and locality_buffer_res(). NA where the run would skip the
-  # locality or its points cannot be built yet. Fixed mode does not read it:
-  # the buffer then scales with the slider.
+  # Per locality, the resolution the Auto dynamic buffer scales with, for the
+  # sidebar's "Grid and buffer for the next run" table, built as the run
+  # builds it (.locality_points(), locality_buffer_res()). NA where the run
+  # would skip the locality. Fixed mode scales the buffer with the slider.
   observeEvent(list(rv$user_data, rv$mapping, input$locality, input$method, input$aux_vars,
                     input$value_type, input$subset), {
     req(rv$user_data)
@@ -978,9 +876,8 @@
 
   observeEvent(input$meta_file, {
     req(input$meta_file)
-    # The field sits beside the dataset upload, so it can be filled first. The
-    # list is matched against the dataset's column names and has nothing to
-    # match until that dataset is loaded - say so rather than fail silently.
+    # The variable list is matched against the dataset's columns, so the
+    # dataset must be loaded first.
     if (is.null(rv$user_data)) {
       showNotification("Upload your dataset first - the variable list is matched against its column names.", type = "warning")
       return()
@@ -1119,10 +1016,8 @@
     showNotification("Variable mapping saved!", type = "message")
   })
 
-  # Rebuild the Context-panel locality selector, preserving the current
-  # selection. Re-issued ONLY when the choice set actually changed: data
-  # mutations that keep the same localities (drawn groups, discretized
-  # columns) must not churn the selector mid-analysis.
+  # Rebuild the Context-panel locality selector, keeping the selection, only
+  # when the choice set changed.
   refresh_locality_choices <- function() {
     loc_col <- rv$mapping$loc
     if (is.null(rv$user_data) || is.null(loc_col) || !(loc_col %in% colnames(rv$user_data))) return(invisible(NULL))
@@ -1136,11 +1031,9 @@
     updateSelectInput(session, "locality", choices = new_choices, selected = selected_locs)
   }
 
-  # The CRS is deliberately NOT required here. Gating the column mapping behind
-  # it would leave rv$mapping$x/y NULL for as long as the (defaultless) Input
-  # Data CRS is unset, which is the state every user is in right after an
-  # upload, and every downstream req() on those names would abort in silence,
-  # taking the landing-position caption and the Run button with it.
+  # The CRS is deliberately NOT required: right after an upload the Input Data
+  # CRS is unset, and gating the column mapping on it would silence every
+  # downstream req(), the landing caption and the Run button included.
   observeEvent(list(input$map_x, input$map_y, input$map_loc, input$map_crs), {
     req(input$map_x, input$map_y, input$map_loc)
     rv$mapping$x <- input$map_x
@@ -1170,9 +1063,8 @@
     needed <- unique(needed)
 
     df_map <- rv$user_data %>% dplyr::select(dplyr::all_of(needed)) %>% na.omit()
-    # req(), not return(NULL): leaflet's renderValue destroys the existing map
-    # BEFORE it dereferences the payload, so a NULL payload wipes the widget and
-    # then throws inside Shiny's message dispatch, dropping the rest of the batch.
+    # req(), not return(NULL): leaflet destroys the map before reading the
+    # payload, so NULL wipes it and errors inside Shiny's dispatch.
     req(nrow(df_map) > 0)
 
 
@@ -1196,9 +1088,8 @@
         marker_size = input$pt_marker_size %||% 3
       )
     } else if (has_loc) {
-      # Validation view: one colour per locality / geographic group so a
-      # mis-mapped coordinate pair or CRS is immediately visible as points
-      # landing in the wrong group.
+      # Validation view: one colour per locality, so a mis-mapped coordinate
+      # pair or CRS shows as points landing in the wrong group.
       loc_vals <- as.character(pts[[loc_col]])
       groups <- sort(unique(loc_vals))
       pal <- generate_group_palette(groups, "Set1")
@@ -1222,10 +1113,8 @@
       m <- m %>% addCircleMarkers(radius = input$pt_marker_size %||% 3, color = "cyan", opacity = 1)
     }
 
-    # Validation adornments, always on (this map exists to be checked against
-    # reality; the Map Viewer's checkboxes are there because those maps are
-    # exported, which this one is not). zoomControl is off, so topleft is free;
-    # the locality legend sits bottomright and the scale bar bottomleft.
+    # Validation adornments, always on (this map is checked, never exported).
+    # zoomControl is off, so topleft is free for the north arrow.
     m <- m %>%
       leaflet::addScaleBar(position = "bottomleft",
                            options = leaflet::scaleBarOptions(metric = TRUE, imperial = FALSE)) %>%
@@ -1233,11 +1122,8 @@
                           layerId = "north_ctrl")
 
     session_state$minimap_rendered <- TRUE
-    # Remember the sample bounds (WGS84) so the reveal handler in chunk H can
-    # re-frame the map: Leaflet's auto-fit at creation is computed for whatever
-    # size the container had at render time, and this map is routinely rendered
-    # while its tab is hidden (a run re-renders it, and the run observer
-    # switches to the Map Viewer at dispatch).
+    # Sample bounds (WGS84) for chunk H's reveal handler to re-frame the map,
+    # which is often rendered while its tab is hidden.
     session_state$minimap_bbox <- tryCatch({
       bb <- sf::st_bbox(pts)
       c(xmin = unname(bb[["xmin"]]), ymin = unname(bb[["ymin"]]),
@@ -1246,9 +1132,8 @@
     m
   })
 
-  # Header context strip: what the whole session is operating on. This is the
-  # only place the dataset, its size, its coordinate system and its locality
-  # count are stated together, and it stays visible from every tab.
+  # Header context strip: dataset, size, both CRSs and locality count, visible
+  # from every tab.
   output$dataset_context <- renderUI({
     df <- rv$user_data
     if (is.null(df)) return(NULL)
@@ -1259,9 +1144,8 @@
     } else {
       NA_integer_
     }
-    # Both systems, each named: the input CRS the coordinates are read in (and,
-    # when it is metric, the models are computed in) and the target CRS the
-    # outputs are produced in. A strip that said only "CRS" left open which.
+    # Both systems, each named: the input CRS (coordinates, and the models when
+    # metric) and the target CRS (outputs).
     crs_in <- normalize_crs_input(input$map_crs)
     crs_out <- normalize_crs_input(input$crs_selection)
     item <- function(label, value) {

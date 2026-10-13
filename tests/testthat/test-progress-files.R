@@ -1,4 +1,5 @@
-# test-progress-files.R — tests for update_progress_file and write_warning_file.
+# Worker status files (progress, warnings), the keys they are named by, and the
+# phase strip that reads them.
 
 test_that("update_progress_file creates file in temp directory", {
   tmp <- tempfile("progress_test_")
@@ -68,7 +69,6 @@ test_that("safe_key keeps every name apart and leaves [A-Za-z0-9_] names as they
 
 test_that("update_progress_file creates directory if it doesn't exist", {
   tmp <- file.path(tempdir(), paste0("nonexistent_", as.integer(Sys.time())))
-  # Ensure it doesn't exist
   if (dir.exists(tmp)) unlink(tmp, recursive = TRUE)
   old_progress_dir <- getOption("monolith_progress_dir")
   old_session_id  <- getOption("monolith_session_id")
@@ -105,14 +105,10 @@ test_that("write_warning_file creates warning file", {
 
 # ── run phase strip ────────────────────────────────────────────────────────
 #
-# The reading end of the same protocol. The workers write per-locality
-# checkpoints with update_progress_file above; the run observer turns their
-# mean into a band (2 = fitting, 3 = predicting, 4 = cross-validating) and
-# hands it to update_premium_progress, which drives the four-entry strip on
-# the Map Viewer overlay. The strip is what tells a reader which phase a run
-# is in, so what gets emitted for a given `step` is asserted rather than
-# eyeballed. These tests capture the emitted instruction; they do not execute
-# it in a browser.
+# The reading end: the run observer turns the workers' per-locality checkpoints
+# into a band (2 = fitting, 3 = predicting, 4 = cross-validating) and passes it
+# to update_premium_progress(), which drives the Map Viewer's four-entry strip.
+# These tests assert the emitted JavaScript; they do not run it in a browser.
 
 capture_progress_js <- function(...) {
   emitted <- character(0)
@@ -160,9 +156,8 @@ test_that("step 5 is passed through as the whole-strip-finished sentinel", {
 })
 
 # ── status_file_parts: one parser for both readers ─────────────────────────
-# The live progress poller and the completion handler that persists warnings
-# into the run log read the same file names. Two copies of this regex is how a
-# warning ends up visible in one place and lost in the other.
+# The live progress poller and the completion handler that writes warnings into
+# the run log share this parser, so neither can read a file name differently.
 
 test_that("status_file_parts maps a file name to its locality and surface", {
   a <- status_file_parts("warn_sess1_Kale_act.txt", "sess1")

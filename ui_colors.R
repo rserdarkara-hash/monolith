@@ -82,13 +82,12 @@ apply_desc_palette <- function(p, pal, continuous = FALSE) {
 }
 
 # Reference limits prefilled for Agronomical > Supervised styling with three
-# classes: Low below `limits[1]`, Moderate from `limits[1]` up to `limits[2]`,
-# High from `limits[2]` up, each class holding its lower limit (the map and
-# the agreement table classify with right = FALSE). `symbol` and `name` are
-# how get_nut_key() recognises the nutrient in a column name or label. The DTPA
-# micronutrient classes are local limits (Çokuysal & Erbaş 2004) on the DTPA
-# soil test of Lindsay & Norvell (1978), who publish single critical levels
-# rather than classes. Scientific Guide section 9.4.1 lists the full references.
+# classes: Low < limits[1] <= Moderate < limits[2] <= High (right = FALSE, as
+# the map and the agreement table classify). `symbol` and `name` let
+# get_nut_key() recognise the nutrient. The DTPA micronutrient classes are
+# local limits (Çokuysal & Erbaş 2004) on the DTPA test of Lindsay & Norvell
+# (1978), who publish only critical levels. Full references: Scientific Guide
+# 9.4.1.
 DTPA_LOCAL_SOURCE <- "local limits of Çokuysal & Erbaş (2004) on the DTPA test of Lindsay & Norvell (1978)"
 NUTRIENT_REFERENCE <- list(
   TN = list(symbol = "TN", name = "NITROGEN", method = "Total N", unit = "%",
@@ -201,11 +200,10 @@ class_limit_defaults <- function(var_id, unit, n_classes, values) {
 }
 
 # Data categories whose variables open on viridis: satellite bands and indices,
-# and the covariate families that mix quantities with opposite colour
-# conventions (temperature and precipitation, elevation and wetness), for which
-# a perceptually uniform sequential scale is the one default that misreads none.
-# A diverging scale marks a midpoint these variables do not have, so none is a
-# default; the picker still offers them.
+# and covariate families mixing opposite colour conventions (temperature vs
+# precipitation, elevation vs wetness), for which a perceptually uniform
+# sequential scale is the one default that misreads none. Diverging scales are
+# offered, never a default.
 VIRIDIS_DEFAULT_CATEGORIES <- c("Environmental Data", "Landsat Data", "Sentinel Data",
                                 "Merged Data", "Terrain Data")
 

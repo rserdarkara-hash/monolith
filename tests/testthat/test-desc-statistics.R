@@ -1,11 +1,10 @@
-# test-desc-statistics.R — tests for the Descriptive Suite's pure statistics:
-# desc_summary_table(), desc_group_fit_stats() and desc_pca_fit()
-# (ui_formatting.R). These back the module's summary table, its per-group trend
-# columns and the PCA panel.
+# The Descriptive Suite's pure statistics (ui_formatting.R): desc_summary_table(),
+# desc_group_fit_stats(), desc_pca_fit(), and summary_stats_df() /
+# stats_table_vectors() behind the statistics card and its export.
 #
 # References are recomputed inside each test from the definition or from an
 # independent base-R route (split + sapply, summary(lm), eigen of the
-# correlation matrix) — never read off the function under test.
+# correlation matrix), never read off the function under test.
 
 
 # ── desc_summary_table ────────────────────────────────────────────────────
@@ -87,8 +86,8 @@ test_that("the summary table carries the robust statistics beside the moments", 
 })
 
 test_that("a near-constant column is not reported as a constant one", {
-  # 7 + N(0, 1e-7) against exactly 7: rounded to three decimals the two
-  # columns printed byte-identical rows (Mean 7, SD 0, Min 7, Max 7).
+  # 7 + N(0, 1e-7) against exactly 7: rounded to three decimals the two would
+  # print identical rows (Mean 7, SD 0, Min 7, Max 7).
   set.seed(5)
   near <- 7 + rnorm(60, 0, 1e-7)
   const <- rep(7, 60)
@@ -124,7 +123,7 @@ test_that("group trend R2 equals summary(lm)$r.squared and its F-test p", {
     s <- summary(stats::lm(ph ~ som, data = sub))
     row <- fits[fits$Group == g, ]
     expect_equal(row$r2, s$r.squared, tolerance = 1e-10)
-    # For a simple linear regression R2 is the squared Pearson correlation —
+    # For a simple linear regression R2 is the squared Pearson correlation,
     # an identity independent of summary.lm's own bookkeeping.
     expect_equal(row$r2, stats::cor(sub$som, sub$ph)^2, tolerance = 1e-10)
     expect_equal(row$p,
@@ -165,7 +164,7 @@ test_that("the loess column is cor(y, fitted)^2 and carries no p-value", {
                  tolerance = 1e-8)
   }
 
-  # A loess has no F test, so no p-value is reported for it — the column must
+  # A loess has no F test, so no p-value is reported for it: the column must
   # be NA rather than borrowing the linear model's test.
   expect_true(all(is.na(fits$p)))
 
@@ -175,10 +174,8 @@ test_that("the loess column is cor(y, fitted)^2 and carries no p-value", {
   lin <- desc_group_fit_stats(d, "som", "ph", "linear", groups, pooled = pooled_rows)
   expect_true(all(fits$r2 >= lin$r2 - 1e-12))
 
-  # A group carrying missing values still reports a number. loess drops the
-  # incomplete rows, so the statistic must be formed on the rows the fit
-  # actually used - comparing against the unfiltered column is a length
-  # mismatch, and the guard would turn the whole column blank.
+  # loess drops incomplete rows, so the statistic is formed on the rows the fit
+  # used, and a group with missing values still reports a number.
   dna <- d
   dna$ph[c(2, 7)] <- NA
   dna$som[11] <- NA
@@ -191,7 +188,7 @@ test_that("the loess column is cor(y, fitted)^2 and carries no p-value", {
 })
 
 
-# ── desc_pca_fit ──────────────────────────────────────────────────────────
+# ── desc_group_fit_stats: a group named TOTAL ─────────────────────────────
 
 test_that("a real TOTAL group and the pooled row have separate trend identities", {
   d <- data.frame(x = rep(1:16, 2), y = c(1:16, rev(1:16)) + rep(sin(1:16) / 10, 2),
@@ -220,6 +217,8 @@ test_that("a real TOTAL group and the pooled row have separate trend identities"
   expect_true(is.na(fits$r2[1]))
   expect_equal(fits$r2[2], cor(d$x[2:16], d$y[2:16])^2)
 })
+
+# ── desc_pca_fit ──────────────────────────────────────────────────────────
 
 test_that("PCA refuses an insufficient complete population before fitting", {
   d <- data.frame(a = c(1:10, rep(NA, 10)), b = c(rep(NA, 10), 1:10), c = 1:20)
@@ -250,7 +249,7 @@ test_that("PCA eigenvalues and variance shares match the correlation/covariance 
   expect_equal(sc$res$sdev^2 / sum(sc$res$sdev^2), ev_cor / sum(ev_cor), tolerance = 1e-8)
 
   # Unscaled (covariance PCA): eigenvalues of cov(X), summing to the total
-  # variance in the variables' own units — a different, scale-dependent answer.
+  # variance in the variables' own units: a different, scale-dependent answer.
   un <- desc_pca_fit(d, vars, labs, scale = FALSE)
   ev_cov <- eigen(stats::cov(X), symmetric = TRUE)$values
   expect_equal(un$res$sdev^2, ev_cov, tolerance = 1e-8)
@@ -312,10 +311,9 @@ test_that("PCA is refused, not errored, below two informative variables", {
 })
 
 # ── summary_stats_df ──────────────────────────────────────────────────────
-# The descriptive-statistics card and its export. The fixed row set is the
-# point: summary() appends an "NA's" element only for a vector that has
-# missing values, and building the second column by assignment onto a frame
-# sized from the first raised whenever exactly one side had them.
+# The descriptive-statistics card and its export. summary() appends an "NA's"
+# element only for a vector with missing values, so the row set is fixed and
+# two columns are paired by metric whichever side has them.
 
 test_that("summary_stats_df reproduces summary() and stays numeric", {
   x <- c(2, 4, 4, 5, 9, 12)

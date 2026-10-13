@@ -1,15 +1,14 @@
 # End-to-end smoke tests: does the real app BOOT and wire its shell together?
 #
-# Everything else in this suite exercises functions in-process; nothing checked
-# that ui_main.R + the nine server_*.R chunks actually assemble into a running
-# Shiny app. A typo in a chunk, a duplicated input id, or a UI element that
-# references a helper removed elsewhere is invisible to unit tests and fatal in
-# production. These tests boot the app in a headless browser and assert the
-# shell (the server initialises without error, the sidebar defaults are what
-# the engines assume, the tab strip's stable `value=` ids still drive the
-# sidebar swap) and the flows only a browser reaches: the CRS wiring, the
-# auxiliary correlation table, and a saved session configuration restored in a
-# second, fresh session.
+# Unit tests exercise functions in-process; none proves that ui_main.R and the
+# nine server_*.R chunks assemble into a running Shiny app, where a typo in a
+# chunk, a duplicated input id or a UI element referencing a removed helper is
+# fatal. These tests boot the app in a headless browser and assert the shell
+# (the server initialises without error, the sidebar defaults are what the
+# engines assume, the tab strip's stable `value=` ids still drive the sidebar
+# swap) and the flows only a browser reaches: the CRS wiring, the auxiliary
+# correlation table, and a saved session configuration restored in a second,
+# fresh session.
 #
 # Deliberately NOT attempted: any assertion on a run's NUMBERS. Runs dispatch
 # parallel futures and would make the suite depend on wall-clock timing. The
@@ -152,7 +151,7 @@ test_that("sidebar defaults match what the engines assume", {
   app <- smoke_app()
   expect_equal(app$get_value(input = "method"), "OK")
   expect_equal(app$get_value(input = "cv_strategy"), "auto")
-  # kNNDM is the second choice in both CV selectors; the defaults are unchanged.
+  # kNNDM is the second choice in both CV selectors, not the default.
   choice_values <- function(id) {
     unlist(app$get_js(sprintf(
       "Array.prototype.map.call(document.querySelectorAll('#%s input[type=radio]'), function (e) { return e.value; })",
@@ -185,8 +184,8 @@ test_that("sidebar defaults match what the engines assume", {
 test_that("the suite tabs swap the sidebar via their stable value ids", {
   app <- smoke_app()
   # The two suite tabs carry value = "tab_desc" / "tab_classif"; ui_sidebar.R
-  # hides the interpolation sidebar behind those ids. A renamed tab title must
-  # never be able to break this again.
+  # hides the interpolation sidebar behind those ids, so a renamed tab title
+  # cannot break the swap.
   app$set_inputs(main_tabs = "tab_classif")
   expect_true(grepl("Classification Suite Active", app$get_html("body"), fixed = TRUE))
 
@@ -233,9 +232,8 @@ test_that("the documentation drawer renders the three shipped guides", {
 
 test_that("the About dialog reports the version read from DESCRIPTION", {
   app <- smoke_app()
-  # 1.0.5 shipped this string hardcoded AND with an unclosed parenthesis
-  # ("(v1.0.5"). It is now interpolated from `app_version`, which global.R reads
-  # from DESCRIPTION at startup, so the wiring is only provable in a booted app.
+  # The version is interpolated from `app_version`, which global.R reads from
+  # DESCRIPTION at startup; only a booted app proves that wiring.
   ver <- unname(read.dcf(
     file.path(normalizePath(file.path(testthat::test_path(), "..", ".."), winslash = "/"),
               "DESCRIPTION"),
@@ -252,17 +250,14 @@ test_that("the About dialog reports the version read from DESCRIPTION", {
 })
 
 # ── CRS wiring, end to end ────────────────────────────────────────────────
-# These two run LAST and deliberately mutate session state (they upload a
-# table), because the tests above assert the pristine shell. They exist
-# because the CRS wiring had been pinned only by source-text assertions, and
-# a source-text assertion cannot tell a live branch from a dead one: the
-# "Input Data CRS Not Set" modal was certified by such a test while sitting
-# downstream of a req() that aborted the run in silence.
+# From here on the tests mutate session state (they upload tables), after the
+# tests above have asserted the pristine shell. A source-text assertion cannot
+# tell a live branch from a dead one, so the CRS wiring is driven in the browser.
 
 crs_smoke_csv <- function(with_lonlat) {
   # 15 stations around Potsdam, written in UTM 33N. With no lon/lat pair the
   # zone is not recoverable from the eastings, which is the case the empty
-  # selectors and the Tier-3 picker exist for.
+  # selectors and the candidate CRS shortlist exist for.
   ctr <- sf::st_coordinates(sf::st_transform(
     sf::st_sfc(sf::st_point(c(12.958, 52.466)), crs = 4326), 32633))
   df <- data.frame(
@@ -292,8 +287,7 @@ test_that("Run Interpolation refuses visibly while the Input Data CRS is unset",
   expect_equal(app$get_value(input = "map_x"), "x")
   expect_equal(app$get_value(input = "map_y"), "y")
   # The standing caption under the mini-map says why nothing is plotted. It
-  # req()s rv$mapping$x, which is only non-NULL because the column mapping is
-  # no longer gated behind the CRS.
+  # req()s rv$mapping$x, so the column mapping must not wait for the CRS.
   expect_true(grepl("Input Data CRS not set", app$get_html("body"), fixed = TRUE))
 
   app$click("run")
@@ -325,10 +319,9 @@ test_that("the header context strip names both coordinate systems", {
   skip_if(is.null(strip), "context strip absent (no dataset in session)")
 
   expect_true(grepl("Points", strip, fixed = TRUE))
-  # The strip is the only always-visible statement of coordinate system: the
-  # input CRS the coordinates are read in and the target CRS the outputs are
-  # produced in. A single item labelled "CRS" left open which, so both roles
-  # are named.
+  # The strip is the only always-visible statement of coordinate system, so it
+  # names both roles (the input CRS the coordinates are read in, the target CRS
+  # the outputs are produced in), never a bare "CRS".
   expect_true(grepl("Input CRS", strip, fixed = TRUE))
   expect_true(grepl("Target CRS", strip, fixed = TRUE))
   expect_false(grepl(">CRS<", strip, fixed = TRUE))
@@ -338,7 +331,7 @@ test_that("the header context strip names both coordinate systems", {
 test_that("variogram tuning context tracks the method and the fitting mode", {
   app <- smoke_app()
   # Governs what the Scientific Analysis tab puts next to a variogram, so a
-  # regression here shows one model's curves beside another model's metrics.
+  # fault here shows one model's curves beside another model's metrics.
   # Both outputs are suspendWhenHidden = FALSE, so they read from any tab.
   app$set_inputs(method = "OK", vgm_mode = "auto")
   app$wait_for_idle()
@@ -442,11 +435,10 @@ run_and_reveal <- function(app, prev = "discard", timeout = 600) {
 
 test_that("Model Performance values sit under their own headings", {
   app <- smoke_app()
-  # A displaced value is not cosmetic: at a 1600 px viewport the body table ran
-  # 162 px wider than its cloned header, so RMSE printed under MAE and NRMSE
-  # under R2. The offset depends on the viewport and on the data, so it is
-  # measured at two widths, and again after leaving and returning to the tab -
-  # the revisit is what a fixed-timer adjust could not fix.
+  # A displaced value is not cosmetic (RMSE printing under MAE). The offset
+  # depends on the viewport and on the data, so it is measured at two widths,
+  # and again after leaving and returning to the tab, which a fixed-timer
+  # adjust cannot handle.
   # A scattered point set, not the collinear CRS fixture above: a line has no
   # domain to interpolate over, so the run produces no table to measure.
   ctr <- sf::st_coordinates(sf::st_transform(
@@ -469,8 +461,7 @@ test_that("Model Performance values sit under their own headings", {
   app$wait_for_idle()
 
   # A palette picked before the run is the one the run is drawn in, and a
-  # Styling switch does not undo it: the picker used to reopen on the
-  # variable's default whenever it was redrawn.
+  # Styling switch does not undo it.
   expect_identical(app$get_value(input = "palette_select"), "YlOrRd")
   app$set_inputs(palette_select = "viridis")
   app$set_inputs(color_style = "bin")
@@ -524,8 +515,8 @@ test_that("Model Performance values sit under their own headings", {
     skip_if(is.null(d), "the Model Performance table did not render")
     expect_lt(max(d), 1.5)                 # first and last column included
 
-    # Leave and come back: the table re-renders while hidden, which is the
-    # state its column widths used to be computed in.
+    # Leave and come back: the table re-renders while hidden, so its column
+    # widths must be recomputed on reveal.
     app$set_inputs(main_tabs = "tab_map")
     app$wait_for_idle()
     app$set_inputs(main_tabs = "tab_analysis")
@@ -566,9 +557,8 @@ test_that("restoring an archived run brings back its maps, metrics and record to
   expect_identical(app$get_value(input = "palette_select"), "viridis")
 
   # Restoring the IDW run brings back its record, its surface and its metrics
-  # together - restoring used to swap the record and the registry only - and
-  # the OK run goes into the archive in its place. The archive panel renders
-  # only while its tab is open.
+  # together, and the OK run goes into the archive in its place. The archive
+  # panel renders only while its tab is open.
   app$set_inputs(main_tabs = "tab_export")
   app$wait_for_idle()
   app$click(paste0("restore_run_", first$run_id))
@@ -642,10 +632,9 @@ test_that("a TPS lambda survives the per-locality panel and the run unchanged", 
   app$set_inputs(tps_mode = "manual")
   app$wait_for_idle()
 
-  # GCV-scale values, a value above the old slider's range, and the value a
-  # fixed lambda of 0.000256 used to round to 0 on: each is stored as typed,
-  # shown again when the locality is revisited, and valid in the browser
-  # (step = "any"; a numeric step flags 2.4e-06 as invalid).
+  # A GCV-scale value, a large one, and one a rounding display would show as 0:
+  # each is stored as typed, shown again when the locality is revisited, and
+  # valid in the browser (step = "any"; a numeric step flags 2.4e-06 as invalid).
   for (lam in c(2.4e-06, 20.2, 0.000256)) {
     app$set_inputs(tps_m_loc = "A")
     app$wait_for_idle()
@@ -806,10 +795,9 @@ test_that("Save config and Load config restore every run-defining setting", {
   expect_identical(restored$palettes, saved$palettes)
 })
 
-# Shut the app down here rather than at suite teardown: global.R sets
-# future::plan(multisession), so the app process keeps one worker per core
-# alive for as long as it lives (~2 GB of RSS on an 16-core machine), and
-# every later test file in the suite would run alongside them.
+# Shut the app down here rather than at suite teardown: the app process keeps
+# its multisession future workers (up to six) alive for as long as it lives,
+# and every later test file in the suite would run alongside them.
 if (!is.null(.smoke$app)) {
   try(.smoke$app$stop(), silent = TRUE)
   .smoke$app <- NULL

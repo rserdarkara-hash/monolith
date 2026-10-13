@@ -3,20 +3,12 @@
 # reactivity. Sourced via ui_helpers.R.
 
 
-# Builds the Map Viewer variogram-quality banner from the per-locality fit
-# list, one band per distinct condition. Red = the fit failed entirely and a
-# heuristic model was used; amber = a non-converged/singular candidate was
-# selected, a converged fit whose range the lags cannot resolve, a variogram
-# still rising at the cutoff, or a smooth family at a negligible nugget.
-# A converged fit is NEVER reported as a failed one. Returns NULL when clean.
-# `target` limits the banner to the fits a specific map actually used:
-# "act" (actual maps), "pre" (predicted maps), or NULL for both (residual
-# maps, which derive from both fits).
-# `engine` is the displayed run's method. It selects the wording of the
-# still-rising band only: RK and RFK fit the variogram to the residuals of a
-# trend model, so what a value-scale variogram is advised to do about a trend
-# is what they already did. CK never reaches here (it sets no `res$fit`, so it
-# contributes no entry to the fit list) and, like OK, does not detrend.
+# The Map Viewer variogram-quality banner, one band per condition: red = the
+# fit failed and a heuristic model was used; amber = a singular/non-converged
+# winner, an unresolved range, a variogram still rising at the cutoff, or a
+# smooth family at a negligible nugget. A converged fit is never reported as
+# failed. NULL when clean. `target`: "act", "pre", or NULL for both (residual
+# maps). `engine` only words the still-rising band: RK/RFK already detrend.
 build_vgm_warning_html <- function(v_fit_list, target = NULL, engine = NULL) {
   # "LocA_act" -> "LocA" when the map's target is known, otherwise
   # "LocA (actual)" so mixed banners stay unambiguous.
@@ -90,11 +82,8 @@ build_vgm_warning_html <- function(v_fit_list, target = NULL, engine = NULL) {
            "<br>The fit converged; what the lags cannot resolve is its range.",
            beyond_line, below_line, "</span>")
   } else ""
-  # Hedged on purpose: a monotone rising variogram is a strong diagnostic for
-  # trend, not proof of it. Never state that non-stationarity was detected.
-  # Neither branch names an engine to switch to: the empirical variogram cannot
-  # say which cause is acting, and naming one would be circular for whichever
-  # engine is already running.
+  # Hedged: a rising variogram suggests a trend but does not prove one, and no
+  # engine is recommended (the variogram cannot say which cause acts).
   trend_part <- if (length(trend_keys) > 0) {
     if (isTRUE(engine %in% c("RK", "RFK"))) {
       paste0("<span style='color:var(--mn-warn);'>-Residual variogram still rising at the lag cutoff for: ",
@@ -128,22 +117,18 @@ build_vgm_warning_html <- function(v_fit_list, target = NULL, engine = NULL) {
          "</div>")
 }
 
-# Text-only panel for a diagnostic that has nothing to plot, so the card states
-# why instead of standing empty: the one empty state of every Scientific
-# Analysis plot card, the server chunks' and the selection panels' below alike.
+# Text-only panel for a diagnostic with nothing to plot: the one empty state
+# of every Scientific Analysis plot card.
 sci_placeholder <- function(msg, size = 5) {
   ggplot() +
     annotate("text", x = 4, y = 4, label = msg, size = size, color = "grey40") +
     theme_void()
 }
 
-#' TPS smoothing-selection panel from the run's own fit record for one
-#' locality and surface (`fit` = res$tps_fit: mode, lambda, eff_df and, for
-#' Auto (GCV), the GCV grid, whose values it was computed on, and the end of
-#' the family GCV's minimum reached, with exact interpolation's
-#' cross-validation at the least-smoothing end). The curve is fields' coarse
-#' lambda grid on a log axis; fields optimises lambda continuously, so the
-#' vertical line is the FITTED lambda, not a grid point.
+#' TPS smoothing-selection panel from the run's fit record (res$tps_fit) for
+#' one locality and surface: the GCV curve on fields' coarse lambda grid (log
+#' axis), the FITTED lambda (optimised continuously) as the dashed line, and a
+#' note on a minimum at either end of the family.
 build_tps_gcv_plot <- function(fit, loc, target = c("act", "pre")) {
   target <- match.arg(target)
   target_label <- if (target == "act") "Actual" else "Predicted"
@@ -194,16 +179,12 @@ build_tps_gcv_plot <- function(fit, loc, target = c("act", "pre")) {
          x = "λ (log scale)", y = "GCV score")
 }
 
-#' IDW power-selection panel from the run's own fit record for one locality and
-#' surface (`fit` = res$idw_fit): under Auto (CV) the pooled CV RMSE of every
-#' power searched on all rows, from equal weights (p = 0) to the
-#' nearest-neighbour limit, the selected power, the spread of the powers the
-#' CV folds selected from their own training rows, how well the data separate
-#' the powers (filled points are within one standard error of the best;
-#' idw_flatness_note) and, for a selection at an end of the family or at a
-#' steep power, what it means (idw_limit_note). An unseparated Predicted
-#' surface's power and profile come from the measured values, and the panel
-#' says so.
+#' IDW power-selection panel from the run's fit record (res$idw_fit): under
+#' Auto (CV) the pooled CV RMSE of every power from equal weights to the
+#' nearest-neighbour limit, the selected power, the fold powers' spread, which
+#' powers lie within one SE of the best (filled points; idw_flatness_note())
+#' and idw_limit_note() at an end of the family or a steep power. An
+#' unseparated Predicted surface's profile comes from the measured values.
 build_idw_power_plot <- function(fit, loc, target = c("act", "pre")) {
   target <- match.arg(target)
   target_label <- if (target == "act") "Actual" else "Predicted"
@@ -268,18 +249,14 @@ build_idw_power_plot <- function(fit, loc, target = c("act", "pre")) {
   p
 }
 
-#' CV Distance Match panel from cv_distance_summary() records: one design, or a
-#' named list of them (one facet per surface, the name leading its strip). The
-#' cumulative distributions of three nearest-neighbour distances, drawn as
-#' steps through their percentiles: from the map's locations to the nearest
-#' sample (the target, strongest line), from each held-out sample to the
-#' nearest training sample under the run's folds, and from each sample to the
-#' nearest other sample (the sampling density, dashed). The distance axis is a
-#' square root: the distances are right-skewed, and the root keeps zeros. W,
-#' the area between the map and held-out curves, is given for the run's folds
-#' and for the record's random reference partition (`reference`). Colour
-#' follows the curve, never the surface; line type and width carry the same
-#' identity, so it is never colour alone.
+#' CV Distance Match panel from cv_distance_summary() records (one, or a named
+#' list faceted per surface): cumulative distributions, as steps through their
+#' percentiles, of map location -> nearest sample (the target, strongest
+#' line), held-out -> nearest training sample under the run's folds, and
+#' sample -> nearest other sample (dashed). The distance axis is a square root
+#' (right-skewed, keeps zeros). W, the area between the map and held-out
+#' curves, is given for the run's folds and the random reference. Line type
+#' and width repeat the colour coding.
 build_cv_distance_plot <- function(design, title = NULL) {
   designs <- if (!is.null(design$probs)) list(design) else Filter(Negate(is.null), design %||% list())
   if (!length(designs)) {
@@ -341,11 +318,9 @@ build_cv_distance_plot <- function(design, title = NULL) {
   p
 }
 
-# RF variable-importance dot chart from a randomForest fit: one panel per
-# measure rf_importance_df() reports (the numeric record exported beside it),
-# covariates ordered by the out-of-bag MSE increase, largest at the top.
-# Covariate names map to display labels when variable metadata is supplied
-# (NULL keeps raw column names).
+# RF variable-importance dot chart: one panel per rf_importance_df() measure,
+# covariates ordered by the OOB MSE increase. Names map to display labels when
+# `vars_metadata` is given.
 build_rf_importance_plot <- function(rf_mod, title, vars_metadata = NULL) {
   df <- rf_importance_df(rf_mod)
   if (nrow(df) == 0) return(NULL)
@@ -397,13 +372,10 @@ relabel_ck_variogram <- function(vm, model, id_labels) {
   list(vm = vm, model = model)
 }
 
-# Semivariogram as ggplot, replacing the lattice plot(v_emp, v_fit) look:
-# empirical lags as points (hover text carries np / distance / semivariance
-# for the plotly expand mode), the fitted model as a line via
-# gstat::variogramLine, and an optional manual-tuning overlay (red dashed).
-# Identical numbers to the lattice version - presentation only. The `text`
-# aesthetic lives on the point layer alone so it cannot fragment the
-# grouping of any line layer.
+# Semivariogram as ggplot: empirical lags as points (hover text: distance,
+# semivariance, np), the fitted model via gstat::variogramLine and an optional
+# manual-tuning overlay (red dashed). The `text` aesthetic sits on the point
+# layer only, so it cannot split a line layer's grouping.
 build_variogram_ggplot <- function(v_emp, v_fit = NULL, title = "", subtitle = NULL,
                                    manual_model = NULL) {
   if (is.null(v_emp) || nrow(v_emp) == 0) return(NULL)
@@ -456,10 +428,8 @@ build_fitted_variogram_plot <- function(v_emp, v_fit, title, extra_sub = NULL,
                          manual_model = manual_model)
 }
 
-# Directional variogram (anisotropy diagnostic) from calc_directional_variogram:
-# one coloured curve per angular cone on shared axes, because the question the
-# panel answers ("does the range differ with direction?") is a comparison
-# between the curves, which facets would make harder to see.
+# Directional variogram from calc_directional_variogram(): one curve per cone
+# on shared axes (not facets), since the panel compares ranges by direction.
 build_directional_variogram_ggplot <- function(vd, title = "", subtitle = NULL) {
   if (is.null(vd) || nrow(vd) == 0 || !"dir.hor" %in% names(vd)) return(NULL)
   df <- as.data.frame(vd)
@@ -536,10 +506,9 @@ build_ck_variogram_ggplot <- function(vm, model, title = "") {
           strip.text = element_text(size = 8.5))
 }
 
-# A ggplot's title with its subtitle and caption as smaller lines under it, for
-# a plotly layout title. ggplotly() drops both, yet they carry what the figure
-# rests on (the complete-case n, the variables a PCA left out, the estimator),
-# so they must reach the interactive view and the PNG its camera button saves.
+# A ggplot's title with its subtitle and caption as smaller lines below, for a
+# plotly layout title: ggplotly() drops both, yet they carry what the figure
+# rests on (complete-case n, excluded variables, the estimator).
 plotly_title_html <- function(p) {
   paste0(plotly_text(p$labels$title %||% ""), plotly_notes_html(plot_notes(p)))
 }
@@ -599,17 +568,13 @@ fit_facet_strips <- function(layout, plot_w) {
        gap = if (any(!top_row)) max(extra[!top_row]) else 0)
 }
 
-# ggplotly conversion for the expanded view (register_expanded_modal: the large
-# modal's 870 px body by a 700 px plot). The tooltip is restricted to the
-# dedicated `text` aesthetic when a layer defines one (avoids the duplicated
-# x/y lines); plots without one keep plotly's default tooltip. The conversion
-# runs at the view's size, so ggplotly's relative units resolve against it, and
-# the widget then fills its container. Facet strips are wrapped to their
-# columns, and a lower row's extra strip lines are given room by widening the
-# panel spacing and converting again (the domains are ggplotly's to lay out).
-# The subtitle and caption, wrapped to the plot's width, go under the title,
-# which is pinned to the top of the figure; the top margin grows by every line
-# they and the top row's strips add, so no text runs into another.
+# ggplotly conversion for the expanded view (register_expanded_modal(), a
+# 870 x 700 px plot). The tooltip uses the `text` aesthetic when a layer
+# defines one. The conversion runs at the view's size and the widget then
+# fills its container. Facet strips are wrapped to their columns (a lower
+# row's extra lines widen the panel spacing, then it converts again), and the
+# subtitle and caption go under the pinned title, the top margin growing with
+# every added line.
 ggplotly_smart <- function(p, width = 870, height = 700) {
   has_text <- "text" %in% names(p$mapping) ||
     any(vapply(p$layers, function(l) "text" %in% names(l$mapping), logical(1)))
@@ -639,10 +604,8 @@ ggplotly_smart <- function(p, width = 870, height = 700) {
   fig$x$layout[c("width", "height")] <- NULL
   fig[c("width", "height")] <- NULL
   if (top == lay$margin$t) return(fig)
-  # The title's first baseline is pinned one line below the top edge. It is
-  # anchored by that baseline because plotly.js drops a top anchor's offset
-  # once a title runs to several lines. ggplotly's own title markup keeps the
-  # plot's title face.
+  # The title's first baseline is pinned one line below the top edge (plotly.js
+  # drops a top anchor's offset once a title has several lines).
   plotly::layout(fig, title = list(text = paste0(lay$title$text %||% "", plotly_notes_html(notes)),
                                    y = 1 - (8 + title_px) / height, yref = "container",
                                    yanchor = "bottom"),
@@ -683,15 +646,13 @@ generate_base_plot <- function(item, input, agro_params = NULL, palette = "YlOrR
       }
       if (inherits(obj, "PackedSpatRaster")) obj <- terra::unwrap(obj)
       pal_name <- palette %||% "YlOrRd"
-      # Registry items carry kind ("value"/"residual"/"uncertainty"); the
-      # label grepl is a fallback for items archived before kind existed.
+      # Registry items carry `kind`; the label match covers an item without one.
       is_resid <- identical(kind, "residual") ||
         (is.null(kind) && grepl("Residual|Point Error", label))
       is_uncert <- identical(kind, "uncertainty") ||
         (is.null(kind) && grepl("Uncertainty Map", label))
-      # Agro/bin class limits are defined on the variable's concentration
-      # units: only value surfaces may be classified (mirrors the in-app
-      # viewer, which always draws residual/uncertainty layers continuously).
+      # Class limits are in the variable's units, so only value surfaces are
+      # classified (as in the Map Viewer).
       is_class <- input$color_style %in% c("agro", "bin") && !is_resid && !is_uncert
       if (is_uncert) pal_name <- uncertainty_palette(pal_name)
 
@@ -725,10 +686,9 @@ generate_base_plot <- function(item, input, agro_params = NULL, palette = "YlOrR
             a_cols <- viridis::viridis(agro_params$n_c)
         }
         
-        # The legend is the class scheme, as the Map Viewer's is: every class
-        # with its swatch (ggplot2 >= 3.5 draws the key of a class absent from
-        # the surface only under show.legend = TRUE) and no "NA" entry for the
-        # cells outside the boundary, which stay transparent.
+        # The legend is the full class scheme, as in the Map Viewer: every class
+        # (show.legend = TRUE keeps absent ones, ggplot2 >= 3.5) and no "NA"
+        # entry for the transparent cells outside the boundary.
         bp <- ggplot() +
           tidyterra::geom_spatraster(data = obj_c, aes(fill = category), show.legend = TRUE) +
           scale_fill_manual(values = a_cols,
@@ -882,9 +842,8 @@ generate_styled_plot <- function(item, input, agro_params = NULL, palette = "YlO
 }
 
 get_stat_letters <- function(df, var_name, group_col, test_type) {
-  # "" is the control's None choice. It must return before the if-chain below,
-  # because the ANOVA branch also fires on `n_groups == 2` regardless of
-  # test_type - so without this guard, "None" still annotated a two-group plot.
+  # "" is the control's None choice; return before the ANOVA branch, which
+  # also fires on two groups whatever test_type is.
   if (is.null(test_type) || length(test_type) != 1 || is.na(test_type) || !nzchar(test_type)) return(NULL)
   df_proc <- df[!is.na(df[[var_name]]) & !is.na(df[[group_col]]), ]
   if (nrow(df_proc) < 3) return(NULL)
@@ -904,11 +863,9 @@ get_stat_letters <- function(df, var_name, group_col, test_type) {
       colnames(df_let)[1] <- group_col
       return(df_let)
     } else if (test_type == "duncan" && n_groups > 2 && requireNamespace("agricolae", quietly = TRUE)) {
-      # Duncan's MRT controls the COMPARISON-wise error rate only; its
-      # family-wise rate grows toward 1 with k. Offered because older agronomy
-      # literature reports it, labelled "(liberal)" in the control, and flagged
-      # in scientific_guide's post-hoc section. Tukey's HSD is the conservative
-      # default - do not present the two as interchangeable.
+      # Duncan's MRT controls only the comparison-wise error rate (the
+      # family-wise rate grows toward 1 with k); offered for older agronomy
+      # literature, labelled "(liberal)". Tukey's HSD is the conservative default.
       res <- agricolae::duncan.test(aov_res, group_col, console = FALSE)
       df_let <- data.frame(group = rownames(res$groups), letter = as.character(res$groups$groups))
       colnames(df_let)[1] <- group_col
@@ -974,9 +931,7 @@ add_stat_layer <- function(p, df, var_name, group_col, stat_test, stat_letter_po
               p <- p + geom_text(data = all_letters, aes(x = -Inf, y = y_pos, label = letter), hjust = -0.1, vjust = 1, size = 3.5, fontface = "italic", inherit.aes = FALSE)
            } else {
               p <- p + geom_text(data = all_letters, aes(x = .data[[group_col]], y = y_pos, label = letter), vjust = -0.5, size = 4, fontface = "bold", inherit.aes = FALSE)
-              # vjust = -0.5 draws the glyph above y_pos; the default 5% scale
-              # expansion is not always enough headroom, cutting letters in
-              # half at the panel top, so widen the upper expansion
+              # Headroom above the letters (vjust = -0.5 draws them above y_pos).
               p <- p + scale_y_continuous(expand = expansion(mult = c(0.05, 0.15)))
            }
        }
@@ -999,8 +954,7 @@ add_stat_layer <- function(p, df, var_name, group_col, stat_test, stat_letter_po
                    l_df <- merge(l_df, agg_df, by = group_col)
                }
                p <- p + geom_text(data = l_df, aes(x = .data[[group_col]], y = y_pos, label = letter), vjust = -0.5, size = 4, fontface = "bold", inherit.aes = FALSE)
-               # Same headroom fix as the faceted branch: keep the letters
-               # from being clipped at the panel top
+               # Same headroom as the faceted branch.
                p <- p + scale_y_continuous(expand = expansion(mult = c(0.05, 0.15)))
            }
        }
@@ -1010,9 +964,8 @@ add_stat_layer <- function(p, df, var_name, group_col, stat_test, stat_letter_po
 
 
 
-# Categorical group axes (boxplot/violin/sina): when many groups or long
-# interaction labels ("A | B | C") would crowd the x axis, drop the axis
-# text entirely, since group identity is already colour-coded in the legend
+# Categorical group axes (boxplot/violin/sina): hide crowded x labels, since
+# group identity is colour-coded in the legend.
 hide_x_labels_if_crowded <- function(p, df, group_col) {
   if (is.null(group_col) || !group_col %in% colnames(df)) return(p)
   lv <- unique(as.character(df[[group_col]]))
@@ -1024,8 +977,8 @@ hide_x_labels_if_crowded <- function(p, df, group_col) {
   return(p)
 }
 
-# Variable-name x axes (parallel coordinates): the names are NOT in the
-# legend, so rotate rather than hide when crowded
+# Variable-name x axes (parallel coordinates) are not in the legend, so they
+# rotate rather than hide when crowded.
 rotate_x_labels_if_crowded <- function(p, df, group_col, labels = NULL) {
   if (is.null(group_col) || !group_col %in% colnames(df)) return(p)
   lv <- unique(display_var_labels(as.character(df[[group_col]]), labels))
@@ -1341,12 +1294,9 @@ generate_advanced_plot <- function(df, vars, group_col = NULL, plot_type = "qq",
 }
 
 
-#' Align a caller-supplied correlation matrix to the plotted variable set.
-#' Both correlation panels index the matrix POSITIONALLY (`cormat[i, j]` against
-#' `vars[i]`, plus `vars[hc$order]`), which is only correct while the caller
-#' happens to build it over the same variables in the same order. Subset by name
-#' so a superset or a re-ordered matrix cannot mislabel a cell; a matrix with no
-#' usable dimnames is left alone (positional is then the only contract there is).
+#' Align a caller-supplied correlation matrix to the plotted variables by name:
+#' both correlation panels index it positionally, so a superset or re-ordered
+#' matrix would mislabel cells. A matrix without usable dimnames is left as is.
 align_cormat <- function(cormat, vars) {
   if (is.null(cormat) || is.null(rownames(cormat)) || is.null(colnames(cormat))) return(cormat)
   if (!all(vars %in% rownames(cormat)) || !all(vars %in% colnames(cormat))) return(cormat)
@@ -1368,9 +1318,7 @@ generate_correlation_heatmap <- function(df, vars, method = "pearson", cormat = 
     cormat <- cor(df_clean, method = method)
   }
   cormat <- align_cormat(cormat, vars)
-  # A constant variable makes cor() return an NA row and column; as.dist() then
-  # hands those NAs to hclust, which errors out ("NA/NaN/Inf in foreign function
-  # call") and the panel goes blank with no explanation.
+  # A constant variable gives NA correlations, which would break hclust.
   if (anyNA(cormat)) return(constant_var_plot())
 
   distmat <- as.dist(1 - abs(cormat))
@@ -1405,9 +1353,7 @@ generate_correlation_network <- function(df, vars, threshold = 0.3, method = "pe
     cormat <- cor(df_clean, method = method)
   }
   cormat <- align_cormat(cormat, vars)
-  # An NA correlation (constant variable) would reach `if (abs(w) >= threshold)`
-  # as a missing value and abort the plot with "missing value where TRUE/FALSE
-  # needed"; name the cause instead.
+  # An NA correlation (constant variable) would abort the threshold test.
   if (anyNA(cormat)) return(constant_var_plot())
 
   n <- length(vars)
@@ -1453,9 +1399,7 @@ generate_partial_correlation <- function(df, vars, control_vars = NULL, method =
 
   if (length(vars) < 2) return(sci_placeholder("Need >=2 variables to correlate"))
 
-  # Residualization + the rank/kendall conventions live in
-  # compute_partial_correlation() so this plot and the correlation summary
-  # table can never disagree about what "partial" means.
+  # compute_partial_correlation() is shared with the summary table.
   pc <- compute_partial_correlation(df, vars, control_vars, method = method)
   refusal <- partial_correlation_refusal(pc, labels)
   if (!is.null(refusal)) return(sci_placeholder(wrap_lines(refusal, 70)))
@@ -1520,28 +1464,18 @@ generate_correlogram <- function(df, vars, method = "pearson", cormat = NULL, la
 }
 
 # ── Spatial cross-correlogram ──────────────────────────────────────────────
-# Lag is a distance here, not a row offset: stats::ccf() measures lag in ROWS
-# of the uploaded table, which for a soil point table is upload order, not
-# distance, and its +/-1.96/sqrt(n) bands additionally assume a stationary
-# series - neither holds for cross-sectional spatial samples.
-#
-# The estimator here is the standard geostatistical one. With both variables
-# standardised to zero mean and unit variance, the empirical cross variogram
-# gamma_12(h) - computed by gstat with the same pair binning as every other
-# variogram in the app - and the cross-covariance are related by
+# Lag is a DISTANCE: stats::ccf() lags table rows (upload order) and its
+# +/-1.96/sqrt(n) bands assume a stationary series. With both variables
+# standardised, the empirical cross variogram (gstat, the app's pair binning)
+# relates to the cross-covariance by
 #     gamma_12(h) = C_12(0) - (C_12(h) + C_21(h)) / 2
-# so the spatial cross-correlation at lag h is
+# so the spatial cross-correlation is
 #     rho_12(h) = r_12 - gamma_12(h)
-# with r_12 the ordinary non-spatial correlation of the standardised variables
-# (Goovaerts 1997 section 4.2.3; Isaaks & Srivastava 1989 ch. 4). Only the
-# SYMMETRIC part of the cross-covariance is estimable from omnidirectional bins
-# (pairs (i,j) and (j,i) land in the same bin), which is also why there is no
-# negative-lag half: unlike a time series, an unordered point set has no
-# "leads" and "lags".
-#
-# Coordinates are projected before binning (the app's never-measure-distance-in-
-# degrees invariant). Returns list(bins, r0, n, unit, ranked, message); `message`
-# is a user-facing placeholder reason and is non-NULL exactly when `bins` is NULL.
+# with r_12 the non-spatial correlation (Goovaerts 1997 4.2.3; Isaaks &
+# Srivastava 1989 ch. 4). Omnidirectional bins estimate only the symmetric
+# part, hence no negative lags. Coordinates are projected first. Returns
+# list(bins, r0, n, unit, ranked, message); `message` (a placeholder reason)
+# is non-NULL exactly when `bins` is NULL.
 compute_spatial_cross_correlogram <- function(df, var1, var2, x_col, y_col,
                                               src_crs, proj_crs = NULL,
                                               n_bins = 15, method = "pearson") {
@@ -1561,9 +1495,7 @@ compute_spatial_cross_correlogram <- function(df, var1, var2, x_col, y_col,
   d <- na.omit(df[, unique(c(var1, var2, x_col, y_col)), drop = FALSE])
   if (!is.numeric(d[[var1]]) || !is.numeric(d[[var2]])) return(fail("Both variables must be numeric"))
   if (nrow(d) < 15) return(fail("Insufficient data: at least 15 complete observations are needed"))
-  # Fixed internal names: the coordinate columns are themselves selectable as
-  # variables, so copying by position keeps a var1 == x_col choice from
-  # producing a duplicated column name in the working frame.
+  # Fixed internal names: a coordinate column may also be chosen as a variable.
   work <- data.frame(.cx = d[[x_col]], .cy = d[[y_col]],
                      .v1 = d[[var1]], .v2 = d[[var2]])
 
@@ -1576,9 +1508,8 @@ compute_spatial_cross_correlogram <- function(df, var1, var2, x_col, y_col,
   }, error = function(e) NULL)
   if (is.null(pts) || nrow(pts) == 0) return(fail("Could not project the coordinates"))
 
-  # Co-located samples merged as the interpolation point sets merge them
-  # (merge_colocated: both variables averaged per location), so replicates do
-  # not stack the shortest bin.
+  # Co-located samples merged as in the interpolation point sets, so
+  # replicates do not stack the shortest bin.
   pts <- merge_colocated(pts)
   out$n <- nrow(pts)
   if (out$n < 15) return(fail("Insufficient data: at least 15 distinct locations are needed"))
@@ -1586,10 +1517,8 @@ compute_spatial_cross_correlogram <- function(df, var1, var2, x_col, y_col,
   crs_unit <- tryCatch(sf::st_crs(pts)$units, error = function(e) NULL)
   if (!is.null(crs_unit) && nzchar(crs_unit)) out$unit <- crs_unit
 
-  # Rank transform for the rank-based methods: Spearman is the product-moment
-  # correlation of ranks, so the whole estimator simply runs on ranks. Kendall
-  # has no distance-binned analogue and is served by the same rank-based curve
-  # (named as such in the plot subtitle).
+  # Rank-based methods run the estimator on ranks (Spearman); Kendall has no
+  # distance-binned analogue and gets the same rank curve, named as such.
   v1v <- pts$.v1; v2v <- pts$.v2
   if (out$ranked) { v1v <- rank(v1v); v2v <- rank(v2v) }
   s1 <- stats::sd(v1v); s2 <- stats::sd(v2v)
@@ -1661,16 +1590,11 @@ generate_spatial_cross_correlogram <- function(df, var1, var2, x_col, y_col,
   return(p)
 }
 
-# The PCA guard's two findings, kept apart because they mean different things:
-# `pairs` (var1, var2, r), the near-duplicate variables with |r| above
-# `threshold`, and `constant`, the variables with no variance.
-# `has_collinearity` covers the pairs only. PCA exists to summarise correlated
-# variables, so correlation as such is no objection to it; a near-duplicate
-# pair, though, carries one latent dimension twice and gives it double weight
-# in a standardised PCA, which the user may accept or resolve. VIF measures how
-# collinearity inflates the variance of REGRESSION coefficients and has no
-# meaning for a PCA, so it plays no part here. A constant cannot enter a
-# standardised PCA at all and is excluded by desc_pca_fit().
+# The PCA guard's two findings: `pairs` (var1, var2, r), near-duplicates with
+# |r| above `threshold`, which double-weight one latent dimension in a
+# standardised PCA (the user may accept or resolve them), and `constant`,
+# variables with no variance (desc_pca_fit() excludes them).
+# `has_collinearity` covers the pairs only; VIF has no meaning for a PCA.
 check_collinearity <- function(df, vars, threshold = 0.95) {
   res <- detect_multicollinearity_engine(df, vars = vars, pairwise_threshold = threshold,
                                          vif_threshold = Inf)
@@ -1781,15 +1705,10 @@ generate_pca_contribution <- function(pca_res, pc = 1) {
   generate_pca_bar_plot(contrib, "Contribution", paste("Variable Contribution to PC", pc), "Contribution (%)", "coral", 100 / length(contrib))
 }
 
-# cos2 = the SHARE of a variable's variance captured by the selected PCs, so
-# the denominator has to be that variable's total variance across ALL retained
-# components: rowSums((V S)^2) = (V S^2 V')_jj = Var(x_j). For a correlation
-# PCA (scale. = TRUE) that denominator is 1 for every variable, so the sum of
-# the selected axes alone is the share; for a covariance PCA (scale. = FALSE)
-# the unnormalised sum is an absolute variance in the variable's own squared
-# units, and mg/kg next to a 0-1 fraction on an axis labelled cos2 is not a
-# cos2. Normalising makes the quantity mean the same thing (bounded [0, 1],
-# factoextra's definition) in both modes and changes nothing for a scaled PCA.
+# cos2 is the SHARE of a variable's variance captured by the selected PCs, so
+# it is normalised by the variable's total over all components (rowSums of
+# (V S)^2 = Var(x_j)): 1 in a correlation PCA, the variable's own squared
+# units in a covariance PCA. Bounded [0, 1] in both (factoextra's definition).
 generate_pca_cos2 <- function(pca_res, axes = 1:2) {
   refusal <- pca_axis_refusal(pca_res, axes)
   if (!is.null(refusal)) return(sci_placeholder(refusal))
@@ -1824,17 +1743,11 @@ generate_pca_cumvar <- function(pca_res) {
 
 generate_pca_mahalanobis <- function(pca_res) {
 
-  # PC scores are uncorrelated by construction, so their covariance is
-  # diag(sdev^2); near-zero-variance PCs (collinear inputs) would make that
-  # matrix numerically singular, so they are excluded from the distance
-  #
-  # This is the CLASSICAL Mahalanobis distance: the centre and scatter are the
-  # ordinary mean/covariance, which the outliers themselves contribute to. A
-  # small cluster of extreme observations therefore inflates the covariance and
-  # can pull its own distance back under the threshold (masking). A robust
-  # estimator (MCD, robustbase::covMcd on the retained scores) is the standard
-  # remedy but is a new dependency; the panel names its estimator instead so the
-  # limitation is visible where it matters. See scientific_guide.md 8.2.
+  # PC scores are uncorrelated, so their covariance is diag(sdev^2); near-zero
+  # PCs (collinear inputs) are excluded to keep it non-singular. CLASSICAL
+  # estimator: outliers inflate the covariance and can mask themselves (a
+  # robust MCD would need a new dependency); the panel names its estimator
+  # (scientific_guide.md 8.2).
   keep <- pca_res$sdev > max(pca_res$sdev) * 1e-8
   scores <- as.data.frame(pca_res$x[, keep, drop = FALSE])
   center <- colMeans(scores)
@@ -1883,57 +1796,17 @@ generate_pca_biplot_3d <- function(pca_res, df, pc_x=1, pc_y=2, pc_z=3, group_co
   return(p)
 }
 
-# Distance ruler for the Map Viewer's leaflet widgets.
+# Basemap tiles for every interactive map (the Map Viewer's three widgets,
+# their proxy swap, the Data Setup mini-map), added on identical terms.
 #
-# addMeasure ships with leaflet (the leaflet-measure plugin and its CSS are
-# bundled), so this costs no dependency and no external asset. draw_map applies
-# it to EVERY widget it builds, which is what puts the tool on the single map
-# and on both comparison maps without a per-map code path.
+# zIndex = 0 is load-bearing: addRasterImage() paints the surface as a canvas
+# GridLayer in the same tile pane (default z-index 1), and a proxy swap
+# appends the new basemap last, over the surface. 0, not negative: a negative
+# z-index can drop the layer behind the pane's ground (a grey map).
 #
-# Bottom-left keeps the control clear of the top-left drawing stack.
-#
-# The plugin's own popup reports SPHERICAL figures (mean-Earth radius) and knows
-# nothing about the analysis CRS, so the readout is taken over: on finish the
-# clicked vertices go to R, measure_path_metrics() recomputes them on the WGS84
-# ellipsoid and in the Target Mapping CRS, and map_ruler_popup_html() comes back
-# to REPLACE that shape's popup contents. The numbers therefore travel with the
-# shape - clicking a measurement made ten minutes ago reopens its own figures -
-# where a single control in the corner could only ever hold the latest one.
-# Coordinates travel as two flat arrays rather than a list of pairs, so the R
-# side receives plain numeric vectors whatever Shiny's JSON simplification does.
-#
-# Cancel calls the same _finishMeasure() the Finish link does, so measurefinish
-# alone cannot tell a completed shape from an abandoned one; only a real finish
-# adds the result layer on the same tick, which is why the layeradd that follows
-# is what actually triggers the round trip. The record lives in a page-level
-# store because the reply arrives through one custom message handler shared by
-# all three map widgets.
-# Basemap tiles for every interactive map in the app: the Map Viewer's three
-# widgets, their proxy swap when the toolbar dropdown changes, and the Data
-# Setup mini-map. One entry point because the widget build and the proxy swap
-# have to add the layer on identical terms - a basemap that behaves differently
-# from the one the map was born with is a bug by construction.
-#
-# zIndex = 0 is load-bearing. leaflet::addRasterImage() does not use an image
-# overlay: it paints the surface as a canvas GridLayer, so the interpolated
-# raster and the basemap are siblings in the same Leaflet tile pane, both on
-# the GridLayer default z-index of 1, and only DOM insertion order keeps the
-# surface on top. That order holds when the widget is built (basemap first,
-# rasters after) and inverts on a proxy swap, which appends the new basemap
-# last and paints it straight over the surface. Pinning the basemap one level
-# below the rasters makes the stacking explicit instead of incidental. It has
-# to be 0 rather than a negative level: a negative z-index drops the layer
-# behind the tile pane's own painted ground in some browsers, which is a map
-# that answers a basemap switch with a bare grey rectangle.
-#
-# The five providers stop at different native zooms. Left to Leaflet, adding a
-# shallower layer to a map already zoomed past its limit drops the map's zoom
-# to that layer's maximum, and the drop is permanent: switching back to a
-# deeper provider does not raise it again. A layer whose maximum sits below the
-# current zoom draws no tiles at all. Declaring the provider's depth as
-# `maxNativeZoom` instead makes Leaflet upscale the deepest tiles it has, so
-# all five cover the same zoom range and switching basemaps changes the imagery
-# and nothing else.
+# Providers stop at different native zooms; declaring each depth as
+# `maxNativeZoom` makes Leaflet upscale instead of permanently lowering the
+# map's zoom, so switching basemaps changes the imagery only.
 BASE_TILE_NATIVE_ZOOM <- c(
   "Esri.WorldImagery"  = 19,
   "OpenTopoMap"        = 17,
@@ -1943,15 +1816,9 @@ BASE_TILE_NATIVE_ZOOM <- c(
 )
 BASE_TILE_MAX_ZOOM <- 20
 
-# CARTO's raster basemaps now require a free API key: an unkeyed request is
-# answered with an "API key required" watermark stamped over the tiles, and
-# CARTO has the raster service on a retirement path. leaflet-providers' CartoDB
-# entry carries no key placeholder, so a keyed request has to be issued as a
-# plain tile layer built from CARTO's own template
-# (https://{s}.basemaps.cartocdn.com/{style}/{z}/{x}/{y}{r}.png?key=...).
-# Everything the switcher depends on - layerId, zIndex, and the two zoom limits
-# below - is set identically on both paths, so a keyed CARTO layer behaves
-# exactly like every other basemap.
+# CARTO raster basemaps need a free API key (unkeyed tiles are watermarked);
+# leaflet-providers has no key placeholder, so a keyed request is a plain tile
+# layer on CARTO's own template, with the same layerId, zIndex and zoom limits.
 BASE_TILE_CARTO_VARIANT <- c(
   "CartoDB.Positron"   = "light_all",
   "CartoDB.DarkMatter" = "dark_all"
@@ -1961,9 +1828,8 @@ BASE_TILE_CARTO_ATTRIBUTION <- paste0(
   '&copy; <a href="https://carto.com/attributions">CARTO</a>'
 )
 
-# api_key is used only by the two CARTO providers; every other provider ignores
-# it. An empty key keeps the previous unkeyed behaviour (watermarked tiles)
-# rather than blanking the map, so the switcher never answers with nothing.
+# `api_key` applies to the two CARTO providers only; an empty key gives the
+# watermarked tiles rather than a blank map.
 add_base_tiles <- function(map, provider, api_key = NULL) {
   if (is.null(provider) || !nzchar(provider)) provider <- "Esri.WorldImagery"
   native <- unname(BASE_TILE_NATIVE_ZOOM[provider])
@@ -1999,6 +1865,14 @@ add_base_tiles <- function(map, provider, api_key = NULL) {
   )
 }
 
+# Distance ruler for the Map Viewer's leaflet widgets (leaflet's bundled
+# leaflet-measure plugin), applied by draw_map to every widget it builds. The
+# plugin's spherical, CRS-unaware readout is taken over: on finish the
+# vertices go to R (as two flat arrays), measure_path_metrics() recomputes
+# them and map_ruler_popup_html() REPLACES that shape's popup, so each
+# measurement keeps its own figures. Cancel fires measurefinish too, so only
+# the layeradd after a real finish starts the round trip; replies arrive
+# through one page-level handler shared by the three map widgets.
 add_map_ruler <- function(map, position = "bottomleft") {
   map %>%
     leaflet::addMeasure(
@@ -2129,11 +2003,9 @@ add_map_ruler <- function(map, position = "bottomleft") {
 MISSING_VALUE_POINT_COLOR <- "#9AA0A6"
 MISSING_VALUE_POINT_LABEL <- "No measured value (not used in the fit)"
 
-# `value_col` names the mapped variable's column. Points with no value there
-# render HOLLOW - position still visible, but unmistakably not a measurement -
-# and gain their own legend entry. The display set is deliberately wider than
-# the fitted set (see run_regional_interpolation), so the distinction has to be
-# on the map rather than in a caption nobody reads.
+# `value_col` names the mapped variable's column: points without a value there
+# render HOLLOW with their own legend entry, since the display set is wider
+# than the fitted set (run_regional_interpolation()).
 add_styled_points <- function(map, pts_sf, color_by = "none", custom_colors = NULL,
                               show_labels = FALSE, label_field = "none",
                               label_size = 11, marker_size = 3,

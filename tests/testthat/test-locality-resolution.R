@@ -1,7 +1,6 @@
-# resolve_selected_localities (ui_helpers.R): single source of truth for
-# turning the sidebar locality selection into the locality set an analysis
-# runs on. Pins the ALL / empty / NULL / missing-column edge cases that were
-# previously handled inconsistently across ~13 inline snippets in monolith.R.
+# Locality and subset resolution (ui_formatting.R): resolve_selected_localities()
+# turns the sidebar selection into the locality set an analysis runs on; the
+# subset, tuning-key and analysis-filter helpers share that contract.
 
 test_that("effective_subset applies only to an available Single-split partition", {
   expect_identical(effective_subset("pred_ss", "Test", c("v", "Subset")), "Test")

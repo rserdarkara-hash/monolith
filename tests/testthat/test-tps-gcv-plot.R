@@ -1,4 +1,4 @@
-# test-tps-gcv-plot.R — the parameter-selection panels and the Regional
+# test-tps-gcv-plot.R: the parameter-selection panels and the Regional
 # Parameters table. build_tps_gcv_plot / build_idw_power_plot draw from the
 # run's own fit record (res$tps_fit / res$idw_fit, committed to
 # rv$disp$regional_params); every state without a curve must say why in the

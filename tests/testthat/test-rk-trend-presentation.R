@@ -1,7 +1,6 @@
-# Tests for the RK linear-trend presentation helpers (ui_helpers.R):
-# rk_fit_stats / rk_coef_table / format_p_value / signif_stars /
-# build_rk_trend_ui. Display-layer only — values must reproduce the
-# corresponding summary.lm quantities exactly.
+# RK linear-trend presentation helpers (ui_formatting.R, build_rk_trend_ui() in
+# ui_components.R). Display layer only: every value must reproduce the
+# corresponding summary.lm quantity exactly.
 
 make_rk_fixture <- function() {
   set.seed(42)
@@ -96,14 +95,11 @@ test_that("build_rk_trend_ui returns tags for summary.lm, NULL otherwise", {
 })
 
 test_that("shiny::validate is never called unqualified (jsonlite masks it)", {
-  # global.R attaches shiny first and jsonlite later, so from that point on a
-  # bare validate() resolves to jsonlite::validate(), which is
-  # `function(txt) stopifnot(is.character(txt))`. In a renderer that means the
-  # panel dies with "ERROR: is.character(txt) is not TRUE" exactly when the
-  # object EXISTS (need() returns NULL), and silently renders nothing when it
-  # is missing (need() returns the message string, which jsonlite accepts).
-  # The same masking applies to the other jsonlite exports the app could
-  # plausibly call unqualified, so guard all three names.
+  # global.R attaches jsonlite after shiny, so a bare validate() resolves to
+  # jsonlite::validate() (`stopifnot(is.character(txt))`): a renderer then dies
+  # with "is.character(txt) is not TRUE" when the object exists and renders
+  # nothing when it is missing. A bare flatten() or unbox() resolves to
+  # jsonlite's too.
   root <- normalizePath(file.path(testthat::test_path(), "..", ".."),
                         winslash = "/")
   files <- list.files(root, pattern = "\\.R$", full.names = TRUE)

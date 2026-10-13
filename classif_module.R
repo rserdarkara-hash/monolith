@@ -1,28 +1,21 @@
-# classif_module.R — Shiny module for the Classification Suite.
-#
-# Decoupled like gov_module.R / desc_exploratory_module.R: configuration + a
-# background (future_promise) run of run_classification_pipeline(), then display
-# of cross-validation performance, the confusion matrix, per-class accuracy, and
-# predicted-class / probability / entropy maps with GeoTIFF + CSV export.
-#
-# The heavy compute returns only serialisable objects; terra rasters are built
-# in the main session (classif_surface_to_rasters) for rendering and download.
+# classif_module.R: Shiny module for the Classification Suite: configuration,
+# a background (future_promise) run of run_classification_pipeline(), and the
+# display of CV performance, confusion matrix, per-class accuracy and class /
+# probability / entropy maps with GeoTIFF + CSV export. The worker returns
+# serialisable objects only; rasters are built in the main session
+# (classif_surface_to_rasters()).
 
 # ── Target factor construction ──────────────────────────────────────────────
-# Build the categorical target used for modelling. `cat` mode uses an existing
-# categorical column verbatim; `bin` mode discretises a numeric column into
-# ordered classes - quantile or equal-interval breaks from classInt, or exact
-# Jenks natural breaks - with right = FALSE, matching the app's agronomic-class
-# convention so intervals read as [low, high); the top interval also holds the
-# maximum and reads [low, high].
+# `cat` mode uses a categorical column verbatim; `bin` mode discretises a
+# numeric column into ordered classes (classInt quantile or equal-interval
+# breaks, or exact Jenks) with right = FALSE, as the app's agronomic classes:
+# [low, high), the top interval also holding the maximum ([low, high]).
 classif_build_target <- function(df, mode, cat_col, num_col, n_classes = 4,
                                  style = "quantile") {
   if (identical(mode, "bin")) {
     x <- as.numeric(df[[num_col]])
     xf <- x[is.finite(x)]
-    # Jenks: the exact natural breaks over every value, the same computation
-    # the map classes use (natural_breaks, spatial_pipeline.R). classInt's
-    # quantile and equal-interval styles draw no random numbers.
+    # Jenks: the map classes' exact natural breaks (natural_breaks()).
     brks <- if (identical(style, "jenks")) {
       if (length(xf) == 0) return(NULL)
       c(min(xf), natural_breaks(xf, n_classes), max(xf))
@@ -31,11 +24,8 @@ classif_build_target <- function(df, mode, cat_col, num_col, n_classes = 4,
     }
     brks <- unique(brks)
     if (length(brks) < 3) return(NULL)
-    # Distinct breaks can still collide after rounding (tight distributions),
-    # and factor() errors on duplicated levels — widen the label precision
-    # until every interval label is unique AND no label has collapsed to a
-    # single point ("[0.07, 0.07)"), which reads as an empty class and makes
-    # the legend look broken even though the underlying interval is real.
+    # Rounded labels can collide or collapse to a point ("[0.07, 0.07)"), and
+    # factor() errors on duplicates: widen the precision until both are gone.
     lo <- utils::head(brks, -1)
     hi <- brks[-1]
     # include.lowest with right = FALSE closes the TOP interval, so its label
@@ -56,21 +46,16 @@ classif_build_target <- function(df, mode, cat_col, num_col, n_classes = 4,
   }
 }
 
-# Columns eligible to be a categorical target / categorical predictor:
-# character/factor ONLY. Numeric columns are never auto-classified as
-# categorical: coarse-resolution covariates (e.g. climate-raster precipitation
-# metrics) legitimately carry very few distinct values, so any cardinality
-# heuristic mislabels them, and treating an ordered quantity as nominal changes
-# both the recipe (dummy encoding) and the grid transfer (nearest-neighbour
-# instead of kriging). Numeric class codes are handled by the "Bin a continuous
-# variable" target mode instead.
+# Columns eligible as a categorical target or predictor: character/factor
+# ONLY. A cardinality heuristic would mislabel coarse numeric covariates and
+# change both the recipe (dummy encoding) and the grid transfer (nearest
+# neighbour instead of kriging); numeric class codes use the "Bin" target mode.
 .classif_is_categorical <- function(x) {
   is.character(x) || is.factor(x)
 }
 
-# Constant header height for the four result cards: the titles differ in length
-# and two of them carry an info icon, so a reserved header keeps all four plot
-# frames on the same baseline even when one title wraps in a narrow window.
+# Constant header height for the four result cards, so a wrapping title keeps
+# the plot frames aligned.
 CLASSIF_CARD_HEAD_H <- "34px"
 
 classif_ui <- function(id) {
@@ -86,11 +71,8 @@ classif_ui <- function(id) {
               title = "Supervised classification of soil / land classes from co-sampled covariates. A minimum of ~50 samples with several members per class is recommended.")
           ),
 
-          # Default to binning: .classif_is_categorical accepts character /
-          # factor columns only (a cardinality heuristic mislabels
-          # coarse-resolution climate covariates as categorical), so a typical soil
-          # dataset offers no categorical column at all and "cat" would open the
-          # panel on nothing but "switch to binning".
+          # Default to binning: only character/factor columns are categorical,
+          # so a typical soil dataset offers no categorical target.
           shiny::radioButtons(ns("target_mode"), "Target",
             choices = c("Categorical column" = "cat", "Bin a continuous variable" = "bin"),
             selected = "bin"),
@@ -318,13 +300,9 @@ classif_ui <- function(id) {
                 " Click any map (or its expand icon) for a full-size, high-resolution view.")
             ),
 
-            # 2x2 result grid. All four panels use the SAME card (shared with
-            # the Scientific Analysis tab): equal frames, and the expand
-            # control in a header row instead of floating over the figure.
-            # Ids are pre-namespaced here, and the three map buttons keep their
-            # historical names so their observers are untouched.
-            # conditionalPanel wraps the whole card, never its contents, so a
-            # surface-less run leaves no orphan header behind.
+            # 2x2 result grid on the shared sci_plot_card (header-row expand
+            # control). Ids are pre-namespaced; conditionalPanel wraps whole
+            # cards so a surface-less run leaves no orphan header.
             shiny::fluidRow(
               shiny::column(6,
                 shiny::conditionalPanel(
@@ -372,10 +350,8 @@ classif_ui <- function(id) {
                 )
               )
             ),
-            # How closely the folds' held-out distances match the prediction
-            # grid's, under every strategy (map or no map). Full width: three
-            # labelled curves, W for two designs and the caption need the room
-            # a half-width card does not have.
+            # CV Distance Match, under every strategy; full width for the three
+            # curves, two W values and the caption.
             shiny::fluidRow(
               shiny::column(12,
                 sci_plot_card(ns("cv_distance_plot"), "CV Distance Match",
@@ -387,9 +363,8 @@ classif_ui <- function(id) {
               )
             ),
             shiny::hr(),
-            # Result tables: one visible at a time, chosen from the dropdown
-            # (metrics first). Availability adapts to the run (per-area rows,
-            # surface-dependent area accounting).
+            # Result tables, one at a time from the dropdown; availability
+            # adapts to the run.
             shiny::uiOutput(ns("table_select_ui")),
             shiny::conditionalPanel(
               condition = sprintf("input['%s'] == 'metrics'", ns("table_selection")),
@@ -475,9 +450,8 @@ classif_server <- function(id, data_reactive, vars_metadata_reactive, spatial_re
     cl_rv <- shiny::reactiveValues(res = NULL, ready = "no", vif_decision = NULL,
                                    modal_map = NULL, cancelling = FALSE)
 
-    # ── Run progress + cancel (file-based, parity with the interpolation
-    # pipeline: the worker writes percent files via update_progress_file and
-    # polls a cancel flag between folds/stages) ──────────────────────────────
+    # ── Run progress + cancel: file-based, as in the interpolation pipeline
+    # (the worker writes percent files and polls a cancel flag) ──────────────
     cls_session_id <- substr(session$token, 1, 8)
     cls_progress_dir <- file.path(tempdir(), paste0("classif_progress_", cls_session_id))
     cls_cancel_file <- file.path(cls_progress_dir, "classif_cancel.txt")
@@ -499,16 +473,12 @@ classif_server <- function(id, data_reactive, vars_metadata_reactive, spatial_re
     })
     cls_progress_file <- file.path(
       cls_progress_dir, paste0("progress_", cls_session_id, "_classification_cls.txt"))
-    # Companion file naming the stage the worker is in, so the caption tracks
-    # the real work (grid build, covariate interpolation, classifying cells)
-    # instead of always claiming cross-validation.
+    # Companion file naming the worker's current stage, for the caption.
     cls_stage_file <- file.path(
       cls_progress_dir, paste0("stage_", cls_session_id, "_classification_cls.txt"))
 
-    # Shown while the (cold) future worker is attaching the modelling stack and
-    # sourcing helpers, before the pipeline writes its first progress/stage
-    # file. On the first run of a session this window is ~30s (tidymodels + sf
-    # stack loading in a fresh R process); saying so stops it reading as a hang.
+    # Shown while a cold worker loads the modelling stack (~30 s on a session's
+    # first run), so it does not read as a hang.
     cls_cold_start_msg <- "Starting (loading modelling libraries, first run ~30s)..."
 
     set_classif_progress <- function(pct, txt) {
@@ -532,18 +502,14 @@ classif_server <- function(id, data_reactive, vars_metadata_reactive, spatial_re
     shiny::observe({
       if (!identical(cl_rv$ready, "running")) return(invisible(NULL))
       shiny::invalidateLater(800, session)
-      # While a cancel is pending, leave the notice alone: overwriting it on the
-      # next tick would flip "Cancelling..." straight back to a progress
-      # caption.
+      # A pending cancel keeps its notice.
       if (isTRUE(cl_rv$cancelling)) return(invisible(NULL))
       pct <- tryCatch({
         v <- suppressWarnings(as.numeric(readLines(cls_progress_file, warn = FALSE)))
         if (length(v) == 0 || is.na(v[1])) 0 else v[1]
       }, error = function(e) 0)
       pct <- max(0, min(99, round(pct)))
-      # file.exists first: the poller starts before the worker has written its
-      # first stage line, and readLines() on a missing path emits a "cannot open
-      # file" WARNING to the console before the error the tryCatch would catch.
+      # file.exists first: readLines() on a missing path warns before erroring.
       stage <- tryCatch({
         if (!file.exists(cls_stage_file)) NULL else {
           s <- suppressWarnings(readLines(cls_stage_file, warn = FALSE))
@@ -551,9 +517,7 @@ classif_server <- function(id, data_reactive, vars_metadata_reactive, spatial_re
         }
       }, error = function(e) NULL)
       if (is.null(stage) && pct == 0) {
-        # Pre-pipeline window: worker still loading packages / sourcing helpers,
-        # no stage written yet. Keep the informative caption instead of "0%",
-        # which otherwise reads like a hang on the first (cold) run.
+        # Pre-pipeline window: keep the informative caption rather than "0%".
         set_classif_progress(0, cls_cold_start_msg)
       } else {
         set_classif_progress(pct, sprintf("%s  %d%%", stage %||% "Working...", pct))
@@ -571,12 +535,10 @@ classif_server <- function(id, data_reactive, vars_metadata_reactive, spatial_re
       shiny::showNotification("Cancelling classification run...", type = "message")
     })
 
-    # Module-local boundary type, buffer logic, and grid resolution
-    # (independent of the interpolation sidebar, which is hidden on this
-    # tab), normalised with defaults. One source of truth: the live scope
-    # preview and the run dispatch both read this reactive. The scope reads
-    # only the boundary part, so moving the resolution slider does not
-    # resolve the scope (merge, hulls, collinearity preview) again.
+    # Module-local boundary, buffer and grid settings (independent of the
+    # hidden interpolation sidebar), read by both the scope preview and the
+    # run dispatch. The scope reads only the boundary part, so the resolution
+    # slider does not re-resolve it.
     bset_boundary <- shiny::reactive({
       list(
         type      = input$boundary_type %||% "concave",
@@ -599,10 +561,8 @@ classif_server <- function(id, data_reactive, vars_metadata_reactive, spatial_re
       sort(unique(as.character(stats::na.omit(df[[sp$loc]]))))
     })
 
-    # Locality picker, specific to the Classification Suite (deliberately NOT
-    # synced with the sidebar Context panel: two synced selections can drift
-    # apart mid-session and leave it ambiguous which one a run honours).
-    # Defaults to all localities; a previous selection survives re-renders.
+    # Locality picker of the Classification Suite, deliberately not synced
+    # with the sidebar (two synced selections can drift). Defaults to all.
     output$scope_loc_ui <- shiny::renderUI({
       ch <- scope_choices()
       if (is.null(ch)) return(NULL)
@@ -637,9 +597,8 @@ classif_server <- function(id, data_reactive, vars_metadata_reactive, spatial_re
         selected = if (is.null(prev)) "ignore" else prev)
     })
 
-    # Resolve the active scope (fast: vector filter + point-in-polygon on the
-    # sample points). Reused verbatim by the run dispatch so the preview count
-    # and the actual run can never disagree.
+    # The active scope, reused verbatim by the run dispatch so the preview
+    # count and the run agree.
     current_scope <- shiny::reactive({
       df <- data_reactive(); sp <- spatial_reactive()
       if (is.null(df) || is.null(sp$x) || is.null(sp$y) ||
@@ -662,16 +621,11 @@ classif_server <- function(id, data_reactive, vars_metadata_reactive, spatial_re
     })
 
     # ── Multicollinearity guardrail (scoped) ─────────────────────────────────
-    # VIF + pairwise screening of the selected NUMERIC covariates, computed on
-    # the points inside the CURRENT scope: correlations measured across all
-    # localities can be spurious (or masked) within the subset actually being
-    # fitted. Reuses detect_multicollinearity_engine, the same gate the RK/RFK
-    # interpolation engines apply. The VIF threshold is method-aware: Random
-    # Forest gets a stricter advisory screen (VIF > 5) because moderate
-    # collinearity that barely hurts prediction still splits permutation
-    # feature importance across the correlated covariates, making genuine
-    # drivers look weak (Strobl et al. 2008); other learners keep the standard
-    # VIF > 10 threshold. Advisory only: the user decides drop vs keep.
+    # VIF + pairwise screening of the selected NUMERIC covariates on the points
+    # inside the CURRENT scope (detect_multicollinearity_engine(), the RK/RFK
+    # gate). Random Forest gets a stricter advisory threshold (VIF > 5):
+    # moderate collinearity splits permutation importance between correlated
+    # covariates (Strobl et al. 2008); other learners keep VIF > 10. Advisory.
     active_vif_threshold <- shiny::reactive({
       if (identical(input$method, "rf")) 5 else 10
     })
@@ -697,10 +651,8 @@ classif_server <- function(id, data_reactive, vars_metadata_reactive, spatial_re
       labs_of <- function(v) paste(vapply(v, function(x) get_var_label(x, vars_metadata_reactive()),
                                           character(1)), collapse = ", ")
       thr <- chk$vif_threshold %||% 10
-      # Zero-variance covariates share the engine's `dropped` vector with the
-      # collinear ones but are a different problem: they are dropped whatever
-      # the user chooses, and calling them collinear sends the user looking for
-      # a correlation that does not exist.
+      # Constants are dropped whatever the user chooses and are not collinear:
+      # named separately.
       vif_vars <- chk$dropped_vif %||% chk$dropped
       const_vars <- chk$dropped_constant %||% character(0)
       reason <- if (thr < 10) {
@@ -753,10 +705,8 @@ classif_server <- function(id, data_reactive, vars_metadata_reactive, spatial_re
       classif_grid_res_note(bs$res_mode, bs$res, sc$boundary_area_m2, sc$boundary_bbox)
     })
 
-    # The Target Mapping CRS can be geographic; the run cannot (grid, buffers,
-    # and distances are metres). classif_resolve_scope substitutes the data's
-    # UTM zone in that case - said here so the projection the maps are drawn in
-    # is never a silent one.
+    # A geographic Target Mapping CRS is replaced by the data's UTM zone
+    # (classif_resolve_scope()); said here so the map projection is not silent.
     crs_note <- shiny::reactive({
       sc <- current_scope()
       if (is.null(sc) || !isTRUE(sc$crs_fallback) || is.null(sc$working_crs)) return(NULL)
@@ -769,15 +719,10 @@ classif_server <- function(id, data_reactive, vars_metadata_reactive, spatial_re
         sprintf("Target Mapping CRS is geographic, so this run is computed and mapped in %s.", nm))
     })
 
-    # Live advisory: a Point buffer narrower than half the grid cell
-    # diagonal discards the cells of isolated samples, so sampled points end up
-    # over blank map (see strict_buffer_gap, spatial_pipeline.R). The scope
-    # carries the boundary area and bbox, so the Auto resolution the run will
-    # actually pick is reproduced exactly via classif_auto_res rather than
-    # guessed. The run itself re-checks and reports through res$grid_warning.
-    # Is the domain actually a union of per-point buffers? Polygons-only
-    # scoping replaces the hull entirely with the user's polygons, so the
-    # Boundary Type control (and this advisory) is inert there.
+    # Live advisory for a Point buffer narrower than half the cell diagonal
+    # (strict_buffer_gap()), at the exact cell size the run will use; the run
+    # re-checks (res$grid_warning). Inert under polygons-only scope, which
+    # replaces the hull.
     strict_scope_active <- shiny::reactive({
       identical(bset_boundary()$type, "strict") &&
         !identical(input$scope_poly %||% "ignore", "only")
@@ -841,9 +786,8 @@ classif_server <- function(id, data_reactive, vars_metadata_reactive, spatial_re
     })
 
     # ── Run ──────────────────────────────────────────────────────────────────
-    # The run is dispatched through try_run() so the multicollinearity modal's
-    # Drop/Keep buttons can re-enter the same path after recording a decision.
-    # The decision is remembered until the covariates or the scope change.
+    # Dispatched through try_run() so the collinearity modal's buttons re-enter
+    # the same path; the decision holds until the covariates or scope change.
     try_run <- function() {
       if (identical(cl_rv$ready, "running")) return(NULL)
       df <- data_reactive(); sp <- spatial_reactive()
@@ -895,10 +839,9 @@ classif_server <- function(id, data_reactive, vars_metadata_reactive, spatial_re
         ))
         return()
       }
-      # Auto-Drop hands the pipeline the threshold, not a drop list: the screen
-      # reruns on the training rows of every fit (step_vif_screen), so the
-      # covariates held out of a fold never help choose its predictors. The
-      # flagged list only guards against a run with nothing left.
+      # Auto-Drop passes the threshold, not a drop list: the screen reruns on
+      # the training rows of every fit (step_vif_screen). The flagged list only
+      # guards against an empty set.
       if (identical(cl_rv$vif_decision, "drop") && length(flagged) > 0) {
         return(launch_run(preds, flagged, vif_threshold = chk$vif_threshold %||% 10))
       }
@@ -912,9 +855,7 @@ classif_server <- function(id, data_reactive, vars_metadata_reactive, spatial_re
     shiny::observeEvent(input$clvif_keep, {
       shiny::removeModal(); cl_rv$vif_decision <- "keep"; try_run()
     })
-    # Method is part of the reset list because the VIF threshold is
-    # method-aware (5 for RF, 10 otherwise): switching learners can change
-    # which covariates are flagged, so a stale decision must not carry over.
+    # Method resets the decision too: the VIF threshold is method-aware.
     shiny::observeEvent(list(input$predictors, input$scope_loc, input$scope_poly, input$method), {
       cl_rv$vif_decision <- NULL
     }, ignoreInit = TRUE)
@@ -925,9 +866,8 @@ classif_server <- function(id, data_reactive, vars_metadata_reactive, spatial_re
         shiny::showNotification("No covariates left after the collinearity drop.", type = "error"); return()
       }
 
-      # Resolve the spatial scope FIRST: the target (including quantile/Jenks
-      # bin breaks) and all CV metrics are then defined on the scoped points
-      # only, and the prediction boundary comes from the same resolution.
+      # Resolve the scope FIRST: the target (and its bin breaks), the CV
+      # metrics and the prediction boundary are all defined on the scoped points.
       sc <- current_scope()
       if (is.null(sc) || sc$n_scoped < 1) {
         shiny::showNotification("No data points fall inside the selected spatial scope.", type = "error"); return()
@@ -1018,11 +958,9 @@ classif_server <- function(id, data_reactive, vars_metadata_reactive, spatial_re
       make_surf <- isTRUE(input$make_surface)
       target_mode_v <- input$target_mode
       target_source_v <- if (identical(target_mode_v, "bin")) input$target_num else input$target_cat
-      # CRS the run is computed in. classif_resolve_scope falls back to the
-      # data's UTM zone when the Target Mapping CRS is geographic (degrees
-      # would collapse the metre-based prediction grid to a single cell), and
-      # the boundary WKT above is already expressed in it - so the pipeline,
-      # the rasters, and the point overlay must all use the same CRS.
+      # The CRS the run is computed in (classif_resolve_scope() swaps a
+      # geographic target for the data's UTM zone); the boundary WKT, the
+      # pipeline, the rasters and the point overlay all use it.
       proj_v <- if (!is.null(sc$working_crs)) sc$working_crs else sp$proj_crs
       # Projected training coordinates (small: n x 2) for the optional
       # sample-point overlay on the prediction maps.
@@ -1030,10 +968,8 @@ classif_server <- function(id, data_reactive, vars_metadata_reactive, spatial_re
         p_sf <- sf::st_as_sf(sdf[, c(sp$x, sp$y)], coords = c(sp$x, sp$y), crs = sp$src_crs)
         sf::st_coordinates(sf::st_transform(p_sf, proj_v))
       }, error = function(e) NULL)
-      # Boundary type, buffer, and grid resolution come from the module's own
-      # Spatial Scope controls: fixed resolution mode uses the manual slider
-      # value; auto lets the pipeline derive a resolution from the boundary
-      # area.
+      # Boundary, buffer and grid from the module's own Spatial Scope controls
+      # (NULL resolution = Auto, derived from the boundary area).
       bs_v <- bset()
       gres <- if (identical(bs_v$res_mode, "fixed")) bs_v$res else NULL
       strict_scope_v <- strict_scope_active()
@@ -1044,20 +980,15 @@ classif_server <- function(id, data_reactive, vars_metadata_reactive, spatial_re
       progress_dir_ship <- cls_progress_dir
       session_id_ship <- cls_session_id
       cancel_file_ship <- cls_cancel_file
-      # The trained workflow is persisted by the worker (same machine) into a
-      # main-session tempfile, keeping the promise payload lean; the Download
-      # Model button copies this file.
+      # The worker saves the trained workflow to a main-session tempfile, which
+      # Download Model copies; the promise payload stays lean.
       model_path_ship <- tempfile(pattern = "classif_model_", fileext = ".rds")
       model_paths <<- c(model_paths, model_path_ship)
 
-      # Lean worker payload: bundle every input into ONE plain-data list built
-      # here in the main session, then ship only that. run_classification_pipeline
-      # is resolved on the worker by the in-worker source() below, so `globals`
-      # is pinned explicitly and future does NOT auto-detect it (auto-detection
-      # would walk and serialise the whole classif_helpers call graph on the
-      # main thread at dispatch, and needlessly ship a function the worker
-      # re-defines anyway). Mirrors the interpolation pipeline's plain-data
-      # hand-off (server_execution.R): no rv$/input$/reactives cross the boundary.
+      # ONE plain-data list built here and shipped with `globals` pinned:
+      # run_classification_pipeline() is defined in the worker by its own
+      # source(), so auto-detection would only walk and serialise the helper
+      # graph on the main thread. No rv$/input$/reactives cross the boundary.
       run_args <- list(
         proj_root = proj_root_ship,
         pipeline = list(
@@ -1087,26 +1018,17 @@ classif_server <- function(id, data_reactive, vars_metadata_reactive, spatial_re
           library(recipes); library(parsnip); library(workflows); library(tune)
           library(rsample); library(dials); library(yardstick); library(spatialsample); library(hardhat)
         })
-        # Source helpers in-worker so the full internal closure is present,
-        # matching the interpolation pipeline's worker convention (T12).
+        # Source the helpers in-worker, as the interpolation workers do.
         source("spatial_helpers.R"); source("classif_helpers.R")
-        # A pool worker is reused across features, and a task whose cluster
-        # teardown did not complete leaves it on a plan pointing at a cluster
-        # nobody owns any more. tune decides whether to tune in parallel by
-        # reading future::nbrOfWorkers() (tune:::get_future_workers), which
-        # answers with that dead cluster's size, so the grid would be
-        # dispatched to its sockets. Start from a known state, as the run,
-        # optimizer and governing-factors bodies do.
+        # Reset the shared pool worker's plan: tune reads nbrOfWorkers()
+        # (tune:::get_future_workers), which a leaked plan answers with a dead
+        # cluster's size.
         future::plan(future::sequential)
         do.call(run_classification_pipeline, run_args$pipeline)
       }, globals = list(run_args = run_args),
-         # seed = TRUE gives the worker a proper parallel-safe L'Ecuyer stream.
-         # Without it future warns "UNEXPECTED VALUE: ... generated random
-         # numbers without specifying argument 'seed'" on every run, because a
-         # fresh PSOCK process otherwise seeds itself from process entropy.
-         # Reproducibility is unaffected either way: every RNG-consuming step in
-         # the pipeline runs inside .classif_with_seed()'s two-sided sandbox,
-         # which sets its own seed and restores the caller's state.
+         # seed = TRUE: a parallel-safe L'Ecuyer stream (avoids future's RNG
+         # warning); every RNG step runs under .classif_with_seed(), so results
+         # are reproducible either way.
          seed = TRUE) %...>% (function(res) {
         run_in_flight <<- FALSE
         if (session_closed) {
@@ -1139,9 +1061,8 @@ classif_server <- function(id, data_reactive, vars_metadata_reactive, spatial_re
         } else {
           shiny::showNotification("Classification completed.", type = "message")
         }
-        # Grid-geometry caveat raised by classif_build_grid: the strict boundary
-        # was narrower than half a cell diagonal, so isolated samples have no
-        # mapped cell. The maps are valid, the support is just under-resolved.
+        # Grid caveat (classif_build_grid()): a strict boundary narrower than
+        # half a cell diagonal leaves isolated samples without a mapped cell.
         if (!is.null(res$grid_warning)) {
           shiny::showNotification(res$grid_warning, type = "warning", duration = 15)
         }
@@ -1153,10 +1074,8 @@ classif_server <- function(id, data_reactive, vars_metadata_reactive, spatial_re
         if (length(fb_notes)) {
           shiny::showNotification(paste(fb_notes, collapse = " "), type = "warning", duration = 15)
         }
-        # CV-design caveat, not a failure: some fold's training rows held none of
-        # these classes, so that fold could not predict them and their held-out
-        # samples score as misses by construction. Worth naming — it depresses
-        # the reported accuracy/kappa for exactly those classes.
+        # CV-design caveat: folds with no training samples of some classes score
+        # those classes' held-out samples as misses (pessimistic for them).
         gaps <- res$class_gaps
         if (!is.null(gaps) && nrow(gaps) > 0) {
           gl <- sort(unique(as.character(gaps$class)))
@@ -1200,11 +1119,8 @@ classif_server <- function(id, data_reactive, vars_metadata_reactive, spatial_re
       if (!is.null(cl_rv$res) && !is.null(cl_rv$res$surface_nn)) "yes" else "no"
     })
     shiny::outputOptions(output, "has_nn", suspendWhenHidden = FALSE)
-    # TRUE when the maps should show the spatial 1-NN surface. Falls back to the
-    # model whenever this run carries no 1-NN surface (binned target, or a
-    # stale selection from a previous categorical run).
-    # A covariate-free run (nn_only) has no model surface at all: its
-    # surface_df IS the 1-NN surface.
+    # TRUE when the maps show the spatial 1-NN surface; falls back to the model
+    # when the run has none. A covariate-free run's surface_df IS the 1-NN one.
     show_nn <- shiny::reactive({
       isTRUE(cl_rv$res$nn_only) ||
         (identical(input$map_source, "nn") && !is.null(cl_rv$res$surface_nn))
@@ -1218,11 +1134,8 @@ classif_server <- function(id, data_reactive, vars_metadata_reactive, spatial_re
       if (!is.null(p) && file.exists(p)) "yes" else "no"
     })
     shiny::outputOptions(output, "has_model", suspendWhenHidden = FALSE)
-    # Dropdown driving which results table is shown (metrics first). Choices
-    # adapt to the run: "Performance by area" only when the scope yields real
-    # groups (redundant when everything collapses to one "All data" group),
-    # "Class area coverage" only when a surface was predicted. The previous
-    # selection is kept across runs when still available.
+    # Results-table dropdown: "Performance by area" only with real groups,
+    # "Class area coverage" only with a surface; the selection persists.
     output$table_select_ui <- shiny::renderUI({
       res <- cl_rv$res; shiny::req(res)
       ch <- c("Model performance metrics" = "metrics",
@@ -1247,11 +1160,8 @@ classif_server <- function(id, data_reactive, vars_metadata_reactive, spatial_re
     })
 
     # ── Rasters (built in main session; terra pointers can't cross workers) ───
-    # Plain cached reactive: rasterisation runs once per completed run (and per
-    # confidence-threshold change). Never write reactiveValues from inside this
-    # reactive — the write self-invalidates it and sends every map through an
-    # extra recalculating wave. The threshold is debounced so dragging the
-    # slider does not re-rasterise at every intermediate value.
+    # Rasterised once per run and per (debounced) confidence threshold. Never
+    # write reactiveValues inside this reactive: it would self-invalidate.
     conf_thresh_d <- shiny::debounce(
       shiny::reactive(input$conf_thresh %||% 0), 400)
     get_rasters <- shiny::reactive({
@@ -1269,11 +1179,9 @@ classif_server <- function(id, data_reactive, vars_metadata_reactive, spatial_re
         conf_threshold = conf_thresh_d())
     })
 
-    # Coverage/selective-accuracy readout for the abstention threshold, derived
-    # from the pooled out-of-fold predictions: what fraction of validation
-    # points would remain classified at this threshold, and how accurate the
-    # retained subset is (selective risk; the retained accuracy should sit at
-    # or above the overall one).
+    # Abstention readout from the pooled out-of-fold predictions: the share of
+    # validation points retained at this threshold and their accuracy
+    # (selective risk).
     output$abstain_note <- shiny::renderUI({
       res <- cl_rv$res; shiny::req(res, res$cv_predictions)
       if (show_nn()) return(NULL)
@@ -1380,13 +1288,8 @@ classif_server <- function(id, data_reactive, vars_metadata_reactive, spatial_re
                           function(v) get_var_label(v, vars_metadata_reactive()), character(1))
       imp$label <- factor(imp$label, levels = rev(imp$label))
       imp$txt <- ifelse(is.na(imp$share_pct), "", sprintf("%.1f%%", imp$share_pct))
-      # Name the evaluation design on the axis: an out-of-fold and a
-      # training-row importance are different quantities and must never be
-      # compared as if they were the same number. Kept short because ggplot
-      # centres the axis title on the PANEL, not the device: long covariate
-      # labels push the panel right, and the full phrase ran off the edge of
-      # this half-width card. "Importance" is already the panel heading, so the
-      # axis only has to name the quantity and the design.
+      # The axis names the evaluation design (out-of-fold and training-row
+      # importances are different quantities), kept short to fit the card.
       x_lab <- if (identical(imp$evaluated_on[1], "out-of-fold")) {
         "Permutation Δ log-loss (out-of-fold)"
       } else {
@@ -1446,10 +1349,8 @@ classif_server <- function(id, data_reactive, vars_metadata_reactive, spatial_re
       # that area holds, so two rows' F1 scores need not share a denominator.
       colnames(gm) <- c("Area", "n", "Overall accuracy", "Cohen's kappa",
                         "Balanced accuracy", "F1 score (macro)", "Classes (K)")
-      # paging = FALSE on every table here: dom = 't' shows no paging
-      # controls, so rows past the first page were unreachable on screen and
-      # missing from a copy. Values stay numeric and are formatted for display
-      # at four significant digits, so a small one never reads as zero.
+      # paging = FALSE on every table here: dom = 't' shows no paging controls.
+      # Values stay numeric, displayed at four significant digits.
       DT::datatable(gm, options = list(
         dom = 't', paging = FALSE, scrollX = TRUE,
         columnDefs = sig_render_defs(gm, c("Overall accuracy", "Cohen's kappa",
@@ -1479,9 +1380,8 @@ classif_server <- function(id, data_reactive, vars_metadata_reactive, spatial_re
     output$perclass_table <- DT::renderDataTable({
       res <- cl_rv$res; shiny::req(res)
       pc <- res$per_class
-      # A class the model never assigned has an undefined user accuracy. Saying
-      # so is the finding; a blank cell reads as a failed computation, and the
-      # macro averages score that class 0 rather than dropping it.
+      # A class never assigned has an undefined user accuracy: say so (the
+      # macro averages score it 0).
       user_acc <- ifelse(pc$n_pred == 0, "no predictions", format_sig(pc$user_accuracy))
       out <- data.frame(Class = pc$class, n = pc$n, `n predicted` = pc$n_pred,
                         `Producer acc. (recall)` = as.numeric(pc$producer_accuracy),
@@ -1497,8 +1397,7 @@ classif_server <- function(id, data_reactive, vars_metadata_reactive, spatial_re
     # table honours the live confidence threshold, including the Unclassified row.
     output$area_table <- DT::renderDataTable({
       rl <- get_rasters()
-      # Unrounded and formatted for display: two fixed decimals printed a class
-      # smaller than 0.005 ha - a few cells on a fine grid - as 0.
+      # Unrounded, formatted for display (a few fine cells would print as 0).
       a <- rl$area
       colnames(a) <- c("Class", "Cells", "Area (ha)")
       DT::datatable(a, options = list(dom = 't', paging = FALSE, scrollX = TRUE,
@@ -1523,9 +1422,8 @@ classif_server <- function(id, data_reactive, vars_metadata_reactive, spatial_re
         drop_part <- paste0(drop_part, sprintf(" Inside CV each fold's screen reran on its training rows: %s.",
           paste(sprintf("%s dropped in %d of %d folds", names(cnt), as.integer(cnt), res$n_folds), collapse = "; ")))
       }
-      # A class the model never assigns is the one thing a headline accuracy
-      # hides completely, and it is exactly the case the macro averages now
-      # score 0 instead of dropping. Name it here, once.
+      # A class the model never assigns is hidden by the headline accuracy (the
+      # macro averages score it 0): name it once.
       pc <- res$per_class
       if (!is.null(pc) && any(pc$n_pred == 0)) {
         gone <- pc$class[pc$n_pred == 0]
@@ -1554,11 +1452,9 @@ classif_server <- function(id, data_reactive, vars_metadata_reactive, spatial_re
     })
 
     # ── Maps ─────────────────────────────────────────────────────────────────
-    # Shared ggplot builders (screen renders + styled PNG export). maxcell
-    # caps DISPLAY resampling only; exports of the data rasters stay full-res.
-    # `export = TRUE` switches to publication styling: larger text throughout
-    # and projected coordinate axes (grid numbers, Easting/Northing in metres)
-    # via coord_sf(datum = <raster CRS>); on-screen maps stay minimal.
+    # Shared ggplot builders (screen + styled PNG). maxcell caps DISPLAY
+    # resampling only. `export = TRUE` adds publication styling: larger text
+    # and projected Easting/Northing axes via coord_sf(datum = <raster CRS>).
     map_theme <- function(export = FALSE) {
       if (!export) {
         return(ggplot2::theme_minimal(base_size = 12) +
@@ -1584,13 +1480,10 @@ classif_server <- function(id, data_reactive, vars_metadata_reactive, spatial_re
         ggplot2::labs(x = "Easting (m)", y = "Northing (m)")
       )
     }
-    # Page width (in) of an export map at 300 dpi. Its Northing labels are
-    # horizontal, so they are wider than the single text line rotated ones
-    # would take; the page widens by exactly that difference, which keeps the
-    # map panel at the size it has on a 9 x 7 in page and moves the axis left
-    # into the added width. Measured on the device ggsave draws on (ragg when
-    # installed, else png; the new page starts showtext), so these are the
-    # widths the saved layout uses. Call inside with_showtext_dpi(300).
+    # Page width (in) of an export map at 300 dpi: horizontal Northing labels
+    # are wider than rotated ones would be, so the page widens by the
+    # difference and the map panel keeps its 9 x 7 in size. Measured on
+    # ggsave's device (ragg, else png); call inside with_showtext_dpi(300).
     export_map_width <- function(p) {
       axis_in <- function(q) {
         gt <- ggplot2::ggplotGrob(q)
@@ -1618,19 +1511,15 @@ classif_server <- function(id, data_reactive, vars_metadata_reactive, spatial_re
       pal <- stats::setNames(viridisLite::viridis(sum(levs_r != "Unclassified")),
                              levs_r[levs_r != "Unclassified"])
       if ("Unclassified" %in% levs_r) pal <- c(pal, c(Unclassified = "#9E9E9E"))
-      # drop = TRUE: ggplot2 (>= 3.5) draws a key glyph only for values the
-      # LAYER actually holds, so a class absent from the surface kept its label
-      # in the legend but lost its colour swatch - an empty box that reads as a
-      # rendering fault. The legend now lists the classes that are on the map;
-      # the full inventory ("k of n classes mapped") moves to the subtitle.
+      # drop = TRUE: ggplot2 >= 3.5 draws no swatch for a class absent from
+      # the layer, so the legend lists the mapped classes; the subtitle gives
+      # "k of n classes mapped".
       ggplot2::scale_fill_manual(name = "Class", values = pal,
                                  na.value = "transparent", drop = TRUE,
                                  na.translate = FALSE)
     }
-    # "k of n classes mapped | largest: X (p% of cells)". A surface where one
-    # class swallows the whole grid is the expected output of a model with no
-    # skill (compare the accuracy/kappa against the no-information rate), not a
-    # broken map - this line says so on the map itself.
+    # "k of n classes mapped | largest: X (p% of cells)": one class covering
+    # the grid is what a skill-less model produces, not a broken map.
     class_map_subtitle <- function(rl) {
       a <- rl$area
       if (is.null(a) || nrow(a) == 0) return(NULL)
@@ -1641,14 +1530,10 @@ classif_server <- function(id, data_reactive, vars_metadata_reactive, spatial_re
       sprintf("%d of %d classes mapped | largest: %s (%.1f%% of cells)",
               nrow(present), nrow(a), top$class, 100 * top$n_cells / total)
     }
-    # Colour-scale limits for the two continuous maps. Both quantities are
-    # bounded on [0, 1] and the default keeps that absolute scale, so the four
-    # per-class probability maps stay comparable with each other and entropy
-    # stays comparable between runs. A narrow field (a weak model's
-    # probabilities sit near 1/k, its entropy near 1) then renders as one flat
-    # colour, which is honest but unreadable - "Stretch colour scale" rescales
-    # to the observed range instead. The range is stated in the subtitle either
-    # way so a flat map can never be mistaken for a constant surface.
+    # Colour limits for the two [0, 1] maps: absolute by default, so the
+    # per-class probability maps and entropy stay comparable; "Stretch colour
+    # scale" uses the observed range instead (a weak model renders flat). The
+    # range is always stated in the subtitle.
     value_scale <- function(r) {
       v <- terra::values(r, mat = FALSE)
       v <- v[is.finite(v)]
@@ -1667,9 +1552,8 @@ classif_server <- function(id, data_reactive, vars_metadata_reactive, spatial_re
       xy <- as.data.frame(res$train_xy)
       sf::st_as_sf(xy, coords = c("X", "Y"), crs = res$crs_wkt)
     })
-    # Optional display layers (all default off): sample-point overlay and
-    # ggspatial scale bar + north arrow. Purely cosmetic - they never touch
-    # the data rasters, only what is drawn on screen / exported as PNG.
+    # Optional display layers (default off): sample points, scale bar and
+    # north arrow. Cosmetic; the data rasters are untouched.
     map_overlays <- function(export = FALSE) {
       layers <- list()
       if (isTRUE(input$map_points)) {
@@ -1689,9 +1573,8 @@ classif_server <- function(id, data_reactive, vars_metadata_reactive, spatial_re
       }
       layers
     }
-    # maxcell caps geom_spatraster's display resampling: 5e4 for the small
-    # in-grid panels, 4e5 for the expanded modal view and the styled PNG
-    # export (higher resolution).
+    # maxcell caps display resampling: 5e4 for the in-grid panels, 4e5 for the
+    # expanded view and the styled PNG.
     plot_class_map <- function(rl, export = FALSE, maxcell = 5e4) {
       ttl <- if (identical(rl$source, "nn")) "Spatial 1-NN Class (no covariates)" else "Predicted Class"
       ggplot2::ggplot() +
@@ -1749,9 +1632,7 @@ classif_server <- function(id, data_reactive, vars_metadata_reactive, spatial_re
     shiny::observeEvent(input$entropy_map_click,  show_map_modal("entropy"))
     shiny::observeEvent(input$prob_expand_btn,    show_map_modal("prob"))
     shiny::observeEvent(input$prob_map_click,     show_map_modal("prob"))
-    # The importance panel is the one a reader most often wants enlarged (long
-    # covariate labels, many bars), and after the card rework it would
-    # otherwise be the only one of the four without an expand control.
+    # The importance panel gets an expand view too (long labels, many bars).
     shiny::observeEvent(input$importance_expand_btn, {
       shiny::showModal(shiny::modalDialog(
         title = "Expanded View: Feature Importance", size = "l", easyClose = TRUE,
@@ -1774,9 +1655,8 @@ classif_server <- function(id, data_reactive, vars_metadata_reactive, spatial_re
         })
     }, res = 96)
 
-    # Cached plots keyed on the run token (+ selected class for the prob map):
-    # resizes and revisits serve the cached bitmap instead of a multi-second
-    # geom_spatraster re-render, so the maps stop flickering "for no reason".
+    # Cached plots keyed on the run token (+ class for the prob map), so
+    # resizes and revisits skip the slow geom_spatraster re-render.
     output$class_map <- shiny::renderCachedPlot({
       plot_class_map(get_rasters())
     }, cacheKeyExpr = {
@@ -1811,12 +1691,10 @@ classif_server <- function(id, data_reactive, vars_metadata_reactive, spatial_re
     })
 
     # ── Downloads ────────────────────────────────────────────────────────────
-    # Float rasters (probability, entropy) are data layers and stay
-    # full-precision FLT4S - GIS software styles those on load. The class
-    # raster ships as a zip (below), because its class names live in a sidecar.
-    # The run's MONOLITH_* tags, shared by every classification GeoTIFF. The
-    # variable is the user's column (as its display label), not the fixed
-    # internal name the analysis frame gives the target.
+    # Float rasters (probability, entropy) stay full-precision FLT4S; the class
+    # raster ships as a zip with its sidecar. classif_geotiff_tags(): the run's
+    # MONOLITH_* tags, naming the user's column (display label), not the
+    # internal target name.
     classif_geotiff_tags <- function(res, product) {
       c(MONOLITH_VARIABLE = get_var_label(res$target_source %||% res$target_col %||% "",
                                           vars_metadata_reactive()),
@@ -1845,11 +1723,9 @@ classif_server <- function(id, data_reactive, vars_metadata_reactive, spatial_re
         }
       )
     }
-    # The class GeoTIFF is INT1U, so GDAL embeds its colour table (viridis,
-    # matching the on-screen map) in the file, but the category NAMES go into a
-    # .tif.aux.xml sidecar: a bare .tif opens as unlabelled integer codes.
-    # classif_class_download_files() writes the tif, the sidecar and a legend
-    # CSV; the zip keeps them together.
+    # The class GeoTIFF (INT1U) embeds its viridis colour table, but the class
+    # NAMES live in a .tif.aux.xml sidecar; classif_class_download_files()
+    # writes the tif, sidecar and legend CSV, zipped together.
     output$dl_class <- shiny::downloadHandler(
       filename = function() if (show_nn()) "predicted_class_nn.zip" else "predicted_class.zip",
       content = function(file) {
@@ -1894,9 +1770,7 @@ classif_server <- function(id, data_reactive, vars_metadata_reactive, spatial_re
         if (!nn) maps <- c(maps, list(plot_entropy_map(rl, export = TRUE, maxcell = 4e5),
                                       plot_prob_map(rl, lyr, cls, export = TRUE, maxcell = 4e5)))
         with_showtext_dpi(300, {
-          # The maps share one raster grid, hence one set of Northing labels:
-          # the class map sizes every page, measured at the on-screen cell cap
-          # (resampling keeps the grid's extent, so the axes are the same).
+          # The maps share one grid, so the class map sizes every page.
           width <- export_map_width(plot_class_map(rl, export = TRUE))
           for (i in seq_along(maps)) {
             ggplot2::ggsave(paths[i], maps[[i]], width = width, height = 7, dpi = 300)
@@ -1906,8 +1780,7 @@ classif_server <- function(id, data_reactive, vars_metadata_reactive, spatial_re
       }
     )
 
-    # Trained model bundle: the worker saved the fitted workflow + metadata to
-    # a tempfile in run_classification_pipeline; this simply hands the file over.
+    # Trained model bundle, saved by the worker; this hands the file over.
     output$dl_model <- shiny::downloadHandler(
       filename = function() {
         res <- cl_rv$res
@@ -1922,10 +1795,8 @@ classif_server <- function(id, data_reactive, vars_metadata_reactive, spatial_re
       }
     )
 
-    # The whole file is assembled by classif_metrics_csv_df() (classif_helpers.R)
-    # so its contents are testable; this handler only supplies the two things
-    # that live in the session - the rasterised area table (which honours the
-    # live confidence threshold) and its surface label - and writes the result.
+    # The CSV is assembled by classif_metrics_csv_df() (testable); this handler
+    # adds the session's area table (live threshold) and its surface label.
     output$dl_report <- shiny::downloadHandler(
       filename = function() "classification_metrics.csv",
       content = function(file) {

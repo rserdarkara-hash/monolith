@@ -4,14 +4,11 @@
 # Sourced via ui_helpers.R.
 
 
-#' Sidebar panel of an engine parameter (IDW power, TPS smoothing) with a
-#' scope switch: one setting for all localities (`global_ui`), or a value per
-#' locality and target (`manual_ui` plus an Apply button). The switch keeps
-#' the input id `<id>_mode` with values "auto" / "manual", which the server
-#' reads. `label` names the parameter in the switch's title. Under Per locality
-#' the `<id>_m_note` output says which localities have a value of their own and
-#' what the others run with: the All localities setting, whose control is
-#' hidden there.
+#' Sidebar panel of an engine parameter (IDW power, TPS smoothing) with a scope
+#' switch `<id>_mode`: "auto" (one setting for all localities, `global_ui`) or
+#' "manual" (a value per locality and target, `manual_ui` plus Apply). Under
+#' Per locality, `<id>_m_note` says which localities have their own value and
+#' what the others run with.
 tuning_ui <- function(id, label, global_ui, manual_ui, manual_btn_label,
                       top_extra_ui = NULL, extra_ui = NULL) {
   content <- tagList(
@@ -41,12 +38,9 @@ tuning_ui <- function(id, label, global_ui, manual_ui, manual_btn_label,
   div(class = "mn-subsection", content)
 }
 
-#' A button that reveals a panel of related controls.
-#'
-#' Built on <details> deliberately: the panel's contents stay in the DOM while
-#' it is closed, so every Shiny input and output inside binds and updates
-#' exactly as it would in an always-visible toolbar. A widget that mounted its
-#' content lazily would leave those outputs suspended until first opened.
+#' A button that reveals a panel of related controls. Built on <details> so the
+#' contents stay in the DOM while closed and every input and output inside
+#' binds and updates as in a visible toolbar.
 mn_popover <- function(label, ..., icon_tag = NULL, align = c("left", "right"),
                        width = "300px") {
   align <- match.arg(align)
@@ -57,49 +51,28 @@ mn_popover <- function(label, ..., icon_tag = NULL, align = c("left", "right"),
   )
 }
 
-# North-arrow markup for leaflet addControl(). A constant string, so it belongs
-# with the UI builders: both the Map Viewer overlay observer (where it is
-# toggled by show_north) and the Data Setup mini-map (where it is permanent)
-# draw the same arrow.
+# North-arrow markup for leaflet addControl(), shared by the Map Viewer overlay
+# and the Data Setup mini-map.
 map_north_arrow_html <- function() {
   "<div style='text-align: center; color: white; font-family: Arial, sans-serif; pointer-events: none;'><div style='font-size: 16px; font-weight: bold; line-height: 1; margin-bottom: 4px; text-shadow: 1px 1px 2px black;'>N</div><svg width='30' height='30' viewBox='0 0 24 24' style='filter: drop-shadow(1px 1px 2px black);'><polygon points='12,2 7,22 12,17 17,22' fill='#e74c3c' stroke='white' stroke-width='1.5'/><polygon points='12,2 7,22 12,17' fill='#c0392b' stroke='white' stroke-width='1.5'/></svg></div>"
 }
 
-# Wraps a leaflet legend title so the stylesheet can hide it. addLegend() drops
-# the title into the control as raw HTML, which is what makes the span reach the
-# DOM; the Overlays "Variable Label in Legend" checkbox then stamps
-# body.mn-show-legend-title to reveal it. Done in CSS rather than by rebuilding
-# the legend so the toggle costs nothing on maps that carry a raster image per
-# locality, and so every legend on screen answers it in the same frame.
+# Wraps a leaflet legend title so CSS can hide it: the Overlays "Variable Label
+# in Legend" checkbox toggles body.mn-show-legend-title, so no legend is
+# rebuilt and every legend answers in the same frame.
 legend_var_title <- function(txt) {
   htmltools::HTML(paste0(
     "<span class=\"mn-legend-title\">", htmltools::htmlEscape(txt), "</span>"
   ))
 }
 
-# Stylesheet for the leaflet measure control (the Map Viewer ruler), injected
-# once in ui_main.R's head. Kept here as a function rather than inline so the
-# exact shipped rules can be loaded into a test page and measured.
-#
-# Every selector carries an element qualifier (`a.leaflet-control-measure-...`)
-# or an extra class so it outranks the plugin's own stylesheet on SPECIFICITY
-# rather than on order: that stylesheet arrives as an htmlwidget dependency and
-# is therefore appended to <head> AFTER this block, so an equal-specificity
-# rule here would lose.
-#
-# Two things are corrected. (1) Geometry: the plugin ships a 36px button (44px
-# once Leaflet flags the container `leaflet-touch`, which it does on any
-# touch-capable machine), while every other button on the map (the drawing
-# toolbar) is 26/30px inside leaflet's standard `leaflet-bar` chrome. The
-# control is restyled to that same chrome so the map has one button size
-# whatever corner a control sits in. (2) Footprint: the
-# expanded panel is trimmed to what the map cannot already tell the user. The
-# heading repeats the button's own tooltip, and the last-point latitude and
-# longitude readout answers a question the ruler is not being asked; both are
-# hidden, and Cancel / Finish keep their icons without the label text. The
-# plugin's own images are used, so the icons stay the x and the tick it draws
-# elsewhere. Their accessible names are set in add_map_ruler(), because hidden
-# text is not an accessible name.
+# Stylesheet for the leaflet measure control (Map Viewer ruler), injected once
+# in ui_main.R's head; a function so tests can load the exact rules. Selectors
+# carry an extra qualifier to outrank the plugin's stylesheet, which is
+# appended to <head> later. It restyles the button to leaflet's standard
+# 26/30px `leaflet-bar` chrome (the plugin ships 36/44px) and trims the panel:
+# the heading and the last-point coordinates are hidden, and Cancel/Finish
+# keep only their icons (accessible names are set in add_map_ruler()).
 map_ruler_css <- function() {
   paste(
     ".leaflet-control-measure { border-radius: 4px; box-shadow: 0 1px 5px rgba(0,0,0,0.65); }",
@@ -120,21 +93,12 @@ map_ruler_css <- function() {
   )
 }
 
-# Contents of a measurement's own popup, built from measure_path_metrics()
-# (global_utils.R), which recomputes the drawn shape in R. It REPLACES the text
-# the measure plugin writes: the plugin computes on a sphere (radius 6371000 m)
-# and knows nothing about the Target Mapping CRS, so leaving its text beside
-# this one would put two answers to the same question on the screen. Attaching
-# the authoritative numbers to the shape itself is also what keeps them true
-# when an older measurement is clicked again - a single box in the corner can
-# only ever describe the most recent one.
-#
-# The markup deliberately reuses the plugin's own classes (h3, p, ul.tasks,
-# a.zoomto, a.deletemarkup): its stylesheet is already loaded, so the popup
-# keeps the familiar heading rule, spacing and task icons for free. The
-# mono-ruler-* classes are the handles add_map_ruler() wires the two links to.
-# NULL for a shape with fewer than two vertices - there is nothing to report,
-# and the plugin's single-point coordinate popup stands.
+# A measurement's own popup, from measure_path_metrics(). It REPLACES the
+# plugin's text (spherical, CRS-unaware) and lives on the shape, so an older
+# measurement keeps its own figures. Reuses the plugin's classes (h3, p,
+# ul.tasks, a.zoomto, a.deletemarkup) for styling; mono-ruler-* are the
+# handles add_map_ruler() wires. NULL below two vertices (the plugin's
+# coordinate popup stands).
 map_ruler_popup_html <- function(res) {
   if (is.null(res) || !is.list(res) || (res$n_points %||% 0) < 2) return(NULL)
 
@@ -152,11 +116,9 @@ map_ruler_popup_html <- function(res) {
     lines <- paste0(lines, row(paste0(len_lab, ", ", proj_lab),
                                format_measure_length(res$length_projected)))
   }
-  # Area is shown on both bases for the same reason lengths are: terra's
-  # ellipsoidal area (the app's own convention, shared with the class-zone
-  # export) and the planimetric area in the analysis CRS differ by the
-  # projection's area distortion, and reporting only one invites the reader to
-  # assume a GIS would re-measure the same figure.
+  # Area on both bases, as for lengths: ellipsoidal (terra, as the class-zone
+  # export) and planimetric in the analysis CRS differ by the projection's
+  # area distortion.
   if (!is.null(res$area_geodesic) && is.finite(res$area_geodesic)) {
     lines <- paste0(lines, row("Area, ground (WGS84)", format_measure_area(res$area_geodesic)))
     if (!is.null(res$area_projected) && is.finite(res$area_projected)) {
@@ -164,10 +126,8 @@ map_ruler_popup_html <- function(res) {
                                  format_measure_area(res$area_projected)))
     }
   }
-  # measure_path_metrics() withholds the area of a ring that crosses itself:
-  # both engines integrate around the ring in traversal order, so a figure
-  # eight's oppositely-traversed lobes return their DIFFERENCE rather than the
-  # area drawn. Say so, or the missing rows read as a failure of the tool.
+  # A self-crossing ring's area is withheld (its lobes cancel); say so, or the
+  # missing rows read as a failure.
   if (crossed) {
     lines <- paste0(lines,
       "<p style='color:var(--mn-warn);'>Area not reported: the path crosses itself. ",
@@ -187,19 +147,12 @@ map_ruler_popup_html <- function(res) {
   )
 }
 
-# Header row (title + PNG download + expand-to-modal buttons) above a plot
-# output. Server side pairs with register_sci_plot() in server_map_viewer.R, which
-# wires <id>_expand (modal) and <id>_dl (300-dpi PNG) to the same builder
-# closure that feeds the in-page cached plot.
-#
-# Callers inside a Shiny module pass ids that are ALREADY namespaced, so
-# `expand_id` can be given explicitly instead of being derived from `id`
-# (the Classification Suite keeps its historical button ids that way).
-# `download = FALSE` drops the PNG button for panels with no export handler,
-# `info` takes an icon/tooltip tag shown next to the title, `click_id` wires
-# the plot's click input, and `head_min_height` reserves a constant header
-# height so a title that wraps cannot push its plot out of line with the
-# card beside it.
+# Header row (title, PNG download, expand-to-modal) above a plot output; the
+# server side is register_sci_plot() (server_map_viewer.R), which wires
+# <id>_expand and <id>_dl (300-dpi PNG) to the plot's builder. Module callers
+# pass namespaced ids and may set `expand_id` explicitly. `download = FALSE`
+# drops the PNG button, `info` adds a tooltip icon, `click_id` wires the plot
+# click, and `head_min_height` keeps wrapped titles from misaligning cards.
 sci_plot_card <- function(id, title, height = "350px",
                           expand_id = paste0(id, "_expand"),
                           download = TRUE, info = NULL, click_id = NULL,
@@ -228,17 +181,9 @@ sci_plot_card <- function(id, title, height = "350px",
 }
 
 # ── Copy-a-table-to-the-clipboard ────────────────────────────────────────────
-# The counterpart to the PNG button on every figure card: a result table is
-# read off the DOM and put on the clipboard in two flavours at once - an HTML
-# table (Word, Google Docs, and the flavour Excel prefers, so it lands in
-# cells) and tab-separated plain text (anything else, and Excel's own fallback
-# parser). Reading the rendered table rather than round-tripping to the server
-# means the clipboard carries exactly what the reader is looking at, including
-# the displayed rounding, and costs no reactive traffic.
-#
-# NO colour literals in the emitted markup: the payload is a document bound for
-# another application, not app chrome, and the receiving program supplies its
-# own palette. border="1" plus <th> is all the formatting Word and Excel need.
+# Reads the rendered table off the DOM (exactly what is displayed, no server
+# round trip) and copies it as HTML (Word, Excel cells) and tab-separated text.
+# No colour literals: the payload is for another application, not app chrome.
 copy_table_js <- function() {
   "
 window.mnTableRows = function (targetId) {
@@ -414,11 +359,9 @@ window.mnCopyTable = function (targetId, btn) {
 "
 }
 
-# Icon-only copy control. Deliberately NOT an action-button: nothing about a
-# clipboard copy needs the server, so it stays a plain <button> and sends no
-# input. `target_id` is the DOM id of the element that CONTAINS the table -
-# for a DT output that is the output id itself, already namespaced inside a
-# module.
+# Icon-only copy control: a plain <button> (no server input). `target_id` is
+# the DOM id of the element containing the table (a DT output's own,
+# namespaced id).
 copy_table_btn <- function(target_id, label = NULL) {
   what <- if (is.character(label) && length(label) == 1 && nzchar(label)) {
     paste0(label, " table")
@@ -510,13 +453,9 @@ build_rk_trend_ui <- function(lm_sum, dt_id, raw_id) {
     sci_table(dt_id, label = "regression coefficients"),
     tags$p(style = "font-size: 0.72em; opacity: 0.65; margin-top: 6px;",
            "Signif. codes: *** p ≤ 0.001, ** p ≤ 0.01, * p ≤ 0.05, . p ≤ 0.1. CI = 95% confidence interval (t-based)."),
-    # The trend is fitted by OLS and its residuals are then kriged BECAUSE they
-    # are spatially autocorrelated - precisely the condition under which OLS
-    # standard errors are biased low. Reporting the coefficients without this
-    # note invites over-declaring covariate significance. The estimates
-    # themselves are unbiased; only their uncertainty is understated. The fix
-    # is the caveat, not a different estimator: a GLS refit under the fitted
-    # residual variogram would be Universal Kriging, a different method.
+    # OLS standard errors are biased low exactly when the residuals are
+    # spatially autocorrelated, the reason RK kriges them; the estimates stay
+    # unbiased. A caveat, not a GLS refit (that would be Universal Kriging).
     tags$p(style = "font-size: 0.72em; opacity: 0.65; margin-top: 2px;",
            tags$b("Read the p-values with care: "),
            "these standard errors, t statistics, confidence intervals and the F test ",
@@ -622,9 +561,8 @@ render_docs_drawer <- function() {
   div(
     id = "docs_drawer",
     class = "docs-drawer",
-    # The drawer itself does not scroll: its scrollbar landed flush against the
-    # page's own and the two read as one doubled bar. The content scrolls in an
-    # inner element instead, which keeps its bar clear of the window edge.
+    # The content scrolls in an inner element so its scrollbar stays clear of
+    # the page's own.
     div(
       id = "docs_drawer_body",
       class = "docs-drawer-body",
@@ -647,9 +585,8 @@ render_docs_drawer <- function() {
         )
       )
     ),
-    # Floating navigation over the open drawer: jump to top/end or step
-    # between sections (headings of the active guide tab). Plain buttons on
-    # purpose - all behaviour is client-side, no server round-trip.
+    # Floating navigation over the open drawer (top/end, previous/next
+    # heading), all client-side.
     div(class = "docs-nav-fab",
         tags$button(type = "button", id = "docs_nav_top", class = "btn",
                     title = "Back to top", "aria-label" = "Back to top", icon("angle-double-up")),
@@ -724,10 +661,7 @@ info_tooltip <- function(id, text) {
     `data-toggle` = "popover",
     `data-placement` = "auto",
     `data-trigger` = "focus",
-    # Attached to <body>, not to the icon's own parent. Left where Bootstrap
-    # puts it by default, the panel would inherit its parent's clipping, and
-    # every tooltip in the sidebar (a scroll container) and in the map/plot
-    # cards would be cut off at the container edge.
+    # Attached to <body>, so sidebar and card containers cannot clip the panel.
     `data-container` = "body",
     `data-content` = content_html,
     `data-html` = "true",
@@ -742,10 +676,9 @@ info_tooltip <- function(id, text) {
   )
 }
 
-# What the Total (Combined) view of a variogram card draws, and why its lag
-# axis ends where it does (pooled_within_variogram, spatial_vgm.R). Built at
-# call time: spatial_vgm.R, which defines POOLED_VGM_MIN_N, is sourced after
-# the UI helpers.
+# What the Total (Combined) view of a variogram card draws and why its lag axis
+# ends where it does. Built at call time: POOLED_VGM_MIN_N (spatial_vgm.R) is
+# sourced after the UI helpers.
 pooled_vgm_note <- function() {
   paste0("Total (Combined) pools the point pairs inside each locality; no pair joins two localities. ",
          "The lag axis stops at the half-diagonal of the smallest locality with at least ", POOLED_VGM_MIN_N,
@@ -757,22 +690,19 @@ pooled_vgm_note <- function() {
 pooled_vgm_info <- function(id) info_tooltip(id, pooled_vgm_note())
 
 
-# One-line statement of the sample a matrix-valued panel was estimated on.
-# Correlation matrices, partial correlations, PCA and the collinearity screen
-# all use the rows complete across EVERY selected variable, so their n is not
-# the row count of the active selection and has to be said out loud.
+# One-line statement of the sample a matrix-valued panel used: rows complete
+# across EVERY selected variable (correlations, partial correlations, PCA, the
+# collinearity screen), so n differs from the selection's row count.
 complete_case_note <- function(n_used, n_total) {
   dropped <- max(0, n_total - n_used)
   sprintf("Complete cases: n = %d of %d rows%s.", n_used, n_total,
           if (dropped > 0) sprintf(" (%d dropped for missing values)", dropped) else "")
 }
 
-# Browser twin of format_sig() (ui_formatting.R): four significant digits,
-# "0" for zero, a whole number exactly, every integer digit from 1000 up,
-# scientific notation below 1e-4. Numeric
-# table columns keep their numbers (DataTables still sorts on them) and only
-# their DISPLAY is formatted, through sig_render_defs(). Mounted once in
-# ui_main.R's head. Non-numeric cells pass through unchanged.
+# Browser twin of format_sig() (ui_formatting.R), mounted once in ui_main.R's
+# head and applied through sig_render_defs(): numeric columns keep their
+# numbers for sorting and only the display is formatted. Non-numeric cells
+# pass through.
 format_sig_js <- function() {
   "
 window.mnFormatSig = function (d) {
@@ -788,11 +718,9 @@ window.mnFormatSig = function (d) {
 "
 }
 
-# The three markers a result table can print in place of a number, and the
-# sentence each one needs. A cell can carry the short form; the explanation
-# belongs under the table, and every table that can show a marker must show
-# the SAME sentence for it - which is why the texts live here and not at the
-# render sites. table_footnote() emits only the ones a table actually used.
+# The three markers a result table can print in place of a number, and the one
+# sentence each needs under every table that uses it; table_footnote() emits
+# only the markers a table used.
 METRIC_MARKER_NOTES <- c(
   scale = paste("n/a¹ Not reported for targets whose observed values span zero.",
                 "Mean- and percentage-normalised errors have no interpretation on a",
@@ -828,22 +756,16 @@ sig_render_defs <- function(df, cols, rownames = FALSE) {
               "}")))
 }
 
-# Shared DT wrapper for the compact summary tables on the Scientific Analysis
-# tab, matching the Classification Suite look (dom = 't'). Paging is disabled
-# because dom = 't' hides the paging controls: with the default pageLength,
-# rows beyond the first page would be silently unreachable in variable-length
-# tables (e.g. per-locality variogram parameters). `scroll_x = FALSE` for a
-# table that fits the narrowest supported viewport: its header and body stay
-# one table, so they cannot drift apart. `signif_cols` names the numeric
-# columns displayed at four significant digits.
+# Shared DT wrapper for the compact Scientific Analysis tables (dom = 't', as
+# in the Classification Suite). Paging is off because dom = 't' hides its
+# controls, which would strand rows past the first page. `scroll_x = FALSE`
+# keeps header and body one table for tables that fit the narrowest viewport.
+# `signif_cols` are shown at four significant digits.
 sci_dt <- function(df, escape = TRUE, header_tooltips = NULL, scroll_x = TRUE,
                    signif_cols = NULL) {
-  # Never return NULL: DT's htmlwidgets binding reads `data.lazyRender` BEFORE
-  # its own `data === null` branch, so a NULL payload arriving at a table that
-  # is currently hidden (this tab renders eagerly, suspendWhenHidden = FALSE)
-  # throws a TypeError inside Shiny's async message dispatch and the remaining
-  # outputs in that batch are never applied. An explicit empty state is also a
-  # better answer for the reader than a blank slot.
+  # Never return NULL: DT's binding reads `data.lazyRender` before its null
+  # check, so a NULL sent to a hidden table throws inside Shiny's message
+  # dispatch and drops the rest of the batch.
   if (is.null(df)) {
     df <- data.frame(Status = "No data for this selection.")
     header_tooltips <- NULL

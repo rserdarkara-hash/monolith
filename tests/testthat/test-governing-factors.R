@@ -1,4 +1,5 @@
-# test-governing-factors.R — tests for compute_governing_factors.
+# compute_governing_factors() (spatial_pipeline.R) and the Governing Factors
+# summary table.
 
 test_that("compute_governing_factors returns NULL for fewer than 10 rows", {
   df <- make_test_df(9)
@@ -7,9 +8,7 @@ test_that("compute_governing_factors returns NULL for fewer than 10 rows", {
 })
 
 test_that("the returned list is the shape the Governing Factors panel reads", {
-  # One fit, read seven ways. Each component used to have a block of its own
-  # making the same call, which paid for eight forests plus eight DALEX passes
-  # to assert eight classes.
+  # One fit, read every way the panel reads it.
   df <- make_test_df(30)
   predictors <- c("b", "c", "d")
   result <- compute_governing_factors(df, "a", predictors)
@@ -110,9 +109,8 @@ test_that("SHAP dependence contributions have per-observation magnitude (T14)", 
   result <- compute_governing_factors(df, "a", "b")
   # With a single predictor every SHAP permutation attributes the full
   # deviation to that variable, so contribution(i) = f(x_i) - mean(f(X))
-  # exactly. The pre-T14 bug summed the aggregated B = 0 row PLUS all
-  # permutation rows returned by predict_parts, inflating this by B + 1
-  # (26x with the DALEX default B = 25) — this assertion pins the magnitude.
+  # exactly; adding predict_parts' aggregate row to its B permutation rows
+  # would inflate it B + 1 times.
   preds <- predict(result$model, newdata = df)
   set.seed(12345)
   sample_idx <- sample(seq_len(nrow(df)), min(100, nrow(df)))
@@ -254,8 +252,8 @@ test_that("the governing-factors table keeps full precision and names its units"
   expect_true(all(df$Unit[-1] == GOV_IMPORTANCE_UNIT))
   expect_equal(length(unique(df$Unit)), 2)
 
-  # Importances are the values the model reported, in decreasing order, at full
-  # precision - the display formats them (they used to print as raw doubles).
+  # Importances are the model's values, in decreasing order, at full precision;
+  # formatting is the display's job.
   expect_equal(df$Value[-1], sort(res$importance$mse_increase, decreasing = TRUE))
   expect_equal(df[[1]][-1], c("som", "sand", "clay"))
   expect_equal(format_sig(df$Value[2]), "2.001")

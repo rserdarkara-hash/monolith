@@ -1,6 +1,6 @@
-# server_map_interactions.R (sourced with local = TRUE inside server) - draw
-# handlers, locality assignment, regional params, popups, point styling and
-# header status chips.
+# server_map_interactions.R (chunk C, sourced with local = TRUE inside server):
+# draw handlers, locality assignment, regional params, popups, point styling
+# and header status chips.
   handle_new_feature <- function(feature) {
     rv$drawn_feature <- feature
     showModal(modalDialog(
@@ -140,9 +140,8 @@
     )
   })
 
-  # Resolve each popup variable to its data column once per point set, so
-  # generate_popup does a plain lookup per point instead of up to four regex
-  # searches per variable per point. Returns a popup_fn(data_row) closure.
+  # Resolve each popup variable to its column once per point set; returns a
+  # popup_fn(data_row) closure doing plain lookups.
   make_popup_fn <- function(cnames) {
     resolve_col <- function(key) {
       key <- as.character(key)
@@ -192,9 +191,8 @@
     
     html_content <- "<div style='max-height: 300px; overflow-y: auto; font-family: sans-serif; min-width: 200px;'>"
     html_content <- paste0(html_content, "<h4>Point Details</h4>")
-    # The mapped variable's own column. A point with no value there is drawn
-    # hollow (add_styled_points); say so here rather than showing an empty row
-    # the reader has to interpret.
+    # A point without a value in the mapped column is drawn hollow; say so
+    # rather than show an empty row.
     if ("v" %in% names_in_row && all(is.na(data_row[["v"]]))) {
       html_content <- paste0(html_content,
         "<p style='margin: 0 0 6px 0; color: var(--mn-text-3); font-style: italic;'>",
@@ -398,12 +396,9 @@
   # screen, not the live sidebar method/value-type selections.
   output$disp_method <- reactive({ rv$disp$method %||% "" })
   outputOptions(output, "disp_method", suspendWhenHidden = FALSE)
-  # Which diagnostic panel family Tab 3 shows. Post-run this is the displayed
-  # run's method. Pre-run (no committed rv$disp) the variogram fitting tools
-  # (OPTIMIZE ALL VARIOGRAMS / Manual tuning) operate on the plain data
-  # variograms, so any kriging-family selection maps to the OK "Data
-  # Structure" panels - otherwise the fallback placeholder would cover the
-  # advertised auto-fit -> manual pre-run tuning workflow.
+  # Which diagnostic panel family Tab 3 shows: the displayed run's method, or
+  # before any run the OK "Data Structure" panels for any kriging selection,
+  # where pre-run auto-fit and manual tuning work.
   output$sci_diag_method <- reactive({
     d_method <- rv$disp$method %||% ""
     if (nzchar(d_method)) return(d_method)
@@ -411,12 +406,9 @@
   })
   outputOptions(output, "sci_diag_method", suspendWhenHidden = FALSE)
 
-  # Variogram tuning context. TRUE while the sidebar is working on kriging
-  # variograms: Manual mode, or an OPTIMIZE ALL VARIOGRAMS that no later run
-  # has superseded. The Scientific Analysis tab must then show the curves those
-  # controls move whatever engine produced the run currently on screen -
-  # without this, switching to Manual after an IDW/TPS run left the variogram
-  # panels hidden behind the "Diagnostic Mode Active" placeholder.
+  # Variogram tuning context: TRUE in Manual mode or after an OPTIMIZE ALL
+  # VARIOGRAMS that no later run superseded. The tab then shows the curves
+  # those controls move, whatever engine produced the run on screen.
   sci_vgm_tuning <- reactive({
     (input$method %||% "") %in% c("OK", "RK", "RFK", "CK") &&
       (identical(input$vgm_mode, "manual") || isTRUE(rv$vgm_preview))
@@ -424,10 +416,8 @@
   output$sci_vgm_tuning <- reactive({ if (isTRUE(sci_vgm_tuning())) "yes" else "no" })
   outputOptions(output, "sci_vgm_tuning", suspendWhenHidden = FALSE)
 
-  # The displayed run came from an engine that fits no variogram, so while
-  # tuning is active its result cards describe a model that has nothing to do
-  # with what the tab is showing. They are held back, not discarded: the run's
-  # maps and exports are still valid and stay where they are.
+  # While tuning, the cards of a run from a variogram-free engine are held back
+  # (not discarded): they describe a model unrelated to the curves shown.
   sci_stale_run <- reactive({
     isTRUE(sci_vgm_tuning()) && (rv$disp$method %||% "") %in% c("IDW", "TPS")
   })
@@ -438,10 +428,8 @@
     shinyjs::toggleClass("sci_stack", "vgm-first", condition = isTRUE(sci_vgm_tuning()))
     shinyjs::toggleClass("sci_stack", "vgm-only", condition = isTRUE(sci_stale_run()))
   })
-  # Whether the displayed run has a prediction side at all: either it was
-  # configured for one, or it produced one. Kept as a reactive because the
-  # Scientific Analysis tab's directional-variogram switch (chunk I) needs the
-  # same answer in R, and two copies of this rule would drift.
+  # Whether the displayed run has a prediction side (configured or produced);
+  # shared with chunk I's directional-variogram switch so the rule exists once.
   disp_has_pred <- reactive({
     d <- rv$disp
     active <- !is.null(d) && (isTRUE(d$comp_mode) || !identical(d$value_type, "actual"))

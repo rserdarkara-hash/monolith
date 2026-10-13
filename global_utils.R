@@ -1,8 +1,7 @@
-# global_utils.R - static configuration and pure (non-reactive) functions
-# extracted from the top of monolith.R. Must stay free of reactive code:
-# validate_crs() in particular is called outside reactive blocks so a bad CRS
-# is caught before the st_transform pipeline.
-# Stored tuning values describe one column and effective subset.
+# global_utils.R - static configuration and pure (non-reactive) functions.
+
+# Stored tuning values carry the column/subset key they were tuned for; a
+# "manual" source survives a later "run" stamp.
 stamp_vgm <- function(obj, key, source) {
   if (is.null(obj)) return(NULL)
   if (identical(source, "run") && identical(attr(obj, "monolith_source"), "manual")) source <- "manual"
@@ -43,32 +42,26 @@ next_trigger <- function(x) {
   if (is.numeric(x) && length(x) == 1 && is.finite(x)) as.integer(x) + 1L else 1L
 }
 
-# The identity of one cross-validation experiment: the target column (with its
-# data subset), the rows that were scored, and the partition they were scored
-# under. Two runs on the same uploaded table whose ids agree cross-validated
-# exactly the same samples in exactly the same folds, so their metrics are
-# comparable; different ids say they are not. Row and fold ids are written as
-# integers because as.character(1e5) is "1e+05". The hash is .hash8()
-# (spatial_pipeline.R).
+# Identity of one CV experiment: target key, scored rows and their folds.
+# Equal ids mean the same samples in the same folds, so metrics are comparable.
+# Ids are written as integers (as.character(1e5) is "1e+05").
 cv_population_id <- function(key, row_id, folds) {
   if (is.null(row_id) || !length(row_id)) return(NA_character_)
   ints <- function(x) paste(as.character(as.integer(x)), collapse = ",")
   .hash8(paste(as.character(key %||% ""), ints(row_id), ints(folds), sep = "|"))
 }
 
-# The pooled ("Total (Combined)") row's identity: the same hash over the
-# localities' own ids, sorted, so the order the localities happened to finish
-# in cannot change it.
+# The pooled ("Total (Combined)") id: the same hash over the localities' sorted
+# ids, so their finishing order cannot change it.
 cv_pooled_population_id <- function(ids) {
   ids <- ids[!vapply(ids, function(x) is.null(x) || length(x) != 1 || is.na(x), logical(1))]
   if (!length(ids)) return(NA_character_)
   .hash8(paste(sort(paste0(names(ids), ":", unlist(ids, use.names = FALSE))), collapse = "|"))
 }
 
-# The main-session record of one surface's cross-validation population: what
-# the worker reported, plus the experiment id and the one-phrase statement of
-# what the folds re-estimated. IDW and TPS score their own point set with their
-# own folds and carry no population name, so they get no id either.
+# Main-session record of a surface's CV population: the worker's report plus
+# the experiment id and what the folds re-estimated. IDW and TPS carry no
+# population name, so no id.
 stamp_cv_population <- function(cv_info, key) {
   if (is.null(cv_info)) return(NULL)
   named <- !is.na(cv_info$population %||% NA_character_)
@@ -76,8 +69,7 @@ stamp_cv_population <- function(cv_info, key) {
   cv_info$refit <- if (!named) NA_character_
     else if (!is.null(cv_info$conditional)) paste0("conditional on ", cv_info$conditional)
     else "per fold"
-  # The row and fold vectors exist to build the id; keeping them would park one
-  # integer vector per sample per locality in reactiveValues for no reader.
+  # The row and fold vectors exist only to build the id; not kept in rv.
   cv_info$row_id <- NULL
   cv_info$folds1 <- NULL
   cv_info
@@ -103,18 +95,12 @@ pooled_cv_population <- function(infos) {
 
 #' Which locality and surface a progress/warning status file belongs to.
 #'
-#' `.write_status_file()` (spatial_pipeline.R) names its files
-#' `<kind>_<session>_<key>_<act|pre>.txt`, where the key is safe_key() of the
-#' locality: made of `[A-Za-z0-9_]`, so it can contain underscores and the
-#' trailing `_act` / `_pre` is what separates the two fields. ONE parser, used
-#' by both the live progress poller and the completion handler that persists
-#' the warnings into the run log - a warning must not be readable in one place
-#' and lost in the other.
+#' Files are `<kind>_<session>_<key>_<act|pre>.txt` (`.write_status_file()`);
+#' safe_key() keys may contain underscores, so the trailing `_act`/`_pre`
+#' separates the fields. The one parser for the live poller and the run log.
 #'
-#' Returns `list(key, locality, target, suffix, label)`. `locality` is the
-#' name among the run's `localities` whose key the file carries, and the key
-#' itself when none does. `target` is NA and `suffix` empty for a file with no
-#' recognised surface suffix.
+#' Returns `list(key, locality, target, suffix, label)`; `locality` falls back
+#' to the key, and `target` is NA for a file without a surface suffix.
 status_file_parts <- function(path, session_id, kind = "warn", localities = NULL) {
   base <- basename(as.character(path)[1])
   stem <- sub(paste0("^", kind, "_", session_id, "_"), "", sub("\\.txt$", "", base))
@@ -128,16 +114,9 @@ status_file_parts <- function(path, session_id, kind = "warn", localities = NULL
        label = paste0(locality, suffix))
 }
 
-#' Location of the run-duration history log: the user's per-application data
-#' directory, overridable through `monolith_history_dir` - the same option
-#' pattern `update_progress_file` uses for `monolith_progress_dir`, so tests can
-#' redirect it without touching the real one. A path relative to the process
-#' working directory would land wherever the app happened to be started from
-#' (silently unwritable on a read-only deployment, and shared between
-#' concurrent sessions).
-#' Concurrent multi-session appends are unsynchronised (no file lock): the
-#' primary deployment is a single-user desktop app, and a torn append only costs
-#' one ETA record, so the risk is tolerated rather than engineered away.
+#' Run-duration history log in the user's data directory; tests redirect it via
+#' option `monolith_history_dir`. Appends are not locked: a torn append costs
+#' one ETA record in a single-user desktop app.
 monolith_history_file <- function() {
   file.path(
     getOption("monolith_history_dir", tools::R_user_dir("monolith", which = "data")),
@@ -145,18 +124,13 @@ monolith_history_file <- function() {
   )
 }
 
-#' Evaluate a plot write with showtext's assumed resolution matched to the device.
+#' Evaluate a plot write with showtext's dpi matched to the device.
 #'
-#' `showtext_auto()` (global.R) routes every glyph through showtext, which sizes
-#' text against its OWN dpi option (96) instead of the resolution of the device
-#' being drawn on. On a 300-dpi export that renders every point size at 96/300 of
-#' the value the theme asked for, and raising the DPI shrinks the text further.
-#' Setting the option to the device's resolution for the duration of a write
-#' makes a point mean a point on the page, at any DPI.
+#' showtext sizes text against its own dpi option (96), so a 300-dpi export
+#' would otherwise render text at 96/300 of the requested size.
 #'
-#' @param dpi Resolution of the device `expr` draws on. Vector devices (pdf, svg)
-#'   are defined in points, so they take 72.
-#' @param expr Write to perform; evaluated once, with the option in force.
+#' @param dpi Device resolution; vector devices (pdf, svg) take 72.
+#' @param expr Write to perform, evaluated once with the option in force.
 with_showtext_dpi <- function(dpi, expr) {
   if (!requireNamespace("showtext", quietly = TRUE)) return(force(expr))
   old <- showtext::showtext_opts(dpi = dpi)
@@ -165,11 +139,9 @@ with_showtext_dpi <- function(dpi, expr) {
 }
 
 estimate_run_duration <- function(loc_sample_counts, method, comp_mode, cores) {
-  # History aware run duration estimator
   history_file <- monolith_history_file()
 
-  # Base multipliers for different methods. Note: RFK, RK, and CK are calibrated 
-  # from real measurements; OK/IDW/TPS multipliers are still unverified guesses.
+  # Method multipliers: RFK/RK/CK are measured, OK/IDW/TPS unverified guesses.
   method_mult <- switch(method,
     "RFK" = 1.0,
     "RK"  = 1.0,
@@ -180,7 +152,6 @@ estimate_run_duration <- function(loc_sample_counts, method, comp_mode, cores) {
     1.0
   )
   
-  # Ensure valid sample counts
   loc_sample_counts[is.na(loc_sample_counts) | loc_sample_counts == 0] <- 50
   
   n_locs <- length(loc_sample_counts)
@@ -190,22 +161,18 @@ estimate_run_duration <- function(loc_sample_counts, method, comp_mode, cores) {
   history_data <- NULL
   
   if (file.exists(history_file)) {
-    # The whole block is the tryCatch VALUE. A handler running
-    # `history_data <- NULL` would assign into its own frame and leave the
-    # outer binding untouched, so a throw partway through the filters (e.g. an
-    # old run_history.csv with no cores_used column) would leave the
-    # partially-filtered frame in place for the ETA lm.
+    # The whole block is the tryCatch value: a handler assigning NULL would only
+    # touch its own frame and leave a partially filtered table behind.
     history_data <- tryCatch({
       hd <- read.csv(history_file)
       hd <- hd[hd$method == method, ]
 
-      # Try filtering by comp_mode if enough data
+      # Narrow to the same comp_mode, then core count, while >= 5 records remain.
       comp_history <- hd[hd$comp_mode == comp_mode, ]
       if (nrow(comp_history) >= 5) {
         hd <- comp_history
       }
 
-      # Try filtering by cores if enough data
       cores_history <- hd[hd$cores_used == cores, ]
       if (nrow(cores_history) >= 5) {
         hd <- cores_history
@@ -227,8 +194,8 @@ estimate_run_duration <- function(loc_sample_counts, method, comp_mode, cores) {
   }
   
   if (!is_history_based) {
-    # Cold-start formula based on real data points (79->150s, 355->510s for 2 models)
-    # Scaled down to 70% per user request
+    # Cold-start formula from two measurements (79 -> 150 s, 355 -> 510 s for
+    # two models), scaled to 70%.
     base_sec <- pmax(5.25, 16.45 + 0.455 * loc_sample_counts)
     model_time <- base_sec * method_mult
     loc_times_sec <- model_time * (if (comp_mode) 2 else 1)
@@ -236,11 +203,11 @@ estimate_run_duration <- function(loc_sample_counts, method, comp_mode, cores) {
   
   max_single_loc_time <- max(loc_times_sec)
   
-  # Distributed efficiency fix (0.75 effective cores)
+  # 0.75 effective cores per core.
   eff_factor <- 0.75
   distributed_time <- sum(loc_times_sec) / max(1, (cores * eff_factor))
   
-  # Apply fudge factor (more uncertainty for cold start)
+  # Wider margin for the cold-start formula.
   fudge_mult <- if (is_history_based) 1.25 else 1.4
   est_time_sec <- max(max_single_loc_time, distributed_time) * fudge_mult
   
@@ -249,9 +216,7 @@ estimate_run_duration <- function(loc_sample_counts, method, comp_mode, cores) {
   } else {
     paste(round(est_time_sec / 60, 1), "minutes")
   }
-  # Without at least 5 matching history records the number comes from the
-  # cold-start formula (two hardware measurements, and unverified multipliers
-  # for OK/IDW/TPS), so it is labelled as the guess it is.
+  # Fewer than 5 matching history records: the cold-start formula is a guess.
   if (!is_history_based) est_time_str <- paste0(est_time_str, " (rough estimate)")
 
   estimate_text <- paste0("~", n_models, " locality model(s), ~", est_time_str, " estimated.\n\n* Note: This time estimate is calibrated based on a below-average hardware benchmark. Actual execution time on modern or cloud hardware will likely be significantly faster.")
@@ -267,12 +232,11 @@ estimate_run_duration <- function(loc_sample_counts, method, comp_mode, cores) {
 }
 
 
-# crs_metre_factor() lives in spatial_pipeline.R so PSOCK workers and this
-# main-session gate share the unit rule. Unknown units do not block.
-
-#' @param require_metric Enforce the metric-axis rule above. Reserved for the
-#'   Target Mapping CRS: the Input Data CRS may use any unit, because the
-#'   pipeline projects out of it before measuring anything.
+#' Validate a CRS for sf and terra; NULL (with a notification) when invalid.
+#'
+#' @param require_metric Refuse a CRS whose axis unit is positively not the
+#'   metre (crs_metre_factor(), spatial_pipeline.R). For the Target Mapping CRS
+#'   only: the pipeline projects out of the Input Data CRS before measuring.
 validate_crs <- function(crs_selection, error_prefix = "Invalid CRS provided", duration = NULL,
                          require_metric = FALSE) {
   tryCatch({
@@ -282,9 +246,8 @@ validate_crs <- function(crs_selection, error_prefix = "Invalid CRS provided", d
     t_obj <- terra::crs(crs_selection)
     if (t_obj == "") stop("Invalid CRS for terra.")
 
-    # Only a POSITIVELY non-metric unit blocks. A geographic CRS passes (the
-    # pipeline projects it to a metric UTM zone itself) and so does one whose
-    # unit could not be resolved.
+    # Only a positively non-metric unit blocks: a geographic CRS is projected to
+    # UTM by the pipeline, and an unresolved unit passes.
     if (isTRUE(require_metric)) {
       f <- crs_metre_factor(c_obj)
       if (!is.na(f) && abs(f - 1) > 1e-9) {
@@ -301,19 +264,12 @@ validate_crs <- function(crs_selection, error_prefix = "Invalid CRS provided", d
 }
 
 # ── Input-CRS identification ───────────────────────────────────────────────
-# Bare projected coordinates do NOT carry their own CRS: UTM zones are
-# mathematically congruent, so one easting/northing pair is equally valid in
-# all 60 zones and reproduces the same latitude with a longitude shifted 6
-# degrees per zone. Monolith therefore identifies the input CRS only when the
-# file carries the evidence to prove it, and never assumes a zone.
+# Bare projected coordinates do not carry their CRS (one easting/northing is
+# valid in all 60 UTM zones), so the input CRS is identified only from evidence
+# in the file, never assumed.
 
-#' Normalise a free-typed CRS entry.
-#'
-#' Both CRS selectors accept typed input, but `sf::st_crs("32633")` errors - a
-#' bare EPSG number is rejected while `EPSG:32633` parses. Promote a bare 4-6
-#' digit code to `EPSG:<n>`; leave everything else (PROJ strings, WKT,
-#' already-prefixed codes, unparseable text) untouched for the caller's own
-#' validation to judge.
+#' Normalise a typed CRS entry: a bare 4-6 digit code becomes `EPSG:<n>`
+#' (sf::st_crs("32633") errors); anything else is returned untouched.
 normalize_crs_input <- function(x) {
   if (is.null(x) || length(x) != 1) return(x)
   if (is.numeric(x) && is.finite(x)) return(paste0("EPSG:", format(x, scientific = FALSE)))
@@ -374,25 +330,16 @@ crs_zone_candidates <- function(lon) {
 
 #' Collapse candidates that put the data in the same place.
 #'
-#' A WGS84 UTM zone and its ETRS89 twin are the same grid to under a metre, so
-#' they score identically and would defeat every discrimination test by tying
-#' with each other. Group candidates by the position they produce, keep the
-#' first of each group (candidate order encodes preference) and report the rest
-#' as equivalent.
+#' A WGS84 UTM zone and its ETRS89 twin agree to under a metre and would tie in
+#' every test, so candidates are grouped by landing position; the first of each
+#' group (candidate order = preference) is kept, the rest reported equivalent.
 #'
-#' @param tol_m Two candidates belong to one group when their positions are
-#'   within this distance. Tier 2A keeps the default 5 m: it asks whether a
-#'   candidate is PROVEN by evidence in the file, so only genuinely identical
-#'   grids may tie there. The Tier-3 shortlist passes a much wider tolerance -
-#'   see crs_candidate_shortlist().
-#' @param pos Optional data.frame(lon, lat) holding each candidate's already
-#'   computed landing position, so a caller that has transformed the data once
-#'   need not pay for a second pass. It must be what crs_landing_position()
-#'   produces (the mean point read in each candidate CRS), or the grouping is
-#'   not the same grouping.
-#' @return list(cands, equivalent, spread_m); `spread_m` is how far the
-#'   furthest member of a group sits from its representative, so a caller can
-#'   state the size of the difference it is folding away.
+#' @param tol_m Grouping distance. Tier 2A keeps 5 m (only identical grids tie);
+#'   the Tier-3 shortlist passes a wider one (crs_candidate_shortlist()).
+#' @param pos Optional data.frame(lon, lat) of positions already computed by
+#'   crs_landing_position(), sparing a second transform.
+#' @return list(cands, equivalent, spread_m); `spread_m` is the furthest
+#'   member's distance from its representative.
 crs_collapse_candidates <- function(x, y, cands, tol_m = 5, pos = NULL) {
   as_pt <- function(lon, lat) {
     if (!isTRUE(is.finite(lon)) || !isTRUE(is.finite(lat))) return(NULL)
@@ -445,11 +392,9 @@ crs_candidate_residual <- function(x, y, lon, lat, epsg) {
 
 #' Tier 2A - identify the input CRS from a companion lon/lat pair.
 #'
-#' Accepts only when one candidate reproduces the geographic pair to within
-#' `tol_m` AND every candidate that does not is at least `ratio` times worse.
-#' Datum siblings that both agree to within `tol_m` (WGS84 vs ETRS89 UTM: the
-#' same grid) are not a contradiction - the first in candidate order wins and
-#' the rest are reported as equivalent.
+#' Accepted only when one candidate reproduces the pair within `tol_m` and every
+#' other is at least `ratio` times worse; same-grid datum siblings (WGS84 vs
+#' ETRS89 UTM) are folded as equivalent first.
 #'
 #' @return list(crs, epsg, residual, runner_up, equivalent, evidence) or NULL.
 identify_crs_from_lonlat <- function(x, y, lon, lat, tol_m = 5, ratio = 100) {
@@ -478,10 +423,9 @@ identify_crs_from_lonlat <- function(x, y, lon, lat, tol_m = 5, ratio = 100) {
 
 #' Tier 2B - identify the input CRS from an uploaded boundary shapefile.
 #'
-#' Read under the right CRS the points drop inside (or beside) the boundary; a
-#' wrong zone throws them hundreds of kilometres away, so the fraction
-#' contained is decisive. The boundary's own CRS is tested first, which also
-#' covers national grids the zone family does not contain.
+#' Under the right CRS the points fall inside (or beside) the boundary; a wrong
+#' zone throws them hundreds of kilometres away. The boundary's own CRS is
+#' tried first, which covers national grids outside the zone family.
 #'
 #' @return list(crs, epsg, fraction, evidence) or NULL.
 identify_crs_from_boundary <- function(x, y, boundary, min_frac = 0.5) {
@@ -530,9 +474,7 @@ identify_crs_from_boundary <- function(x, y, boundary, min_frac = 0.5) {
   if (is.null(geom) || length(geom) == 0) return(NULL)
   bb <- sf::st_bbox(geom)
   pad <- 0.05 * sqrt((bb[["xmax"]] - bb[["xmin"]])^2 + (bb[["ymax"]] - bb[["ymin"]])^2)
-  # With s2 on, st_buffer() on longitude/latitude takes metres, so a pad in
-  # degrees would be a buffer of a fraction of a millimetre. Use the diagonal's
-  # geodesic length there.
+  # With s2 on, st_buffer() on lon/lat takes metres: pad by the geodesic diagonal.
   if (isTRUE(sf::sf_use_s2())) {
     corners <- sf::st_sfc(sf::st_point(c(bb[["xmin"]], bb[["ymin"]])),
                           sf::st_point(c(bb[["xmax"]], bb[["ymax"]])), crs = 4326)
@@ -545,17 +487,13 @@ identify_crs_from_boundary <- function(x, y, boundary, min_frac = 0.5) {
 }
 
 #' Identify the input CRS of a mapped X/Y pair, with a message naming the
-#' evidence. Tier 1 (degree ranges) -> EPSG:4326 only with evidence that the
-#' numbers ARE degrees; Tier 2A (companion lon/lat) and Tier 2B (boundary .prj)
-#' -> the proven code; otherwise NULL, i.e. no guess.
+#' evidence: Tier 1 (degree ranges) -> EPSG:4326, Tier 2A (companion lon/lat)
+#' and Tier 2B (boundary) -> the proven code, otherwise NULL (no guess).
 #'
-#' Degree ranges alone prove nothing: a local metre grid (a field plot with
-#' X = 2-48, Y = 5-60) fits |X| <= 180, |Y| <= 90 too, and read as degrees it
-#' becomes a domain thousands of kilometres wide. So a degree-range pair is
-#' identified only when the columns are NAMED as longitude/latitude or an
-#' uploaded boundary contains at least half the points read as degrees (the
-#' Tier 2B acceptance fraction). Otherwise the result
-#' carries `crs = NULL` and `suggest = "EPSG:4326"`, and the caller asks.
+#' Degree ranges alone prove nothing (a local metre grid fits them too), so
+#' Tier 1 also needs lon/lat column names or a boundary containing at least
+#' half the points read as degrees; otherwise it returns `crs = NULL` with
+#' `suggest = "EPSG:4326"` and the caller asks.
 identify_input_crs <- function(df, x_col, y_col, boundary = NULL) {
   if (is.null(df) || !all(c(x_col, y_col) %in% colnames(df))) return(NULL)
   x <- suppressWarnings(as.numeric(as.character(df[[x_col]])))
@@ -616,11 +554,8 @@ identify_input_crs <- function(df, x_col, y_col, boundary = NULL) {
   NULL
 }
 
-#' Where the mapped coordinates currently land, in degrees, under `crs`.
-#'
-#' The single readout that makes a wrong zone obvious: a soil scientist working
-#' at Potsdam recognises 13°E instantly, and 24.958°E as nonsense. Returns NULL
-#' when the position cannot be computed.
+#' Where the mapped coordinates land, in degrees, under `crs` (NULL when not
+#' computable): the readout that makes a wrong zone obvious.
 crs_landing_position <- function(df, x_col, y_col, crs) {
   if (is.null(crs) || !nzchar(as.character(crs)[1])) return(NULL)
   if (is.null(df) || is.null(x_col) || is.null(y_col)) return(NULL)
@@ -642,25 +577,14 @@ crs_landing_position <- function(df, x_col, y_col, crs) {
   }, error = function(e) NULL))
 }
 
-# ── EPSG registry: candidates by declared area of use ──────────────────────
-# Tier 3. With no evidence in the file the zone cannot be recovered, but the
-# question can be turned around: instead of asking the user for an EPSG code,
-# ask WHERE the data is and report which projections put it there.
-#
-# The catalogue is already on disk. sf ships PROJ's own SQLite database
-# (proj.db), whose projected_crs / usage / extent tables carry every EPSG
-# projected CRS together with the lat/lon box it declares as its area of use -
-# 5,330 non-deprecated codes, worldwide, read in about 0.3 s and cached for
-# the session. No curated national-grid list, no region assumptions.
-#
-# Order matters for speed. Transforming all 5,330 candidates takes over two
-# minutes, so the containment test is applied FIRST, as plain arithmetic on
-# the query result (0 ms, and anywhere on earth it leaves 15-50 candidates);
-# only the survivors are transformed.
-#
-# Every entry point returns NULL instead of erroring. A build without proj.db
-# or without RSQLite falls back to crs_zone_candidates(), so Tier 3 degrades
-# to the four-code zone family rather than breaking the upload.
+# ── EPSG registry: candidates by declared area of use (Tier 3) ─────────────
+# With no evidence in the file, the user says WHERE the data is and the app
+# lists the projections that put it there. The catalogue is PROJ's proj.db
+# (shipped with sf): ~5,330 non-deprecated EPSG projected CRSs with their
+# area-of-use boxes, read once (~0.3 s) and cached. Containment runs first as
+# plain arithmetic, so only the 15-50 survivors are transformed. Entry points
+# return NULL instead of erroring; without proj.db or RSQLite the shortlist
+# falls back to crs_zone_candidates().
 
 .crs_registry_cache <- new.env(parent = emptyenv())
 
@@ -693,12 +617,9 @@ crs_registry_path <- function() {
 #' The EPSG projected-CRS catalogue with its declared areas of use.
 #'
 #' @return data.frame(code, name, area, descr, west, east, south, north), one
-#'   row per declared extent (a few codes declare more than one). `area` is the
-#'   short label of the area of use and `descr` its full text, which lists the
-#'   countries the CRS covers - that is what the free-text filter searches.
-#'   NULL when the
-#'   catalogue cannot be read. Cached for the session; a failure is cached too,
-#'   so a missing proj.db costs one attempt rather than one per upload.
+#'   row per declared extent; `descr` lists the countries covered (what the
+#'   free-text filter searches). NULL when unreadable. Cached for the session,
+#'   a failure included.
 crs_registry <- function(refresh = FALSE) {
   if (!refresh) {
     if (!is.null(.crs_registry_cache$reg)) return(.crs_registry_cache$reg)
@@ -724,30 +645,21 @@ crs_registry <- function(refresh = FALSE) {
 
 #' Does a declared area of use contain a point?
 #'
-#' The one containment test in the app. Vectorised over both sides, so it
-#' serves the whole-catalogue filter (many extents, one point), the
-#' self-consistency check (one extent per row, one point per row) and the
-#' suitability gate (one extent, several sample points) without a second copy.
-#'
-#' `west > east` marks an extent that CROSSES THE ANTIMERIDIAN - a wrapped
-#' range, not an empty one - so longitude is tested as a union there and as an
-#' interval everywhere else. Returns NA for an extent with missing bounds;
-#' callers use which() and therefore treat NA as "no answer", never as a hit.
+#' The app's one containment test, vectorised over both sides (catalogue
+#' filter, shortlist self-check, suitability gate). `west > east` is an extent
+#' crossing the antimeridian, tested as a union. NA bounds answer NA, so
+#' callers use which().
 crs_extent_contains <- function(west, east, south, north, lon, lat, pad = 0) {
   w <- west - pad; e <- east + pad
-  # NOT ifelse(): it returns a result the length of its TEST, so a single
-  # extent tested against several points would collapse to the first point.
-  # Written as a boolean combination, every shape recycles correctly and NA
-  # bounds still answer NA.
+  # Not ifelse(): its result has the TEST's length, which would collapse one
+  # extent tested against several points to the first point.
   wrapped <- west > east
   in_lon <- (!wrapped & lon >= w & lon <= e) | (wrapped & (lon >= w | lon <= e))
   in_lon & lat >= south - pad & lat <= north + pad
 }
 
-#' Primary Tier-3 filter: every CRS whose declared area of use contains the
-#' point the user indicated. Pure arithmetic - no transform, no sf call - so it
-#' runs over the whole catalogue instantly. `west > east` marks an extent that
-#' crosses the antimeridian.
+#' Primary Tier-3 filter: every CRS whose area of use contains the indicated
+#' point. Pure arithmetic, so it runs over the whole catalogue instantly.
 crs_registry_filter_extent <- function(reg, lon, lat, pad = 0) {
   if (is.null(reg) || !nrow(reg)) return(NULL)
   if (!isTRUE(is.finite(lon)) || !isTRUE(is.finite(lat))) return(NULL)
@@ -756,15 +668,10 @@ crs_registry_filter_extent <- function(reg, lon, lat, pad = 0) {
   hit[!duplicated(hit$code), , drop = FALSE]
 }
 
-#' Secondary Tier-3 filter: free text against the CRS name and the full text of
-#' its area of use, which lists the countries covered ("Germany", "Kansas",
-#' "zone 33N").
-#'
-#' Text does NOT bound the search the way a point does - "United States" alone
-#' matches well over a thousand codes, and transforming that many costs tens of
-#' seconds - so the result is capped at `limit` and flagged with a `truncated`
-#' attribute. Narrow the text, or intersect it with an extent, for a usable
-#' shortlist.
+#' Secondary Tier-3 filter: free text against the CRS name and its area-of-use
+#' text ("Germany", "Kansas", "zone 33N"). Text does not bound the search like
+#' a point ("United States" matches over a thousand codes), so the result is
+#' capped at `limit` and flagged with a `truncated` attribute.
 crs_registry_filter_area <- function(reg, text, limit = 120) {
   if (is.null(reg) || !nrow(reg)) return(NULL)
   if (is.null(text) || !nzchar(trimws(text))) return(NULL)
@@ -780,15 +687,10 @@ crs_registry_filter_area <- function(reg, text, limit = 120) {
   hit
 }
 
-#' Preference order within a group of CRS that put the data in the same place.
-#'
-#' crs_collapse_candidates() keeps the FIRST member of each group as the row's
-#' representative, so this ordering decides what the user is shown. WGS 84
-#' first, then ETRS89, then the rest: the datum siblings agree to well under a
-#' metre here and are all listed on the row, but "WGS 84 / UTM zone 33N" is the
-#' name a user recognises. The sort is stable, so within a rank the caller's
-#' own order stands - which is how the crs_zone_candidates() fallback keeps its
-#' deliberate ordering when no registry names are available.
+#' Preference order within a group of CRS that land the data in the same place:
+#' WGS 84, then ETRS89, then the rest. crs_collapse_candidates() keeps the first
+#' member, so this decides the name shown; the sort is stable, so the
+#' crs_zone_candidates() fallback keeps its own order.
 .crs_preference_order <- function(names) {
   names[is.na(names)] <- ""
   order(ifelse(grepl("^WGS 84 /", names), 1L,
@@ -799,29 +701,20 @@ crs_registry_filter_area <- function(reg, text, limit = 120) {
 #'
 #' @param x,y The mapped coordinate columns, in their own (unknown) CRS.
 #' @param lon,lat Where the user says the data is (a click on the world
-#'   mini-map). Primary path.
-#' @param area_text Country or region text. Secondary path, used when no click
-#'   is supplied.
+#'   mini-map); the primary path.
+#' @param area_text Country or region text; used alone when there is no click.
 #' @param limit Rows returned after collapsing same-place candidates.
-#' @param max_km Reject a candidate landing further than this from the
-#'   indicated point. The click is rough by nature, so the tolerance is wide;
-#'   the neighbouring UTM zone misses by 400 km and Web Mercator by far more.
-#' @param collapse_m How far apart two candidates may land and still be offered
-#'   as ONE place. Wide on purpose: a grid's datum siblings (WGS 84, WGS 72,
-#'   WGS 72BE and ED50 UTM zone 33N all read Potsdam coordinates within 210 m
-#'   of each other) are separated by far less than a map click can resolve, so
-#'   listing them as competing rows ranked by distance to that click lets noise
-#'   pick the winner - and an obsolete datum can lead. Folded onto one row they
-#'   are ranked by preference instead, with the size of the fold reported. Two
-#'   genuinely different answers - adjacent UTM zones - sit ~400 km apart and
-#'   are never folded.
+#' @param max_km Reject a candidate landing further than this from the click;
+#'   wide because a click is rough (the next UTM zone misses by 400 km).
+#' @param collapse_m Candidates landing within this distance form one row.
+#'   Datum siblings (WGS 84/72/72BE and ED50 UTM 33N land within 210 m at
+#'   Potsdam) are closer than a click resolves, so they are ranked by
+#'   preference rather than click noise; adjacent UTM zones are never folded.
 #' @return data.frame(epsg, name, area, lon, lat, distance_km, text, spread_m)
-#'   with an `equivalent` list column naming the codes folded onto the row,
-#'   nearest first; NULL when nothing can be computed, and a zero-row frame
-#'   when the catalogue holds no candidate that fits. Two attributes travel
-#'   with the frame: `truncated` (the country text matched more codes than
-#'   could be searched) and `text_no_match` (the text matched nothing inside
-#'   the area the click had already bounded).
+#'   plus an `equivalent` list column of the codes folded onto each row,
+#'   nearest first; NULL when nothing can be computed, zero rows when nothing
+#'   fits. Attributes: `truncated` (the text matched too many codes to search)
+#'   and `text_no_match` (the text matched nothing inside the clicked area).
 crs_candidate_shortlist <- function(x, y, lon = NULL, lat = NULL, area_text = NULL,
                                     limit = 8, max_km = 500, collapse_m = 250) {
   trunc <- FALSE; no_match <- FALSE
@@ -839,8 +732,7 @@ crs_candidate_shortlist <- function(x, y, lon = NULL, lat = NULL, area_text = NU
   reg <- crs_registry()
   pool <- if (have_click) crs_registry_filter_extent(reg, lon, lat) else
     crs_registry_filter_area(reg, area_text)
-  # Text alongside a click narrows the pruned pool instead of replacing it,
-  # which costs nothing: the point has already bounded the search.
+  # Text alongside a click narrows the already bounded pool.
   narrowed <- FALSE
   if (have_click && !is.null(pool) && nrow(pool) &&
       !is.null(area_text) && nzchar(trimws(area_text))) {
@@ -850,13 +742,10 @@ crs_candidate_shortlist <- function(x, y, lon = NULL, lat = NULL, area_text = NU
   trunc <- isTRUE(attr(pool, "truncated"))
 
   if (is.null(pool) || !nrow(pool)) {
-    # A text filter that matched nothing must narrow to EMPTY. Falling through
-    # to the zone family below would widen the search back out and answer a
-    # question the user did not ask.
+    # A text filter that matched nothing narrows to EMPTY, never back out.
     if (narrowed) { no_match <- TRUE; return(flag(.crs_shortlist_empty())) }
-    # Degraded path: no catalogue at all. A longitude still fixes the UTM zone
-    # exactly, which is what Phase A's zone family encodes, so Tier 3 narrows
-    # to four codes instead of failing.
+    # No catalogue: a longitude still fixes the UTM zone, so fall back to the
+    # four-code zone family.
     if (!have_click) return(NULL)
     pool <- data.frame(code = crs_zone_candidates(lon), name = NA_character_,
                        area = NA_character_, descr = NA_character_,
@@ -871,10 +760,8 @@ crs_candidate_shortlist <- function(x, y, lon = NULL, lat = NULL, area_text = NU
   pool$lon <- vapply(land, `[[`, numeric(1), "lon")
   pool$lat <- vapply(land, `[[`, numeric(1), "lat")
 
-  # Self-consistency: a candidate is an answer only if reading the data under
-  # it lands inside the area that same candidate declares it covers. This is
-  # what prunes the national grids - Potsdam coordinates read as Swiss LV95
-  # come out nowhere near Switzerland.
+  # Self-consistency: the data read under a candidate must land inside that
+  # candidate's own area of use (Potsdam read as Swiss LV95 does not).
   self <- crs_extent_contains(pool$west, pool$east, pool$south, pool$north,
                               pool$lon, pool$lat)
   pool <- pool[which(self), , drop = FALSE]
@@ -895,14 +782,11 @@ crs_candidate_shortlist <- function(x, y, lon = NULL, lat = NULL, area_text = NU
     pool <- pool[which(is.finite(pool$distance_km) & pool$distance_km <= max_km), , drop = FALSE]
     if (!nrow(pool)) return(flag(.crs_shortlist_empty()))
   }
-  # Preference decides the representative of each collapsed group, distance
-  # decides the order the groups are offered in - and in that order, not the
-  # reverse. Members of one group sit metres apart, so sorting the pool by
-  # distance first would let sub-metre datum differences pick the representative.
+  # Preference picks each group's representative, then distance orders the
+  # groups; the reverse would let sub-metre datum differences pick it.
   pool <- pool[.crs_preference_order(pool$name), , drop = FALSE]
 
-  # The landing positions are already computed, so the collapse is handed them
-  # rather than transforming the same mean point a second time.
+  # Reuse the landing positions instead of transforming again.
   grp <- crs_collapse_candidates(x, y, pool$code, tol_m = collapse_m,
                                  pos = data.frame(lon = pool$lon, lat = pool$lat))
   idx <- match(grp$cands, pool$code)
@@ -932,40 +816,19 @@ crs_candidate_shortlist <- function(x, y, lon = NULL, lat = NULL, area_text = NU
 }
 
 # -- Target Mapping CRS suitability -----------------------------------------
-# A metre axis unit is necessary for the Target Mapping CRS and nowhere near
-# sufficient. Web Mercator's
-# axis unit IS the metre, and at 52 deg N it reports every distance 64% too
-# long; a UTM zone two zones away is metric too, and 1.07% too long. Grid
-# resolution, buffer radius, variogram ranges, exported cell size and the
-# ruler's projected column are all stated in metres and all read straight off
-# this CRS, so a CRS that does not suit the region corrupts every one of them
-# while raising no error anywhere.
-#
-# Two checks, both empirical, both dependency-free:
-#   1. the data must fall inside the area of use the CRS itself declares;
-#   2. the point scale factor k at the data must be near 1.
-# Neither ever blocks on "cannot answer" - an unparseable CRS, one with no
-# declared extent, one PROJ refuses to transform into - the same posture
-# crs_metre_factor() takes when it returns NA.
+# A metre axis unit is necessary but not sufficient: Web Mercator is metric yet
+# 64% long at 52 deg N, and a UTM zone two zones away is 1.07% long. Grid
+# resolution, buffers, variogram ranges, exported cell size and the ruler all
+# read metres off this CRS. Two checks: the data inside the CRS's declared
+# area of use, and point scale factor k near 1. "Cannot answer" (unparseable,
+# no extent, untransformable) never blocks.
 
-#' A CRS's own declared area of use, as c(west, east, south, north) degrees.
+#' A CRS's own declared area of use, in degrees.
 #'
-#' The inverse of crs_registry_filter_extent(): that maps a point to candidate
-#' CRS, this maps a CRS to its extent. Resolved in three steps - PROJ's
-#' catalogue by EPSG code (authoritative, and already cached for the session),
-#' then the BBOX node of the WKT2 sf returns anyway (which covers geographic
-#' and non-EPSG CRS the projected-only registry does not carry), then NULL.
-#'
-#' WKT2 writes the node as BBOX[south, west, north, east] - latitude first -
-#' so EPSG:32633 reads BBOX[0,12,84,18] and means 12 deg E to 18 deg E.
-#'
-#' EVERY declared extent is returned, not the first. 17 EPSG codes in this
-#' catalogue declare more than one - EPSG:2393 (KKJ / Finland Uniform
-#' Coordinate System) declares both "Finland - 25.5E to 28.5E onshore" and
-#' "Finland - onshore" - and a code's area of use is their UNION, which is the
-#' rule crs_registry_filter_extent() already applies when it offers that code
-#' as a candidate. Reading one row instead told a Finnish user at 22 deg E that
-#' their data landed outside a CRS that covers it.
+#' Read from PROJ's catalogue by EPSG code, else from the WKT2 BBOX node (which
+#' covers geographic and non-EPSG CRS; written BBOX[south, west, north, east]),
+#' else NULL. Every declared extent is returned (17 codes declare several, e.g.
+#' EPSG:2393): a code's area of use is their union.
 #'
 #' @return data.frame(west, east, south, north), one row per declared extent,
 #'   or NULL when the CRS declares none.
@@ -1005,29 +868,18 @@ crs_area_of_use <- function(crs) {
 
 #' Empirical point scale factor of a projected CRS at given positions.
 #'
-#' Projects two short geodesic arcs centred on each position and compares each
-#' projected length against its true length on the WGS84 ellipsoid:
-#'   parallel arc  ground length = N(phi) * cos(phi) * dlambda,
-#'                 N = a / sqrt(1 - e^2 sin^2 phi)
-#'   meridian arc  ground length = M(phi) * dphi,
-#'                 M = a (1 - e^2) / (1 - e^2 sin^2 phi)^(3/2)
-#' k = projected / ground. A CRS that preserves distance at the data reports
-#' k = 1 there; k = 1.64 means every distance it reports is 64% too long.
-#'
-#' BOTH arcs are measured, because one is only sufficient for a CONFORMAL
-#' projection (TM, Mercator, LCC), where k is identical in every direction. An
-#' equal-area projection distorts the two by construction and in opposite
-#' senses - EPSG:5070 at Potsdam is +3.17% along the parallel and -3.07% along
-#' the meridian - and equal-area is exactly what a user might wrongly pick for
-#' distance work. The gate judges the larger |k - 1|.
+#' Projects two short arcs centred on each position and divides each projected
+#' length by its WGS84 ellipsoid length:
+#'   parallel  N(phi) cos(phi) dlambda,  N = a / sqrt(1 - e^2 sin^2 phi)
+#'   meridian  M(phi) dphi,              M = a (1 - e^2) / (1 - e^2 sin^2 phi)^(3/2)
+#' Both arcs, because only a conformal projection scales equally in every
+#' direction (EPSG:5070 at Potsdam: +3.17% along the parallel, -3.07% along the
+#' meridian). The larger |k - 1| is judged.
 #'
 #' @param lon,lat Positions in degrees; the worst case over them is returned.
-#' @param arc_deg Arc length in degrees, centred on each position (+/- arc_deg
-#'   / 2). 0.001 deg is about 111 m along a meridian, short enough that k is
-#'   the POINT scale factor rather than a finite-distance average.
-#' @return list(k, dev, parallel, meridian, lon, lat) at the worst position, or
-#'   NULL for a geographic CRS (no linear scale to speak of) and whenever the
-#'   projection cannot be evaluated. Callers treat NULL as "do not block".
+#' @param arc_deg Arc length (0.001 deg ~ 111 m), short enough for a point scale.
+#' @return list(k, dev, parallel, meridian, lon, lat) at the worst position;
+#'   NULL for a geographic CRS or an unevaluable projection ("do not block").
 crs_scale_factor <- function(crs, lon, lat, arc_deg = 0.001) {
   if (is.null(crs) || length(crs) != 1) return(NULL)
   co <- suppressWarnings(tryCatch(sf::st_crs(crs), error = function(e) NULL))
@@ -1073,14 +925,11 @@ crs_scale_factor <- function(crs, lon, lat, arc_deg = 0.001) {
 
 #' Where the data lands, in degrees: centroid plus bounding-box corners.
 #'
-#' The gate samples five positions rather than one because a large study area
-#' can be well inside tolerance at its centre and outside it at an edge - the
-#' UTM zone-boundary case exactly. Each is resolved through Phase A's
-#' crs_landing_position(), so the gate and the Data Setup readout can never
-#' disagree about where the data is.
+#' Five positions, because a large study area can be within tolerance at its
+#' centre and outside it at an edge (the UTM zone-boundary case). Each goes
+#' through crs_landing_position(), as the Data Setup readout does.
 #'
-#' @param crs The INPUT Data CRS: this converts the file's own coordinates to
-#'   degrees, and is unrelated to the target CRS being judged.
+#' @param crs The INPUT Data CRS (converts the file's coordinates to degrees).
 crs_sample_positions <- function(df, x_col, y_col, crs) {
   if (is.null(df) || is.null(x_col) || is.null(y_col)) return(NULL)
   if (!all(c(x_col, y_col) %in% colnames(df))) return(NULL)
@@ -1102,30 +951,18 @@ crs_sample_positions <- function(df, x_col, y_col, crs) {
              lat = vapply(pos, function(z) z$lat, numeric(1)))
 }
 
-#' Is this Target Mapping CRS fit to measure with, where the data actually is?
+#' Is this Target Mapping CRS fit to measure with where the data is?
 #'
-#' The shared judgement behind both the selection-time advisory and the run
-#' gate, so the two can never state different rules.
+#' One judgement for the selection-time advisory and the run gate. A geographic
+#' target returns "ok": the pipeline projects it to UTM itself.
 #'
-#' A GEOGRAPHIC target CRS returns "ok" untouched: EPSG:4326 is not a
-#' projection, has no meaningful k, and the pipeline projects it to a metric
-#' UTM zone itself - the same exemption validate_crs(require_metric) makes.
+#' |k - 1| above 0.1% warns (a UTM zone stays below it across its own 6 deg);
+#' above 1% blocks, subject to an explicit override. Falling outside the
+#' declared area of use only warns: the box is advisory and a study area
+#' straddling a zone boundary still measures correctly; k measures the harm.
 #'
-#' Thresholds. 0.1% is the practical floor for spatial analysis: a UTM zone
-#' holds |k - 1| below 0.1% across its own 6 deg of longitude (0.04% on its
-#' central meridian, just under 0.1% at the zone edge on the equator), so
-#' anything worse means the CRS does not belong to the region. 1% is where the error
-#' exceeds any plausible tolerance - a 250 m buffer becomes 252.5 m, a
-#' variogram range is misreported by the same factor - and is refused, subject
-#' to an explicit override. Falling outside the declared area of use WARNS but
-#' never refuses: the declared box is an authority's advisory bound, and a
-#' study area straddling a zone boundary sits outside one box while still
-#' measuring correctly. k is what measures the harm.
-#'
-#' `msg` states the FACTS about this CRS at this data and nothing else; the
-#' standing consequence clause is `detail`, so a caller can lead with the
-#' finding and put the explanation behind a tooltip without either copy of the
-#' wording drifting from the other.
+#' `msg` states the findings; the standing explanation is `detail`
+#' (crs_measure_detail), so callers can put it behind a tooltip.
 #'
 #' @return list(level = "ok"/"warn"/"block", title, msg, detail, k, dev, outside).
 crs_target_suitability <- function(crs, lon, lat, warn_dev = 0.001, block_dev = 0.01) {
@@ -1144,8 +981,7 @@ crs_target_suitability <- function(crs, lon, lat, warn_dev = 0.001, block_dev = 
 
   ext <- crs_area_of_use(crs)
   if (!is.null(ext) && nrow(ext)) {
-    # A sample position is inside the area of use when ANY declared extent
-    # holds it: several extents are a union, not a sequence of separate claims.
+    # Several declared extents are a union: inside any one counts.
     inside <- vapply(seq_along(lon), function(j)
       any(crs_extent_contains(ext$west, ext$east, ext$south, ext$north,
                               lon[j], lat[j]) %in% TRUE), logical(1))
@@ -1181,39 +1017,18 @@ crs_target_suitability <- function(crs, lon, lat, warn_dev = 0.001, block_dev = 
   out
 }
 
-#' Why the Target Mapping CRS matters, in one place.
-#'
-#' Every surface that reports a CRS problem needs this sentence and none of
-#' them needs it in the headline, so it travels as `crs_target_suitability()`'s
-#' `detail` and is shown behind a tooltip (Data Setup) or as the second
-#' paragraph (run gate). The last clause answers the question users actually
-#' ask when the advisory fires: no, this is not why the points are in the wrong
-#' place.
+#' Why the Target Mapping CRS matters: the `detail` of crs_target_suitability(),
+#' shown behind a tooltip (Data Setup) or as the run gate's second paragraph.
 crs_measure_detail <- paste(
   "The finished surface is resampled into the Target Mapping CRS, so exported rasters and their cell size, the resolution suggestion and the Map Viewer's projected ruler are all stated in its metres and carry its scale error at your data, with no error raised anywhere. The models are fitted in the Input Data CRS (or, for geographic or non-metre input, its UTM zone); for projected data choose the same UTM zone for both.",
   "The Target Mapping CRS never moves your points on the map (that is the Input Data CRS); it decides what a metre means.")
 
-#' The Target Mapping CRS this data should be measured in.
-#'
-#' crs_target_suitability() says a CRS is wrong; this says which one is right.
-#' Diagnosing without prescribing would hand the user a bounding box in
-#' decimal degrees to compare against, when the app can derive the answer from
-#' the data's own longitude.
-#'
-#' A longitude fixes the UTM zone exactly - the same arithmetic
-#' crs_zone_candidates() encodes - so the answer needs no catalogue and no
-#' transform; the catalogue is consulted only for the CRS's proper name.
-#'
-#' WGS 84 / UTM is recommended everywhere rather than the local national grid:
-#' it exists for every longitude, |k - 1| never exceeds 0.04% inside its own
-#' zone, and it needs no judgement about which of several national systems an
-#' area "belongs" to. A user who prefers their national grid types it in, and
-#' the gate then judges that choice on the same two rules as any other.
-#'
-#' The zone comes from the MEAN position while `dev` is measured at EVERY
-#' sample position, so a study area spanning zones reports the true worst case
-#' of the CRS being offered - which lets a caller decline to offer a
-#' recommendation that is no better than what the user already has.
+#' The Target Mapping CRS this data should be measured in: the WGS 84 / UTM
+#' zone of the mean position (defined everywhere, |k - 1| under 0.1% inside its
+#' zone, no judgement between national grids; a user may still type one in).
+#' The catalogue is consulted only for the name. `dev` is measured at every
+#' sample position, so a caller can decline a recommendation no better than
+#' the current CRS.
 #'
 #' @param lon,lat Sample positions in degrees, as crs_sample_positions() returns.
 #' @return list(crs, code, label, k, dev), or NULL when no position is usable.
@@ -1262,10 +1077,8 @@ shp_boundary_overlap <- function(shp, x, y, crs) {
     hull <- !all(as.character(sf::st_geometry_type(shp)) %in% c("POLYGON", "MULTIPOLYGON"))
     poly <- shp_boundary_polygons(shp)
     if (is.null(poly)) return(list(n = sum(ok), inside = 0L, dist_km = NA_real_, hull = hull, usable = FALSE))
-    # Tested in the data's own CRS when it is projected, as the pipeline's clip
-    # is: in EPSG:4326 sf draws polygon edges as geodesics, so a sample lying
-    # on a straight projected edge can read as outside. Geographic data is
-    # tested in 4326, where the distance comes back in metres too.
+    # Tested in the data's own projected CRS, as the pipeline clips (in 4326 sf
+    # draws polygon edges as geodesics); geographic data is tested in 4326.
     frame <- if (isTRUE(sf::st_is_longlat(src))) sf::st_crs(4326) else src
     poly <- sf::st_union(sf::st_transform(sf::st_make_valid(poly), frame))
     pts <- sf::st_transform(sf::st_as_sf(data.frame(.x = x[ok], .y = y[ok]),
@@ -1286,10 +1099,8 @@ utm_crs_choices <- local({
   c(n, s)
 })
 
-# Two selectors, two lists. Web Mercator is a legitimate INPUT CRS - data
-# really does arrive in it - but never an analysis one: at 52 deg N it inflates
-# every distance by 64%, so it is not offered as a Target, and the suitability
-# gate refuses it if it is typed in anyway.
+# Web Mercator is a legitimate INPUT CRS but never a Target: it inflates
+# distances 64% at 52 deg N, and the suitability gate refuses it if typed in.
 common_crs_input <- c(
   "WGS 84 (EPSG:4326)" = "EPSG:4326",
   "S-JTSK / Krovak East North (EPSG:5514)" = "EPSG:5514",
@@ -1310,11 +1121,10 @@ crs_near_zone_codes <- function(lon, lat) {
   as.integer((if (lat < 0) 32700 else 32600) + zones)
 }
 
-#' Grouped selectize choices for a CRS selector: the zones near the data first
-#' (when known), then the non-UTM entries, then the remaining UTM zones by
-#' hemisphere, then any value outside `base` (a typed or restored CRS), which
-#' selectize refuses unless it is one of the options. Each group is a list so
-#' Shiny renders a one-item group as a group rather than a bare option.
+#' Grouped selectize choices for a CRS selector: zones near the data first, then
+#' non-UTM entries, the remaining UTM zones by hemisphere, and any value outside
+#' `base` (selectize refuses a value that is not an option). Groups are lists so
+#' a one-item group still renders as a group.
 crs_choice_groups <- function(base, near = integer(0), extra = NULL) {
   near_v <- intersect(paste0("EPSG:", near), base)
   rest <- base[!(base %in% near_v)]
@@ -1417,20 +1227,11 @@ sync_styler_config <- function(cfg, session) {
 
 #' The payload an export-registry item draws, materialised on demand.
 #'
-#' Most items store their payload directly. An uncertainty item does not: its
-#' variance band already sits in the surface item registered beside it, and its
-#' standard error is that band's square root, so storing either as a raster of
-#' its own is a second copy of values the registry holds. At the ~4e6-cell grid
-#' cap one packed layer is ~30 MB of R memory, and a comparison run on a
-#' kriging engine registered four of them (variance and SE for both surfaces) -
-#' in the live registry and again in each of the three archived runs. They are
-#' stored as a `derived` spec instead and rebuilt here: 0.06 s at the cap,
-#' against the ggplot render that follows it.
-#'
-#' `derived$src` is the source SpatRaster itself, the same object the surface
-#' item holds, so the reference costs nothing and an archived entry carries its
-#' own source. `layer` names the band, `fun` an optional transform, and `name`
-#' the layer name the GeoTIFF records as its band description.
+#' Uncertainty items store a `derived` spec, not a raster: the variance band
+#' already sits in the surface item and the SE is its square root, so a copy
+#' would cost ~30 MB per layer at the grid cap, per archived run.
+#' `derived$src` is the surface's own SpatRaster; `layer` names the band, `fun`
+#' an optional transform and `name` the GeoTIFF band description.
 export_item_obj <- function(item) {
   if (is.null(item) || !is.list(item)) return(NULL)
   if (!is.null(item$obj)) return(item$obj)
@@ -1447,14 +1248,9 @@ export_item_obj <- function(item) {
   r
 }
 
-#' The raster behind an export-registry item, or NULL when it has none.
-#'
-#' GeoTIFF export is offered only for registry items whose payload IS one
-#' raster surface. Two items registered under type "map" carry something else
-#' and have no single-raster form: the Actual vs Predicted comparison holds a
-#' list of two packed rasters (type "map_combined"), and the Point Error Map
-#' holds sf points plus a boundary. Both stay image-only exports; the vector
-#' route for point and polygon geometry is the Map Viewer's GIS export.
+#' The raster behind an export-registry item, or NULL when it has none. The
+#' Actual vs Predicted pair ("map_combined") and the Point Error Map (sf points)
+#' have no single-raster form and stay image-only.
 export_raster_payload <- function(item) {
   if (is.null(item) || !is.list(item)) return(NULL)
   if (!identical(item$type, "map")) return(NULL)
@@ -1464,14 +1260,11 @@ export_raster_payload <- function(item) {
   NULL
 }
 
-#' Excel sheet name for an export-registry table: at most 31 characters, only
-#' letters, digits and spaces (anything else becomes "_"), and unique within
-#' `used` ignoring case, which is how Excel and openxlsx compare sheet names.
-#' Every label in a run opens with "<variable label> - " and a workbook holds
-#' one variable's run, so exactly that prefix is dropped and the part that tells
-#' the sheets apart (locality and table name) is kept. The prefix is matched as a
-#' whole string, never up to the first " - ": a variable label can contain
-#' " - " itself. A clash gets "_Pre" for a predicted-surface item, else a counter.
+#' Excel sheet name for an export-registry table: at most 31 characters of
+#' letters, digits and spaces, unique within `used` ignoring case (as Excel
+#' compares). The whole "<variable label> - " prefix is dropped (one variable
+#' per workbook; the label itself may contain " - "). A clash gets "_Pre" for
+#' a predicted-surface item, else a counter.
 export_sheet_name <- function(label, id = "", used = character(0), var_label = NULL) {
   label <- label %||% ""
   id <- id %||% ""
@@ -1514,15 +1307,10 @@ styler_format_ext <- function(fmt) {
          "png")
 }
 
-#' The Download Run Configuration record: the run configuration, the
-#' per-locality tuning the run's method consumed, and provenance. An IDW run
-#' lists its power settings and fits (map power, CV power profile, fold
-#' powers), a TPS run its lambda settings and fits (fitted lambda, effective df,
-#' GCV curve); the kriging engines consume neither, so none is written.
-#' JSON has no infinity, so an IDW fit's powers are written as numbers where
-#' finite and every power is also named (idw_power_text): the nearest-neighbour
-#' limit is a name, never a number or a dropped field. A kNNDM run records the
-#' settings its folds were built with (`cv_knndm`) beside its repeat count.
+#' The Download Run Configuration record: run configuration, the per-locality
+#' tuning the method consumed (IDW powers and fits, or TPS lambdas, effective
+#' df and GCV curve; none for kriging) and provenance. A kNNDM run also records
+#' its fold settings (`cv_knndm`).
 run_record_payload <- function(cfg, regional_params, app_version, pkg_versions) {
   keep <- switch(cfg$method %||% "", IDW = "^idw_", TPS = "^tps_", NULL)
   if (identical(cfg$cv_strategy, "knndm")) {
@@ -1552,9 +1340,8 @@ run_record_payload <- function(cfg, regional_params, app_version, pkg_versions) 
   out
 }
 
-# An IDW fit record as the JSON run record writes it: the map power, each
-# candidate of the CV profile and each fold power as a number where finite
-# (the nearest-neighbour limit leaves it out) beside its name.
+# An IDW fit as the JSON record writes it: each power as a number where finite
+# (JSON has no Inf) beside its name (idw_power_text()).
 idw_fit_record <- function(fit) {
   if (!is.list(fit)) return(fit)
   num <- function(p) ifelse(is.finite(p), p, NA_real_)
@@ -1578,19 +1365,15 @@ idw_fit_record <- function(fit) {
   fit
 }
 
-#' The run record as the JSON text Download Run Configuration writes, at full
-#' precision: jsonlite's default keeps 4 decimal places, which wrote a GCV score
-#' of 0.000505 as 0.0005 and cut every RMSE of the record.
+#' The run record as JSON at full precision (jsonlite's default 4 decimals
+#' would truncate small GCV scores and RMSEs).
 run_record_json <- function(payload) {
   jsonlite::toJSON(payload, pretty = TRUE, auto_unbox = TRUE, digits = NA,
                    null = "null", force = TRUE, POSIXt = "ISO8601")
 }
 
-#' Why a JSON file handed to Load Config cannot be loaded, or NULL when it is a
-#' session configuration. The record Download Run Configuration writes (config
-#' + provenance) documents a finished run and carries none of the session
-#' fields (map_x, map_crs, crs_selection, ...), so loading it would set
-#' nothing - whether it is recent or an older one with a single `crs` field.
+#' Why a JSON file handed to Load Config cannot be loaded (a run record:
+#' config + provenance, no session fields), or NULL for a session configuration.
 session_config_refusal <- function(cfg) {
   if (!is.list(cfg) || is.null(cfg$config) || is.null(cfg$provenance)) return(NULL)
   ver <- cfg$provenance$app_version %||% cfg$config$app_version %||% "unknown"
@@ -1713,9 +1496,8 @@ config_palettes_out <- function(picks, vars) {
 }
 
 #' Picked palettes back from a configuration: entries of variables in `vars`
-#' naming a palette the picker offers; the others are listed in `skipped`. A file
-#' written before palettes were kept per variable carries one `palette_select`,
-#' the picker's value for the variable it restores (`legacy_var`).
+#' naming an offered palette; the others are listed in `skipped`. An older
+#' file's single `palette_select` applies to `legacy_var`.
 config_palettes_in <- function(palettes, vars, legacy_palette = NULL, legacy_var = NULL) {
   if (is.null(palettes) && !is.null(legacy_palette) && !is.null(legacy_var)) {
     palettes <- stats::setNames(list(legacy_palette), legacy_var)
@@ -1745,23 +1527,12 @@ geotiff_tag_options <- function(tags) {
 
 #' Write a SpatRaster as a compressed GeoTIFF at `file`.
 #'
-#' terra picks its driver from the file extension, so a path without one would
-#' silently produce a non-TIFF. Shiny does hand download handlers a path that
-#' keeps the extension declared by `filename()`, so this is belt and braces
-#' rather than a live failure mode; it stays because the guarantee is Shiny's,
-#' not ours, and a wrong-format file is a silent corruption.
-#' Values, CRS and extent are written exactly as computed: a GeoTIFF is the
-#' data, so no styling, palette or DPI applies to it. Multi-layer surfaces
-#' (kriging returns prediction and variance) are written as multi-band files
-#' with the layer names kept as band descriptions.
-#'
-#' terra writes STATISTICS_MEAN and STATISTICS_STDDEV as -9999 placeholders,
-#' which GIS software reads as real and stretches the display with. So the file
-#' is written to a temporary path first and copied into place by
-#' gdal_translate with -stats, which stores the exact band statistics and the
-#' `tags` (named character vector, dataset-level metadata) inside the TIFF, with
-#' no .aux.xml sidecar. That pass copies the cells unchanged. If it fails, the
-#' plain file is kept and a warning says what is missing.
+#' Values, CRS and extent are written exactly as computed (no styling);
+#' multi-layer surfaces become multi-band files with layer names as band
+#' descriptions. A `.tif` extension is enforced because terra picks the driver
+#' from it. terra's -9999 STATISTICS placeholders would stretch a GIS display,
+#' so the file goes through gdal_translate -stats, which also embeds `tags`
+#' (no .aux.xml). If that pass fails, the plain file is kept with a warning.
 write_geotiff <- function(r, file, tags = NULL) {
   if (is.null(r) || !inherits(r, "SpatRaster")) stop("No raster surface to export.")
   target <- if (tolower(tools::file_ext(file)) %in% c("tif", "tiff")) file else paste0(file, ".tif")
@@ -1791,49 +1562,24 @@ write_geotiff <- function(r, file, tags = NULL) {
 
 #' Measure a path drawn with the Map Viewer's ruler.
 #'
-#' The Leaflet measure control computes on a SPHERE (its own calc module, radius
-#' 6371000 m), which is up to ~0.5% off the ellipsoid in length, and it knows
-#' nothing about the coordinate system the models run in. Both numbers this app
-#' owes the user are therefore recomputed here from the clicked WGS84 vertices:
+#' The Leaflet measure control works on a sphere (up to ~0.5% off) and knows no
+#' CRS, so both figures are recomputed from the WGS84 vertices:
+#'   - GEODESIC length on the WGS84 ellipsoid (terra/GeographicLib);
+#'   - PLANAR length in the Target Mapping CRS, the CRS of exported rasters
+#'     (the variogram lags' metric only when it is also the working CRS).
+#' A wide gap between the two flags a CRS that suits the area poorly; a
+#' geographic Target CRS gives no planar figure.
 #'
-#'   - the GEODESIC length on the WGS84 ellipsoid, via terra (GeographicLib):
-#'     the ground distance, independent of any projection;
-#'   - the PLANAR length in the Target Mapping CRS, the CRS of the exported
-#'     rasters. The engines work in the run's working CRS (a projected Input
-#'     Data CRS, or the UTM zone of a geographic one), so this figure is in the
-#'     metric of the variogram lags and the grid resolution only when the two
-#'     are the same system.
+#' From three vertices the path closes into a ring: lengths become perimeters
+#' and areas are reported on both bases. A self-crossing ring gets no area (its
+#' lobes cancel; a symmetric bowtie gives zero), while its perimeter stays exact.
 #'
-#' The two differ by the projection's distance distortion, small at field scale
-#' (~0.003% over 2.5 km in UTM) and worth showing rather than hiding: a wide gap
-#' means the selected CRS is a poor fit for the area being measured. A
-#' GEOGRAPHIC Target Mapping CRS yields no planar figure at all - a length in
-#' degrees is meaningless, the same rule `validate_and_project_sf()` enforces
-#' before interpolation.
-#'
-#' Area is reported on the same two bases once the path has three vertices,
-#' which is where the measure control itself switches to area. `terra::expanse`
-#' is the ellipsoidal area, the same call the class-zone export uses. From that
-#' third vertex on the length CLOSES with the shape and becomes a perimeter, so
-#' the two figures describe one and the same ring: an open path reported beside
-#' the area of a closed one differs from it by the closing leg and invites the
-#' reader to add a boundary that was never measured.
-#'
-#' A ring that crosses itself has no area worth printing: GEOS and terra both
-#' integrate around the ring in traversal order (the planar shoelace sum and its
-#' geodesic counterpart), so a figure-eight's oppositely-traversed lobes return
-#' their DIFFERENCE, not the area drawn on the screen - a symmetric bowtie
-#' evaluates to zero. The perimeter is unaffected by the crossing and stays
-#' exact, so it is still reported; the area is withheld rather than invented.
-#'
-#' @param lonlat Two-column matrix of clicked vertices, longitude then latitude,
-#'   in WGS84.
-#' @param proj_crs Target Mapping CRS (anything `sf::st_crs` accepts). NULL or a
-#'   geographic CRS leaves the projected fields NA.
-#' @return List with `n_points`, `closed` (TRUE once the shape is a ring, which
-#'   makes the lengths perimeters), `self_intersecting`, `length_geodesic`,
-#'   `length_projected` (metres), `area_geodesic`, `area_projected` (square
-#'   metres) and `crs_label`. Un-measurable quantities are NA, never 0.
+#' @param lonlat Two-column matrix of clicked WGS84 vertices (lon, lat).
+#' @param proj_crs Target Mapping CRS; NULL or geographic leaves the projected
+#'   fields NA.
+#' @return List with `n_points`, `closed`, `self_intersecting`,
+#'   `length_geodesic`, `length_projected` (m), `area_geodesic`,
+#'   `area_projected` (m^2) and `crs_label`. Unmeasurable quantities are NA.
 measure_path_metrics <- function(lonlat, proj_crs = NULL) {
   out <- list(n_points = 0L, closed = FALSE, self_intersecting = FALSE,
               length_geodesic = NA_real_, length_projected = NA_real_,
@@ -1842,15 +1588,11 @@ measure_path_metrics <- function(lonlat, proj_crs = NULL) {
   if (is.null(lonlat)) return(out)
   lonlat <- suppressWarnings(matrix(as.numeric(as.matrix(lonlat)), ncol = 2))
   lonlat <- lonlat[stats::complete.cases(lonlat), , drop = FALSE]
-  # A vertex placed on top of its predecessor contributes nothing to the path
-  # and would hand terra a zero-length segment; dropping it keeps the vertex
-  # count honest as well.
+  # Drop a vertex placed on its predecessor (a zero-length segment).
   if (nrow(lonlat) > 1) {
     lonlat <- lonlat[c(TRUE, rowSums(abs(diff(lonlat))) > 0), , drop = FALSE]
   }
-  # An already-closed ring is counted by its corners: the repeated first vertex
-  # is the closure this function applies itself below, not a place the user
-  # clicked, and leaving it in would overstate the count by one.
+  # An already-closed ring: the repeated first vertex is not a click.
   if (nrow(lonlat) > 2 && all(lonlat[1, ] == lonlat[nrow(lonlat), ])) {
     lonlat <- lonlat[-nrow(lonlat), , drop = FALSE]
   }
@@ -1900,16 +1642,11 @@ measure_path_metrics <- function(lonlat, proj_crs = NULL) {
 
 #' Does a closed ring cross itself?
 #'
-#' Tested combinatorially on the clicked longitude/latitude pairs rather than
-#' through `st_is_valid()`: over a measurement-sized shape the planar and the
-#' projected topologies are identical, and this stays a plain predicate whether
-#' or not a Target Mapping CRS is set and whichever way `sf_use_s2()` happens to
-#' be switched. Only PROPER crossings count (edges passing through each other,
-#' strict sign change on both orientation tests); a ring whose edges merely
-#' touch at a vertex still has the area its shoelace sum reports.
+#' Tested combinatorially on the lon/lat corners, independent of the Target CRS
+#' and sf_use_s2(). Only proper crossings count; edges touching at a vertex do
+#' not.
 #'
-#' @param xy Two-column matrix of the ring's corners, WITHOUT the repeated
-#'   closing vertex; edges wrap from the last corner back to the first.
+#' @param xy Two-column matrix of corners WITHOUT the repeated closing vertex.
 ring_self_intersects <- function(xy) {
   n <- nrow(xy)
   if (is.null(n) || n < 4) return(FALSE)  # a triangle cannot cross itself
@@ -1917,8 +1654,7 @@ ring_self_intersects <- function(xy) {
   side <- function(o, a, b) (a[1] - o[1]) * (b[2] - o[2]) - (a[2] - o[2]) * (b[1] - o[1])
   for (i in seq_len(n - 1L)) {
     for (j in seq(i + 1L, n)) {
-      # Consecutive edges share a vertex by construction, as do the first and
-      # the last once the ring wraps; neither is a self-intersection.
+      # Adjacent edges (last and first included) share a vertex by construction.
       if (j == i + 1L || (i == 1L && j == n)) next
       p1 <- xy[i, ]; p2 <- xy[nxt(i), ]
       q1 <- xy[j, ]; q2 <- xy[nxt(j), ]
@@ -1932,17 +1668,10 @@ ring_self_intersects <- function(xy) {
 
 #' Fold an sf layer's attribute table into the two fields KML can carry.
 #'
-#' GDAL's KML driver writes only <name> and <description> per placemark: every
-#' other field is dropped on write, so a class-zone layer would arrive in Google
-#' Earth as unlabelled polygons with no break limits and no hectares. The
-#' LIBKML driver does support full attributes through ExtendedData, but it is
-#' absent from the GDAL that ships with sf on Windows, so it cannot be relied
-#' on. Instead, the label goes to <name> (what a GIS shows next to the polygon)
-#' and the whole record is serialised into <description>, which is where a KML
-#' reader looks when the placemark is clicked. Nothing is silently lost.
-#' NA prints as an empty value: the open outer breaks are genuinely unbounded,
-#' and "class_max:" reads as such where "class_max: NA" would look like a
-#' failed computation.
+#' GDAL's KML driver keeps only <name> and <description> (LIBKML, which keeps
+#' every field, is absent from sf's Windows GDAL), so the label goes to <name>
+#' and the whole record to <description>. NA prints empty: the open outer
+#' breaks are unbounded, not failed.
 kml_attribute_fields <- function(sf_obj, name_field = NULL) {
   geom_col <- attr(sf_obj, "sf_column")
   attr_cols <- setdiff(names(sf_obj), geom_col)
@@ -1977,13 +1706,9 @@ kml_attribute_fields <- function(sf_obj, name_field = NULL) {
   out[, c("Name", "Description", geom_col)]
 }
 
-#' Write an sf layer in one of the four offered GIS formats.
-#'
-#' Shared by both vector exports (drawn polygons and map class zones) so the
-#' format list cannot drift between them. KML and GeoJSON are WGS84 formats by
-#' specification and the layer is reprojected for them; Shapefile and
-#' GeoPackage keep the analysis CRS, which is the projected metric one for
-#' class zones, so a GIS measures them in the same projection the app reported.
+#' Write an sf layer in one of the four offered GIS formats (drawn polygons and
+#' class zones). KML and GeoJSON are WGS84 by specification; Shapefile and
+#' GeoPackage keep the analysis CRS.
 write_vector_export <- function(sf_obj, file, fmt, layer_name = "layer") {
   if (is.null(sf_obj) || nrow(sf_obj) == 0) stop("Nothing to export.")
 
@@ -1995,9 +1720,8 @@ write_vector_export <- function(sf_obj, file, fmt, layer_name = "layer") {
   }
 
   if (fmt == "shp") {
-    # A shapefile is a set of sibling files, so it travels as a zip. The
-    # directory is unique per call; the on.exit below would otherwise delete a
-    # second export's files if two shared a name.
+    # A shapefile travels as a zip; a per-call directory stops two exports with
+    # one name from deleting each other's files.
     temp_dir <- tempfile("vec_export_")
     dir.create(temp_dir, showWarnings = FALSE)
     on.exit(unlink(temp_dir, recursive = TRUE), add = TRUE)
@@ -2022,13 +1746,9 @@ write_vector_export <- function(sf_obj, file, fmt, layer_name = "layer") {
 
 #' Retire the raster image layers a shorter restyle left behind.
 #'
-#' The Map Viewer gives its raster images positional Leaflet ids
-#' (`rast_img_1`, `rast_img_2`, ...) and re-adds them on every restyle.
-#' Leaflet REPLACES a layer whose id matches, but it never drops one the new
-#' pass does not re-add, so a run that paints fewer images than the one
-#' already on the map would leave the surplus on screen. `n_prev` is how many
-#' images the previous pass added to this map, `n_now` how many this one did.
-#'
+#' Map Viewer images have positional ids (`rast_img_1`, ...); Leaflet replaces
+#' a re-added id but never drops one the new pass omits. `n_prev` and `n_now`
+#' are the image counts of the previous and current pass.
 #' @param m A leaflet widget or leafletProxy.
 #' @return `m`, with the surplus ids removed.
 remove_surplus_raster_images <- function(m, n_now, n_prev) {

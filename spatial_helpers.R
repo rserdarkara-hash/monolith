@@ -1,21 +1,11 @@
-# spatial_helpers.R - thin master file for the geostatistical core.
+# spatial_helpers.R - master file for the geostatistical core.
 #
-# WORKER CONTRACT (critical for parallelism - do not break):
-# The future_promise pipeline in server_execution.R, every nested PSOCK worker
-# (inside interp_run_item, which sources this file via an ABSOLUTE
-# run_params$main_wd path because nested workers do not inherit the project
-# working directory), and the classification worker all load the model code
-# with a single `source("spatial_helpers.R", local = FALSE)`. Sourcing this
-# file must therefore define the COMPLETE spatial helper set in the caller's
-# global environment: the fragment source() calls below use the default
-# local = FALSE so everything lands in globalenv and the worker entry points
-# (interp_run_item & co.) stay globalenv-enclosed.
-# If you add a fragment, register it HERE - a worker missing one fragment
-# (e.g. calc_ccc) crashes the whole parallel run with "object not found".
-#
-# Fragments are resolved relative to THIS file's own location (taken from the
-# innermost source() frame), so the master works no matter which working
-# directory the sourcing worker happens to have.
+# WORKER CONTRACT: every worker (interpolation, nested PSOCK, variogram
+# optimizer, Governing Factors, classification) loads the model code with
+# source("spatial_helpers.R"), so this file must define every fragment's
+# functions in the global environment. A fragment not registered here crashes
+# parallel runs with "object not found". Fragments resolve relative to this
+# file, whatever the worker's working directory.
 local({
   src_dir <- tryCatch({
     f <- NULL

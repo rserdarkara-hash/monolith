@@ -1,14 +1,10 @@
-# server_map_viewer.R (sourced with local = TRUE inside server) - draw_map,
-# proxy-managed overlays (keyed on map_overlay_rev), view switcher and the
-# main/comparison renderLeaflet blocks.
+# server_map_viewer.R (chunk H, sourced with local = TRUE inside server):
+# draw_map, proxy-managed overlays (keyed on map_overlay_rev), view switcher
+# and the main/comparison renderLeaflet blocks.
 
-  # Stale-results banner. Every layer on this tab is a snapshot of the last
-  # run: rv$sf / rv$bound / rv$disp are written only by the run pipeline, so
-  # retargeting the Input Data CRS or the X/Y columns on the Data Setup tab
-  # moves nothing here until Generate is pressed again. Without this the
-  # controls read as inert - which is exactly how a wrong zone survives a
-  # user's trial and error. The results are NOT cleared: the archive and the
-  # export registry depend on them.
+  # Stale-results banner: the maps are a snapshot of the last run, so a later
+  # Input Data CRS or X/Y change moves nothing here until the next run. Warn,
+  # never clear (the archive and the registry hold these results).
   output$map_crs_stale_note <- renderUI({
     d <- rv$disp
     req(d)
@@ -41,8 +37,7 @@
     res_mode_val <- input$res_mode %||% "local"
     manual_res_val <- input$grid_res %||% 50
     
-    # In Auto modes the cell size follows each boundary and its samples and is
-    # only known once the run has built the boundaries; the Map Viewer's resolution
+    # In the Auto modes the cell size is set during the run; the resolution
     # overlay lists the sizes a run used.
     df <- data.frame(
       Locality = names(res_list),
@@ -70,12 +65,9 @@
     df
   }, striped = TRUE, hover = TRUE, bordered = TRUE, width = "100%")
 
-  # Live advisory for a Point buffer that is narrower than half the
-  # grid cell diagonal, which drops the cells of isolated samples (see
-  # strict_buffer_gap, spatial_pipeline.R). Shown for Fixed resolution only:
-  # in Auto modes the run derives the cell size from the boundaries it builds, so a
-  # pre-run figure here would be a guess. Those modes are covered by the
-  # authoritative run-time warning instead.
+  # Advisory for a Point buffer narrower than half the cell diagonal
+  # (strict_buffer_gap()), for Fixed resolution only: in the Auto modes the run
+  # derives the cell size and warns itself.
   output$strict_buffer_note <- renderUI({
     if (!identical(input$boundary_type, "strict")) return(NULL)
     if (!identical(input$res_mode %||% "local", "fixed")) return(NULL)
@@ -85,11 +77,8 @@
     p(style = paste("font-size: 0.78em; margin-top: 8px; border-left: 2px solid var(--mn-warn);",
                     "padding-left: 8px; color: var(--mn-text-2); line-height: 1.35;"),
       msg,
-      # An uploaded boundary shapefile replaces the point buffers for every
-      # locality it matches, and the run-time check stays silent for those. It
-      # is matched per locality though, so the ones it misses do fall back to
-      # the point-buffer boundary and are still exposed - hence a qualifier
-      # rather than hiding the advisory.
+      # An uploaded boundary replaces the point buffers only for the localities
+      # it matches, so qualify rather than hide the advisory.
       if (!is.null(rv$shp_bound)) {
         span(" This applies to localities your uploaded boundary shapefile does not cover, which fall back to the point buffers.")
       })
@@ -104,16 +93,12 @@
     Filter(Negate(is.null), r_list)
   }
 
-  # Styling signature per map widget: stamped by draw_map on a full render
-  # and checked by the proxy restyler, so a styling tick that matches what a
-  # map already shows (e.g. the invalidation wave right after a run
-  # completes, when the widgets have just re-rendered) costs nothing.
+  # Styling signature per map widget, stamped by draw_map and checked by the
+  # proxy restyler, so a tick matching what a map already shows costs nothing.
   map_style_sig <- new.env(parent = emptyenv())
 
-  # How many raster image layers each map widget currently carries. Leaflet
-  # replaces a layer whose id matches but never drops one the new pass does
-  # not re-add, so a restyle that paints fewer images than the last one has
-  # to retire the surplus explicitly (remove_surplus_raster_images).
+  # Raster image layers each widget carries, so a restyle with fewer images
+  # retires the surplus (remove_surplus_raster_images()).
   map_raster_count <- new.env(parent = emptyenv())
 
   # The surface a map widget's label shows, whose own class breaks style it;
@@ -131,9 +116,8 @@
   }
 
   current_style_sig <- function(lab, class_params) {
-    # Effective style: agro/bin without computable class params renders the
-    # continuous fallback, so it must share the continuous signature (e.g.
-    # selecting Agronomical before pressing APPLY changes nothing on screen).
+    # Agro/bin without computable class params renders continuous, so it
+    # shares the continuous signature.
     style_eff <- input$color_style %||% "cont"
     if (style_eff %in% c("agro", "bin") && is.null(class_params)) style_eff <- "cont"
     paste(
@@ -147,12 +131,9 @@
     )
   }
 
-  # Adds/replaces the raster image layers and their legend on `m`, which may
-  # be a fresh leaflet widget (initial render inside draw_map) or a
-  # leafletProxy (in-place restyle). Stable layerIds make proxy re-adds
-  # REPLACE the previous images/legend instead of stacking, so a styling
-  # change costs one PNG encode per layer - never a widget rebuild (tile
-  # refetch, toolbar, overlay re-adds).
+  # Adds/replaces the raster image layers and legend on a fresh widget (inside
+  # draw_map) or a leafletProxy (restyle). Stable layerIds make re-adds
+  # REPLACE, so a styling change costs one PNG encode per layer, no rebuild.
   style_map_rasters <- function(m, r_list, lab, map_id = NULL) {
     meta <- get_display_meta()
     if (is.null(meta) || length(r_list) == 0) return(m)
@@ -162,9 +143,8 @@
       r_name <- if (!is.null(r_names) && length(r_names) >= i && !is.na(r_names[i]) && r_names[i] != "") r_names[i] else as.character(i)
       paste0(rv$run_counter, "_", lab, "_", r_name)
     }
-    # Image ids are positional, so they must be handed out as the images are
-    # actually added: a locality whose raster fails to project is skipped, and
-    # an id derived from the loop index would leave a hole in the sequence.
+    # Positional image ids are handed out as images are added, so a skipped
+    # locality leaves no hole in the sequence.
     n_img <- 0L
     add_img <- function(m, r, pal) {
       n_img <<- n_img + 1L
@@ -172,14 +152,12 @@
                            layerId = raster_img_layer_id(n_img))
     }
     legend_id <- "rast_legend"
-    # The layer comes from the view menu, which offers SE/variance views only
-    # for a run that produced a variance band; the band test stays as a guard
-    # against a stale menu value carried over from the previous run.
+    # The variance-band test guards against a stale view-menu value from the
+    # previous run.
     uncert_layer <- map_view_layer()
     is_uncert_view <- uncert_layer %in% c("se", "var") && isTRUE(meta$has_variance)
-    # NULL when an uncertainty view meets a raster without a variance band:
-    # that locality is left undrawn rather than painted with its predictions
-    # under a variance legend.
+    # NULL for an uncertainty view on a raster without a variance band: that
+    # locality is left undrawn.
     select_active_layer <- function(r_w) {
       if (is_uncert_view) {
         if (!"var1.var" %in% names(r_w)) return(NULL)
@@ -189,10 +167,7 @@
         if("var1.pred" %in% names(r_w)) r_w[["var1.pred"]] else r_w[[1]]
       }
     }
-    # Lazy palette-domain extraction: only the continuous branch reads the
-    # cell values (classified and residual branches build their own
-    # domains), so classified styling ticks skip a per-locality values()
-    # pass entirely.
+    # Palette domain read lazily: only the continuous branch needs cell values.
     get_vv_scale <- function() {
       jv <- if (is_uncert_view) joint_uncert_vv() else joint_vv()
       if (!is.null(jv)) return(jv)
@@ -213,8 +188,7 @@
     legend_title <- map_legend_title(meta$label, meta$unit, if (is_uncert_view) uncert_layer else "value")
 
     if(lab == "resid_raster") {
-      # The residual view always displays the var1.pred difference, so the
-      # palette domain comes from that layer (the view has no SE/variance form)
+      # The residual view shows the var1.pred difference (no SE/variance form).
       resid_layers <- list()
       for (i in seq_along(r_list)) {
         r_w <- get_projected_raster(r_list[[i]], layer_key(i))
@@ -231,10 +205,8 @@
       }
       m <- m %>% leaflet::addLegend(pal = pal, values = c(-abs_max, abs_max), title = legend_var_title(map_legend_title(meta$label, layer = "resid")), layerId = legend_id)
     } else {
-      # Classified styling when requested AND computable, with the classes of
-      # the surface this map shows; any failure or not-yet-applied class
-      # breaks fall back to the continuous palette so the viewer NEVER renders
-      # an empty base map over a completed run.
+      # Classified styling with this map's surface classes when computable;
+      # otherwise continuous, so a completed run never shows an empty map.
       class_params <- if (!is_uncert_view) class_params_for(lab) else NULL
 
       if (!is.null(class_params)) {
@@ -277,21 +249,16 @@
     m
   }
 
-  # draw_map builds the full widget only for STRUCTURAL changes (new run,
-  # view switch): styling reads are isolate()d here, and pure styling ticks
-  # (palette, continuous/binned/agro, class breaks, the view menu's SE or
-  # variance layer) are
-  # handled by the proxy restyler observer below. Cheap overlays (styled
-  # points, borders, north arrow, scale, resolution box, base tiles) are
-  # applied by leafletProxy observers keyed on map_overlay_rev.
+  # draw_map builds the full widget only for STRUCTURAL changes (new run, view
+  # switch); styling reads are isolate()d and pure styling ticks go to the
+  # proxy restyler. Cheap overlays (points, borders, north arrow, scale,
+  # resolution box, base tiles) are proxy observers keyed on map_overlay_rev.
   draw_map <- function(r_obj, lab, map_id = NULL) {
     current_tiles <- isolate(input$base_map_layer) %||% "Esri.WorldImagery"
     current_key <- isolate(carto_api_key())
 
     if((is.null(r_obj) || (is.list(r_obj) && length(r_obj) == 0)) && lab != "resid_points") {
-      # Placeholder map (no raster layers yet, e.g. mid-run): a Leaflet widget
-      # without layers has no auto-fit limits, and a map that never receives a
-      # view never loads tiles - it stays solid gray. Always give it one.
+      # Placeholder map (no rasters yet): give it a view, or it never loads tiles.
       if (!is.null(map_id)) {
         if (exists(map_id, envir = map_style_sig)) rm(list = map_id, envir = map_style_sig)
         assign(map_id, 0L, envir = map_raster_count)
@@ -333,15 +300,13 @@
         vgm_warn_html <- build_vgm_warning_html(rv$disp$v_fits, target = vgm_target,
                                                 engine = rv$disp$method)
         if (!is.null(vgm_warn_html)) {
-          # className is NOT decorative: addControl() defaults to "info legend",
-          # which lands this banner under the legend rule and its 190px cap plus
-          # overflow:hidden, silently clipping the text and the close button.
+          # className matters: the default "info legend" class would clip the
+          # banner under the legend's 190px overflow rule.
           m <- m %>% addControl(html = vgm_warn_html, position = "bottomleft",
                                 className = "vgm-warn-control leaflet-control")
         }
-        # Styling reads (palette, class breaks, SE/variance layer) are
-        # isolated: a styling tick must invalidate only the proxy restyler,
-        # never this full widget build.
+        # Styling reads are isolated so a styling tick invalidates only the
+        # proxy restyler.
         isolate({
           m <- style_map_rasters(m, r_list, lab, map_id)
           if (!is.null(map_id)) {
@@ -372,12 +337,10 @@
   }
 
   # ── Proxy restyler: styling ticks swap raster images + legend in place ──
-  # Invalidated by the pure styling inputs (palette, styling mode, APPLIED
-  # class breaks, the view menu's SE/variance layer, match scales). Structural
-  # changes (new run, a different surface in the view menu) still go through
-  # the full renderLeaflet path, which stamps map_style_sig; priority = -10
-  # runs this AFTER the outputs in the same flush, so a freshly rendered
-  # widget is never re-encoded.
+  # Invalidated by pure styling inputs (palette, style, APPLIED class breaks,
+  # SE/variance layer, match scales). Structural changes take the full
+  # renderLeaflet path; priority = -10 runs this after the outputs, so a
+  # freshly rendered widget is never re-encoded.
   observe({
     # Styling dependencies, registered unconditionally so the observer is
     # armed even before the first run.
@@ -420,9 +383,7 @@
 
   # --- proxy-managed overlays (no raster re-encode on toggle) ---
 
-  # Run points reprojected for Leaflet, cached on rv$sf only: styling ticks
-  # (marker size slider, label toggles, palette) reuse the projected object
-  # instead of re-running st_transform on every invalidation.
+  # Run points reprojected for Leaflet, cached on rv$sf only.
   pts_view_4326 <- reactive({
     pts <- rv$sf
     if (is.null(pts) || nrow(pts) == 0) return(NULL)
@@ -460,10 +421,8 @@
           marker_size = input$pt_marker_size %||% 3,
           popup_fn = popup_fn,
           legend_layer_id = "styled_points_legend",
-          # rv$sf is the DISPLAY set: coordinate-deduplicated but never
-          # NA-target filtered, so it holds points the surface was not fitted
-          # from. Style them apart rather than letting them read as samples
-          # supporting the map.
+          # rv$sf is the DISPLAY set (never NA-target filtered), so points the
+          # surface was not fitted from are styled apart.
           value_col = "v"
         )
       }
@@ -510,14 +469,10 @@
     }
   })
 
-  # Chrome toggles (Overlays panel). All three are answered by a class on
-  # <body> and a rule in the stylesheet rather than by touching the widgets:
-  # the draw toolbar and the measure control are built into the widget, so
-  # hiding them any other way would mean a full re-render, and the legend
-  # title is carried by three maps at once. isFALSE/isTRUE rather than a
-  # negated isTRUE so the first flush - when the input has not arrived yet -
-  # lands on the checkbox's own default instead of flickering through the
-  # opposite state.
+  # Chrome toggles (Overlays panel), answered by a class on <body> and a CSS
+  # rule: the toolbar and measure control are built into the widget, and the
+  # legend title sits on three maps. isFALSE/isTRUE so the first flush, before
+  # the input arrives, matches the checkbox default.
   observe({
     shinyjs::toggleClass(selector = "body", class = "mn-hide-drawtools",
                          condition = isFALSE(input$show_draw_tools))
@@ -531,13 +486,9 @@
                          condition = isTRUE(input$show_legend_title))
   })
 
-  # Ruler readout, one observer per map: the three widgets carry separate input
-  # ids even though draw_map builds them all. `local()` is what captures each id
-  # - a bare `for` binding would leave every observer reading the last one.
-  # Deliberately NOT keyed on map_overlay_rev: this answers a user gesture, not
-  # an overlay refresh. The answer goes back to the token add_map_ruler() minted
-  # for the shape, which is what makes it land in that measurement's own popup
-  # instead of a corner box that only ever holds the newest figure.
+  # Ruler readout, one observer per map (`local()` captures each id). Not
+  # keyed on map_overlay_rev: it answers a gesture. The reply goes to the
+  # token add_map_ruler() minted, landing in that measurement's own popup.
   for (rid in overlay_map_ids) local({
     map_id <- rid
     input_id <- paste0(map_id, "_ruler")
@@ -548,11 +499,8 @@
       lon <- suppressWarnings(as.numeric(val$lng))
       lat <- suppressWarnings(as.numeric(val$lat))
       if (length(lon) < 2 || length(lon) != length(lat)) return(invisible(NULL))
-      # The Target Mapping CRS of the run ON SCREEN, not whatever the sidebar
-      # now holds. The projected figure is in that CRS; the models computed in
-      # the working CRS, which coincides with it only when the two are the same
-      # system. Falls back to the live selection only before a first run has
-      # committed one (rv$disp is the same snapshot get_display_meta reads).
+      # The Target Mapping CRS of the run ON SCREEN; the live selection only
+      # before a first run.
       ruler_crs <- rv$disp$crs_sel %||% input$crs_selection
       res <- tryCatch(measure_path_metrics(cbind(lon, lat), ruler_crs),
                       error = function(e) NULL)
@@ -564,10 +512,8 @@
     }, ignoreInit = TRUE)
   })
 
-  # Distance scale. The control lives in the external #distance_scale_container:
-  # it is moved (and styled) there right after creation, so no DOM polling is
-  # needed, and it is toggled with plain JS on the live map instances instead
-  # of a re-render.
+  # Distance scale: the control is moved into #distance_scale_container on
+  # creation and toggled with plain JS on the live maps (no re-render).
   observe({
     map_overlay_rev()
     show <- isTRUE(input$show_scale)
@@ -600,16 +546,11 @@
     ", if (show) "true" else "false"))
   })
 
-  # View switcher for the Map Viewer: offers only the surfaces the committed
-  # run actually computed, so switching views is instant (no recompute) and a
-  # context change in the sidebar can never blank the displayed map.
-  # Re-renders only when a run is dispatched/completed, defaulting to the view
-  # implied by the committed run configuration.
-  # The SE and variance views are offered when the displayed run PRODUCED a
-  # prediction-variance band (rv$disp$has_variance, stamped with the export
-  # items), so they follow what is on screen rather than the method picked for
-  # the next run, and a kriging run that returned no variance band offers no
-  # view that would come up blank.
+  # View switcher: only the surfaces the committed run computed, so switching
+  # is instant and a sidebar change cannot blank the map. SE/variance views
+  # are offered when the displayed run PRODUCED a variance band
+  # (rv$disp$has_variance). Re-renders only on run dispatch/completion,
+  # defaulting to the run's configured view.
   output$map_view_ui <- renderUI({
     req(rv$disp)
     d <- isolate(rv$disp)
@@ -631,8 +572,7 @@
 
     selectInput("map_view", NULL, choices = choices, selected = default_view, width = "230px", selectize = FALSE)
   })
-  # keep the view choices in sync even while the Map Viewer tab is hidden -
-  # the layout conditionalPanels depend on input$map_view being current
+  # Kept current while hidden: the layout conditionalPanels read input$map_view.
   outputOptions(output, "map_view_ui", suspendWhenHidden = FALSE)
 
   # Runs before the renderers in the same flush, so a map reads the new view.
@@ -677,10 +617,8 @@
   })
 
   observeEvent(list(input$base_map_layer, carto_api_key()), {
-    # draw_map reads the tile choice under isolate(), so this proxy swap is
-    # the only path that updates tiles on an already-rendered map. The CARTO
-    # key is part of the tile URL on those two providers, so entering or
-    # clearing it has to re-add the layer the same way a provider switch does.
+    # The only tile update path for rendered maps (draw_map isolates the
+    # choice); the CARTO key is part of those tile URLs, so it re-adds too.
     for (map_id in overlay_map_ids) {
       leafletProxy(map_id) %>%
         clearTiles() %>%
@@ -695,9 +633,8 @@
       bb <- tryCatch(sf::st_bbox(sf::st_transform(sf::st_as_sf(rv$bound), 4326)), error = function(e) NULL)
       if (!is.null(bb)) return(bb)
     }
-    # The CRS is checked alongside the columns: since the column mapping is no
-    # longer gated behind it, x/y can be set while the Input Data CRS is not,
-    # and st_transform() of an NA-CRS point set errors rather than degrading.
+    # The CRS is checked too: x/y can be mapped while the Input Data CRS is
+    # unset, and st_transform() of an NA-CRS point set errors.
     if (!is.null(rv$user_data) && !is.null(rv$mapping$x) && !is.null(rv$mapping$y) &&
         isTruthy(rv$mapping$crs)) {
       return(tryCatch({
@@ -711,14 +648,10 @@
     NULL
   }
 
-  # Leaflet refuses to draw into a zero-size container: it stashes the layers in
-  # `pendingRenderData` and only flushes them once the widget is resized. A map
-  # whose FIRST render happens while its tab (or its view conditionalPanel) is
-  # hidden therefore stays a blank gray box until a resize reaches it - which is
-  # exactly what happens when a run completes while the user is on another tab.
-  # A single resize event races the Bootstrap tab fade and the overlay
-  # transition, so pump resizes until every VISIBLE map reports it has actually
-  # rendered (capped at ~3 s so a genuinely hidden map costs nothing).
+  # Leaflet stashes layers drawn into a zero-size container until a resize, so
+  # a map first rendered on a hidden tab stays grey. One resize races the tab
+  # fade, so resizes are pumped until every VISIBLE map has rendered (capped
+  # at ~3 s).
   pump_map_resize <- function() {
     shinyjs::runjs("
       (function() {
@@ -744,11 +677,9 @@
     ")
   }
 
-  # Fit the visible map canvases to the run area and nudge Leaflet to
-  # re-measure its container. Shared by the Refresh Map Area button and the
-  # reveal handler: a widget that initialized without a valid view (the
-  # placeholder rendered mid-run) never loads tiles, so revealing the maps
-  # must always end with an explicit fit.
+  # Fit the visible maps to the run area and re-measure their containers
+  # (Refresh Map Area and reveal): a widget initialised without a view never
+  # loads tiles.
   fit_maps_to_data <- function() {
     bbox <- run_area_bbox()
     if (!is.null(bbox)) {
@@ -761,23 +692,12 @@
     pump_map_resize()
   }
 
-  # Companion to pump_map_resize() for every OTHER htmlwidget, DT above all.
-  # DT stashes a payload delivered to a zero-size element and flushes it only
-  # from its own resize handler; the Scientific Analysis tables are pushed
-  # eagerly (suspendWhenHidden = FALSE) and the run observer switches to the Map
-  # Viewer at dispatch, so those tables are one run behind until something
-  # resizes them.
-  #
-  # Dispatching a window resize event is NOT enough: Shiny routes each output
-  # binding's resize through makeResizeFilter(), which drops the call when the
-  # element's box is unchanged since its last non-zero measurement - which is
-  # exactly the case when returning to a tab that was already visited once.
-  # (Shiny itself already calls the filtered onResize on shown.bs.tab, so a
-  # window event adds nothing.) Call the bindings directly instead: same work,
-  # without the filter. Each widget then decides what it owes - DT re-renders
-  # its stash, leaflet invalidates its size and flushes pendingRenderData - and
-  # anything unbound or still hidden is skipped. Fails closed: if Shiny's
-  # internals ever move, the guards make this a no-op rather than an error.
+  # pump_map_resize() for every OTHER htmlwidget, DT above all: DT flushes a
+  # payload stashed while hidden only from its resize handler, and the eager
+  # Scientific Analysis tables are hidden when results land. A window resize
+  # is dropped by Shiny's makeResizeFilter() for an unchanged box, so the
+  # bindings are called directly; unbound or hidden widgets are skipped, and
+  # the guards make it a no-op if Shiny's internals move.
   pump_widget_resize <- function() {
     shinyjs::runjs("
       (function() {
@@ -797,13 +717,9 @@
     ")
   }
 
-  # The Data Setup mini-map needs more than a flush. When it was rendered at a
-  # different container size (it re-renders on locality assignment and point
-  # restyling, both driven from the Map Viewer), invalidateSize repaints the
-  # full container but KEEPS the stale centre and zoom, leaving the samples
-  # outside the frame. So re-fit it to the stored sample bounds on reveal,
-  # after the size has been invalidated - repeated across the Bootstrap tab
-  # fade because a fit computed for a zero-size container is worthless.
+  # The Data Setup mini-map also needs a re-fit: invalidateSize keeps a stale
+  # centre and zoom after a re-render at another size, so it is re-fitted to
+  # the stored sample bounds, repeatedly across the tab fade.
   refit_setup_minimap <- function() {
     bb <- session_state$minimap_bbox
     if (is.null(bb) || !all(is.finite(bb)) ||
@@ -825,10 +741,8 @@
        format(bb[["ymax"]], digits = 15), format(bb[["xmax"]], digits = 15)))
   }
 
-  # A widget that initialized (or re-rendered) hidden must repair itself as soon
-  # as it becomes visible, even when the user never clicks Reveal Maps:
-  # returning to a tab, or switching view (which swaps which conditionalPanel is
-  # shown), are the moments a stashed render can finally be flushed.
+  # A widget rendered while hidden repairs itself when it becomes visible (tab
+  # return or view switch), not only on Reveal Maps.
   observeEvent(input$main_tabs, {
     if (identical(input$main_tabs, "tab_map")) pump_map_resize()
     if (identical(input$main_tabs, "tab_data")) refit_setup_minimap()
@@ -926,9 +840,8 @@
       }
    })
 
-   # Manual-mode slider values feed a live overlay line on the fitted
-   # variogram plots; they belong in the cache key only while they actually
-   # affect the plot (the short-circuit reads mirror the plot's own logic).
+   # Manual-mode slider values enter the cache key only while they draw the
+   # overlay line (mirroring the plot's own condition).
    vgm_manual_overlay_key <- function(target) {
      if (identical(input$vgm_mode, "manual") && identical(input$sel_loc_stats, input$m_loc)) {
        if (identical(manual_vgm_target(), target)) return(list(input$m_psill, input$k_mod, input$m_range, input$m_nugget))
@@ -937,11 +850,8 @@
    }
 
    # ── SA diagnostics build closures ────────────────────────────────────────
-   # Every Scientific Analysis plot card shares ONE ggplot builder between its
-   # in-page cached render, the expand modal (static + interactive plotly) and
-   # the 300-dpi PNG download. Variogram panels draw the empirical values and
-   # the fitted line (variogramLine); an empty card draws sci_placeholder()
-   # (ui_plotting.R).
+   # Each Scientific Analysis plot card shares ONE ggplot builder between its
+   # cached in-page render, the expand modal and the 300-dpi PNG download.
    register_sci_plot <- function(id, title, build_fn) {
      register_expanded_modal(input, output, session,
        btn_id = paste0(id, "_expand"), mode_id = paste0(id, "_mode"),
@@ -956,9 +866,7 @@
            showNotification("This plot is not available to download yet.", type = "warning")
            req(FALSE)
          }
-         # The builders size their text in points; with showtext told the
-         # device's resolution those points land on the page as written, so the
-         # 12 pt screen theme reads as a 12 pt figure on the 9 x 7 in canvas.
+         # Points land on the page as written, with showtext told the dpi.
          with_showtext_dpi(300, suppressWarnings(
            ggsave(file, plot = p, width = 9, height = 7, dpi = 300, bg = "white")))
        }
@@ -967,11 +875,8 @@
 
    build_vgm_structure_plot <- function(target) {
      loc <- input$sel_loc_stats
-     # Displayed run's context when one exists; live sidebar selection while
-     # the sidebar is tuning variograms and as the pre-run fallback, so
-     # "OPTIMIZE ALL VARIOGRAMS" -> Manual tuning labels the fitted curves with
-     # the variable being tuned rather than with the variable of a run these
-     # curves did not come from.
+     # The displayed run's context, or the live sidebar while tuning
+     # variograms and before a run, so tuned curves carry the tuned variable.
      meta <- if (isTRUE(sci_vgm_tuning())) get_current_meta() else get_display_meta()
      if (is.null(meta)) meta <- get_current_meta()
      req(loc, meta)
@@ -980,10 +885,8 @@
        if (isTRUE(sci_vgm_tuning())) {
          return(sci_placeholder("Select a locality to inspect its stored variogram for the current variable and data subset."))
        }
-       # Pooled within localities (pooled_within_variogram): no pair joins two
-       # localities. rv$sf is the display set, one locality per `loc`; before
-       # the displayed run's points exist, the uploaded rows of the Total's
-       # localities stand in.
+       # Pooled within localities (no pair joins two); before the run's points
+       # exist, the uploaded rows of the Total's localities stand in.
        col <- if (target == "act") "v" else "pv"
        pts_list <- if (!is.null(rv$sf) && col %in% colnames(rv$sf)) {
          split(rv$sf[col], rv$sf$loc)
@@ -1049,11 +952,8 @@
                               " with a nugget below 5% of the sill")
        }
      }
-     # The fitted model's parameters head the subtitle, as on every variogram
-     # panel. A target with no usable variance in this locality has all-zero
-     # empirical points and a fitted curve 60 orders of magnitude below the
-     # data: the points are drawn, not a model of the noise
-     # (build_fitted_variogram_plot).
+     # Parameters head the subtitle; a target without usable variance shows
+     # its points, not a model of the noise (build_fitted_variogram_plot()).
      build_fitted_variogram_plot(v_emp, v_fit,
                                  title = paste0("Fitted (", tgt_label, "): ", loc),
                                  extra_sub = manual_sub, manual_model = manual_model)
@@ -1063,8 +963,7 @@
      p <- build_vgm_structure_plot("act"); req(p); p
    }, cacheKeyExpr = {
      loc <- input$sel_loc_stats
-     # input$var_id covers the pre-run state (no committed rv$disp yet):
-     # switching the sidebar variable must invalidate the pre-run panels
+     # input$var_id covers the pre-run state (no rv$disp yet).
      list("vgm_main", loc, rv$results_rev, rv$disp$actual %||% input$var_id,
           sci_vgm_tuning(), input$var_id, input$sci_name_mode,
           current_tuning_keys(),

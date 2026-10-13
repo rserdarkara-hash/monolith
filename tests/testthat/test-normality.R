@@ -1,4 +1,4 @@
-# test-normality.R — tests for compute_normality from desc_exploratory_module.R.
+# compute_normality() and the normality verdict (desc_exploratory_module.R).
 
 # ── Edge cases: insufficient data ──────────────────────────────────────────
 
@@ -46,8 +46,8 @@ test_that("uses Lilliefors test for n >= 5000", {
 # ── Classification ─────────────────────────────────────────────────────────
 
 test_that("detects a two-point distribution as non-normal (Shapiro-Wilk)", {
-  # 22 zeros and 23 ones: two point masses at n=45 (SW path)
-  # shapiro.test() gives p ≈ 2.6e-09 for this vector — unambiguously non-normal
+  # Two point masses, 22 zeros and 23 ones (n = 45, Shapiro-Wilk path):
+  # shapiro.test() gives p = 2.6e-09.
   x <- c(rep(0, 22), rep(1, 23))
   res <- compute_normality(x)
   expect_equal(res$status, "not_normal")
@@ -86,7 +86,7 @@ test_that("normality tooltip shows (on residuals) only when groups are present",
     group_id = factor(rep(c("A", "B"), each = 15))
   )
   
-  # Test with single group (should contain "(on raw values)", should NOT contain "(on residuals)")
+  # One group: the test runs on the raw values.
   shiny::testServer(desc_exploratory_server, args = list(
     data_reactive = reactive(df_single),
     vars_metadata_reactive = reactive(NULL)
@@ -103,7 +103,7 @@ test_that("normality tooltip shows (on residuals) only when groups are present",
     expect_true(grepl("(on raw values)", html_str, fixed = TRUE))
   })
   
-  # Test with multi group (should contain "(on residuals)", should NOT contain "(on raw values)")
+  # Several groups: the test runs on within-group residuals.
   shiny::testServer(desc_exploratory_server, args = list(
     data_reactive = reactive(df_multi),
     vars_metadata_reactive = reactive(NULL)
@@ -145,9 +145,7 @@ test_that("compute_normality reports the test's own statistic and p-value", {
 
 
 # ── The verdict a reader sees and copies ───────────────────────────────────
-# The verdict used to exist only inside an icon's `title` attribute, so it
-# could not be copied into a report or read without hovering. It is text on
-# the page now, and it has to be a complete, self-describing sentence.
+# The verdict is page text, so it must be a complete, self-describing sentence.
 
 test_that("the normality verdict is a complete sentence naming test, statistic, p and n", {
   x <- qnorm(ppoints(60))
@@ -172,8 +170,7 @@ test_that("the normality verdict is a complete sentence naming test, statistic, 
 })
 
 test_that("an untested column says WHY, not 'insufficient data'", {
-  # A constant column is not a small sample: blaming n told the reader to
-  # collect more of a variable that does not vary.
+  # A constant column is not a small sample, so its reason must not blame n.
   const <- compute_normality(rep(3, 40))
   expect_equal(const$reason, "the values are constant")
   expect_match(normality_verdict_text(const), "the values are constant", fixed = TRUE)

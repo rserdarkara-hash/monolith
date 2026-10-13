@@ -1,5 +1,4 @@
-# Smoke test — verifies the testthat infrastructure is wired up correctly.
-# If this file doesn't run, nothing else will.
+# Infrastructure smoke test: if this file fails, nothing else is trustworthy.
 
 test_that("testthat infrastructure loads application functions", {
   # helper.R should have sourced global.R + all helpers + monolith.R
@@ -46,8 +45,8 @@ test_that("application sourcing honors sequential test startup without changing 
     .package = "future"
   )
 
-  # Exercise the real startup branch without opening sockets. A parallel
-  # worker attempt during test sourcing must fail even on a healthy runner.
+  # Evaluate global.R's real startup branch with future::plan() mocked, so no
+  # worker socket is opened.
   withr::with_options(list(monolith_test_sequential = TRUE), {
     eval(blocks[[1]])
     expect_identical(calls, list(future::sequential))
@@ -62,7 +61,8 @@ test_that("application sourcing honors sequential test startup without changing 
     expect_length(calls, 1L) # Re-sourcing keeps the existing app pool.
   })
 
-  # Re-load the actual helper to cover both sources and option restoration.
+  # Re-source helper.R itself: both loads of global.R get the sequential plan,
+  # and the option is restored afterwards.
   calls <- list()
   current <- future::sequential
   old_option <- getOption("monolith_test_sequential")

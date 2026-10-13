@@ -1,4 +1,4 @@
-# test-idw-selection.R — IDW power selection, Auto (CV).
+# test-idw-selection.R: IDW power selection, Auto (CV).
 #
 # The power is selected on an exact nearest-neighbour IDW kernel
 # (idw_kernel_predict) because nesting the selection inside cross-validation
@@ -25,11 +25,11 @@ gstat_idw_cv <- function(pts, folds, p, nmax) {
 }
 
 test_that("the kernel reproduces gstat's IDW cross-validation", {
-  # Leave-one-out on golden tiny for every power and neighbourhood; on core
-  # smallest locality, Auto and spatial-block folds for every combination, plus an explicit
-  # leave-one-out check. Auto also resolves to leave-one-out when that scope
-  # has at most 50 rows; the separate partition test below uses 60 rows to
-  # exercise random 10-fold. Both ends of the IDW family are among the powers.
+  # Leave-one-out on golden tiny for every power and neighbourhood; on the
+  # smallest core locality, Auto and spatial-block folds for every combination
+  # plus one explicit leave-one-out. Both ends of the IDW family are among the
+  # powers. Auto resolves to leave-one-out at 50 rows or fewer; the partition
+  # test below uses 60 rows to exercise random 10-fold.
   tiny <- idw_fixture("tiny")
   core_site <- idw_fixture("core", golden_locality("core", "smallest", min_n = 30L))
   powers <- c(0, 0.5, 2, 4.75, IDW_MAX_FINITE_POWER, Inf)

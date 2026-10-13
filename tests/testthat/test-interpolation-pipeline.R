@@ -1,8 +1,7 @@
-# test-interpolation-pipeline.R — tests for init_interpolation_res,
-# sanitize_spatial_predictions, safe_run_cv, suggest_lmc_model,
-# calc_scientific_lags, merge_wrapped_rasters, get_joint_scale_values,
-# validate_and_project_sf, the apply_* interpolation engines
-# (IDW/TPS/OK/RK/RFK/CK) and the apply_interpolation dispatcher.
+# The interpolation pipeline: result scaffolding and CV helpers, grids and
+# resolutions, point-set preparation (projection, co-located samples), the
+# apply_* engines (IDW/TPS/OK/RK/RFK/CK), the apply_interpolation dispatcher,
+# the regional driver and its parallel dispatch contract.
 #
 # Engine calls write progress files via update_progress_file(); the
 # monolith_progress_dir option is unset in tests, so they go to tempdir()
@@ -502,8 +501,8 @@ test_that("a location whose only measured row sits beside an unmeasured twin kee
 })
 
 test_that("merge_colocated is the identity on data with no co-located samples", {
-  # Golden case 2: the golden set holds no replicates, so every model point set
-  # built from it must be the input itself, bit for bit.
+  # The golden set holds no replicates, so every model point set built from it
+  # must be the input itself, bit for bit.
   full <- golden_sf("full")
   expect_identical(merge_colocated(full), full)
   counted <- merge_colocated(full, count = TRUE)
@@ -584,7 +583,7 @@ test_that("apply_TPS returns cv_obj as sf carrying the input CRS", {
   pts <- make_test_points(15)
   grid <- make_test_grid_safe(pts, res = 200)
   # fields::Tps always runs its GCV grid search for diagnostics, which warns
-  # about endpoint minima on small noisy data — irrelevant to what we test here
+  # about endpoint minima on small noisy data, irrelevant to this test.
   res <- suppressWarnings(apply_TPS(pts, "v", grid, list(tps_lambda = 0.01)))
   expect_s3_class(res$cv_obj, "sf")
   expect_equal(sf::st_crs(res$cv_obj), sf::st_crs(pts))
@@ -1121,12 +1120,11 @@ test_that("a CV population too small to fold skips the CV and still draws the ma
 })
 
 test_that("a locality is projected once, before the covariate filter", {
-  # D4f: the working CRS is a property of the locality, not of the covariate
+  # The working CRS is a property of the locality, not of the covariate
   # selection. This fixture straddles the 12 deg E UTM zone boundary so that
   # ALL rows average into zone 32 while the covariate-complete rows average
-  # into zone 33 - projecting after the filter would put RK's samples on a
-  # different grid from OK's, which is exactly what the Comparable switch is
-  # meant to rule out.
+  # into zone 33: projecting after the filter would put RK's samples on a
+  # different grid from OK's, which the Comparable switch exists to rule out.
   set.seed(505)
   lon <- c(runif(20, 10.5, 11.0), runif(32, 12.1, 12.5))
   lat <- c(runif(20, 45.0, 45.4), runif(32, 45.0, 45.4))
@@ -1191,8 +1189,7 @@ test_that("a locality is a failed region when it lost a surface, not when only i
 
 test_that("the run record separates the two CRS and selected from used covariates", {
   # Two runs that fitted different models (a covariate dropped in one
-  # locality) used to export identical records, and the record named only the
-  # Input Data CRS.
+  # locality) must export different records, and the record names both CRS.
   res_all <- list(
     list(l = "Kale", aux_used_act = c("elev", "ndvi"), aux_dropped_act = "clay",
          aux_used_pre = c("elev", "clay", "ndvi"), aux_dropped_pre = character(0)),
@@ -1504,8 +1501,8 @@ test_that("the OK fallback refits its variogram inside every fold", {
 })
 
 test_that("a CK fold refits its LMC and standardization from its own rows", {
-  # Nothing about the held-out row — not its target, not its covariate, not
-  # their contribution to the standardization means — may reach its own
+  # Nothing about the held-out row (not its target, not its covariate, not
+  # their contribution to the standardization means) may reach its own
   # prediction.
   pts <- golden_sf("tiny")
   n <- nrow(pts)
@@ -1847,8 +1844,8 @@ test_that("apply_RFK grows one forest per LOOCV fold, all at the requested ntree
 
 test_that("covariate names that are not syntactic give the results of syntactic ones", {
   # gstat (through sp) and randomForest's formula method re-read column names
-  # through make.names(), so a lab header such as "Fe (mg/kg)" was "not found"
-  # even when backticked: RK and RFK lost the locality, CK fell back to OK.
+  # through make.names(), so a lab header such as "Fe (mg/kg)" must give the
+  # results of its syntactic twin in RK, RFK and CK.
   pts <- golden_sf("full", localities = golden_locality("full", "compact", min_n = 30L))
   pts$v <- pts$ph
   grid <- make_test_grid_safe(pts, res = 150)
@@ -2104,9 +2101,9 @@ test_that("apply_interpolation returns error result for unknown method", {
 test_that("pre-resolved VIF set (aux_kept) reproduces the engine's own gate exactly", {
   # run_regional_interpolation resolves the multicollinearity gate BEFORE the
   # covariates are kriged onto the grid (so dropped ones are never kriged) and
-  # passes the surviving set down as method_params$aux_kept. That is a compute-
-  # path change only: the gate sees the same frame either way, so the fitted
-  # model and its predictions must be identical.
+  # passes the surviving set down as method_params$aux_kept. The gate sees the
+  # same frame either way, so the fitted model and its predictions must be
+  # identical.
   pts <- make_test_points(30)
   pts$aux3 <- pts$aux1 * 2 + rnorm(30, 0, 1e-3)   # collinear with aux1
   grid <- make_test_grid_safe(pts, res = 200)
@@ -2141,9 +2138,9 @@ test_that("pre-resolved VIF set (aux_kept) reproduces the engine's own gate exac
 
 test_that("covariate engines without aux vars report the real cause, not 'unknown method'", {
   # Every covariate branch tests length(aux_vars) > 0, so RK/RFK/CK with no
-  # covariates used to fall through to the unknown-method stop() and tell the
-  # user RK was an unrecognised method. server_execution.R guards the UI path,
-  # but the engine is publicly callable.
+  # covariates must name that cause rather than fall through to the
+  # unknown-method stop(). server_execution.R guards the UI path, but the
+  # engine is publicly callable.
   pts <- make_test_points(10)
   grid <- make_test_grid_safe(pts, res = 200)
   lags <- calc_scientific_lags(pts)
@@ -2193,9 +2190,9 @@ test_that("with_rng_sandbox is two-sided and with_seed is reproducible", {
   expect_identical(.Random.seed, before)
   expect_equal(with_seed(99, runif(3)), x1)
 
-  # Remove branch: no .Random.seed before the call, none left behind after it
-  # (the half-sided version of this sandbox used to leak a seeded stream into
-  # whatever ran next in a fresh session or worker).
+  # Remove branch: no .Random.seed before the call, none left behind after it,
+  # or a seeded stream would leak into whatever runs next in a fresh session
+  # or worker.
   if (exists(".Random.seed", envir = globalenv(), inherits = FALSE)) rm(".Random.seed", envir = globalenv())
   x2 <- with_seed(99, runif(3))
   expect_false(exists(".Random.seed", envir = globalenv(), inherits = FALSE))
@@ -2291,8 +2288,8 @@ test_that("calc_class_breaks emits no conditions (Jenks message regression)", {
   set.seed(999)
   vv <- rnorm(20000, 50, 10)
   # A stray condition unwinding through the classification_params reactive
-  # poisoned it and made Jenks styling silently fall back to the continuous
-  # palette, so neither break path may signal one.
+  # would poison it and drop Jenks styling silently to the continuous palette,
+  # so neither break path may signal one.
   expect_no_condition(calc_class_breaks(vv, 4, "jenks"))
   expect_no_condition(calc_class_breaks(c(1, 1, 2, 2, 3), 5, "jenks"))
   expect_no_condition(calc_class_breaks(vv, 4, "kmeans"))
@@ -2313,7 +2310,7 @@ test_that("autofit_vgm_item fits actual and predicted variograms per item", {
   expect_s3_class(res$pre$fit, "variogramModel")
   expect_true(res$act$mod %in% c("Sph", "Exp", "Gau", "Mat"))
 
-  # matches the same fit computed inline (the observer's former lambda body)
+  # matches the same fit computed inline
   sub_a <- merge_colocated(validate_and_project_sf(sf::st_as_sf(df_a, coords = c("x", "y"), crs = 32633)))
   lags <- calc_scientific_lags(sub_a)
   v_emp <- gstat::variogram(v ~ 1, sub_a, width = lags$width, cutoff = lags$cutoff)
@@ -2492,10 +2489,9 @@ test_that("boundary helpers: hull, assumed CRS and overlap", {
 })
 
 test_that("CK applies the multicollinearity gate to its co-kriging system", {
-  # apply_CK had NO gate: the Auto-Drop / Keep All threshold was threaded to
-  # RK/RFK only, so collinear covariates still reached fit.lmc() -- which is
-  # precisely what makes the LMC fit fail and drop the run into the silent
-  # Ordinary Kriging fallback.
+  # Collinear covariates reaching fit.lmc() make the LMC fit fail and drop the
+  # run into the Ordinary Kriging fallback, so CK applies the Auto-Drop / Keep
+  # All gate as RK and RFK do.
   set.seed(11)
   pts <- make_test_points(30)
   pts$aux3 <- pts$aux1 * 2 + rnorm(30, 0, 1e-3)   # collinear with aux1
@@ -2540,16 +2536,16 @@ test_that("engine parameter guards: absent IDW params and an NA TPS lambda", {
   pts <- make_test_points(20)
   grid <- make_test_grid_safe(pts, res = 200)
 
-  # R2: apply_IDW is publicly callable, and apply_TPS's fallback depends on
-  # it resolving absent parameters itself: no neighbourhood is the default 12,
-  # no power is Auto (CV).
+  # apply_IDW is publicly callable, and apply_TPS's fallback depends on it
+  # resolving absent parameters itself: no neighbourhood is the default 12, no
+  # power is Auto (CV).
   idw_res <- suppressWarnings(apply_IDW(pts, "v", grid, list(cv_strategy = "loocv")))
   expect_false(is.null(idw_res$res_sf))
   expect_true(any(is.finite(idw_res$res_sf$var1.pred)))
   expect_identical(idw_res$idw_fit$mode, "cv")
 
-  # R1: `NA < 0` is NA, which errors the if() and silently sent the entire
-  # surface down the IDW fallback. NA now means unset = Auto (GCV).
+  # `NA < 0` is NA, which would error the if() and send the surface down the
+  # IDW fallback; an NA lambda means unset = Auto (GCV).
   tps_res <- suppressWarnings(apply_TPS(
     pts, "v", grid, list(cv_strategy = "loocv", tps_lambda = NA_real_)))
   expect_false(is.null(tps_res$res_sf))
@@ -2557,10 +2553,9 @@ test_that("engine parameter guards: absent IDW params and an NA TPS lambda", {
 })
 
 test_that("residual (Delta) raster carries only the prediction layer", {
-  # r_a - r_p differenced the whole stack, so when both surfaces carried a
-  # kriging-variance layer the exported residual GeoTIFF gained a
-  # "difference of two kriging variances" band -- not a quantity that exists.
-  # The viewer was safe (raster_value_layer picks var1.pred); the export was not.
+  # Differencing the whole stacks would give the exported residual GeoTIFF a
+  # "difference of two kriging variances" band, not a quantity that exists,
+  # whenever both surfaces carry a variance layer.
   pts <- make_test_points(20)
   coords <- sf::st_coordinates(pts)
   pts_data <- data.frame(x = coords[, 1], y = coords[, 2],
@@ -2628,12 +2623,10 @@ test_that("the prediction grid is invariant to the boundary-clip block size", {
 })
 
 test_that("IDW and TPS surfaces carry no phantom variance band", {
-  # gstat::idw() returns an all-NA `var1.var` next to var1.pred (verified under
-  # the project's installed gstat), so rasterizing every returned field doubled
-  # the size of every IDW surface and wrote a blank second band into the
-  # exported GeoTIFF; the main session then registered two blank "Uncertainty
-  # Map" export items off the same layer. Gate on the METHOD: apply_TPS's IDW
-  # fallback returns a gstat idw object too.
+  # gstat::idw() returns an all-NA `var1.var` beside var1.pred; rasterized, it
+  # would double every IDW surface, write a blank band into the exported
+  # GeoTIFF and register two blank "Uncertainty Map" export items. Gate on the
+  # METHOD: apply_TPS's IDW fallback returns a gstat idw object too.
   pts <- make_test_points(20)
   coords <- sf::st_coordinates(pts)
   pts_data <- data.frame(x = coords[, 1], y = coords[, 2],
@@ -2667,8 +2660,8 @@ test_that("a constant target names itself in the run warnings", {
   # A locality whose target has no variance produces a flat surface, an
   # is_fallback variogram and all-NA R2/NSE/CCC/RPD/RPIQ (those metrics are
   # ratios against the observed variance, so they are UNDEFINED here, not zero).
-  # Without this the only signal was the amber "fallback model" banner, which
-  # names the symptom. Message only: the run must still complete.
+  # The run warnings name the cause, not only the symptom the amber "fallback
+  # model" banner shows. Message only: the run must still complete.
   pts <- make_test_points(20)
   coords <- sf::st_coordinates(pts)
   pts_data <- data.frame(x = coords[, 1], y = coords[, 2],
@@ -2726,9 +2719,8 @@ test_that("a degenerate target is flagged on its fitted variogram", {
 
 test_that("an Actual-only run carries no ML-prediction products", {
   # pred_col is resolved from the variable's _cve/_ss column whatever the view
-  # is, so an Actual-only run used to fill pv and then register a point-error
-  # surface and a residual map for a run that predicted nothing. The pipeline
-  # half of that contract: with pv absent, no prediction product is built.
+  # is. The pipeline half of the contract: with pv absent, no prediction
+  # product (point-error surface, residual map) is built.
   pts <- make_test_points(20)
   coords <- sf::st_coordinates(pts)
   pts_data <- data.frame(x = coords[, 1], y = coords[, 2],
@@ -2753,11 +2745,10 @@ test_that("an Actual-only run carries no ML-prediction products", {
 })
 
 test_that("an emptied covariate screen names the cause instead of failing as RK", {
-  # When the gate drops every covariate, aux_vars becomes character(0) and the
-  # trend formula built from it is "`v` ~ ", which as.formula() rejects with
-  # "attempt to use zero-length variable name" -- reported by the tryCatch as a
-  # bare "RK failed". The locality still routes to the named OK fallback; only
-  # the message changes.
+  # When the gate drops every covariate, the trend formula would be "`v` ~ ",
+  # which as.formula() rejects ("attempt to use zero-length variable name"),
+  # surfacing as a bare "RK failed". The locality routes to the named OK
+  # fallback, and the message names the cause.
   pts <- make_test_points(20)
   pts$covA <- 1.0   # both constant, so the gate's constant prune empties the set
   pts$covB <- 3.0
@@ -2926,10 +2917,9 @@ test_that("an all-NA surface yields NULL rather than an empty layer", {
 
 test_that("a boundary that encloses no grid node skips the locality with a named warning", {
   # A coarse fixed resolution over a tight strict boundary can leave NO
-  # candidate node inside it; the engines then kriged the full bbox and the
-  # mask discarded every cell -- a blank locality with no message, after
-  # paying for the whole interpolation. The run now names the cause and skips
-  # (classif_build_grid already stops loudly in the same situation).
+  # candidate node inside it. The run names the cause and skips the locality
+  # before paying for any interpolation (classif_build_grid stops loudly in the
+  # same situation).
   pts_data <- data.frame(x = c(0, 100, 200), y = c(0, 100, 0),
                          v = c(1.2, 3.4, 2.1), pv = NA, Locality = "LocA")
   item <- list(l = "LocA", pts_data = pts_data,
@@ -3230,13 +3220,12 @@ test_that("RFK prediction is the forest trend plus the kriged residual", {
   skip_if(grepl("Falling back to OK", res$log_msg, fixed = TRUE),
           "RFK fell back to OK on this fixture")
 
-  # The forest is unseeded here, so the reference is built from the engine's
-  # own fitted forest and its own OOB residuals: the claim under test is the
-  # decomposition, not the forest.
+  # The reference is built from the engine's own fitted forest and its own OOB
+  # residuals: the claim under test is the decomposition, not the forest.
   #
   # The trend residual is recomputed from the returned forest: the engine
-  # kriges the OOB residual, which is a training quantity the result list no
-  # longer carries (CV residuals live in res$cv_obj).
+  # kriges the OOB residual, a training quantity the result list does not
+  # carry (CV residuals live in res$cv_obj).
   dat <- pts
   dat$residuals <- pts$ph - res$rf_model$predicted
   kr <- gstat::krige(residuals ~ 1, dat, grid, model = res$fit, debug.level = 0)
@@ -3440,33 +3429,20 @@ test_that("the Jenks break path is pinned", {
 test_that("the whole regional driver still produces the surface it produced before", {
   # The end-to-end alarm. Every test above proves a component computes what its
   # method defines; this one asks whether the driver still assembles them into
-  # the same map - the question an edit anywhere in the pipeline actually raises.
+  # the same map. It is only legitimate because the component tests establish
+  # correctness first: on its own it says "unchanged", not "right". Ordinary
+  # Kriging on purpose (seed-sandboxed, with no covariate surfaces or forest in
+  # its path), and sequential, so it does NOT cover the future/PSOCK dispatch
+  # layer.
   #
-  # It is a regression lock, and it is only legitimate because the component
-  # tests establish correctness first: on its own it would say "unchanged", not
-  # "right". Ordinary Kriging on purpose (fully seed-sandboxed; RFK's forest is
-  # unseeded and would not reproduce), and sequential, so it does NOT cover the
-  # future/PSOCK dispatch layer.
-  #
-  # The variogram is PINNED by golden_pin_vgm() rather than fitted. Fitted, this
-  # lock is not portable: on this scope all sixteen of robust_vgm_fit()'s
-  # candidates fail to converge and the single survivor of the sanity window
-  # follows the platform's floating-point path, which moved the range 12%
-  # between Windows and Linux and every value downstream with it. What remains
-  # is a linear solve on a matrix with condition number 5.8, so the 1e-6
-  # relative tolerance is comfortable rather than tight, and the vgm_* entries
-  # are constants confirming the pin reached the engine. robust_vgm_fit() keeps
-  # its own coverage in test-robust-vgm-fit.R.
-  #
-  # The BOUNDARY is pinned the same way, by golden_pin_boundary(). The
-  # point-derived hull put two cell centres 1.2 m and 2.0 m from its edge on a
-  # 300 m grid, so a sub-metre GEOS or concaveman difference decided whether
-  # they were in: moving the buffer 0.5 m locally reproduced the CI failure's
-  # exact signature, the same five surface entries moving while cells, vgm_* and
-  # cv_* stayed bit-identical. The pinned boundary is a union of whole lattice
-  # cells, so every candidate centre sits exactly 150 m from an edge and the
-  # mask survives +/- 20 m of vertex noise unchanged. It still clips - 294
-  # candidate cells, 127 kept - so the mask remains under test.
+  # The variogram and the boundary are PINNED (golden_pin_vgm(),
+  # golden_pin_boundary(); helper.R gives the derivations): fitted, the
+  # variogram follows the platform's floating-point path on this scope, and the
+  # point-derived hull leaves cell centres within metres of its edge. What
+  # remains is a linear solve on a matrix with condition number 5.8, so the
+  # 1e-6 relative tolerance is comfortable rather than tight; the vgm_* entries
+  # are constants confirming the pin reached the engine. The pinned boundary
+  # still clips (294 candidate cells, 127 kept), so the mask stays under test.
   # If this fails where nothing in the repository changed, read the `info` line
   # on the failure: it carries the R and package versions the baseline was
   # recorded under and names any that differ here.
@@ -3503,15 +3479,14 @@ test_that("calc_metric_spacing is the mean nearest-neighbour distance in metres"
 # -- the parallel dispatch contract -----------------------------------------
 
 test_that("every pinned dispatch ships the globals its body reads", {
-  # The promise bodies pin `globals =` rather than paying future's recursive
-  # discovery walk, which cost 6 s of frozen main session on every run and, at
-  # the governing-factors site, shipped masked base generics whose package
-  # references made the worker attach spam, terra, fields and sf. The price of
-  # pinning is that a name added to a body and forgotten in its list fails
-  # only inside the worker, as "object not found", where no sequential test
-  # can see it. So: every free name in a pinned body must be pinned, defined
-  # at the top level of a spatial_helpers.R fragment (the worker sources those
-  # itself), or come from a package.
+  # The promise bodies pin `globals =` rather than pay future's recursive
+  # discovery walk (seconds of frozen main session per run, and masked base
+  # generics whose package references made the worker attach packages). The
+  # price is that a name added to a body and forgotten in its list fails only
+  # inside the worker, as "object not found", where no sequential test can see
+  # it. So every free name in a pinned body must be pinned, defined at the top
+  # level of a spatial_helpers.R fragment (the worker sources those itself), or
+  # come from a package.
   root <- normalizePath(file.path(testthat::test_path(), "..", ".."), mustWork = TRUE)
 
   # The fragment list is READ from the master, never restated here: a fragment
@@ -3573,9 +3548,9 @@ test_that("every pinned dispatch ships the globals its body reads", {
   interp <- check_dispatch("server_execution.R",
                            "seed = 12345) %...>% (function(res_all) {",
                            c("main_wd", "run_params", "df_list", "nested_workers"))
-  # Pinning also switches off the package detection that walk used to do, so
-  # the unqualified calls in the helper graph need the same declaration the
-  # nested furrr_options makes.
+  # Pinning also switches off the walk's package detection, so the unqualified
+  # calls in the helper graph need the same declaration the nested
+  # furrr_options makes.
   expect_identical(eval(interp$packages), c("sf", "gstat", "dplyr"))
 
   check_dispatch("gov_module.R",
@@ -3616,9 +3591,9 @@ test_that("every pinned dispatch establishes its own parallel plan", {
 # ── Models handed back to the main session ─────────────────────────────────
 # A formula built inside a function carries that function's whole frame as its
 # environment, and `terms` inherits it. A fitted model returned from a worker
-# therefore dragged the locality's point set, prediction grid, covariate grid
-# and kriging output back with it, and the main session held that frame for
-# the displayed run and for every archived copy of it.
+# would drag the locality's point set, prediction grid, covariate grid and
+# kriging output back with it, held by the main session for the displayed run
+# and every archived copy of it.
 
 test_that("detach_model_frame drops the fitting frame and keeps the model", {
   fit_in_a_frame <- function() {
@@ -3666,7 +3641,7 @@ test_that("the pipeline's RK summary and RFK forest carry no pipeline frame", {
   # The reporting path reads these and nothing else.
   expect_equal(nrow(rk$summ_act$coefficients), 2L)
   expect_true(is.finite(rk$summ_act$r.squared))
-  # The summary's own content is a few kB; the frame it used to carry is not.
+  # The summary's own content is a few kB; a pipeline frame would not be.
   expect_lt(length(serialize(rk$summ_act, NULL)), 1e5)
 
   rfk <- suppressWarnings(run_regional_interpolation(
@@ -3684,8 +3659,8 @@ test_that("the pipeline's RK summary and RFK forest carry no pipeline frame", {
 
 test_that("a projected Target Mapping CRS keeps the run's cell size", {
   # terra::project() chooses its own cell size when the Target Mapping CRS is
-  # another system (a 30 m grid came out at 30.10 m from UTM 35N to 36N), so
-  # the exported rasters did not have the resolution the run reports.
+  # another system (30 m from UTM 35N to 36N becomes 30.10 m), so the exported
+  # rasters must be built at the cell size the run reports.
   set.seed(4)
   n <- 40
   pts_data <- data.frame(x = 500000 + runif(n, 0, 1200), y = 4400000 + runif(n, 0, 1200))
@@ -3714,9 +3689,9 @@ test_that("a projected Target Mapping CRS keeps the run's cell size", {
 })
 
 test_that("the working CRS as target relabels the surface and keeps its values", {
-  # terra::project() onto the same system rewrote every cell at float
-  # precision to change only the CRS's spelling (a proj4 UTM zone against its
-  # EPSG code, as a geographic upload's working CRS is written).
+  # Projecting onto the same system would rewrite every cell at float precision
+  # only to change the CRS's spelling (a proj4 UTM zone against its EPSG code,
+  # as a geographic upload's working CRS is written).
   r <- terra::rast(nrows = 20, ncols = 20, xmin = 500000, xmax = 500600,
                    ymin = 4400000, ymax = 4400600,
                    crs = "+proj=utm +zone=35 +datum=WGS84 +units=m +no_defs")
@@ -3736,8 +3711,8 @@ test_that("the working CRS as target relabels the surface and keeps its values",
 
 test_that("Fixed-mode localities share one lattice, so the merged surface is not resampled", {
   # terra::merge resamples every raster whose origin differs from the first
-  # one's. Fixed-mode grids started at their own boundary's corner, so the
-  # merged surface carried interpolated values for every locality but one.
+  # one's, so Fixed-mode grids share one lattice rather than starting at their
+  # own boundary's corner.
   set.seed(8)
   item_at <- function(l, x0, y0) {
     d <- data.frame(x = x0 + runif(30, 0, 900), y = y0 + runif(30, 0, 900))

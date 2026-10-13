@@ -1,15 +1,12 @@
-# server_execution.R (sourced with local = TRUE inside server) - run estimates,
-# archive/VIF gates and the future_promise interpolation pipeline. CRITICAL:
-# run_params is built from reactives BEFORE the future_promise block; no rv$*/
-# input$* may be referenced inside the future, and the nested
-# parallelly::makeClusterPSOCK topology must be preserved as-is.
+# server_execution.R (chunk G, sourced with local = TRUE inside server): run
+# estimates, archive/CRS/VIF gates and the future_promise interpolation run.
+# CRITICAL: run_params is built from reactives BEFORE the future_promise
+# block; no rv$*/input$* inside the future, and the nested
+# parallelly::makeClusterPSOCK topology stays as-is.
 
   # ── Run warnings ──────────────────────────────────────────────────────────
-  # Workers report per-locality warnings as `warn_` files. These two closures
-  # are the one path that reads them: everything the live progress poller
-  # shows is what the completion handler persists into rv$log and so into the
-  # exported run log, where a message explaining why metric cells are blank
-  # outlives the progress overlay.
+  # The one reader of the workers' `warn_` files: what the live poller shows is
+  # what the completion handler persists into rv$log (and the exported log).
   read_run_warnings <- function() {
     files <- list.files(path = session_progress_dir,
                         pattern = paste0("^warn_", session_id, "_.*_.*\\.txt$"),
@@ -26,17 +23,13 @@
     Filter(Negate(is.null), out)
   }
 
-  # Append this run's warnings to the run log, then clear the run's status
-  # files. Called from every completion path, including the two failure
-  # handlers - a run that failed is exactly when its warnings matter most.
+  # Append this run's warnings to the run log and clear its status files;
+  # called from every completion path, failures included.
   persist_run_warnings <- function() {
     warns <- tryCatch(read_run_warnings(), error = function(e) list())
     if (length(warns) > 0) {
-      # A warning the worker also wrote to its own log (the grid-coarsening and
-      # constant-target notes use both channels) is already in rv$log; adding
-      # it again would print the same sentence twice.
-      # Matched per LINE on message AND locality, so the same sentence logged
-      # for one locality does not swallow another locality's warning.
+      # Skip a warning the worker already logged (some notes use both
+      # channels), matched per LINE on message AND locality.
       log_lines <- strsplit(rv$log %||% "", "\n", fixed = TRUE)[[1]]
       already <- function(w) {
         any(grepl(w$message, log_lines, fixed = TRUE) &
@@ -98,11 +91,9 @@
     ))
   }
 
-  # What the next run will cost, stated before it is started: duration, how many
-  # locality models, how many points, and the method it would use. Recomputed
-  # from the same estimator the confirmation dialog reads, so the two never
-  # disagree; silent until a dataset has been mapped (calculate_run_estimates
-  # req()s the run metadata).
+  # The next run's cost (duration, locality models, points, method) above the
+  # Run button, from the confirmation dialog's estimator; silent until a
+  # dataset is mapped.
   output$run_estimate_line <- renderUI({
     est <- tryCatch(calculate_run_estimates(), error = function(e) NULL)
     if (is.null(est)) return(NULL)
@@ -119,14 +110,11 @@
     )
   })
 
-  # Archived entries hold a run's rasters, CV objects and fitted models, so an
-  # unbounded archive grows RAM run after run; keep only the most recent few.
-  # An entry is snapshot_display_state() (server_setup.R). Measured on the
-  # 7-locality golden set (OK, comparison mode, Auto grid): the registry's
-  # merged Actual and Predicted surfaces dominate an entry, beside 78 MB of
-  # per-locality rasters and CV state, which is why the cap is 3, not 5. The
-  # uncertainty maps add nothing to that: they are registered as derivations
-  # of those surfaces (export_item_obj, global_utils.R), not as copies.
+  # Archived entries (snapshot_display_state()) hold rasters, CV objects and
+  # models, so the archive keeps the most recent few. On the 7-locality golden
+  # set (OK, comparison, Auto grid) an entry carries the merged surfaces plus
+  # 78 MB of per-locality state, hence 3; uncertainty maps are derivations,
+  # not copies.
   MAX_RUN_HISTORY <- 3L
   push_run_history <- function(entry, base = NULL) {
     # A cancelled run produced nothing, so it is never archived as a result.
@@ -176,11 +164,9 @@
     }
   }
 
-  # Neither CRS selector has a default, so "not set yet" is the state every
-  # user is in immediately after an upload. It has to REFUSE VISIBLY: a bare
-  # req() on rv$mapping$crs made the Run button look broken, with no
-  # notification, no modal and no run-log line. One closure, called from both
-  # gates, so the message cannot exist only on a path that is never reached.
+  # Neither CRS selector has a default, so "not set" is the state right after
+  # an upload: refuse VISIBLY (a bare req() made Run look broken). One
+  # closure, called from both gates.
   crs_selection_gate <- function() {
     if (isTruthy(rv$mapping$crs) && isTruthy(input$crs_selection)) return(TRUE)
     missing <- if (!isTruthy(rv$mapping$crs)) "Input Data CRS" else "Target Mapping CRS"
@@ -216,9 +202,8 @@
                        icon("exclamation-triangle"), suit$title),
       tags$p(suit$msg),
       tags$p(suit$detail),
-      # Name the CRS that IS right rather than describing it, and name it here
-      # too: a user who reaches the run gate without having read the Data Setup
-      # advisory must not be sent back to work the answer out for themselves.
+      # Name the CRS that IS right, here too, for a user who skipped the Data
+      # Setup advisory.
       local({
         rec <- crs_recommend_target(pos$lon, pos$lat)
         if (is.null(rec)) {
@@ -237,10 +222,8 @@
     FALSE
   }
 
-  # Which runs need auxiliary variables. RK/RFK/CK model with them; OK does not
-  # use them at all, but under the Comparable CV population they select the
-  # samples OK is trained and scored on, so a run with none is a configuration
-  # the user did not mean.
+  # Runs that need covariates: RK/RFK/CK model with them; under the Comparable
+  # CV population they select the samples OK is trained and scored on.
   run_uses_covariates <- function() {
     input$method %in% c("RK", "RFK", "CK") ||
       (identical(input$method, "OK") && identical(input$cv_population, "comparable"))
@@ -251,9 +234,8 @@
     else "Please select at least one auxiliary variable for RK/RFK/CK model generation."
   }
 
-  # A TPS or IDW run needs a usable Fixed lambda or power before it starts: it
-  # is also the value every locality without a stored value of its own runs
-  # with, and both are typed numbers.
+  # A TPS or IDW run needs a usable Fixed lambda or power (also the value
+  # every locality without its own runs with).
   fixed_param_gate <- function() {
     msg <- if (identical(input$method, "TPS") && identical(input$tps_lambda_mode, "fixed") &&
                !tps_fixed_ok(input$tps_lambda)) {
@@ -268,16 +250,12 @@
     FALSE
   }
 
-  # The covariate-collinearity screen, factored out of observeEvent(input$run)
-  # so the CRS gate in front of it can hand control back here after an override
-  # without the screen being written twice. Every run screens again and asks
-  # again: the answer is handed to the run by rv$vif_choice_made, which the
-  # proceed_vif observer consumes and clears.
+  # The covariate-collinearity screen, shared by the Run handler and the CRS
+  # override. Every run asks again; the answer travels in rv$vif_choice_made,
+  # which the proceed_vif observer consumes and clears.
   run_collinearity_gate <- function() {
     if (input$method %in% c("RK", "RFK", "CK") && length(input$aux_vars) > 1) {
-       # Screen multicollinearity on the data the run will actually fit (the
-       # selected localities), not the full table: covariates can be collinear
-       # within one locality but not across all of them, and vice versa.
+       # Screened on the selected localities' data, which the run fits.
        df_vif <- sf::st_drop_geometry(rv$user_data)
        locs <- resolve_selected_localities(input$locality, df_vif, rv$mapping$loc)
        eff_subset <- effective_subset(input$value_type, input$subset, names(df_vif))
@@ -290,10 +268,8 @@
             title = tags$div(style = "color: var(--mn-danger); font-weight: 600;", icon("exclamation-triangle"), "High Multicollinearity Detected"),
             tags$p("High correlation / multicollinearity detected among the selected variables within the selected localities. This may destabilize the spatial estimation model."),
             tags$p(tags$b("Variables recommended to be dropped:"), paste(vif_res$dropped, collapse=", ")),
-            # The answer is a rule, not a one-off edit to a covariate list: the
-            # map applies it to every sample of a locality and each CV fold
-            # applies it again to its own training samples, so a fold can keep
-            # a different set than the map.
+            # The answer is a rule, applied to each locality's samples and
+            # again inside every CV fold.
             tags$p(style = "font-size: 0.9em; color: var(--mn-text-2);",
                    "Your answer sets the rule. The map applies it to all samples of each locality; cross-validation applies it again inside every fold, using only that fold's training samples, so a fold can keep a different set. Constant covariates are always dropped."),
             tags$p("What would you like to do?"),
@@ -337,9 +313,8 @@
       showNotification("A model run is already in progress.", type = "warning")
       return()
     }
-    # Cross-feature guard (mirror of run_optimizer_async's model_running check):
-    # both paths spawn their own nested PSOCK cluster of cores - 1 workers, so
-    # running them concurrently oversubscribes the machine ~2x.
+    # Cross-feature guard (mirrors run_optimizer_async()): both spawn cores - 1
+    # workers.
     if (isTRUE(rv$opt_running)) {
       showNotification("An optimization is running; start the interpolation after it finishes.", type = "warning")
       return()
@@ -355,9 +330,8 @@
     }
     if (!fixed_param_gate()) return()
 
-    # Suitability of the Target Mapping CRS is asked FIRST: there is no point
-    # settling a collinearity decision for a run that will not be allowed to
-    # measure anything correctly, and only one modal is ever open at a time.
+    # CRS suitability is asked FIRST: no collinearity decision for a run that
+    # will not measure correctly, and only one modal at a time.
     if (!crs_suitability_gate()) return()
 
     run_collinearity_gate()
@@ -455,19 +429,16 @@
     showNotification("Auto-archive/discard setting has been reset. You will be prompted for future runs.", type = "message")
   })
 
-  # Where a model run actually executes. input$run first passes through the
-  # archive-confirmation gate and then flips rv$proceed_run; this observer picks
-  # it up, validates the coordinate mapping, builds the per-locality point sets,
-  # and dispatches the interpolation to the future_promise pipeline so the UI
-  # stays responsive while localities are processed.
+  # Where a model run executes: input$run passes the gates and the archive
+  # confirmation, then flips rv$proceed_run; this observer validates, builds
+  # the per-locality point sets and dispatches the future_promise pipeline.
   observeEvent(rv$proceed_run, {
     if (isTRUE(rv$model_running)) {
       showNotification("A model run is already in progress.", type = "warning")
       return()
     }
-    # Re-checked here, not only at input$run: the archive/estimate confirmation
-    # modal sits between the two observers, and an optimizer can be started
-    # while it is open.
+    # Re-checked here: an optimizer can start while the confirmation modal is
+    # open.
     if (isTRUE(rv$opt_running)) {
       showNotification("An optimization is running; start the interpolation after it finishes.", type = "warning")
       return()
@@ -553,31 +524,24 @@
     }
 
     # ── Every CRS refusal happens HERE, before a single piece of state moves ──
-    # This is the last block of the observer's validation half. Everything
-    # below it - the run counter, the raster caches, rv$disp, the export
-    # registry, the CV lists - is COMMITTED, so an early return past this point
-    # leaves the session with the previous run's results destroyed and a
-    # run-config panel describing a run that never happened. There is no unwind
-    # path on purpose: refuse before committing, and nothing needs unwinding.
+    # Everything below (run counter, caches, rv$disp, registry, CV lists) is
+    # COMMITTED, so a return past this point would destroy the previous run's
+    # results; refuse before committing and nothing needs unwinding.
 
-    # Engines use metre-based Input Data CRS coordinates, or local UTM for
-    # geographic/non-metre input. The Target CRS gate protects the resampled
-    # surface, the resolution suggestion and the projected ruler.
+    # The Target CRS gate protects the resampled surface, the resolution
+    # suggestion and the projected ruler (engines work in the Input Data CRS or
+    # local UTM).
     safe_crs <- validate_crs(input$crs_selection, "CRS Validation Error:", duration = 15,
                              require_metric = TRUE)
     if (is.null(safe_crs)) return()
-    # Both selectors are free-typed (selectize create = TRUE), so an
-    # unparseable entry reaches this point having passed every selection-time
-    # advisory silently; catch it with a clear notification instead of letting
-    # st_as_sf() fail deep inside the interpolation worker.
+    # Both selectors accept free text, so an unparseable entry is caught here,
+    # not deep inside the worker.
     safe_src_crs <- validate_crs(rv$mapping$crs, "Input Data CRS Validation Error:", duration = 15)
     if (is.null(safe_src_crs)) return()
 
-    # Suitability enforcement. The gate at input$run is where the user is
-    # asked; this is the check no path can bypass, re-measured here rather than
-    # trusted. A "block" verdict stops the run unless that exact verdict was
-    # explicitly overridden, and a verdict that cannot be reached ("cannot
-    # answer") never stops anything.
+    # Suitability enforcement no path can bypass, re-measured here: a "block"
+    # stops the run unless that exact verdict was overridden; "cannot answer"
+    # never stops anything.
     crs_suit_pos <- crs_sample_positions(rv$user_data, x_col_name, y_col_name, rv$mapping$crs)
     crs_suit <- if (is.null(crs_suit_pos)) NULL else
       crs_target_suitability(input$crs_selection, crs_suit_pos$lon, crs_suit_pos$lat)
@@ -592,18 +556,13 @@
 
     locs <- resolve_selected_localities(input$locality, rv$user_data, rv$mapping$loc)
 
-    # Switch tabs client-side: shinyjs messages reach the browser immediately,
-    # whereas updateTabsetPanel queues an input message that is only flushed
-    # after this whole observer (validation + data prep + future dispatch)
-    # finishes - the pan would lag several seconds and yank the user back if
-    # they had already navigated elsewhere in the meantime.
+    # Switch tabs client-side: updateTabsetPanel would only flush after this
+    # whole observer and could yank the user back seconds later.
     shinyjs::runjs("$('#main_tabs a[data-value=\"tab_map\"]').tab('show');")
 
     shinyjs::disable("run")
-    # Label swap must go through updateActionButton: Shiny 1.13 renders the
-    # label into a .action-label child span, and raw shinyjs::html() here
-    # destroys that span, so later updateActionButton restores (cancel/finish)
-    # would APPEND their label next to the stale text instead of replacing it.
+    # Via updateActionButton: shinyjs::html() would destroy Shiny's
+    # .action-label span, and later restores would append beside stale text.
     updateActionButton(session, "run", label = "Interpolating...", icon = icon("spinner", class = "fa-spin"))
 
     shinyjs::show("map_processing_overlay")
@@ -618,18 +577,13 @@
                   if (input$method %in% c("OK", "RK", "RFK", "CK")) "Fit variogram" else "Fit model")
     update_premium_progress(5, "Preparing the run. The interface stays responsive; you can keep working in other tabs.", step = 1)
 
-    # Per-RUN flag, not per-session: clearing one shared flag at the start of run
-    # N+1 revoked the cancellation of run N's still-in-flight workers, which then
-    # ran to completion alongside the new batch (their results discarded by the
-    # run_token guard, their cores not). rv$run_counter is bumped a few lines
-    # below, so the id for THIS run is the next value.
+    # A per-RUN cancel flag, so starting run N+1 cannot revoke run N's
+    # cancellation; rv$run_counter is bumped below, hence + 1L.
     cancel_file <- file.path(session_progress_dir,
                              paste0("cancel_flag_", rv$run_counter + 1L, ".txt"))
     if (file.exists(cancel_file)) tryCatch(file.remove(cancel_file), error = function(e) NULL)
-    # Clear the previous run's status files, WARNINGS INCLUDED: the progress
-    # panel simply lists every warn_ file it finds, so a warning left behind by
-    # the last run is shown against this one - stating a strict buffer/cell-size
-    # mismatch, or an engine fallback, that the user may have just fixed.
+    # Clear the previous run's status files, warnings included, or the panel
+    # would show stale warnings against this run.
     old_files <- list.files(path = session_progress_dir, pattern = paste0("^(progress|warn)_", session_id, "_.*_.*\\.txt$"), full.names = TRUE)
     if (length(old_files) > 0) tryCatch(file.remove(old_files), error = function(e) NULL)
     rv$model_running <- TRUE
@@ -650,9 +604,7 @@
       "CK"  = paste0("Co-Kriging | Aux: ", paste(input$aux_vars, collapse=", "), " | Nmax: ", input$ck_nmax %||% 15)
     )
     method_params_str <- method_params_list[[input$method]] %||% ""
-    # The RFK trend forest has no sidebar control; the app uses 200 trees,
-    # matching apply_kriging_pipeline's fallback. Pinning it here makes the
-    # dispatch explicit and records the count actually used.
+    # The RFK forest size has no sidebar control: 200 trees, recorded here.
     rfk_ntree_val <- 200
     # Repeated CV is opt-in (it costs one extra full CV pass per repeat) and
     # collapses to 1 wherever the resolved plan is LOOCV, which is deterministic.
@@ -660,9 +612,8 @@
       max(1L, min(25L, suppressWarnings(as.integer(input$cv_repeat_n %||% 5))))
     } else 1L
     if (is.na(cv_repeats_val)) cv_repeats_val <- 1L
-    # Everything an archived run needs to be told apart from another one, and
-    # everything a methods section has to state, so two runs that differ only
-    # in CV strategy or in the collinearity decision are told apart here.
+    # The run record: everything that tells two runs apart and that a methods
+    # section must state.
     eff_subset <- effective_subset(input$value_type, input$subset, names(rv$user_data))
     tuning_keys <- c(act = tuning_key(meta$actual, eff_subset),
                      pre = tuning_key(if (input$value_type == "pred_ss") meta$pred_ss else meta$pred, eff_subset))
@@ -682,11 +633,8 @@
       boundary_type = input$boundary_type,
       buffer_mode = input$buff_mode,
       buffer_dist = input$buff_dist,
-      # In the Auto modes the cell size follows each locality's boundary and
-      # samples and is not known until the run has built them, so the sidebar slider
-      # (which holds the global recommendation there, not a size any grid
-      # uses) must not be recorded as the resolution. The completion handler
-      # below replaces this with the sizes the run actually gridded at.
+      # In the Auto modes the cell size is set per locality during the run;
+      # the completion handler fills in the sizes actually used.
       resolution = if (identical(input$res_mode, "fixed")) input$grid_res else "set at run",
       res_mode = input$res_mode,
       comp_mode = input$comp_mode,
@@ -697,9 +645,7 @@
                     (isTRUE(input$comp_mode) || !identical(input$value_type, "actual"))) isTRUE(input$sep_fit) else NA,
       cv_strategy = input$cv_strategy %||% "auto",
       cv_repeats = cv_repeats_val,
-      # What the reported metrics were measured on, and what the folds
-      # re-estimated, so two archived runs that differ only here are told apart
-      # in this record.
+      # What the metrics were measured on and what the folds re-estimated.
       cv_population = switch(input$method,
         "OK" = if (identical(input$cv_population, "comparable")) "Comparable (common rows)" else "Native (every measured sample)",
         "RK" = , "RFK" = "Common rows (target and every covariate)",
@@ -709,9 +655,8 @@
       cv_covariate_screen = if (input$method %in% c("RK", "RFK", "CK")) "per fold" else NA_character_,
       # Manual variogram models are consumed by Ordinary Kriging only.
       vgm_mode = if (identical(input$method, "OK")) (input$vgm_mode %||% "auto") else NA_character_,
-      # What the user selected. What each locality's model used, and what the
-      # collinearity screen removed, is only known once the workers return:
-      # covariates_retained / covariates_dropped are filled at completion.
+      # The selection; what each locality used and what the screen removed is
+      # filled at completion (covariates_retained / covariates_dropped).
       covariates_selected = if (run_uses_covariates()) paste(input$aux_vars, collapse = ", ") else NA,
       # The RESOLVED gate the dispatch passes into run_params: Inf records the
       # user's "Keep All (Not Recommended)" choice in the collinearity modal.
@@ -722,11 +667,9 @@
       method_params = method_params_str
     )
 
-    # Committed display context: everything the Map Viewer and Scientific
-    # Analysis tabs render is keyed to this snapshot (via get_display_meta or
-    # rv$disp directly), never to the live sidebar inputs, so reconfiguring
-    # the sidebar for the next run cannot alter the displayed results.
-    # Superset of get_current_meta()'s fields so it is a drop-in replacement.
+    # Committed display context: the Map Viewer and Scientific Analysis render
+    # from this snapshot (get_display_meta() or rv$disp), never the live
+    # sidebar. A superset of get_current_meta()'s fields.
     rv$disp <- c(meta, list(
       var_id = meta$actual,
       method = input$method,
@@ -734,18 +677,11 @@
       comp_mode = isTRUE(input$comp_mode),
       localities = locs,
       subset = eff_subset,
-      # The Target Mapping CRS of this run: the CRS its rasters were written in.
-      # The Map Viewer's ruler reports its projected figure against it, even
-      # after the sidebar has been retargeted for the next run. The models
-      # computed in the working CRS, which is this system only when the two
-      # coincide.
+      # This run's Target Mapping CRS (its rasters' CRS), named by the ruler's
+      # projected figure even after the sidebar is retargeted.
       crs_sel = input$crs_selection,
-      # The INPUT-side mapping this run was computed from. Every layer on the
-      # Map Viewer is a snapshot of the last run, so changing the Input Data
-      # CRS or the X/Y columns afterwards moves nothing there until Generate
-      # is pressed again. Recording the mapping is what lets that divergence
-      # be reported (map_crs_stale_note, server_map_viewer.R) instead of
-      # leaving the control looking inert.
+      # The input mapping this run used, so a later change is reported
+      # (map_crs_stale_note) rather than seeming to do nothing.
       map_crs = rv$mapping$crs,
       map_x = rv$mapping$x,
       map_y = rv$mapping$y
@@ -755,9 +691,7 @@
       rv$export_registry <- list()
       rv$rast_list_act <- list(); rv$rast_list_pre <- list(); sf_list <- list(); b_list <- list()
       rv$rast <- NULL; rv$rast_pred <- NULL; rv$rast_res <- NULL; rv$has_predictions <- FALSE
-      # Set only when this run produces them, so they must not survive from the
-      # previous one: a run in which every locality fails would otherwise
-      # register the old run's performance tables under this run's label.
+      # Set only when this run produces them, so cleared here.
       rv$rast_point_res <- NULL; rv$sf <- NULL; rv$bound <- NULL
       rv$bound_overlap_m2 <- c(act = 0, pre = 0)
     rv$log <- paste0("[Run #", rv$run_counter, "] Starting spatial interpolation using method: ", input$method, "...")
@@ -803,9 +737,7 @@
     idw_p_val <- idw_param_value(input$idw_p_mode, input$idw_p) %||% 2
     idw_nmax_val <- input$idw_nmax
     tps_lambda_val <- tps_param_value(input$tps_lambda_mode, input$tps_lambda)
-    # Stored per-locality values apply under "Per locality" only; "All
-    # localities" runs every locality with the sidebar setting, as a variogram
-    # applied in Manual mode is used only under Manual fitting.
+    # Stored per-locality values apply under "Per locality" only.
     idw_per_locality <- identical(input$idw_mode, "manual")
     tps_per_locality <- identical(input$tps_mode, "manual")
     
@@ -825,12 +757,8 @@
       pts_data$x <- sub_df[[current_x_col]]
       pts_data$y <- sub_df[[current_y_col]]
       pts_data$v <- sub_df[[actual_col]]
-      # Only a run that maps a prediction side carries the uploaded prediction
-      # column. pred_col is resolved from the variable's _cve/_ss column
-      # whatever the view is, so without this test an Actual-only run would
-      # fill pv and register ML-prediction products (point-error surface,
-      # residual map, uploaded-prediction card) for a run that predicted
-      # nothing.
+      # Only a run that maps a prediction side carries the prediction column,
+      # or an Actual-only run would register ML-prediction products.
       run_uses_pred <- isTRUE(comp_mode) || !identical(val_type, "actual")
       pts_data$pv <- if (run_uses_pred && !is.null(pred_col) &&
                          pred_col %in% colnames(sub_df)) sub_df[[pred_col]] else NA
@@ -846,10 +774,9 @@
       }
       idw_p_act <- idw_param("act")
       tps_lambda_act <- tps_param("act")
-      # "Fit Actual/Predicted separately" unticked: the Predicted surface reuses
-      # the measured values' model - their variogram, IDW power and TPS lambda.
-      # (A TPS lambda on Auto is shared in the worker: the Predicted surface
-      # takes the one GCV selects for the measured values.)
+      # Unseparated, the Predicted surface reuses the measured values' model
+      # (variogram, IDW power, TPS lambda; an Auto lambda is shared in the
+      # worker).
       m_params <- list(
         idw_p_act = idw_p_act,
         idw_p_pre = if (sep_fit) idw_param("pre") else idw_p_act,
@@ -870,9 +797,8 @@
       list(l = l, pts_data = pts_data, m_params = m_params)
     })
 
-    # Snapshot the per-locality method params this run actually consumes so
-    # display/export tables report them; the live tuning store holds no entry
-    # for localities that run with the setting for all localities.
+    # Snapshot the per-locality params this run consumes (the live store has
+    # no entry for localities on the all-localities setting).
     rv$disp$regional_params <- setNames(
       lapply(df_list, function(item) item$m_params[c("idw_p_act", "idw_p_pre", "tps_lambda_act", "tps_lambda_pre")]),
       vapply(df_list, function(item) item$l, character(1))
@@ -904,12 +830,9 @@
         seq_len(nrow(shp_bound))
       })
 
-    # Manual variogram fits reach every engine in m_params, but only the OK
-    # branch consumes them: RK/RFK refit the RESIDUAL variogram once the trend
-    # is removed and CK fits an LMC (both correct - a value-scale model must not
-    # be imposed on residuals). Say so instead of ignoring the user's tuning in
-    # silence. Gated on Manual mode: stored fits also come from OPTIMIZE ALL
-    # VARIOGRAMS and from previous runs, where nothing was hand-tuned.
+    # Manual variogram fits are consumed by OK only (RK/RFK refit the residual
+    # variogram, CK fits an LMC), so say so under Manual mode rather than
+    # ignore the user's tuning silently.
     if (identical(vgm_mode, "manual") && current_method %in% c("RK", "RFK", "CK")) {
       if (any(vapply(df_list, function(item) !is.null(item$m_params$pre_fit_act) ||
                        !is.null(item$m_params$pre_fit_pre), logical(1)))) {
@@ -958,18 +881,12 @@
     
     vif_thresh_local <- rv$active_vif_thresh
 
-    # Everything the workers need is a plain-data list plus TOP-LEVEL
-    # functions from spatial_helpers.R. The promise worker and each nested
-    # worker source() that file themselves, so no function values have to be
-    # shipped as globals at all (shipping monolith-defined closures would drag
-    # their source environments to every worker). The dispatch below
-    # therefore PINS `globals =` to the four plain-data objects the body
-    # reads. Automatic discovery would otherwise walk the whole 106-object
-    # helper call graph recursively on every single run - 6 s of frozen main
-    # session, measured, uncached - only to ship function values the worker's
-    # own source() defines anyway. `packages =` states the attachment that walk
-    # would infer: the helper graph calls sf, gstat and dplyr
-    # unqualified (the same set the nested furrr_options below declares).
+    # The workers get plain data plus TOP-LEVEL functions they source()
+    # themselves, so `globals =` is PINNED to the four plain-data objects the
+    # body reads: automatic discovery would walk the whole helper call graph
+    # on every run (6 s of frozen session) to ship functions the worker defines
+    # anyway. `packages =` states what that walk would infer (sf, gstat and
+    # dplyr, called unqualified, as in the nested furrr_options).
     run_params <- list(
       main_wd = main_wd,
       current_method = current_method, current_crs = current_crs, aux_vars = aux_vars,
@@ -980,32 +897,24 @@
       cancel_file_val = cancel_file_val, vif_threshold = vif_thresh_local
     )
 
-    # Nested futures default to a sequential plan, so without an explicit
-    # escalation all localities run one after another inside the single
-    # future_promise worker. The nested worker count is decided HERE in the
-    # main session (availableCores() introspection inside a PSOCK worker is
-    # unreliable) and shipped into the worker as plain data. Numerics are
-    # plan-independent: furrr's fixed seed assigns one L'Ecuyer stream per
-    # locality regardless of topology.
+    # Nested futures default to sequential, so the nested worker count is
+    # decided here (availableCores() is unreliable inside a PSOCK worker) and
+    # shipped as plain data. Numerics are plan-independent: furrr's fixed seed
+    # gives one L'Ecuyer stream per locality whatever the topology.
     cores_hint <- tryCatch(as.integer(future::availableCores()), error = function(e) 1L)
     nested_workers <- if (length(df_list) > 1L) max(1L, min(cores_hint - 1L, length(df_list))) else 1L
-    # record the ACTUAL parallelism in run_history.csv so the duration
-    # estimator calibrates against what really happened
+    # Record the ACTUAL parallelism for the duration estimator.
     log_cores <- nested_workers
 
     promises::future_promise({
       setwd(main_wd)
-      # Define the full helper set (interp_run_item included) in the promise
-      # worker's GLOBAL env; nested workers repeat this themselves inside
-      # interp_run_item because they are fresh processes.
+      # Helpers (interp_run_item included) in the promise worker's GLOBAL env;
+      # nested workers source them again (fresh processes).
       source("spatial_helpers.R", local = FALSE)
-      # This pool worker is reused across features and may carry a plan its
-      # previous task failed to tear down; nbrOfWorkers() would then report a
-      # dead cluster's size and the guard below would skip building a live one.
+      # A reused pool worker may carry a plan pointing at a dead cluster: reset.
       future::plan(future::sequential)
-      # Auto (Global) needs every locality's boundary before any locality runs:
-      # it shares the finest of their Auto cell sizes. Build those boundaries
-      # here, in the worker, so the interface stays responsive.
+      # Auto (Global) needs every locality's boundary first (it shares the
+      # finest Auto cell size); built here, off the main session.
       if (identical(run_params$res_mode, "global")) {
         run_params$shared_res <- shared_auto_resolution(df_list, run_params)
       }
@@ -1013,23 +922,17 @@
       nested_cl <- NULL
       old_mc_cores <- getOption("mc.cores")
       tryCatch({
-        # No `nbrOfWorkers() == 1L` clause: the plan reset above makes it
-        # true by construction, and a tautology in a guard reads as if it
-        # still protected something.
+        # No `nbrOfWorkers() == 1L` clause: the plan reset above makes it true.
         if (nested_workers >= 2L) {
-          # PSOCK workers report mc.cores = 1; the main session allocated
-          # nested_workers cores to this batch, so tell parallelly before
-          # spawning or its worker-count guard misfires. Owning the cluster
-          # explicitly (instead of plan(multisession)) guarantees a clean
-          # teardown in the finally block below.
+          # PSOCK workers report mc.cores = 1; set it before spawning, or
+          # parallelly's worker-count guard misfires. An owned cluster (not
+          # plan(multisession)) guarantees a clean teardown below.
           options(mc.cores = nested_workers)
           nested_cl <- parallelly::makeClusterPSOCK(nested_workers)
           future::plan(future::cluster, workers = nested_cl)
         }
-        # interp_run_item is TOP-LEVEL (globalenv-enclosed after the source()
-        # above), so furrr ships a lean function value instead of a closure
-        # over this future's evaluation environment; run parameters travel as
-        # one plain-data argument.
+        # interp_run_item() is TOP-LEVEL, so furrr ships a lean function; run
+        # parameters travel as one plain-data argument.
         furrr::future_map(df_list, interp_run_item, run_params = run_params,
           .options = furrr::furrr_options(
             seed = 12345,
@@ -1038,11 +941,9 @@
             packages = c("sf", "gstat", "dplyr")
           ))
       }, finally = {
-        # tear the nested cluster down and restore mc.cores so the (reused)
-        # promise worker returns to the plain single-threaded state other
-        # future_promise tasks expect. Stop the cluster FIRST and swallow both
-        # errors: switching the plan away from an unhealthy cluster can throw,
-        # which would otherwise leave this worker on a dead cluster.
+        # Restore the reused promise worker to single-threaded state: stop the
+        # cluster FIRST and swallow both errors (a failed plan switch must not
+        # leave it on a dead cluster).
         options(mc.cores = old_mc_cores)
         if (!is.null(nested_cl)) {
           tryCatch(parallel::stopCluster(nested_cl), error = function(e) NULL)
@@ -1055,21 +956,14 @@
        seed = 12345) %...>% (function(res_all) {
       if (this_token != rv$run_token) return()
 
-      # Everything below runs in the MAIN session on results the workers already
-      # returned successfully. It gets its own tryCatch because `p %...>% f
-      # %...!% g` routes rejections from BOTH p and f to g: without this, a
-      # failure in merge_wrapped_rasters, register_export_item, the leaflet
-      # fitBounds or the kappa tables was reported as "Parallel Interpolation
-      # Failed" with troubleshooting advice about coordinate columns and
-      # collinear covariates — i.e. the user was sent to debug a worker that
-      # had in fact finished. With the assembly body guarded here, `%...!%`
-      # below genuinely means "the parallel run itself failed".
+      # Main-session assembly of the workers' results, with its own tryCatch:
+      # `p %...>% f %...!% g` routes failures of both p and f to g, which would
+      # report an assembly error as "Parallel Interpolation Failed".
       tryCatch({
 
       tryCatch({
         batch_elapsed_sec <- as.numeric(difftime(Sys.time(), log_start_time, units = "secs"))
-        # Same resolver the estimator reads, so writer and reader can never
-        # disagree about where the history lives (user data dir, not the wd).
+        # Same resolver as the estimator (user data dir).
         history_file <- monolith_history_file()
         dir.create(dirname(history_file), recursive = TRUE, showWarnings = FALSE)
 
@@ -1099,16 +993,12 @@
         }
       }, error = function(e) {})
       
-      # Failures are collected and shown in ONE modal after the loop: a
-      # showModal per locality replaced the previous dialog, so with several
-      # failing regions the user saw only the last one (and the stacked
-      # notifications auto-expire after 15s).
+      # Failures are shown in ONE modal after the loop (per-locality modals
+      # replaced each other).
       failed_regions <- list()
-      # Repeated-CV frames, gathered per locality so the pooled ("Total
-      # (Combined)") repeat rows are built from the same locality set as the
-      # pooled row of the metrics table. Localities whose plan degraded to
-      # LOOCV contribute their single (deterministic) frame - see
-      # build_cv_repeat_summary.
+      # Repeated-CV frames per locality, pooled over the same locality set as
+      # the metrics table's pooled row; LOOCV localities contribute their
+      # single frame (build_cv_repeat_summary()).
       reps_act <- list(); reps_pre <- list()
       run_fits <- list(); run_emps <- list()
 
@@ -1116,9 +1006,8 @@
       for(res in res_all) {
           l <- res$l
           if (is.numeric(res$actual_res) && length(res$actual_res) == 1) grid_res_used[[l]] <- res$actual_res
-          # The engine's own record of how each surface's power or smoothing was
-          # set (selected or fixed, with the GCV curve or the CV power profile),
-          # read by Regional Parameters, the diagnostics panels and the exports.
+          # The engine's record of how each surface's power or smoothing was
+          # set, read by Regional Parameters, the panels and the exports.
           if (current_method == "TPS") {
             for (tgt in c("act", "pre")) {
               rv$disp$regional_params[[l]][[paste0("tps_fit_", tgt)]] <-
@@ -1165,15 +1054,11 @@
             for (target in c("act", "pre")) {
               nm <- paste0(l, "_", target)
               fit <- run_fits[[nm]]
-              # Unseparated, the Predicted surface borrowed the measured-value
-              # model. It was tuned on the Actual column, so it is not stored
-              # under the prediction column's key, where it would later be
-              # offered (or applied) as that column's variogram. The run
-              # snapshot below still records what the surface was kriged with.
+              # An unseparated Predicted surface borrowed the Actual model, tuned
+              # on the Actual column: not stored under the prediction column's key.
               if (target == "pre" && !sep_fit && identical(fit, run_fits[[paste0(l, "_act")]])) fit <- NULL
-              # A model the user applied for this key stays applied: a run,
-              # Auto-Fit included, never replaces it (author decision
-              # 2026-09-17). OPTIMIZE ALL VARIOGRAMS still does.
+              # A model the user applied for this key stays applied: a run never
+              # replaces it (OPTIMIZE ALL VARIOGRAMS does).
               if (!is.null(resolve_stored_vgm(rv$v_fit_list[[nm]], "manual", tuning_keys[[target]]))) fit <- NULL
               if (!is.null(fit)) rv$v_fit_list[[nm]] <- stamp_vgm(fit, tuning_keys[[target]], "run")
               if (!is.null(run_emps[[nm]])) rv$v_emp_list[[nm]] <- stamp_vgm(run_emps[[nm]], tuning_keys[[target]], "run")
@@ -1200,9 +1085,8 @@
         rv$run_config_summary$covariates_dropped <- cov_rec$dropped
         if (current_method == "CK") rv$run_config_summary$ck_design <- cov_rec$design
       }
-      # The cell size each locality was gridded at. In Auto modes the sidebar
-      # cannot know it before the run (it follows each boundary and its samples), so the
-      # Map Viewer's resolution overlay and the run record read it from here.
+      # Each locality's cell size (the Auto modes set it during the run), for
+      # the resolution overlay and the run record.
       rv$disp$grid_res_used <- grid_res_used
       if (length(grid_res_used)) {
         used <- round(unlist(grid_res_used), 1)
@@ -1215,12 +1099,10 @@
       }
 
       if (cv_repeats_val > 1) {
-        # Summarised once per run (not per render): the pooled rows reproject
-        # and pool every locality's frames, which is far too much work to
-        # repeat on each locality-filter change.
+        # Summarised once per run: pooling every locality's frames is too
+        # costly per render.
         rv$cv_repeats_act <- build_cv_repeat_summary(reps_act)
-        # rv$has_predictions is only set further down this handler; the
-        # collected frames are the reliable signal that a predicted surface ran.
+        # rv$has_predictions is set later; collected frames signal a predicted run.
         if (length(reps_pre) > 0) rv$cv_repeats_pre <- build_cv_repeat_summary(reps_pre)
         if (is.null(rv$cv_repeats_act)) {
           rv$log <- paste0(rv$log, "\n[Repeated CV] No locality produced more than one fold realization",
@@ -1257,21 +1139,16 @@
       register_export_item("map_actual", paste(meta$label, "- Actual Map -", m_lab), "map", rv$rast, meta$category,
                            legend = map_legend_title(meta$label, meta$unit), surface = "act")
       
-      # Uncertainty products exist for the kriging engines only: IDW's var1.var
-      # is all NA and TPS has none, so neither registers them (the Map
-      # Viewer's SE/variance views apply the same guard).
+      # Uncertainty products for the kriging engines only (IDW's var1.var is
+      # all NA, TPS has none), as in the Map Viewer.
       temp_rast_a <- terra::unwrap(rv$rast)
       if (method_has_variance(current_method) && "var1.var" %in% names(temp_rast_a)) {
-        # The Map Viewer offers its SE/variance views on this flag, so the menu
-        # and the export registry agree about whether the run has a variance
-        # band at all - not just about whether its method normally would.
+        # The Map Viewer's SE/variance views key on this flag, so menu and
+        # registry agree.
         rv$disp$has_variance <- TRUE
-        # Registered as derivations of the surface above, not as copies of it:
-        # the variance band is already in `rv$rast` and the SE is its square
-        # root, so two more packed layers per surface would hold the same
-        # values a third and a fourth time, here and in every archived run.
-        # `name` is the layer name the GeoTIFF records as its band description,
-        # so the square root must not ship describing itself as a variance.
+        # Registered as derivations of the surface (export_item_obj()), not
+        # copies. `name` is the GeoTIFF band description, so the SE is named
+        # var1.se.
         register_export_item("map_uncert_var_act", paste(meta$label, "- Uncertainty Map (Variance - Actual) -", m_lab), "map", NULL, meta$category, kind = "uncertainty",
                              legend = map_legend_title(meta$label, meta$unit, "var"),
                              derived = list(src = temp_rast_a, layer = "var1.var", name = "var1.var"))
@@ -1347,9 +1224,8 @@
     # Analysis plots (their cache keys embed it).
     rv$results_rev <- rv$results_rev + 1L
 
-    # Point error map: the discrete sample-location errors the Map Viewer's
-    # Point Residuals panel shows, exported as points (not the IDW surface,
-    # which is registered separately above as Interpolated Point Errors).
+    # Point error map: the sample-location errors as points (the IDW surface
+    # is the separate Interpolated Point Errors item).
     if (!is.null(rv$sf) && "resid" %in% colnames(rv$sf) && any(!is.na(rv$sf$resid))) {
       pts_err <- rv$sf[!is.na(rv$sf$resid), c("resid", "loc")]
       register_export_item("map_point_residuals", paste(meta$label, "- ML Predictions Point Error Map"),
@@ -1368,15 +1244,11 @@
       }, error = function(e) NULL)
     }
 
-    # NOTE: intentionally no get_current_meta() re-read here - the export
-    # labels below must use the meta captured at dispatch, not whatever the
-    # sidebar points at when the run finishes.
+    # No get_current_meta() re-read: export labels use the meta captured at
+    # dispatch.
 
-    # Pooled per-locality cross-validation: the "Total (Combined)" row of the
-    # Model Performance card. Only the per-locality rows were exportable
-    # before, so the figure a reader quotes for the whole run had to be
-    # retyped off the screen. Pooling happens in pool_cv_sf()'s auto-UTM zone,
-    # the same way the card does it.
+    # Pooled "Total (Combined)" CV rows of the Model Performance card, exported
+    # (pooled in pool_cv_sf()'s auto-UTM zone, as the card does).
     pooled_cv <- function(data_list, metrics_list, label, infos, pooled) {
       res <- isolate(pooled())
       if(is.null(res)) return(NULL)
@@ -1430,18 +1302,15 @@
 
     if(!is.null(rv$sf)) {
       df_perf <- rv$sf %>% st_drop_geometry() %>% filter(!is.na(v), !is.na(pv))
-      # Same builder as the on-screen Prediction Performance card
-      # (server_sci_analysis.R): perform_cv() owns every definition, so an
-      # export cannot report a different CCC or an Inf RPD than the screen.
+      # Same builder as the on-screen Prediction Performance card.
       perf_total <- pred_perf_df(df_perf$v, df_perf$pv)
       if(!is.null(perf_total)) {
         register_export_item("table_perf_uploaded_total", paste(meta$label, "- Total Prediction Performance"), "table", perf_total, meta$category)
       }
     }
 
-    # The on-screen Descriptive Statistics card's own frame and builder: the
-    # uploaded rows of the run's localities, not rv$sf (which is
-    # coordinate-deduplicated and would summarise a different sample).
+    # The Descriptive Statistics card's own frame: the uploaded rows of the
+    # run's localities, not the deduplicated rv$sf.
     sv_total <- stats_table_vectors(rv$user_data, rv$disp, rv$mapping$loc, rv$disp$localities)
     if(!is.null(sv_total)) {
       stats_total <- summary_stats_df(sv_total$act, sv_total$pre,
@@ -1451,10 +1320,9 @@
       }
     }
 
-    # Class-area and class-agreement tables are registered by one observer in
+    # Class-area and agreement tables are registered by an observer in
     # server_sci_analysis.R whenever the committed classification changes
-    # (rv$results_rev, bumped above, is one of its triggers): they exist only
-    # once the surface is classified, which normally happens after a run.
+    # (rv$results_rev is one of its triggers).
 
     for(l in locs) {
        register_locality_assets(l, meta, comp_mode, val_type, current_method)
@@ -1479,20 +1347,15 @@
     shinyjs::hide("cancel_model_btn")
     shinyjs::show("reveal_maps_btn")
 
-    # Deliberately NOT re-enabled here. The run finished but its surfaces are
-    # still behind the reveal overlay, and a second run started from this state
-    # would overwrite results the user has not seen. The reveal handler is what
-    # hands the button back.
+    # Not re-enabled here: the results are still behind the reveal overlay,
+    # and a new run would overwrite them unseen. The reveal handler re-enables.
     updateActionButton(session, "run", label = "Interpolated", icon = icon("check"))
 
     rv$model_running <- FALSE
 
       }, error = function(e) {
-        # The interpolation itself completed; assembling/registering its results
-        # in the main session did not. Say exactly that, and still release the
-        # run UI so the app is usable. Whatever was assembled before the failure
-        # stays in rv$ — the Reveal button is offered so partial surfaces can be
-        # inspected, with the modal warning that they may be incomplete.
+        # The run completed but assembling its results did not: say so, release
+        # the run UI and offer Reveal for any partial surfaces.
         rv$log <- paste0(rv$log, "\n\n[ERROR] Results assembly failed after a successful run: ", conditionMessage(e))
         shinyjs::hide("map_run_steps")
         shinyjs::hide("cancel_model_btn")
@@ -1568,9 +1431,8 @@
 
   observe({
     req(rv$model_running)
-    # Everything about the run in progress comes from the committed context
-    # (rv$disp), never the live sidebar: changing the locality selection while
-    # a run executes must not move the expected-model count under the bar.
+    # From the committed context (rv$disp), so a sidebar change cannot move
+    # the expected-model count.
     d <- rv$disp
     selected_locs <- if (!is.null(d)) d$localities else NULL
     n_locs_calc <- max(1L, length(selected_locs))
@@ -1587,24 +1449,17 @@
         if(length(val) == 0 || is.na(val)) 0 else val
       }, numeric(1))
 
-      # Fixed denominator (the run's expected model count): progress files
-      # appear as engines start, so dividing by the files seen so far made the
-      # average - and the bar - jump BACKWARDS every time a new locality
-      # joined. sum(vals) is non-decreasing and the denominator is constant,
-      # so the bar now only ever fills. If an engine dies before its file
-      # exists the bar parks below the cap until the completion handler
-      # resolves, which is the honest reading of overall progress.
+      # Fixed denominator (the expected model count), so the bar only fills as
+      # progress files appear; an engine that dies before writing parks it
+      # below the cap until completion.
       avg_pct <- sum(vals, na.rm = TRUE) / max(1L, expected_models)
       
       bar_width <- 50 + (avg_pct * 0.5)
       bar_width <- max(50, min(99, bar_width)) # Cap at 99% until complete handler resolves
 
-      # The engines write a common set of checkpoints into their progress
-      # files: entry at 10-20, the fitted model by 50, the surface by 55, then
-      # the CV repeats up to 90. avg_pct is their mean, so these bands say
-      # which phase the run as a whole is in. (IDW and TPS cross-validate
-      # before writing their surface, so for those two the last two entries
-      # light in the reverse order to the work.)
+      # Phase bands from the engines' common checkpoints: entry at 10-20, model
+      # by 50, surface by 55, CV repeats to 90 (IDW and TPS cross-validate
+      # before writing their surface, so their last two phases light in reverse).
       run_step <- if (avg_pct < 50) 2L else if (avg_pct < 55) 3L else 4L
       update_premium_progress(bar_width, step = run_step)
 
@@ -1614,10 +1469,8 @@
       if (!identical(rv$run_pct, chip_pct)) rv$run_pct <- chip_pct
       
       progress_msgs <- c()
-      # One parser for both readers of these file names (status_file_parts,
-      # global_utils.R). A file names its locality by key; the run's
-      # localities give the name back, and only a key that matches none of
-      # them is shown with its underscores read as spaces.
+      # status_file_parts() names the locality; a key matching no run locality
+      # is shown with underscores read as spaces.
       locs <- rv$disp$localities
       shown_name <- function(parts) {
         if (identical(parts$locality, parts$key) && !parts$key %in% locs) gsub("_", " ", parts$key)
@@ -1649,10 +1502,8 @@
     }
   })
 
-  # The record of a run cancelled before it produced results. The previous
-  # results were archived or discarded at dispatch, so there is nothing to fall
-  # back to: the panels say what was requested and that it never finished, and
-  # push_run_history() refuses to archive the record as a result.
+  # Mark a run cancelled before producing results: the panels state what was
+  # requested, and push_run_history() refuses to archive it.
   mark_run_cancelled <- function() {
     cfg <- rv$run_config_summary
     if (is.null(cfg) || identical(cfg$status, "cancelled")) return(invisible(NULL))
@@ -1695,9 +1546,8 @@
     # The run button was held disabled from the moment the run completed;
     # revealing the results is what makes starting another run legitimate.
     shinyjs::enable("run")
-    # The displayed widget may still be the view-less placeholder rendered at
-    # dispatch time (the raster re-render races with this button appearing);
-    # an explicit fit + resize guarantees tiles and surfaces show immediately.
+    # The widget may still be the placeholder rendered at dispatch; an
+    # explicit fit + resize shows tiles and surfaces at once.
     fit_maps_to_data()
     showNotification("Maps and scientific analysis metrics are now available.", type = "message")
     

@@ -1,38 +1,23 @@
-# classif_helpers.R — supervised classification engine for the Classification
-# Suite module (Digital Soil Mapping style categorical prediction).
-#
-# Scope (Phase 1): a shared preprocessing recipe, three learners behind a
-# parsnip/workflows backbone (multinomial logistic, random forest, XGBoost),
-# an expandable hyperparameter-tuning registry, spatial and standard
-# cross-validation, classification performance metrics + confusion matrix, and
-# raster prediction (class / per-class probability / entropy) reusing the same
-# krige_covariates() covariate surfaces the kriging engines build.
-#
-# The engine here is deliberately decoupled from Shiny and from grid
-# construction: predict_classification_surface() takes a plain covariate
-# data.frame (the interpolated grid), so it is unit-testable without the app.
-#
-# Conventions inherited from spatial_helpers.R: any set.seed() saves and
-# restores the caller's .Random.seed (two-sided sandbox); projected (metric)
-# coordinates only.
+# classif_helpers.R: supervised classification engine of the Classification
+# Suite: a shared preprocessing recipe, three learners behind parsnip/workflows
+# (multinomial logistic, random forest, XGBoost), a tuning registry, spatial /
+# kNNDM / standard CV, metrics with confusion matrix, and class / probability /
+# entropy surfaces predicted on krige_covariates() grids. Shiny-independent;
+# seeded steps are sandboxed (with_seed()); projected coordinates only.
 
-# renv dependency discovery: parsnip loads the engine packages from the string
-# names passed to set_engine() (e.g. "ranger", "xgboost", "nnet"), which renv's
-# static analysis cannot detect, so renv::snapshot() would otherwise omit them
-# from the lockfile. This never-executed block makes them discoverable; the
-# packages are still loaded on demand by parsnip at fit time, not attached here.
+# parsnip loads the engines by the names given to set_engine(), which renv's
+# static analysis cannot see; this never-executed block lists them for the
+# lockfile.
 if (FALSE) {
   requireNamespace("ranger")
   requireNamespace("xgboost")
   requireNamespace("nnet")
 }
 
-# How many BOUNDING-BOX cells a classification prediction grid may consider
-# before its resolution is coarsened. The raster template spans the full bbox
-# and a multi-part scope (distant localities) covers far more of it than the
-# hulls do, so this bounds the candidate grid, not the surviving one. Both the
-# Auto resolution and a manual one from the slider are floored by it. Named so
-# the suite can shrink it and exercise the cap without allocating the budget.
+# Cap on the BOUNDING-BOX cells a prediction grid may consider before its
+# resolution is coarsened (Auto and manual alike). A multi-part scope covers
+# far less than its bbox, so this bounds the candidate grid, not the surviving
+# one. Named so tests can shrink it.
 .CLASSIF_MAX_CANDIDATE_CELLS <- 4e6
 
 # The IDW that stands in for a numeric covariate surface kriging could not
@@ -41,35 +26,26 @@ if (FALSE) {
 .CLASSIF_COV_IDW <- list(idw_p = 2, idw_nmax = 12)
 
 # ── Seed sandbox ────────────────────────────────────────────────────────────
-# Thin alias for the app-wide sandbox `with_seed()` (spatial_vgm.R): seed the
-# RNG, run `expr`, then restore the caller's .Random.seed (or remove it if the
-# caller had none) so classification folds are reproducible without perturbing
-# the global stream. The name and the ~40 call sites stay as they are; only the
-# implementation is shared now. Safe by load order: global.R and the
-# classification worker both source spatial_helpers.R BEFORE this file.
+# Alias of with_seed() (spatial_vgm.R, sourced first by global.R and the
+# worker): seeds, runs `expr`, restores the caller's RNG state.
 .classif_with_seed <- function(seed, expr) {
   with_seed(seed, expr)
 }
 
 # ── Method registry ─────────────────────────────────────────────────────────
-# One entry per learner. `args` are the parsnip main-model arguments with their
-# Phase-1 fixed defaults; `engine_args` are engine-specific pass-throughs.
-# `build(args, engine_args)` assembles the parsnip spec. Adding a learner = add
-# one entry here; nothing else in the engine hard-codes the method list.
+# One entry per learner: `args` are the parsnip main arguments with their fixed
+# defaults, `engine_args` engine pass-throughs, `build()` assembles the spec.
+# Adding a learner = adding an entry; nothing else hard-codes the list.
 .classif_method_defs <- function() {
   list(
     multinom = list(
       label  = "Multinomial Logistic Regression",
       engine = "nnet",
       args   = list(penalty = 0.0),
-      # parsnip's nnet::multinom wrapper does not expose case weights
-      # (case_weights_allowed() is FALSE), so the class-imbalance weighting
-      # option silently degrades to an unweighted fit for this learner and the
-      # run result flags weights_applied = FALSE.
+      # parsnip's nnet::multinom takes no case weights: the weighting option
+      # fits unweighted and the run flags weights_applied = FALSE.
       supports_weights = FALSE,
-      # MaxNWts guards against the "too many weights" error when many dummy
-      # covariates x many classes inflate the weight count; trace silences the
-      # nnet fitting log.
+      # MaxNWts: many dummy covariates x classes exceed nnet's default limit.
       engine_args = list(trace = FALSE, MaxNWts = 20000L),
       build = function(args, engine_args) {
         spec <- rlang::exec(parsnip::multinom_reg, mode = "classification", !!!args)
@@ -81,9 +57,8 @@ if (FALSE) {
       engine = "ranger",
       args   = list(trees = 500L, mtry = NULL, min_n = NULL),
       supports_weights = TRUE,
-      # probability = TRUE => probability forest (needed for class probabilities
-      # and the entropy uncertainty surface); num.threads = 1 + seed keep the
-      # fit bit-reproducible under the test harness's sequential plan.
+      # Probability forest (class probabilities, entropy); one thread and a
+      # seed keep the fit reproducible.
       engine_args = list(probability = TRUE, importance = "impurity",
                          num.threads = 1L, seed = 12345L),
       build = function(args, engine_args) {
@@ -124,13 +99,9 @@ classif_supports_weights <- function(method) {
 }
 
 # ── Class-imbalance weights ─────────────────────────────────────────────────
-# Inverse-frequency ("balanced") case weights: w_c = n / (k * n_c), so every
-# class contributes equally to the loss regardless of its sample count and the
-# weights average to 1 over the training rows. This is the standard weighting
-# heuristic (King & Zeng 2001; scikit-learn's class_weight = "balanced").
-# SMOTE-style synthetic oversampling is deliberately NOT offered: synthetic
-# points inherit no valid spatial position, so they break the spatial-CV
-# leakage guarantees and fabricate autocorrelation structure.
+# Inverse-frequency ("balanced") case weights w_c = n / (k * n_c), averaging 1
+# over the training rows (King & Zeng 2001; scikit-learn "balanced"). No
+# SMOTE: synthetic points have no valid location and would break spatial CV.
 .classif_class_weights <- function(y) {
   y <- droplevels(as.factor(y))
   tab <- table(y)
@@ -139,13 +110,10 @@ classif_supports_weights <- function(method) {
 }
 
 # ── Scope adequacy check ────────────────────────────────────────────────────
-#' Human-readable diagnosis of an under-powered classification scope. Returns
-#' NULL when the scoped data are adequate, otherwise one message naming every
-#' shortfall — including WHICH classes fall below the per-class minimum and
-#' their sample counts — plus what to do about it. The run is not blocked
-#' (small-class CV is defined, just weak), so the caller shows this as a
-#' warning notification. A sample is a sampled location (classif_resolve_scope
-#' merges co-located rows), so `n_complete` counts complete locations.
+#' Diagnosis of an under-powered scope: NULL when adequate, otherwise one
+#' message naming every shortfall (the classes below `min_class`, with counts)
+#' and the remedy. Advisory: the run is not blocked. `n_complete` counts
+#' complete locations (classif_resolve_scope merges co-located rows).
 classif_scope_adequacy <- function(tvec, n_complete, min_rows = 20L, min_class = 3L) {
   tab <- table(droplevels(as.factor(tvec)))
   small <- tab[tab < min_class]
@@ -166,10 +134,8 @@ classif_scope_adequacy <- function(tvec, n_complete, min_rows = 20L, min_class =
 }
 
 # ── Tuning-depth registry (expandable) ──────────────────────────────────────
-# Maps a tuning "depth" to, per method, the set of hyperparameters that become
-# tune() placeholders and the space-filling grid size. Expanding tuning later
-# is purely additive: add a depth key, or extend a method's parameter vector.
-# `none` (the Phase-1 default) tunes nothing and fits the fixed defaults above.
+# Per depth and method: the hyperparameters set to tune() and the
+# space-filling grid size. `none` tunes nothing (the fixed defaults above).
 .classif_tuning_registry <- function() {
   list(
     none = list(
@@ -217,18 +183,12 @@ classif_tuning_params <- function(method, depth = "none") {
 }
 
 # ── Model spec ──────────────────────────────────────────────────────────────
-#' Build a parsnip model spec for `method`. Any argument named in `tune_params`
-#' is set to tune() (marking it for the tuning grid); `overrides` replaces fixed
-#' defaults for the rest. This is the single point where tunable vs fixed is
-#' decided, so the tuning registry fully drives model construction.
-#'
-#' `n_classes` handles the binary special case of the multinom method:
-#' parsnip's multinom_reg/nnet mangles probability output for 2-class targets
-#' (it emits one .pred_i column per ROW instead of per class), and for k = 2
-#' the multinomial logistic model reduces EXACTLY to binomial logistic
-#' regression — so a logistic_reg/glm spec is substituted. glm has no penalty
-#' argument, matching the multinom default penalty = 0 (unpenalised); callers
-#' must clear multinom tune_params for binary targets.
+#' Parsnip spec for `method`: arguments in `tune_params` become tune(),
+#' `overrides` replace the remaining defaults. A two-class multinom target is
+#' fitted as logistic_reg/glm: k = 2 multinomial logistic IS binomial logistic,
+#' and parsnip's nnet wrapper emits one probability column per row, not per
+#' class, for two classes. glm is unpenalised like the multinom default, so
+#' callers clear multinom tune_params for binary targets.
 classif_build_spec <- function(method, tune_params = character(0), overrides = list(),
                                n_classes = NULL) {
   defs <- .classif_method_defs()
@@ -256,13 +216,11 @@ classif_build_spec <- function(method, tune_params = character(0), overrides = l
 }
 
 # ── Collinearity screen step ────────────────────────────────────────────────
-#' Recipe step that reruns the iterative VIF screen (detect_multicollinearity_engine,
-#' the engine the module's Auto-Drop modal uses) whenever the recipe is prepped.
-#' tidymodels preps a recipe on every analysis set, so the screen is repeated
-#' on the training rows of each outer fold, tuning resample and nested inner
-#' fold, and on all rows for the final model: held-out covariates never help
-#' choose the predictors that are scored on them. Trained and row-independent
-#' at bake (it only removes columns), as classif_build_recipe requires.
+#' Recipe step running the iterative VIF screen (detect_multicollinearity_engine,
+#' as the Auto-Drop modal) at every prep: on the training rows of each outer
+#' fold, tuning resample and nested inner fold, and on all rows for the final
+#' model, so held-out covariates never choose the predictors scored on them.
+#' Bake only removes columns (row-independent, as classif_build_recipe requires).
 step_vif_screen <- function(recipe, ..., role = NA, trained = FALSE, threshold = 10,
                             removals = NULL, skip = FALSE,
                             id = recipes::rand_id("vif_screen")) {
@@ -309,9 +267,8 @@ tidy.step_vif_screen <- function(x, ...) {
                  id = rep(x$id, if (isTRUE(x$trained)) length(x$removals) else 0L))
 }
 
-# Registered explicitly: the generics are called from inside the recipes and
-# generics namespaces, and a method that only lives in the global environment
-# of a sourced session or PSOCK worker must not depend on search-path lookup.
+# Registered explicitly so dispatch from inside the recipes/generics namespaces
+# never depends on search-path lookup (sourced session, PSOCK worker).
 registerS3method("prep", "step_vif_screen", prep.step_vif_screen, envir = asNamespace("recipes"))
 registerS3method("bake", "step_vif_screen", bake.step_vif_screen, envir = asNamespace("recipes"))
 registerS3method("tidy", "step_vif_screen", tidy.step_vif_screen, envir = asNamespace("generics"))
@@ -341,15 +298,12 @@ classif_screened_out <- function(fitted_wf) {
 }
 
 # ── Recipe ──────────────────────────────────────────────────────────────────
-#' Shared preprocessing recipe: impute missing covariates (median / mode),
-#' absorb novel factor levels seen only at prediction time, one-hot-free dummy
-#' encode categoricals, drop zero-variance columns, and standardise numeric
-#' predictors (helps multinomial convergence; monotonic, so harmless to trees).
-#' The same recipe feeds every learner, per the single-template design.
-#' `weight_col` (optional) names a hardhat::importance_weights column in
-#' `train_df`; recipes auto-assigns it the case_weights role (verified: it is
-#' excluded from all_numeric_predictors and not required at predict time), so
-#' the formula can include it without it ever becoming a predictor.
+#' Shared preprocessing recipe for every learner: median/mode imputation,
+#' novel-level absorption, dummy encoding, zero-variance removal and
+#' standardisation (helps multinom convergence; harmless to trees). An optional
+#' `weight_col` (hardhat::importance_weights) takes the case_weights role, so it
+#' sits in the formula without becoming a predictor or being needed at predict
+#' time.
 classif_build_recipe <- function(train_df, target, predictors, weight_col = NULL,
                                  vif_threshold = NULL) {
   train_df <- as.data.frame(train_df)
@@ -360,19 +314,18 @@ classif_build_recipe <- function(train_df, target, predictors, weight_col = NULL
   form <- stats::as.formula(paste0("`", target, "` ~ ",
                                    paste(sprintf("`%s`", c(predictors, weight_col)), collapse = " + ")))
 
-  # EVERY step here must stay TRAINED and ROW-INDEPENDENT. Two things depend on
-  # it: `predict_classification_surface` predicts the grid in blocks and relies
-  # on block == whole-grid identity, and `.classif_perm_fast_path` permutes baked
-  # columns instead of raw ones. A step that mixes rows (step_pca, an
-  # interaction, a spatial lag) breaks the first outright; the second detects it
-  # at runtime and falls back, but the surface path does not.
+  # EVERY step must stay trained and row-independent: the surface is predicted
+  # in blocks (predict_classification_surface). Permutation importance also
+  # permutes baked columns (.classif_perm_fast_path), which needs each baked
+  # column to depend on one raw predictor; its probe catches a row- or
+  # column-mixing step (a spatial lag, step_pca) and falls back, but the
+  # surface path has no such check.
   rec <- recipes::recipe(form, data = train_df) |>
     recipes::step_novel(recipes::all_nominal_predictors()) |>
     recipes::step_impute_median(recipes::all_numeric_predictors()) |>
     recipes::step_impute_mode(recipes::all_nominal_predictors())
-  # Auto-Drop: the collinearity screen is part of the recipe, so it reruns on
-  # every set the recipe is prepped on (see step_vif_screen). NULL = Keep All
-  # or nothing flagged: no screen.
+  # Auto-Drop: the screen reruns at every prep (step_vif_screen). NULL = Keep
+  # All or nothing flagged.
   if (is.numeric(vif_threshold) && length(vif_threshold) == 1 && is.finite(vif_threshold)) {
     rec <- step_vif_screen(rec, recipes::all_numeric_predictors(), threshold = vif_threshold)
   }
@@ -383,16 +336,12 @@ classif_build_recipe <- function(train_df, target, predictors, weight_col = NULL
 }
 
 # ── Fold construction ───────────────────────────────────────────────────────
-#' Class-stratified random k-fold, the Standard strategy's folds: the samples
-#' of each class in random order, the classes one after another, and fold ids
-#' dealt in turn along that sequence from a random order of the v folds. Each
-#' class spreads over as many folds as it has samples (a class of m <= v
-#' samples lands in m different folds, so no training set loses more than one
-#' of its samples), and the folds differ in size by at most one. The fold count
-#' does not follow the smallest class: only a singleton leaves a fold's
-#' training set without its class (a reported class gap), and it would at any
-#' fold count. Seed-sandboxed. The same partition is kNNDM's random partition
-#' in this suite and the random reference of its CV Distance Match panel.
+#' Class-stratified random k-fold (the Standard strategy): each class in random
+#' order, the classes concatenated, fold ids dealt in turn from a random order
+#' of the v folds. A class of m <= v samples lands in m folds, fold sizes differ
+#' by at most one, and only a singleton class leaves a training set without its
+#' class (a reported class gap). Seed-sandboxed. Also kNNDM's random partition
+#' and the CV Distance Match panel's reference.
 classif_stratified_folds <- function(y, v, seed = 12345L) {
   y <- droplevels(as.factor(y))
   n <- length(y)
@@ -407,20 +356,15 @@ classif_stratified_folds <- function(y, v, seed = 12345L) {
   })
 }
 
-#' Integer fold vector for classification CV, mirroring make_cv_folds' contract
-#' (one integer per row). `spatial` clusters projected coordinates
-#' (spatialsample::spatial_clustering_cv, k-means, matching the interpolation
-#' engines' spatial-block convention); `standard` is the class-stratified
-#' random k-fold (classif_stratified_folds; unstratified random k-fold without
-#' a target). Both are seed-sandboxed. v is clamped to the point count, so no
-#' fold is empty.
-#' `knndm` matches the folds to the prediction grid's locations `domain_xy`
-#' (knndm_folds, with k = v), with the `standard` folds for the same v and seed
-#' as its random partition: where kNNDM chooses spatial folds they are
-#' returned, and everywhere else - random folds already match the map, no
-#' spatial partition is valid, there is no domain, or fewer than
-#' CV_KNNDM_MIN_N points - the `standard` folds. attr(, "knndm") records the
-#' choice (knndm_folds' record; branch "small" below CV_KNNDM_MIN_N).
+#' Integer fold vector (one per row, as make_cv_folds), v clamped to the point
+#' count, seed-sandboxed. `spatial`: k-means clusters of the projected
+#' coordinates (spatialsample::spatial_clustering_cv, the interpolation
+#' engines' spatial-block convention); `standard`: classif_stratified_folds
+#' (unstratified random without a target); `knndm`: knndm_folds() matched to
+#' the grid locations `domain_xy`, with the `standard` folds as its random
+#' partition, returned whenever kNNDM does not choose spatial folds (including
+#' no domain or fewer than CV_KNNDM_MIN_N points, branch "small").
+#' attr(, "knndm") records the choice.
 classif_make_fold_id <- function(pts_sf, strategy = c("spatial", "knndm", "standard"),
                                  target = NULL, v = 10L, seed = 12345L, domain_xy = NULL) {
   strategy <- match.arg(strategy)
@@ -455,14 +399,11 @@ classif_make_fold_id <- function(pts_sf, strategy = c("spatial", "knndm", "stand
   })
 }
 
-#' Turn an integer fold vector into an rsample rset over `train_df`, so the same
-#' fold assignment can drive tune::fit_resamples / tune_grid. Each fold's
-#' assessment set is the rows tagged with that fold id.
-#' With `target` given and a `.case_wt` column present, every split gets its
-#' own copy of its analysis rows carrying class weights recomputed from THOSE
-#' rows, so no assessment label enters the class frequencies a tuning fit is
-#' weighted by. Importance weights never enter the metrics, so the assessment
-#' rows' weights are irrelevant.
+#' Integer fold vector -> rsample rset over `train_df`, for
+#' tune::fit_resamples / tune_grid. With `target` and a `.case_wt` column, each
+#' split gets its own analysis rows with class weights recomputed from those
+#' rows, so no assessment label enters a tuning fit's weights (the metrics never
+#' read weights).
 classif_folds_to_rset <- function(train_df, fold_id, assess_df = NULL, target = NULL) {
   ids <- sort(unique(fold_id))
   if (!is.null(target) && ".case_wt" %in% names(train_df)) {
@@ -501,12 +442,10 @@ classif_folds_to_rset <- function(train_df, fold_id, assess_df = NULL, target = 
   df
 }
 
-#' Build the covariates each fold would have at its held-out locations using
-#' only that fold's analysis rows. Target labels are retained for scoring, but
-#' never passed to the covariate-surface builder.
-#' attr(, "cov_fallback"): one row (fold, covariate) per numeric covariate
-#' whose held-out values came from the IDW fallback (krige_covariates); NULL
-#' when every fold's covariates were kriged.
+#' Each fold's covariates at its held-out locations, interpolated from that
+#' fold's analysis rows only (target labels kept for scoring, never passed to
+#' the surface builder). attr(, "cov_fallback"): (fold, covariate) rows whose
+#' values came from the IDW fallback; NULL when every fold kriged.
 .classif_fold_assessment <- function(keep_sf, train_df, predictors, fold_id,
                                      cancel_file = NULL, progress = NULL) {
   assess_df <- train_df
@@ -546,12 +485,9 @@ classif_folds_to_rset <- function(train_df, fold_id, assess_df = NULL, target = 
   assess_df
 }
 
-#' One sentence per numeric covariate whose surface came from the IDW
-#' fallback of krige_covariates() (a kriging error, or a solve that returned
-#' no prediction): where it happened (the prediction grid, and in how many
-#' cross-validation folds). `fb` is the pipeline's `covariate_fallback`
-#' record; `label_of` maps a column name to its display label. NULL when
-#' every covariate surface was kriged.
+#' One sentence per numeric covariate whose surface came from the IDW fallback
+#' of krige_covariates(): where (the grid, how many CV folds). `fb` is the
+#' pipeline's `covariate_fallback` record; NULL when every surface was kriged.
 classif_covariate_notes <- function(fb, label_of = identity) {
   if (is.null(fb)) return(NULL)
   folds <- fb$folds
@@ -568,11 +504,10 @@ classif_covariate_notes <- function(fb, label_of = identity) {
 }
 
 # ── Metrics ─────────────────────────────────────────────────────────────────
-#' Class-label metric set for the statistics yardstick owns here: overall
-#' accuracy, Cohen's kappa and balanced accuracy. Precision, recall and F1 are
-#' NOT in it - they come from classif_macro_metrics() below, which scores an
-#' unpredicted class rather than dropping it. Used on POOLED out-of-fold
-#' predictions.
+#' Yardstick class-label metrics for pooled out-of-fold predictions: accuracy,
+#' Cohen's kappa, balanced accuracy. Precision, recall and F1 come from
+#' classif_macro_metrics(), which scores an unpredicted class instead of
+#' dropping it.
 classif_class_metric_set <- function() {
   yardstick::metric_set(
     yardstick::accuracy,
@@ -581,30 +516,18 @@ classif_class_metric_set <- function() {
   )
 }
 
-#' Precision, recall and F1 over a FIXED class universe.
+#' Precision, recall and F1 over a FIXED class universe: every class in
+#' `universe` counts once in each average. A never-predicted class has 0/0
+#' precision; yardstick would drop it, putting the three averages on different
+#' denominators. The zero_division = 0 convention (scikit-learn) scores it 0
+#' instead, keeping one denominator and leaving minority classes visible.
 #'
-#' Every class in `universe` contributes exactly once to each of the three
-#' averages. A class the model never predicts has an undefined 0/0 precision;
-#' yardstick removes it from the multiclass average (with a warning raised
-#' inside the worker, where nothing sees it), which puts the three figures on
-#' different denominators - a macro F1 could then exceed both its own
-#' components, and a model that ignores a class outscored one that found a
-#' little of it. Scikit-learn's zero_division = 0 convention is used instead:
-#' the class scores 0 and stays in the average, which is the only choice that
-#' keeps one denominator and the only one consistent with reporting macro
-#' metrics so minority classes are not masked.
+#' A class with no reference sample (`n_true == 0`) is not evaluable: its
+#' recall, and so the macro recall, is NA. Pooled runs drop unused levels
+#' first; it arises per area, where `universe` is the classes the area holds.
 #'
-#' `n_true == 0` is a different situation and stays different: that class has
-#' no reference sample in this evaluation population, so its recall is not
-#' evaluable and comes back NA (which makes the macro recall NA - a loud
-#' failure, never a silent zero). Unused target levels are dropped before CV,
-#' so it cannot arise for a pooled run; it does arise per area, where
-#' `universe` is restricted to the classes that area actually holds.
-#'
-#' Two classes are reported with the BINARY estimator (the first level is the
-#' event), which is what the guides state and what every two-class run has
-#' always reported - with the same zero-division rule, so only the degenerate
-#' "no predicted events" case moves.
+#' Two classes use the BINARY estimator (first level = event) with the same
+#' zero-division rule.
 classif_macro_metrics <- function(truth, pred, classes = levels(as.factor(truth)),
                                   universe = classes) {
   truth <- factor(as.character(truth), levels = classes)
@@ -669,11 +592,9 @@ classif_estimator_labels <- function() {
     binary         = "Binary")
 }
 
-#' Attach display labels to a yardstick metrics data.frame
-#' (.metric/.estimator/.estimate), preserving the raw ids. A macro average
-#' carries the number of classes it was taken over and a binary one its event
-#' class: both are part of what the estimator IS, and without them two rows
-#' averaged over different class sets read as comparable numbers.
+#' Display labels for a yardstick metrics frame, raw ids kept. A macro average
+#' carries its class count (K) and a binary one its event class, so rows
+#' averaged over different class sets do not read as comparable.
 classif_label_metrics <- function(m) {
   ml <- classif_metric_labels(); el <- classif_estimator_labels()
   lab <- unname(ml[m$.metric]); lab[is.na(lab)] <- m$.metric[is.na(lab)]
@@ -687,11 +608,9 @@ classif_label_metrics <- function(m) {
   m
 }
 
-#' Lean metric set fed to tune::fit_resamples / tune_grid. Only accuracy and
-#' kappa: both are defined even when a single held-out spatial cluster lacks a
-#' class, so per-fold computation stays warning-free. The reported per-class and
-#' macro metrics are recomputed from pooled predictions (classif_compute_metrics),
-#' where all classes appear, so nothing is lost by keeping resampling lean.
+#' Lean metric set for tune::fit_resamples / tune_grid: accuracy and kappa stay
+#' defined when a held-out cluster lacks a class. The reported metrics are
+#' recomputed on the pooled predictions (classif_compute_metrics).
 classif_resample_metric_set <- function() {
   yardstick::metric_set(yardstick::accuracy, yardstick::kap)
 }
@@ -736,11 +655,9 @@ classif_compute_metrics <- function(pred_df, target) {
   out
 }
 
-#' Per-class producer (recall) and user (precision) accuracy from a confusion
-#' matrix, the standard DSM per-class report. `n` counts the class's reference
-#' samples and `n_pred` the predictions of it: a class with `n_pred == 0` is
-#' one the model never assigned, which is why its user accuracy is undefined
-#' (the displays say "no predictions" rather than leaving the cell blank).
+#' Per-class producer (recall) and user (precision) accuracy from the confusion
+#' matrix. `n` counts reference samples, `n_pred` predictions: `n_pred == 0`
+#' (never assigned) leaves user accuracy undefined, shown as "no predictions".
 classif_per_class_accuracy <- function(pred_df, target) {
   cm <- yardstick::conf_mat(pred_df, truth = !!rlang::sym(target),
                             estimate = !!rlang::sym(".pred_class"))
@@ -760,10 +677,8 @@ classif_per_class_accuracy <- function(pred_df, target) {
 }
 
 # ── Cross-validation ────────────────────────────────────────────────────────
-# Cooperative cancellation for the classification worker: the module writes a
-# flag file, the worker checks it between expensive stages (fold boundaries,
-# tuning, final fit, surface build) — the same file-based machinery the
-# interpolation pipeline uses, since Shiny reactives don't exist in workers.
+# Cooperative cancellation: the module writes a flag file, which the worker
+# checks between expensive stages (as the interpolation pipeline does).
 .classif_check_cancel <- function(cancel_file) {
   if (!is.null(cancel_file) && file.exists(cancel_file)) {
     stop("Classification run cancelled by user.", call. = FALSE)
@@ -772,13 +687,9 @@ classif_per_class_accuracy <- function(pred_df, target) {
 }
 
 # ── Progress ladder ─────────────────────────────────────────────────────────
-#' Cumulative upper bounds, as a fraction of the progress bar, for each stage of
-#' run_classification_pipeline. The original denominator (outer folds + 2) gave
-#' the whole post-CV half of the run two steps, so the bar reached ~92% the
-#' moment cross-validation ended and then sat there for the longest part of the
-#' job: interpolating every covariate onto the grid and classifying every cell.
-#' These shares are wall-clock estimates, not guarantees; their only job is to
-#' keep the bar moving through the stages that actually take the time.
+#' Cumulative upper bound of each pipeline stage as a fraction of the progress
+#' bar: wall-clock estimates that keep the bar moving through the slow stages
+#' (covariate interpolation, grid classification), not guarantees.
 .classif_stage_anchors <- function(make_surface = TRUE) {
   if (isTRUE(make_surface)) {
     c(cv = 0.50, fit = 0.60, importance = 0.66,
@@ -790,12 +701,10 @@ classif_per_class_accuracy <- function(pred_df, target) {
   }
 }
 
-#' Build the worker's progress reporter, or NULL when progress is not being
-#' reported (direct calls, tests). The returned closure takes a stage name, a
-#' 0-1 fraction WITHIN that stage, and an optional human-readable label; it
-#' writes the percent through the shared update_progress_file() and the label to
-#' a sibling stage file the module polls, so the text tracks what is actually
-#' running instead of always claiming cross-validation.
+#' The worker's progress reporter (NULL without `progress_dir`: direct calls,
+#' tests). The closure takes a stage, a 0-1 fraction within it and an optional
+#' label; it writes the percent via update_progress_file() and the label to a
+#' stage file the module polls.
 .classif_progress_reporter <- function(progress_dir, session_id = "classif",
                                        make_surface = TRUE) {
   if (is.null(progress_dir)) return(NULL)
@@ -808,8 +717,7 @@ classif_per_class_accuracy <- function(pred_df, target) {
     lo <- if (i == 1L) 0 else unname(anchors[i - 1L])
     hi <- unname(anchors[i])
     pct <- lo + max(0, min(1, frac)) * (hi - lo)
-    # step/total carries the percent scaled by 1000; update_progress_file itself
-    # rounds step/total to a whole percent, so the reported bar resolution is 1%.
+    # Percent scaled by 1000; update_progress_file() rounds to a whole percent.
     update_progress_file("classification", "cls", round(pct * 1000), 1000)
     if (!is.null(label)) {
       tryCatch(writeLines(label, stage_file), error = function(e) NULL)
@@ -818,23 +726,13 @@ classif_per_class_accuracy <- function(pred_df, target) {
   }
 }
 
-#' Align one fold's probability frame to the trained level set.
-#'
-#' A fold's analysis rows need not contain every class: under spatial folds a
-#' spatially clustered class can fall entirely inside one held-out block, and
-#' even class-stratified folds strand a singleton class in exactly one fold.
-#' ranger and nnet::multinom then DROP the unused outcome level ("Dropped unused
-#' factor level(s) in dependent variable"), so `predict(type = "prob")` comes
-#' back with fewer `.pred_<level>` columns than the target has levels and the
-#' pooled `rbind` fails with "numbers of columns of arguments do not match"
-#' (xgboost happens to keep all columns, so the crash was engine-dependent).
-#'
-#' Absent classes are padded with probability 0 and the columns pinned to the
-#' trained level order. Zero is the fold model's genuine posterior, not an
-#' imputation: a model fitted without a class cannot assign it any mass. Rows
-#' whose truth IS that class therefore score as a total miss, which is the
-#' honest reading — the fold had no chance at them. `missing` reports the
-#' affected classes so the caller can surface the CV-design caveat.
+#' Align one fold's probability frame to the trained level set. A fold's
+#' analysis rows can lack a class (a clustered class inside one held-out block,
+#' a singleton under stratified folds); ranger and nnet then drop that level,
+#' predict fewer `.pred_<level>` columns, and the pooled rbind fails. Absent
+#' classes are padded with probability 0 (the fold model's true posterior: it
+#' cannot assign mass to an unseen class), so their held-out rows score as
+#' misses. `missing` names them for the CV-design caveat.
 .classif_align_prob_cols <- function(prob, lvl) {
   prob <- as.data.frame(prob)
   want <- paste0(".pred_", lvl)
@@ -844,26 +742,17 @@ classif_per_class_accuracy <- function(pred_df, target) {
        missing = sub("^\\.pred_", "", absent))
 }
 
-#' Cross-validate one classification method. Returns pooled out-of-fold
-#' predictions, aggregate metrics, per-class accuracies, the confusion matrix,
-#' and the fold vector used. If `depth` requests tuning, hyperparameters are
-#' chosen by an inner grid over the same folds before the out-of-fold
-#' predictions are collected (defended against leakage by tune's per-split
-#' preprocessing).
+#' Cross-validate one method: pooled out-of-fold predictions, metrics,
+#' per-class accuracies, confusion matrix and fold vector. A tuning `depth`
+#' first selects hyperparameters by a grid over the same folds (mildly
+#' optimistic: the selection saw every fold's held-out data).
 #'
-#' `nested = TRUE` (only meaningful when `depth` tunes something) switches to
-#' nested cross-validation: instead of selecting one hyperparameter set on the
-#' same folds that score it (mildly optimistic — the selection has seen every
-#' fold's held-out data), each OUTER fold re-runs the grid search on
-#' `inner_v` inner folds built from its analysis rows only, finalises the
-#' workflow with that fold's winner, and predicts its held-out rows. The
-#' pooled metrics then estimate the performance of the WHOLE procedure
-#' including the tuning search (Varma & Simon 2006; Cawley & Talbot 2010).
-#' Inner folds reuse the outer `strategy` (spatial folds inside spatial CV,
-#' so inner selection faces the same leakage regime as the outer estimate;
-#' under kNNDM, folds matched on the outer fold's analysis rows against the
-#' same prediction grid locations `domain_xy`).
-#' Cost multiplies roughly by `inner_v`.
+#' `nested = TRUE` (with tuning) runs nested CV instead: each outer fold re-runs
+#' the grid search on `inner_v` inner folds of its analysis rows, with the same
+#' `strategy` (kNNDM inner folds matched to the same `domain_xy`), and predicts
+#' its held-out rows with that winner. The pooled metrics then estimate the
+#' whole procedure including tuning (Varma & Simon 2006; Cawley & Talbot 2010),
+#' at about `inner_v` times the cost.
 run_classification_cv <- function(pts_sf, target, predictors,
                                   method = "rf",
                                   strategy = c("spatial", "knndm", "standard"),
@@ -883,14 +772,11 @@ run_classification_cv <- function(pts_sf, target, predictors,
   cc <- stats::complete.cases(full_df[, c(target, predictors), drop = FALSE])
   keep_sf <- pts_sf[cc, ]
   train_df <- .classif_numeric_as_double(full_df[cc, c(target, predictors), drop = FALSE], predictors)
-  # droplevels, not as.factor alone: classif_build_target() carries EVERY bin
-  # label as a level (an equal-interval or Jenks break can enclose no samples),
-  # and dropping rows with missing covariates can empty a level that the scoped
-  # data did populate. A level with no rows is not a class the model can learn:
-  # it makes yardstick's macro recall undefined (bal_accuracy comes back NA),
-  # adds an all-zero row and column to the confusion matrix, and later trips
-  # predict_classification_surface()'s missing-column stop() because the fitted
-  # engine never emits a probability column for it.
+  # droplevels: classif_build_target() keeps every bin label (a break can
+  # enclose no samples) and dropping incomplete rows can empty a level. An empty
+  # level is no learnable class: it makes macro recall undefined, adds a zero
+  # row/column to the confusion matrix, and has no probability column at
+  # prediction.
   train_df[[target]] <- droplevels(as.factor(train_df[[target]]))
   lvl <- levels(train_df[[target]])
   grp <- if (is.null(group)) NULL else as.character(group)[cc]
@@ -899,11 +785,9 @@ run_classification_cv <- function(pts_sf, target, predictors,
     stop("Classification target must have at least two classes after removing missing rows.")
   }
 
-  # Class-imbalance weighting: inverse-frequency case weights, applied only
-  # when the engine supports them. Every fit recomputes them from its own
-  # analysis rows: the out-of-fold refits below, and each tuning resample
-  # (classif_folds_to_rset with `target`), so no held-out class-prevalence
-  # information enters a fit.
+  # Inverse-frequency weights, only where the engine supports them; every fit
+  # (out-of-fold refits, each tuning resample) recomputes them from its own
+  # analysis rows, so no held-out class prevalence enters a fit.
   weights_applied <- isTRUE(class_weights) && classif_supports_weights(method)
   weight_col <- if (weights_applied) ".case_wt" else NULL
   if (weights_applied) {
@@ -942,24 +826,19 @@ run_classification_cv <- function(pts_sf, target, predictors,
   best_params <- NULL
   tune_grid_df <- NULL
   if (length(tune_params) > 0) {
-    # One space-filling grid shared by every tuning pass. Finalising the
-    # parameter set against the full predictor frame leaks nothing label-borne
-    # (it only pins data-dependent hyperparameter ranges such as mtry <= p).
+    # One space-filling grid for every tuning pass. Finalising on the full
+    # predictor frame only bounds ranges (mtry <= p) and carries no labels.
     tune_grid_df <- .classif_with_seed(seed, {
       pset <- hardhat::extract_parameter_set_dials(wf)
-      # Ranges such as mtry <= p count the covariates an Auto-Drop screen keeps
-      # on all rows (a range bound, carrying no label information).
+      # p counts the covariates the Auto-Drop screen keeps on all rows.
       pset <- dials::finalize(pset, x = train_df[, setdiff(predictors,
         .classif_screen_all_rows(train_df, predictors, vif_threshold)), drop = FALSE])
       dials::grid_space_filling(pset, size = .classif_grid_size(depth))
     })
   }
   if (length(tune_params) > 0 && !nested_active) {
-    # Non-nested (default): hyperparameters are selected by an inner grid over
-    # the same folds; the chosen values are then cross-validated below, so
-    # tuned-depth metrics are mildly optimistic. Depth "none" has no tuning
-    # step and is unaffected; `nested = TRUE` removes the optimism at ~inner_v
-    # times the cost.
+    # Non-nested: hyperparameters selected on the same folds that then score
+    # them (mildly optimistic); `nested = TRUE` removes this at ~inner_v x cost.
     .classif_check_cancel(cancel_file)
     report_cv(cov_share, "Tuning hyperparameters (grid search)...")
     tuned <- .classif_with_seed(seed, {
@@ -972,20 +851,16 @@ run_classification_cv <- function(pts_sf, target, predictors,
     report_cv(cov_share + tune_share)
   }
 
-  # Manual out-of-fold loop: fit on the analysis rows, predict hard class AND
-  # full class probabilities on the held-out fold, then pool. Hand-rolled (like
-  # perform_kriging_loocv) so probability columns are always collected and no
-  # per-fold metric warning arises when a spatial fold happens to be single-class.
-  # `.row` records each prediction's row index in train_df so the spatial
-  # baseline below (and McNemar pairing) can align with the model predictions.
+  # Hand-rolled out-of-fold loop (like perform_kriging_loocv): fit on the
+  # analysis rows, predict class and probabilities on the held-out fold, pool.
+  # Probabilities are always collected and a single-class fold raises no metric
+  # warning. `.row` indexes train_df for the baseline and McNemar pairing.
   nested_params <- list()
   imp_parts <- list()
   # (fold, covariate) pairs the fold's own VIF screen removed.
   fold_screen <- list()
-  # (fold, class) pairs whose class was absent from that fold's analysis rows.
-  # Collected rather than warned about in-worker: the module surfaces them once,
-  # naming the classes, because it is a property of the CV design (and of the
-  # class balance), not a model failure.
+  # (fold, class) pairs absent from that fold's analysis rows: a CV-design
+  # property the module reports once, not a model failure.
   class_gaps <- list()
   folds_seq <- sort(unique(fold_id))
   n_fold <- length(folds_seq)
@@ -1000,17 +875,14 @@ run_classification_cv <- function(pts_sf, target, predictors,
       tr <- train_df[fold_id != i, , drop = FALSE]
       te <- assess_df[fold_id == i, , drop = FALSE]
       if (weights_applied) {
-        # Recompute weights from the analysis rows only (no held-out
-        # class-prevalence leaks into the fold's fit).
+        # Weights from the analysis rows only.
         tr$.case_wt <- hardhat::importance_weights(
           .classif_class_weights(tr[[target]]))
       }
       fold_wf <- fit_wf
       if (nested_active) {
-        # Inner tuning sees ONLY this outer fold's analysis rows: fold
-        # construction, grid search, and winner selection all happen inside
-        # them, so the outer held-out rows never influence the chosen
-        # hyperparameters.
+        # Inner folds, grid search and winner all use only this outer fold's
+        # analysis rows.
         inner_id <- classif_make_fold_id(keep_sf[fold_id != i, , drop = FALSE],
                                          strategy, target = target,
                                          v = inner_v, seed = seed + i, domain_xy = domain_xy)
@@ -1035,34 +907,16 @@ run_classification_cv <- function(pts_sf, target, predictors,
         fold_screen[[length(fold_screen) + 1]] <<-
           data.frame(fold = i, covariate = screened_i, stringsAsFactors = FALSE)
       }
-      # Out-of-fold permutation importance: score THIS fold's model on the rows
-      # it never saw, before they are used for anything else. Done here because
-      # the fold's fitted workflow only exists inside this iteration — the
-      # alternative (refitting afterwards) would double the CV cost, whereas
-      # this reuses a fit that already exists and predicts the same number of
-      # rows in total as the training-row design. Permutation shuffles a
-      # predictor WITHIN the assessment rows, so very small folds decorrelate
-      # it less thoroughly; that caveat is documented in the guide.
-      #
-      # Its OWN seed sandbox, deliberately: .classif_perm_delta burns
-      # n_rep x n_predictors sample.int() draws, and on the shared fold-loop
-      # stream those draws shifted the random state every LATER fold's fit
-      # started from — so a purely diagnostic toggle could move the reported
-      # accuracy/kappa/confusion matrix. It bites whenever the learner consumes
-      # RNG: with the current registry that is xgboost at depth "full" (which
-      # tunes sample_size and mtry, i.e. row subsampling and colsample), while
-      # multinom (nnet's rang = 0 starts weights at zero), ranger (engine
-      # seed = 12345L) and xgboost at none/light (sample_size = 1) fit
-      # deterministically. Nesting the two-sided sandbox restores the fold
-      # stream on exit, so the CV loop is byte-identical whether or not
-      # importance is requested — for every learner, including any stochastic
-      # one added later — and each fold's importance is independently
-      # reproducible from `seed` and `k` alone.
-      # A covariate this fold's own Auto-Drop screen removed is not in its
-      # model, so permuting it would score a zero for a covariate the fold
-      # never used and drag the pooled importance of a genuinely used one down.
-      # It is left out of this fold's contribution, and the pool averages each
-      # covariate over the folds that kept it.
+      # Out-of-fold permutation importance: this fold's model on the rows it
+      # never saw, scored here because the fold's fit exists only in this
+      # iteration (refitting later would double the CV cost). Shuffles stay
+      # within the assessment rows, so tiny folds decorrelate less (documented
+      # in the guide). Its OWN seed sandbox leaves the fold stream untouched:
+      # a learner that draws RNG (xgboost at depth "full") scores the same with
+      # or without importance, and each fold's importance is reproducible from
+      # `seed` and `k`. A covariate this fold's screen removed is not in its
+      # model: it is left out of this fold's contribution, and the pool averages
+      # each covariate over the folds that kept it.
       imp_preds <- setdiff(predictors, screened_i)
       if (isTRUE(oof_importance) && length(imp_preds)) {
         imp_parts[[length(imp_parts) + 1]] <<-
@@ -1108,8 +962,8 @@ run_classification_cv <- function(pts_sf, target, predictors,
     fold_id = fold_id,
     assessment_df = assess_df,
     n_folds = length(unique(fold_id)),
-    # The levels actually modelled (complete cases, empty levels dropped) — the
-    # single source of truth for the surface columns and the exported bundle.
+    # The levels actually modelled (complete cases, empty levels dropped): the
+    # single source of the surface columns and the exported bundle's classes.
     levels = lvl,
     # NULL when every fold saw every class; otherwise one row per (fold, class)
     # the fold's training set lacked. See .classif_align_prob_cols().
@@ -1135,11 +989,10 @@ run_classification_cv <- function(pts_sf, target, predictors,
 }
 
 # ── Spatial-only baseline + covariate lift ──────────────────────────────────
-#' Out-of-fold nearest-neighbour class assignment from coordinates alone: for
-#' each fold, every held-out point receives the class of its nearest (Euclidean,
-#' projected coords) analysis-set point — the categorical analogue of
-#' Thiessen/nearest-neighbour interpolation, i.e. what pure spatial proximity
-#' achieves with NO covariates. Returns a factor aligned with the input rows.
+#' Out-of-fold 1-NN classes from coordinates alone: each held-out point takes
+#' the class of its nearest analysis-set point (projected Euclidean), the
+#' categorical analogue of Thiessen interpolation with NO covariates. Returns a
+#' factor aligned with the input rows.
 classif_spatial_baseline <- function(coords, y, fold_id) {
   coords <- as.matrix(coords)
   y <- as.factor(y)
@@ -1155,11 +1008,10 @@ classif_spatial_baseline <- function(coords, y, fold_id) {
   factor(out, levels = levels(y))
 }
 
-#' The spatial 1-NN baseline as a MAP: every grid cell takes the class of its
-#' nearest sample (Euclidean, projected coords) - the categorical analogue of
-#' Thiessen polygons. Built from the same complete-case point set the CV
-#' baseline scores, so the reported baseline accuracy describes this surface.
-#' Hard classes only: 1-NN has no class probabilities, so no entropy either.
+#' The spatial 1-NN baseline as a map (each cell takes its nearest sample's
+#' class), built from the point set the CV baseline scores, so the baseline
+#' accuracy describes this surface. Hard classes only (no probabilities, no
+#' entropy).
 classif_nn_surface <- function(train_xy, train_y, grid_xy, levels = NULL) {
   train_xy <- as.matrix(train_xy)
   grid_xy <- as.matrix(grid_xy)
@@ -1170,13 +1022,10 @@ classif_nn_surface <- function(train_xy, train_y, grid_xy, levels = NULL) {
              .pred_class = factor(y[nn], levels = lev))
 }
 
-#' Covariate-free cross-validation: the spatial 1-NN classifier IS the model.
-#' Uses the same fold construction as run_classification_cv (same seed, same
-#' strategy, points with a target value), so on a dataset without missing
-#' covariates its folds and out-of-fold predictions equal the `.pred_base`
-#' column of a covariate run. No probabilities exist, so only the class
-#' metrics are computed. `.pred_base` mirrors `.pred_class` so every consumer
-#' of the pooled predictions keeps working.
+#' Covariate-free CV: the spatial 1-NN classifier IS the model, on the same
+#' folds as run_classification_cv (equal to a covariate run's `.pred_base`
+#' when no covariate is missing). Class metrics only; `.pred_base` mirrors
+#' `.pred_class` for the shared consumers.
 run_classification_nn_cv <- function(pts_sf, target, strategy = c("spatial", "knndm", "standard"),
                                      v = 10L, seed = 12345L, group = NULL, domain_xy = NULL) {
   strategy <- match.arg(strategy)
@@ -1272,18 +1121,12 @@ classif_lift_interpretation <- function(lift, target_mode = "cat", strategy = "s
   msg
 }
 
-#' Covariate lift: how much the covariate model improves on two no-covariate
-#' baselines, computed from pooled out-of-fold predictions that carry
-#' `.pred_class` (model) and `.pred_base` (spatial 1-NN baseline).
-#'
-#' - `majority_acc` is the no-information rate (always predict the modal class).
-#' - `baseline_acc` / `baseline_kap` score the spatial 1-NN baseline on the
-#'   same folds, so the comparison shares the identical validation design.
-#' - `lift_abs` is the accuracy gain in points over the spatial baseline;
-#'   `mcnemar_p` is McNemar's paired test on the discordant correct/incorrect
-#'   pairs (exact binomial below 25 discordant pairs, continuity-corrected
-#'   chi-square above) — the standard significance test for comparing two
-#'   classifiers on the same samples (Dietterich 1998).
+#' Covariate lift over two no-covariate baselines, from pooled out-of-fold
+#' predictions with `.pred_class` (model) and `.pred_base` (spatial 1-NN):
+#' `majority_acc` is the no-information rate; `baseline_acc`/`baseline_kap`
+#' score the 1-NN baseline on the same folds; `lift_abs` is the accuracy gain
+#' in points; `mcnemar_p` is McNemar's paired test on the discordant pairs, the
+#' standard comparison of two classifiers on the same samples (Dietterich 1998).
 classif_covariate_lift <- function(pred_df, target) {
   truth <- as.factor(pred_df[[target]])
   mod_ok  <- as.character(pred_df$.pred_class) == as.character(truth)
@@ -1300,13 +1143,9 @@ classif_covariate_lift <- function(pred_df, target) {
   b <- sum(!mod_ok & base_ok)   # baseline right, model wrong
   c_ <- sum(mod_ok & !base_ok)  # model right, baseline wrong
   # Exact binomial below 25 discordant pairs, continuity-corrected chi-square
-  # above it (Edwards 1948; the usual switch point). mcnemar.test() is the
-  # chi-square APPROXIMATION to the binomial, and it is unreliable exactly
-  # where this statistic usually lands: b + c_ counts only the samples where
-  # the covariate model and the spatial 1-NN baseline disagree in correctness,
-  # which on a few hundred well-separated points is routinely under 25. Under
-  # the null both discordant cells are equally likely, so the exact test is
-  # binom.test(c_, b + c_, p = 0.5).
+  # above (Edwards 1948): b + c_ counts only the samples where model and
+  # baseline differ in correctness, often under 25, where the chi-square
+  # approximation is unreliable. Under the null: binom.test(c_, b + c_, 0.5).
   mcnemar_p <- if ((b + c_) > 0) {
     tryCatch({
       if ((b + c_) < 25L) {
@@ -1333,40 +1172,24 @@ classif_covariate_lift <- function(pred_df, target) {
 
 # ── Permutation feature importance ──────────────────────────────────────────
 #' Model-agnostic permutation importance (Breiman 2001; Fisher et al. 2019):
-#' permute one covariate at a time, re-predict, and record the increase in
-#' multiclass log-loss relative to the unpermuted baseline. Log-loss is used
-#' (rather than accuracy) because it consumes the full probability output, so
-#' it detects importance even when permutation rarely flips the argmax class.
-#' Comparable across all learners, unlike engine-native measures (ranger
-#' impurity vs xgboost gain vs multinom coefficients).
+#' the increase in multiclass log-loss when one covariate is permuted. Log-loss
+#' uses the full probability output, so it detects importance that rarely flips
+#' the argmax class, and it is comparable across learners (unlike impurity,
+#' gain or coefficients).
 #'
-#' Two evaluation designs are supported (see `classif_permutation_importance`
-#' for the training-row one and `run_classification_cv(oof_importance = TRUE)`
-#' for the out-of-fold one); both share the core below so the two variants are
-#' guaranteed to compute the same quantity on different rows.
-#'
-#' Core: given ONE fitted workflow and ONE evaluation frame, return the
-#' per-predictor increase in multiclass log-loss under permutation, plus the
-#' unpermuted baseline and the row count (the caller needs `n` to pool folds).
-#' Callers are responsible for the seed sandbox — the shuffles happen here.
-#'
-#' Predicting through the workflow re-bakes the whole recipe on every shuffle
-#' (n_rep x n_predictors bakes per evaluation frame, inside the CV loop under
-#' the out-of-fold design). The fast path below bakes ONCE and permutes the
-#' baked block instead — see `.classif_perm_fast_path` for why that is exact and
-#' how it is verified. It is a pure efficiency change: same draws, same order,
-#' same numbers, and any frame where the equivalence cannot be demonstrated
-#' falls back to the original path per predictor.
+#' Core shared by the training-row (classif_permutation_importance) and
+#' out-of-fold (run_classification_cv(oof_importance = TRUE)) designs: for ONE
+#' fitted workflow and ONE evaluation frame, the per-predictor deltas, the
+#' unpermuted baseline and `n` (for pooling folds). The caller provides the
+#' seed sandbox. The fast path (.classif_perm_fast_path) bakes once and
+#' permutes the baked block (same draws, same numbers); a predictor where that
+#' equivalence is not demonstrated re-bakes per shuffle.
 .classif_perm_delta <- function(wf, df, target, predictors, n_rep = 5L,
                                 cancel_file = NULL, progress = NULL) {
   truth <- as.factor(df[[target]])
 
-  # Out-of-fold design: this fold's model may have been fitted without one of
-  # the classes and so emits no column for it (see .classif_align_prob_cols).
-  # Without the pad, match() returns NA, p_true is NA, and the WHOLE importance
-  # frame collapses to NA. Padding at 0 keeps the baseline and the permuted
-  # scores on the same footing, so their difference — which is all the
-  # importance measure uses — stays meaningful.
+  # A fold model fitted without a class emits no column for it; padding at 0
+  # keeps the baseline and permuted scores comparable instead of NA.
   score <- function(prob) {
     prob <- as.matrix(prob)
     colnames(prob) <- sub("^\\.pred_", "", colnames(prob))
@@ -1382,20 +1205,13 @@ classif_covariate_lift <- function(pred_df, target) {
 
   base_ll <- log_loss_of(df)
 
-  # SETUP RUNS IN AN RNG SANDBOX, and that is load-bearing, not defensive:
-  # `predict()` itself consumes random numbers for some engines (measured:
-  # ranger's does), so the verification predict below would otherwise shift the
-  # stream every later sample.int() draws from and move the importances. Inside
-  # the sandbox the ambient state is restored, so the shuffle sequence is exactly
-  # the one the re-bake-per-shuffle implementation produced. What keeps the loop
-  # itself aligned is that both branches make the SAME number of predict calls
-  # (one per repeat) — keep it that way.
+  # Setup runs in an RNG sandbox because predict() draws RNG for some engines
+  # (ranger), which would shift the shuffle stream. Both branches make the same
+  # number of predict calls (one per repeat): keep it that way.
   fast <- with_rng_sandbox({
     fp <- .classif_perm_fast_path(wf, df, predictors)
-    # Second half of the runtime proof: the baked frame must reproduce the
-    # workflow's OWN baseline prediction. If it does not (an engine whose
-    # predict method expects something forge() supplies), the fast path is
-    # discarded wholesale rather than trusted.
+    # The baked frame must reproduce the workflow's own baseline prediction,
+    # or the fast path is discarded.
     if (!is.null(fp)) {
       base_fast <- tryCatch(score(predict(fp$model, fp$baked, type = "prob")),
                             error = function(e) NA_real_)
@@ -1408,9 +1224,8 @@ classif_covariate_lift <- function(pred_df, target) {
   }
 
   n_pred <- length(predictors)
-  # The cancel check, the progress tick and the fast/slow branch consume no RNG:
-  # exactly one sample.int(n) per (predictor, repeat), in the same nesting order
-  # as before, so the shuffle sequence and every importance value are unchanged.
+  # Exactly one sample.int(n) per (predictor, repeat); nothing else in the loop
+  # draws RNG.
   delta <- vapply(seq_len(n_pred), function(j) {
     p <- predictors[j]
     .classif_check_cancel(cancel_file)
@@ -1436,23 +1251,14 @@ classif_covariate_lift <- function(pred_df, target) {
 }
 
 #' Fast-path setup for `.classif_perm_delta`: bake the evaluation frame once and
-#' map each raw predictor to the baked column block it owns.
-#'
-#' Why permuting the baked block is the same thing as permuting the raw column:
-#' every step in `classif_build_recipe` is TRAINED at prep time and applied
-#' ROW-WISE at bake time (novel-level absorption, median/mode imputation, dummy
-#' expansion, zero-variance column removal, normalisation), and each baked column
-#' is a function of exactly one raw predictor. A row permutation therefore
-#' commutes with baking — including the NA case, where permute-then-impute and
-#' impute-then-permute both put the trained median wherever the NA landed.
-#'
-#' That is an argument about the recipe as it stands today, so it is checked
-#' rather than assumed: each predictor is probed with one fixed non-identity
-#' permutation and the fast result must reproduce a real bake exactly. A step
-#' that is not row-independent (a future step_pca, an interaction term, a spatial
-#' lag) or a block-mapping collision (a nominal `ph` with level `field` sitting
-#' beside a numeric `ph_field`) fails the probe and that predictor silently
-#' reverts to the slow path instead of returning a wrong importance.
+#' map each raw predictor to its baked column block. Every recipe step is
+#' trained at prep and row-wise at bake, and each baked column depends on one
+#' raw predictor, so a row permutation commutes with baking (NA included: the
+#' trained median lands wherever the NA went). Checked, not assumed: each
+#' predictor is probed with one fixed permutation that must reproduce a real
+#' bake; a row- or column-mixing step (a spatial lag, step_pca) or a block-name
+#' collision (nominal `ph` with level `field` beside numeric `ph_field`) fails
+#' the probe and that predictor takes the slow path.
 #'
 #' @return list(model, baked, blocks, ok) or NULL if the workflow cannot be split.
 .classif_perm_fast_path <- function(wf, df, predictors) {
@@ -1462,9 +1268,8 @@ classif_covariate_lift <- function(pred_df, target) {
     baked <- recipes::bake(rec, new_data = df, recipes::all_predictors())
     nms <- names(baked)
 
-    # A numeric predictor keeps its own name through the recipe; a nominal one is
-    # replaced by its step_dummy block. Both are candidates only — the probe is
-    # what makes them safe.
+    # A numeric predictor keeps its name; a nominal one becomes its step_dummy
+    # block. Candidates only: the probe makes them safe.
     blocks <- lapply(predictors, function(p) {
       if (p %in% nms) p else nms[startsWith(nms, paste0(p, "_"))]
     })
@@ -1487,12 +1292,10 @@ classif_covariate_lift <- function(pred_df, target) {
   }, error = function(e) NULL)
 }
 
-#' Shared presentation frame for both importance designs. `share_pct`
-#' renormalises the positive importances to sum to 100 for the "elevation
-#' contributed X%" reading; negative raw values (a predictor whose permutation
-#' IMPROVES the loss, i.e. pure noise) clamp to a 0 share. `evaluated_on`
-#' records the design so the plot, the table and the metrics CSV can never
-#' present an optimistic and an honest number as though they were the same.
+#' Presentation frame for both importance designs. `share_pct` renormalises
+#' the positive importances to 100; negative ones (permutation improved the
+#' loss: noise) get a 0 share. `evaluated_on` records the design, so
+#' training-row and out-of-fold numbers are never presented as one.
 .classif_importance_frame <- function(predictors, delta, baseline, evaluated_on) {
   pos <- pmax(delta, 0)
   share <- if (sum(pos) > 0) 100 * pos / sum(pos) else rep(NA_real_, length(pos))
@@ -1507,11 +1310,10 @@ classif_covariate_lift <- function(pred_df, target) {
   out[order(-out$importance), , drop = FALSE]
 }
 
-#' Training-row design: the final fitted model scored on the rows it was fitted
-#' on — the standard default (vip::vi_permute). Rankings are informative but the
-#' absolute values lean optimistic for flexible learners, because a model that
-#' has partly memorised its training rows loses more when a predictor it
-#' memorised through is destroyed. Seed-sandboxed; `n_rep` permutation repeats.
+#' Training-row design: the final model scored on its own training rows (the
+#' vip::vi_permute default). Rankings are informative, but absolute values lean
+#' optimistic for flexible learners that partly memorise their training rows.
+#' Seed-sandboxed; `n_rep` repeats.
 classif_permutation_importance <- function(model, train_df, target, predictors,
                                            n_rep = 5L, seed = 12345L,
                                            cancel_file = NULL, progress = NULL) {
@@ -1525,18 +1327,15 @@ classif_permutation_importance <- function(model, train_df, target, predictors,
   .classif_importance_frame(predictors, core$delta, core$baseline, "training")
 }
 
-#' Pool per-fold out-of-fold importances into one frame. Each fold contributed
-#' a mean-over-its-own-rows log-loss delta, so weighting by fold size and
-#' dividing by the total reproduces EXACTLY the delta that pooling every
-#' out-of-fold row into a single evaluation set would give.
+#' Pool per-fold out-of-fold importances: weighting each fold's mean delta by
+#' its size reproduces exactly the delta of one pooled evaluation set.
 .classif_pool_fold_importance <- function(parts, predictors) {
   if (!length(parts)) return(NULL)
   w <- vapply(parts, function(z) as.numeric(z$n), numeric(1))
   if (sum(w) <= 0) return(NULL)
-  # n_pred x n_fold, NA where a fold's own Auto-Drop screen removed the
-  # covariate, so each covariate is averaged over the folds that used it and a
-  # covariate no fold kept is left out of the table entirely. Without a screen
-  # every part carries every predictor and this is the plain weighted mean.
+  # n_pred x n_fold, NA where a fold's screen removed the covariate: each
+  # covariate is averaged over the folds that used it, and one no fold kept is
+  # left out. Without a screen this is the plain weighted mean.
   dl <- matrix(NA_real_, nrow = length(predictors), ncol = length(parts),
                dimnames = list(predictors, NULL))
   for (j in seq_along(parts)) {
@@ -1552,16 +1351,13 @@ classif_permutation_importance <- function(model, train_df, target, predictors,
 }
 
 # ── Final fit ───────────────────────────────────────────────────────────────
-#' Fit the final classification workflow on all training points, tuning first
-#' if `depth` requests it. The tuning CV uses the SAME `strategy` as the run's
-#' evaluation CV: tuning under random stratified folds while reporting spatial-CV
-#' metrics picks hyperparameters against exactly the optimism spatial CV exists
-#' to remove, and those hyperparameters are what the map, the entropy surface,
-#' the permutation importance and the exported .rds bundle are all built from.
-#' Under kNNDM the same `domain_xy` gives the same folds as the CV's, so its
-#' held-out covariates (`cv_assessment_df`) are reused.
-#' Returns the fitted workflow plus the target levels for downstream raster
-#' layer naming.
+#' Fit the final workflow on all training points, tuning first if `depth` asks.
+#' Tuning uses the run's own `strategy`: random folds behind spatial-CV metrics
+#' would pick hyperparameters for the optimism spatial CV removes, and the map,
+#' entropy, importance and .rds bundle are built from them. When the same seed
+#' (and `domain_xy` under kNNDM) reproduces the CV's folds, their held-out
+#' covariates (`cv_assessment_df`) are reused. Returns the fitted workflow and
+#' the target levels.
 fit_classification_model <- function(pts_sf, target, predictors,
                                      method = "rf", depth = "none",
                                      strategy = c("spatial", "knndm", "standard"),
@@ -1573,9 +1369,8 @@ fit_classification_model <- function(pts_sf, target, predictors,
   full_df <- as.data.frame(sf::st_drop_geometry(pts_sf))
   cc <- stats::complete.cases(full_df[, c(target, predictors), drop = FALSE])
   train_df <- .classif_numeric_as_double(full_df[cc, c(target, predictors), drop = FALSE], predictors)
-  # Same droplevels contract as run_classification_cv, so `model$levels` (which
-  # names the surface probability columns and the exported bundle's classes) can
-  # never claim a class the fitted engine has no column for.
+  # Same droplevels contract as run_classification_cv: `model$levels` never
+  # names a class the engine has no column for.
   train_df[[target]] <- droplevels(as.factor(train_df[[target]]))
 
   weights_applied <- isTRUE(class_weights) && classif_supports_weights(method)
@@ -1621,11 +1416,10 @@ fit_classification_model <- function(pts_sf, target, predictors,
     wf <- tune::finalize_workflow(wf, final_params)
   }
 
-  # Auto-Drop: the tuning resamples above screened inside each split; the
-  # model itself is fitted on the covariates the same screen keeps on all
-  # rows, WITHOUT the custom step. The exported bundle is loaded in sessions
-  # that do not define step_vif_screen's methods, and it should not ask for
-  # covariates the model never uses.
+  # Auto-Drop: tuning screened inside each split; the model is fitted on the
+  # covariates the screen keeps on all rows WITHOUT the custom step, so the
+  # exported bundle loads where step_vif_screen is undefined and asks only for
+  # covariates it uses.
   if (is.numeric(vif_threshold) && length(vif_threshold) == 1 && is.finite(vif_threshold)) {
     predictors <- setdiff(predictors, screened_out)
     wf <- workflows::workflow() |>
@@ -1640,42 +1434,31 @@ fit_classification_model <- function(pts_sf, target, predictors,
        # The covariates the fitted model uses (after an Auto-Drop screen).
        target = target, predictors = predictors, method = method,
        screened_out = screened_out,
-       # The hyperparameters this exported/deployed model was actually built
-       # with (its own full-data tuning pass) — not the CV loop's selection.
+       # This model's own full-data tuning result, not the CV loop's selection.
        best_params = final_params,
        weights_applied = weights_applied)
 }
 
 # ── Prediction surface ──────────────────────────────────────────────────────
-#' Shannon entropy of a per-row probability matrix, normalised to [0, 1] by
-#' log(n_class): 0 = a single class certain, 1 = uniform over classes. The
-#' natural spatial-uncertainty surface for a classifier, analogous to the
-#' kriging variance map for continuous predictions.
+#' Shannon entropy per row, normalised to [0, 1] by log(k): 0 = one class
+#' certain, 1 = uniform. The classifier's uncertainty surface, analogous to the
+#' kriging variance map.
 classif_shannon_entropy <- function(prob_mat) {
   prob_mat <- as.matrix(prob_mat)
   k <- ncol(prob_mat)
   if (k < 2) return(rep(0, nrow(prob_mat)))
-  # Vectorised -sum(p log p). Zeroing the non-finite terms is equivalent to the
-  # old per-row p[p > 0] filter (adding an exact 0 to a running sum is a no-op
-  # and the surviving terms keep their column order), but avoids apply()'s
-  # per-row list allocation, which dominated on million-cell prediction grids.
+  # Vectorised -sum(p log p); non-finite terms (0 log 0) count as 0.
   pl <- prob_mat * log(prob_mat)
   pl[!is.finite(pl)] <- 0
   as.numeric(-rowSums(pl) / log(k))
 }
 
-#' Predict class, per-class probability, and normalised entropy for a covariate
-#' data.frame (typically the interpolated prediction grid from
-#' krige_covariates()). Returns `newdata` with `.pred_class`, `.pred_<level>`
-#' columns, and `.entropy` appended.
-#' Prediction runs in row blocks. Every recipe step in classif_build_recipe is
-#' TRAINED (novel levels, impute medians/modes, dummy levels, zv removals,
-#' normalise centres/scales), so baking is row-independent and a blocked
-#' prediction is identical to a single whole-grid call. Blocking buys two
-#' things on the million-cell grids this stage produces: a cancel checkpoint
-#' and a progress tick between blocks (a whole-grid call runs for minutes with
-#' the bar frozen and the cancel flag unread), plus a lower peak memory
-#' footprint.
+#' Predict class, per-class probabilities and normalised entropy for a
+#' covariate frame (usually the krige_covariates() grid); returns `newdata`
+#' with `.pred_class`, `.pred_<level>` and `.entropy` appended. Predicts in row
+#' blocks, identical to one whole-grid call because every recipe step is
+#' trained and row-independent; the blocks give cancel checkpoints, progress
+#' ticks and a lower memory peak on million-cell grids.
 predict_classification_surface <- function(model, newdata, chunk_size = NULL,
                                            cancel_file = NULL, progress = NULL) {
   wf <- model$workflow
@@ -1701,14 +1484,10 @@ predict_classification_surface <- function(model, newdata, chunk_size = NULL,
   # frame is identical whatever the block size.
   rownames(prob) <- NULL
 
-  # Every learner in .classif_method_defs() is a probability model, so the hard
-  # class IS the argmax of the probabilities parsnip just returned — asking for
-  # type = "class" as well would re-bake the recipe and re-run the model over
-  # the whole grid a second time, on the longest stage of the run. The only
-  # behavioural difference is at exact probability ties, where ties.method =
-  # "first" fixes the winner on the trained level order instead of leaving it to
-  # the engine. The factor is rebuilt against the trained level set rather than
-  # relying on c()/unlist() level handling, which differs across R versions.
+  # Every learner is a probability model, so the hard class is the argmax of
+  # these probabilities (a second type = "class" call would re-run the model on
+  # the whole grid). Exact ties go to the first trained level; the factor is
+  # rebuilt on the trained level set.
   lev <- model$levels
   if (is.null(lev)) lev <- sub("^\\.pred_", "", names(prob))
   prob_cols <- paste0(".pred_", lev)
@@ -1724,29 +1503,20 @@ predict_classification_surface <- function(model, newdata, chunk_size = NULL,
   cls[!stats::complete.cases(prob_mat)] <- NA
 
   out <- cbind(nd, .pred_class = cls, prob)
-  # Entropy comes from prob_mat, the frame validated against the trained level
-  # set three lines above — not from the raw predict() output. Identical today
-  # (every learner returns exactly the level columns), but an engine that ever
-  # returned an extra column would silently rescale the whole uncertainty
-  # surface instead of tripping the missing-column guard.
+  # From prob_mat, validated against the trained levels, so an extra engine
+  # column can never rescale the entropy.
   out$.entropy <- classif_shannon_entropy(prob_mat)
   out
 }
 
 # ── Rasterisation ───────────────────────────────────────────────────────────
-#' Rasterise a prediction surface. `grid_sf` must carry x/y (projected) plus the
-#' `.pred_class`, `.pred_<level>`, and `.entropy` columns from
-#' predict_classification_surface(). Returns a list with a categorical class
-#' SpatRaster, a multi-layer probability SpatRaster, an entropy SpatRaster, and
-#' a per-class area table in ellipsoidal (true ground) hectares from
-#' terra::expanse, the same call the app's continuous classified-map area
-#' reporting and class-zone GIS export use.
-#' `conf_threshold` implements the abstention ("reject option", Chow 1970)
-#' rule: cells whose maximum class probability falls BELOW the threshold are
-#' assigned an explicit "Unclassified" category (rendered grey) instead of a
-#' weak argmax guess, flagging where field verification is needed. 0 disables
-#' abstention. Thresholds at or below 1/n_classes cannot fire (the max
-#' probability of a k-class prediction is always >= 1/k).
+#' Rasterise a prediction surface (`grid_sf` with projected x/y and the
+#' predict_classification_surface() columns): a categorical class SpatRaster,
+#' a probability stack, an entropy layer, and a per-class area table in
+#' ellipsoidal hectares (terra::expanse, as the app's other area reports).
+#' `conf_threshold` is the reject option (Chow 1970): cells whose maximum class
+#' probability is below it become "Unclassified" (grey). 0 disables it; values
+#' <= 1/k never fire (a k-class maximum is always >= 1/k).
 classif_surface_to_rasters <- function(grid_sf, res, crs_wkt, levels_order = NULL,
                                        conf_threshold = 0) {
   df <- as.data.frame(grid_sf)
@@ -1760,9 +1530,8 @@ classif_surface_to_rasters <- function(grid_sf, res, crs_wkt, levels_order = NUL
   prob_cols <- paste0(".pred_", levs)
   prob_cols <- prob_cols[prob_cols %in% names(df)]
 
-  # Abstention mask from the per-cell winning probability. The "Unclassified"
-  # level is appended only when a threshold is active so a plain run's class
-  # raster, legend, and area table are byte-identical to the pre-feature ones.
+  # Abstention mask from each cell's winning probability; "Unclassified" is a
+  # level only while a threshold is active.
   use_abstain <- is.numeric(conf_threshold) && length(conf_threshold) == 1 &&
     !is.na(conf_threshold) && conf_threshold > 0 && length(prob_cols) == length(levs)
   if (use_abstain) {
@@ -1776,17 +1545,13 @@ classif_surface_to_rasters <- function(grid_sf, res, crs_wkt, levels_order = NUL
                     min(df$y) - res / 2, max(df$y) + res / 2)
   templ <- terra::rast(ext, resolution = res, crs = crs_wkt)
 
-  # One coordinate matrix for every layer below (class + k probability layers +
-  # entropy), built once: inside the probability lapply it would materialise an
-  # n x 2 matrix once per class on a million-cell grid.
+  # One coordinate matrix for every layer (not one per probability layer).
   xy <- as.matrix(df[, c("x", "y")])
 
   class_r <- terra::rasterize(xy, templ, values = cls_int)
   levels(class_r) <- data.frame(ID = seq_along(levs_map), class = levs_map)
-  # Embed the same viridis palette the in-app map uses so the exported class
-  # GeoTIFF opens coloured in GIS/image viewers (a bare integer band renders
-  # greyscale). viridisLite is a hard dependency of ggplot2, always installed.
-  # Abstained cells get a neutral grey, matching the on-screen palette.
+  # The in-app viridis palette as an embedded colour table, so the class
+  # GeoTIFF opens coloured in GIS (abstained cells grey, as on screen).
   pal <- viridisLite::viridis(length(levs))
   if (use_abstain) pal <- c(pal, "#9E9E9E")
   terra::coltab(class_r) <- data.frame(value = seq_along(levs_map), col = pal)
@@ -1809,16 +1574,12 @@ classif_surface_to_rasters <- function(grid_sf, res, crs_wkt, levels_order = NUL
   }
 
   counts <- table(factor(cls_chr, levels = levs_map))
-  # Ellipsoidal area, from the SAME terra::expanse call the interpolation Area
-  # Coverage table (server_sci_analysis.R) and the class-zone GIS export
-  # (spatial_pipeline.R) make, so the three cannot disagree. The planimetric
-  # alternative (n_cells x res^2) is the area IN THE PROJECTION PLANE and
-  # differs from ground area by the CRS's area scale factor k^2: measured
-  # -0.08% on a UTM central meridian, +0.19% at the zone edge. Small, but
-  # systematic, and in a column labelled hectares on the ground.
-  # class_r is CATEGORICAL, so expanse(byValue = TRUE) reports `value` as the
-  # class LABEL, not the integer ID - match on the label. Falls back to the
-  # planimetric figure only if expanse cannot be evaluated.
+  # Ellipsoidal area from terra::expanse, as the interpolation Area Coverage
+  # table and the class-zone export, so the three agree. n_cells x res^2 is the
+  # projection-plane area, off by the CRS's area scale k^2 (-0.08% on a UTM
+  # central meridian, +0.19% at the zone edge); it is the fallback only if
+  # expanse fails. class_r is categorical: expanse(byValue = TRUE) reports the
+  # class LABEL as `value`.
   cell_ha <- (res * res) / 10000
   area_ha <- as.numeric(counts) * cell_ha
   area_exp <- tryCatch({
@@ -1840,13 +1601,10 @@ classif_surface_to_rasters <- function(grid_sf, res, crs_wkt, levels_order = NUL
 }
 
 # ── Prediction grid + covariate surface ─────────────────────────────────────
-#' Auto grid resolution for a classification scope: ~50k cells inside the
-#' domain, clamped to [5, 1000] m. A multi-part boundary (distant localities)
-#' can cover a bounding box far larger than its own area, and the raster
-#' template spans the full bbox before clipping, so the resolution is
-#' additionally floored to keep the candidate grid below ~4M cells.
-#' Shared by classif_build_grid and the module's pre-run resolution advisory so
-#' the number the user is shown is the number the run will use.
+#' Auto grid resolution: ~50k cells inside the domain, clamped to [5, 1000] m,
+#' floored so the bbox candidate grid stays under the cell cap. Shared by
+#' classif_build_grid and the module's pre-run advisory, so the user sees the
+#' resolution the run uses.
 classif_auto_res <- function(area_m2, bbox) {
   max(.classif_auto_res_rule(area_m2), .classif_res_floor(bbox))
 }
@@ -1882,23 +1640,17 @@ classif_grid_res_note <- function(mode, res, area_m2, bbox) {
   list(res = eff, text = txt)
 }
 
-#' The candidate-cell budget, as a resolution floor in metres. Named so the
-#' suite can shrink it and exercise the cap without allocating the budget.
+#' The candidate-cell budget as a resolution floor in metres.
 .classif_res_floor <- function(bbox) {
   dx <- as.numeric(bbox["xmax"] - bbox["xmin"])
   dy <- as.numeric(bbox["ymax"] - bbox["ymin"])
   sqrt(dx * dy / .CLASSIF_MAX_CANDIDATE_CELLS)
 }
 
-#' Apply the same ~4M candidate-cell floor to a MANUAL resolution. The Auto
-#' path has carried it since 2026-07-10; the Manual Resolution slider had no
-#' cap at all, and it is the path that can ask for the finest grid. The raster
-#' template spans the whole bounding box before the clip, so the slider's 5 m
-#' minimum over a multi-locality scope of 20 x 20 km is 1.6e7 candidate nodes -
-#' several GB inside the classification worker, where an allocation failure
-#' surfaces to the user only as a generic run failure. Shared by
-#' classif_build_grid and the module's live resolution advisory so the number
-#' the user is shown before the run is the number the run uses.
+#' The candidate-cell floor applied to a manual resolution: the template spans
+#' the whole bbox before the clip, so 5 m over a 20 x 20 km multi-locality
+#' scope would be 1.6e7 candidate nodes (several GB in the worker). Shared by
+#' classif_build_grid and the module's live advisory.
 classif_cap_res <- function(res, bbox) {
   if (is.null(res) || !is.finite(res)) return(res)
   cap <- .classif_res_floor(bbox)
@@ -1924,18 +1676,13 @@ classif_domain_boundary <- function(pts_proj, boundary = "concave", boundary_sf 
   sf::st_as_sf(sf::st_sfc(sf::st_geometry(bnd), crs = sf::st_crs(pts_proj)))
 }
 
-#' Build a projected prediction grid inside the scope boundary
-#' (classif_domain_boundary), mirroring the interpolation pipeline's approach
-#' (hull, terra raster, clip). Resolution defaults to ~50k cells inside the
-#' domain, clamped to [5, 1000] m.
-#' `strict_scope` says whether the domain in force really is a union of
-#' per-point buffers, which is what the buffer/cell-size advisory below is
-#' about. It defaults to the boundary style, but a caller that supplies its own
-#' `boundary_sf` can override it: polygons-only scoping, for instance, hands
-#' over the user's polygons and the Boundary Type control is then inert.
-#' `scope` is the boundary classif_domain_boundary() already resolved from the
-#' same arguments (run_classification_pipeline resolves it before the
-#' cross-validation), so the hull is not built twice.
+#' Projected prediction grid clipped to the scope boundary
+#' (classif_domain_boundary), as in the interpolation pipeline. Resolution:
+#' classif_auto_res when NULL, else classif_cap_res. `strict_scope` says whether
+#' the domain really is a union of point buffers (the buffer/cell-size
+#' advisory); it defaults to the boundary style, and a caller supplying its own
+#' `boundary_sf` (polygons-only scope) overrides it. `scope` is the boundary
+#' the pipeline already resolved, so the hull is not built twice.
 classif_build_grid <- function(pts_proj, res = NULL,
                                boundary = c("concave", "convex", "bbox", "wrapped", "strict"),
                                boundary_sf = NULL,
@@ -1959,24 +1706,18 @@ classif_build_grid <- function(pts_proj, res = NULL,
       res <- res_capped
     }
   }
-  # A Point buffer boundary narrower than half the cell diagonal discards
-  # the cells of isolated samples (see strict_buffer_gap, spatial_pipeline.R).
-  # Reported here because this is the only place the effective resolution is
-  # known in Auto mode; advisory only, the grid is still built as asked.
+  # A Point buffer narrower than half the cell diagonal drops isolated samples'
+  # cells (strict_buffer_gap, spatial_pipeline.R); only here is the Auto
+  # resolution known. Advisory only.
   strict_warning <- if (isTRUE(strict_scope)) {
     strict_buffer_message(buffer_dist, res)
   } else NULL
   # Square cells of exactly `res` (grid_template, spatial_pipeline.R).
   grid_r <- grid_template(bbox, res, sf::st_crs(pts_proj)$wkt)
-  # Cell centres as a plain MATRIX, tested against the boundary a block at a
-  # time, with the sf built ONCE from the survivors - the same shape
-  # run_regional_interpolation uses, and for the same reason: an sfc_POINT
-  # stores every node as its own classed numeric(2), ~430 bytes per cell
-  # against 16 for a matrix row, and terra::as.points materialised every
-  # bounding-box node before anything was discarded. Same st_within predicate,
-  # same surviving rows, same order, same columns as the single-pass form.
-  # st_within (not st_intersects) is deliberate: a node exactly on the boundary
-  # is outside the scope.
+  # Cell centres as a plain matrix clipped a block at a time, the sf built once
+  # from the survivors (as run_regional_interpolation): an sfc_POINT costs ~430
+  # bytes per cell against 16 for a matrix row. st_within, not st_intersects: a
+  # node exactly on the boundary is outside the scope.
   grid_xy <- terra::crds(grid_r, na.rm = FALSE)
   n_bbox <- nrow(grid_xy)
   blk <- max(1L, as.integer(.GRID_CLIP_BLOCK_CELLS))
@@ -1988,11 +1729,8 @@ classif_build_grid <- function(pts_proj, res = NULL,
     inside[s:e] <- sf::st_within(chunk, bnd, sparse = FALSE)[, 1]
     rm(chunk)
   }
-  # Falling back to the full bbox here would silently predict over the entire
-  # bounding box — the opposite of what scoping promises. Fail loudly instead;
-  # the module's promise-error handler surfaces this message. When the cap has
-  # already coarsened the cells, "reduce the resolution" is advice the user
-  # cannot take, so the message has to name what actually happened.
+  # No fallback to the full bbox (that would predict outside the scope): fail
+  # loudly, naming the cap when it already coarsened the cells.
   if (!any(inside)) {
     stop("No grid cells fall inside the scope boundary at this resolution; reduce the grid resolution or widen the scope.",
          if (is.null(res_note)) "" else paste0(" ", res_note))
@@ -2003,29 +1741,24 @@ classif_build_grid <- function(pts_proj, res = NULL,
                          coords = c("x", "y"), crs = sf::st_crs(pts_proj))
   grid_p$x <- keep_xy[, 1]; grid_p$y <- keep_xy[, 2]
   rm(keep_xy)
-  # One advisory channel: the module raises res$grid_warning as a single
-  # notification, so a coarsened resolution and a strict-buffer gap must arrive
-  # together rather than one silencing the other.
+  # One advisory channel (res$grid_warning): a coarsened resolution and a
+  # strict-buffer gap arrive together.
   notes <- c(res_note, strict_warning)
   notes <- notes[!is.na(notes) & nzchar(notes)]
   list(grid_p = grid_p, res = res, crs_wkt = sf::st_crs(pts_proj)$wkt,
        strict_warning = if (length(notes)) paste(notes, collapse = " ") else NULL)
 }
 
-#' Populate a prediction grid with covariate values. Numeric covariates are
-#' interpolated with the existing krige_covariates() surface builder (same path
-#' as RK/RFK); categorical covariates, which cannot be kriged, inherit the class
-#' of their nearest training point (FNN). Both approaches are documented as
-#' approximations that propagate onto the classifier's inputs.
-#' attr(, "cov_fallback") names the numeric covariates whose surface is the
-#' IDW fallback (absent when every one was kriged).
+#' Covariate values on a prediction grid: numeric covariates through
+#' krige_covariates() (as RK/RFK), categorical ones from the nearest training
+#' point (FNN), both approximations that propagate into the classifier's
+#' inputs. attr(, "cov_fallback") names numeric covariates whose surface is the
+#' IDW fallback.
 build_classification_grid_aux <- function(pts_proj, grid_p, predictors,
                                           cancel_file = NULL, progress = NULL) {
   df <- sf::st_drop_geometry(pts_proj)
-  # A predictor absent from the frame yields df[[p]] = NULL, and is.numeric(NULL)
-  # is FALSE - it would be routed to the categorical branch, become an all-NA
-  # column, get mode-imputed to a constant and then dropped by step_zv, leaving
-  # the model quietly trained on fewer predictors than the user selected.
+  # An absent predictor would read as categorical (is.numeric(NULL) is FALSE),
+  # become a constant and be dropped by step_zv, silently shrinking the model.
   missing_preds <- setdiff(predictors, names(df))
   if (length(missing_preds) > 0) {
     stop("Predictor column(s) not found in the training data: ",
@@ -2039,9 +1772,7 @@ build_classification_grid_aux <- function(pts_proj, grid_p, predictors,
   fallback <- character(0)
   if (length(num_preds) > 0) {
     lags <- calc_scientific_lags(pts_proj)
-    # One covariate kriged onto the full grid is the coarsest interruptible
-    # unit here (gstat's krige() call is a black box), so cancel latency in
-    # this stage is one covariate.
+    # One covariate is the smallest interruptible unit (krige() is a black box).
     kc <- krige_covariates(pts_proj, grid_p, num_preds, lags, .CLASSIF_COV_IDW,
                            on_var = function(i, total) {
                              .classif_check_cancel(cancel_file)
@@ -2067,18 +1798,11 @@ build_classification_grid_aux <- function(pts_proj, grid_p, predictors,
 }
 
 # ── Spatial scope (localities / polygons) ───────────────────────────────────
-#' Put a point set on a metric CRS before any spatial step of a classification
-#' run touches it. The Target Mapping CRS may legitimately be geographic
-#' (EPSG:4326 is the first entry of that selector), but grid resolution and
-#' hull buffers are metres, the covariate surfaces are kriged on metric lags,
-#' spatial-CV blocks are sized in metres and cell area is reported in hectares.
-#' Left in degrees, the auto resolution (metres, derived from an s2 area in
-#' m^2) is applied to an extent measured in degrees and the prediction grid
-#' collapses to a single continent-sized cell: one flat rectangle instead of a
-#' map. The fallback is the data's UTM zone, the same one the interpolation
-#' pipeline applies (validate_and_project_sf), restated as its EPSG code -
-#' the proj4 string that function builds carries none, which would leave the
-#' maps and the exported GeoTIFFs describing their projection as "unknown".
+#' Put a point set on a metric CRS before any spatial step: the Target Mapping
+#' CRS may be geographic, but resolution, buffers, kriging lags, CV blocks and
+#' hectares are metric (in degrees the grid collapses to one cell). The
+#' fallback is the data's UTM zone (validate_and_project_sf), restated as its
+#' EPSG code so maps and GeoTIFFs name their projection.
 classif_project_metric <- function(pts) {
   if (is.null(pts) || nrow(pts) == 0 || !sf::st_is_longlat(pts)) return(pts)
   pts <- validate_and_project_sf(pts)
@@ -2145,31 +1869,21 @@ classif_scope_polygons <- function(drawn_sf = NULL, shp_sf = NULL, target_crs = 
   out
 }
 
-# Union of per-group hulls over projected points. Grouped hulls (one per
-# locality) keep the prediction domain from bridging unsampled terrain between
-# localities; a NULL group reproduces the single-hull behaviour. Degenerate
-# hulls (a group with < 3 unique coordinates collapses to a point/line) get a
-# small pad so the boundary still encloses grid cells.
-#
-# Styles mirror the interpolation sidebar's Boundary Type exactly:
-#   concave/convex/bbox — tight hulls (millimetre snap buffer, see below);
-#   wrapped — concave hull padded by a buffer: "fixed" uses `buffer_dist`
-#     metres, "dynamic" derives the distance per group from its sampling
-#     density (mean 1-NN spacing x 0.5, x the generic 2.0 multiplier, clamped
-#     to [5, 2000] m), the same construction run_regional_interpolation uses
-#     (the method-specific multiplier is an interpolation concept, so the
-#     classifier uses get_buffer_multiplier's default of 2.0);
-#   strict — union of per-point buffers of `buffer_dist` metres (always fixed,
-#     matching the sidebar, which offers dynamic logic for wrapped only).
+# Union of per-group hulls over projected points: one hull per locality keeps
+# the domain from bridging unsampled terrain (NULL group = a single hull), and
+# degenerate hulls (< 3 unique points) get a small pad. Styles match the
+# sidebar's Boundary Type: concave/convex/bbox are tight hulls (snap buffer);
+# wrapped is a concave hull plus a buffer, "fixed" = `buffer_dist` m, "dynamic"
+# = per group mean 1-NN spacing x 0.5 x 2.0 (get_buffer_multiplier's generic
+# default), clamped to [5, 2000] m, as run_regional_interpolation; strict is
+# the union of fixed `buffer_dist` point buffers.
 .classif_scope_hulls <- function(pts_proj, group = NULL, style = "concave",
                                  buffer_mode = "fixed", buffer_dist = 250) {
   bb <- sf::st_bbox(pts_proj)
   diag_len <- sqrt((bb["xmax"] - bb["xmin"])^2 + (bb["ymax"] - bb["ymin"])^2)
   pad <- max(1, 0.02 * diag_len)
-  # concaveman's C++ backend can emit hull vertices a few 1e-5 map units off
-  # the input coordinates, leaving boundary samples marginally outside their
-  # own hull; a millimetre-scale snap buffer (projected CRSs are metric)
-  # guarantees the domain contains every training point.
+  # concaveman can emit vertices ~1e-5 units off the inputs, leaving boundary
+  # samples just outside; a millimetre snap buffer keeps every point inside.
   snap <- max(0.001, 1e-6 * diag_len)
   b_dist_safe <- if (is.null(buffer_dist) || !is.finite(buffer_dist)) 250 else max(0, buffer_dist)
   group_buffer <- function(p) {
@@ -2207,35 +1921,25 @@ classif_scope_polygons <- function(drawn_sf = NULL, shp_sf = NULL, target_crs = 
   sf::st_union(do.call(c, parts))
 }
 
-#' Resolve the spatial scope of a classification run: filter `df` to the
-#' selected localities and/or polygons, assign each retained point an
-#' evaluation group (locality, or polygon label in polygons-only mode), and
-#' build the projected prediction boundary as WKT.
+#' Resolve a classification run's spatial scope: filter `df` to the selected
+#' localities and/or polygons, give each point an evaluation group (locality,
+#' or polygon label in "only" mode), and build the projected boundary as WKT.
 #'
-#' `poly_mode`: "ignore" scopes by localities alone; "intersect" keeps points
-#' inside the selected localities AND the polygons; "only" keeps points inside
-#' the polygons regardless of locality. `localities = NULL`, an empty vector,
-#' or a vector containing "ALL" means every locality.
+#' `poly_mode`: "ignore" = localities alone; "intersect" = inside the
+#' localities AND the polygons; "only" = inside the polygons, any locality.
+#' `localities` NULL, empty or containing "ALL" = every locality. The boundary
+#' is the polygon union ("only"), the union of per-locality hulls ("ignore"),
+#' or their intersection ("intersect"), so prediction never bridges localities
+#' or leaves the polygons.
 #'
-#' The boundary is the polygon union ("only"), the union of per-locality hulls
-#' of the scoped points ("ignore"), or the intersection of the two
-#' ("intersect"), so prediction never extends into unsampled terrain between
-#' localities or outside the user's polygons.
-#'
-#' One sample is one sampled location. The scoped rows whose working-CRS
-#' coordinates agree to the centimetre are merged (merge_colocated) BEFORE the
-#' target is built: a numeric column (the source-CRS coordinates, a covariate,
-#' a variable to bin) becomes the mean of the rows that measured it, a class
-#' column (character or factor) the location's majority, NA where the most
-#' frequent classes tie. The locality, and the polygon in polygon modes, come
-#' from the location's first row, so co-located rows filed under different
-#' localities are one location. Every fold design, baseline and map downstream
-#' then works on locations.
+#' One sample is one location: scoped rows whose working-CRS coordinates agree
+#' to the centimetre are merged (merge_colocated) before the target is built.
+#' Numeric columns average; class columns take the majority (NA on a tie);
+#' locality and polygon come from the location's first row.
 #'
 #' Returns `df` (one row per location), `group`, the boundary, the working
 #' CRS, `n_input` (georeferenced rows), `n_rows` (scoped rows), `n_scoped`
-#' (scoped locations), `n_merged = c(locations, rows)` (the locations that held
-#' two or more rows and how many rows they held) and `majority_ties` (per class
+#' (locations), `n_merged = c(locations, rows)` and `majority_ties` (per class
 #' column, the locations a tie left without a class).
 classif_resolve_scope <- function(df, x_col, y_col, src_crs, proj_crs,
                                   loc_col = NULL, localities = NULL,
@@ -2294,10 +1998,8 @@ classif_resolve_scope <- function(df, x_col, y_col, src_crs, proj_crs,
                 majority_ties = stats::setNames(integer(length(cls_cols)), cls_cols)))
   }
 
-  # One row per sampled location. The row index travels as TEXT, so the
-  # merge keeps each location's first row index instead of averaging it; the
-  # locality (a numeric code included) and the polygon hit are then read off
-  # that row, never averaged or voted.
+  # One row per location. The row index travels as TEXT so the merge keeps each
+  # location's first index; locality and polygon hit are read off that row.
   pts$.mn_scope_row <- as.character(seq_len(n_rows))
   pts <- merge_colocated(pts, majority = cls_cols)
   first <- as.integer(pts$.mn_scope_row)
@@ -2408,16 +2110,12 @@ classif_tie_note <- function(sc, target_col = NULL, predictors = character(0),
 }
 
 #' Per-area performance from pooled out-of-fold predictions: one row per scope
-#' group plus a Total row (which reproduces the pooled headline metrics). Class
-#' metrics only — probability metrics are unstable on small per-area subsets.
-#' Metrics undefined for an area (e.g. a class never observed there) come back
-#' NA rather than erroring.
+#' group plus a Total row (the pooled headline). Class metrics only
+#' (probability metrics are unstable on small subsets); undefined ones are NA.
 #'
-#' The macro F1 of an AREA is taken over the classes with reference support in
-#' that area: a class the pooled target has but this area does not is not
-#' evaluable here, while a class the area holds and the model never predicts
-#' there still scores 0 (the F13 rule). `K` reports that denominator per row,
-#' because two areas' macro figures need not be over the same class set.
+#' An area's macro F1 is over the classes with reference support THERE: a
+#' class the area lacks is not evaluable, one it holds but never gets predicted
+#' scores 0. `K` reports that denominator, which can differ between areas.
 classif_group_metrics <- function(pred_df, target, group_col = ".scope_group") {
   ms <- classif_class_metric_set()
   classes <- levels(as.factor(pred_df[[target]]))
@@ -2456,15 +2154,12 @@ classif_group_metrics <- function(pred_df, target, group_col = ".scope_group") {
   out
 }
 
-#' Write the predicted-class download into `dir`: the class GeoTIFF (INT1U, so
-#' the colour table is embedded), the `.tif.aux.xml` sidecar in which GDAL
-#' stores the category names, and a legend CSV (`ID,class`) that names the codes
-#' without depending on the sidecar surviving the reader's unzip tool. Returns
-#' the paths written; when GDAL wrote no sidecar the bundle is the tif and the
-#' CSV, with a warning. `tags` (named character) are the run's MONOLITH_* tags,
-#' set through terra's metadata: GDAL writes them inside the TIFF, and the colour
-#' table and categories are written exactly as without them (a gdal_translate
-#' pass would have to carry those over).
+#' Write the predicted-class download into `dir`: the INT1U class GeoTIFF
+#' (embedded colour table), the `.tif.aux.xml` sidecar holding the category
+#' names, and a legend CSV (`ID,class`) that survives any unzip tool. Returns
+#' the paths; without a sidecar, the tif and CSV with a warning. `tags` (the
+#' run's MONOLITH_* tags) go in through terra's metadata, leaving the colour
+#' table and categories intact.
 classif_class_download_files <- function(class_r, dir, base = "predicted_class", tags = NULL) {
   tif <- file.path(dir, paste0(base, ".tif"))
   tags <- tags[!is.na(tags) & nzchar(tags)]
@@ -2484,14 +2179,10 @@ classif_class_download_files <- function(class_r, dir, base = "predicted_class",
 }
 
 #' The classification metrics CSV: every result table of the run in one tidy
-#' frame of five columns (scope, metric, yardstick_id, estimator, value).
-#'
-#' Pure, so the exported file is testable; the download handler only writes it.
-#' The per-class block and the confusion matrix are in it because they are what
-#' lets a reader recompute the macro averages - for an imbalanced problem they
-#' are the rows that matter most, and a file that reports only the averages
-#' cannot be checked at all. `area` is the rasteriser's area table (it honours
-#' the live confidence threshold, so it cannot be recomputed from `res`).
+#' frame (scope, metric, yardstick_id, estimator, value); pure, so the export
+#' is testable. The per-class block and confusion matrix let a reader recompute
+#' the macro averages. `area` is the rasteriser's area table (it honours the
+#' live confidence threshold, so it cannot come from `res`).
 classif_metrics_csv_df <- function(res, area = NULL, area_note = NULL) {
   if (is.null(res)) return(NULL)
   blk <- function(scope, metric, id, estimator, value) {
@@ -2553,10 +2244,8 @@ classif_metrics_csv_df <- function(res, area = NULL, area_note = NULL) {
       classif_cv_label(res$strategy, res$knndm),
       c(d$W_cv, d$W_random))
   }
-  # Permutation feature importance. The scope names the evaluation design (each
-  # fold's model on its held-out rows, or the final model on its own training
-  # rows) so a reader of the CSV alone cannot mistake one for the other - they
-  # are not comparable numbers.
+  # Permutation importance; the scope names the design (out-of-fold or training
+  # rows), as the two are not comparable numbers.
   if (!is.null(res$importance)) {
     imp <- res$importance
     out[[length(out) + 1]] <- blk(
@@ -2616,19 +2305,13 @@ classif_metrics_csv_df <- function(res, area = NULL, area_note = NULL) {
 }
 
 # ── Orchestrator (worker-safe) ──────────────────────────────────────────────
-#' End-to-end classification run intended to execute inside a future worker.
-#' Takes a plain data.frame plus coordinate/CRS metadata (not an sf, which is
-#' cheaper to serialise), builds projected points, cross-validates, and — when
-#' make_surface = TRUE — fits the final model and predicts over the grid.
-#'
-#' Returns ONLY serialisable objects (data.frames, tables, vectors): no terra
-#' SpatRaster (external pointers cannot cross a future boundary) and no
-#' in-memory fitted workflow. The caller rasterises `surface_df` with
-#' classif_surface_to_rasters() in the main session. The fitted workflow is
-#' instead persisted to `model_rds_path` (when given) as an .rds bundle with
-#' its training metadata, so the trained model survives the session and can be
-#' reused on new data (verified: nnet/ranger/xgboost fits all round-trip
-#' through saveRDS across R processes on the pinned package versions).
+#' End-to-end classification run for a future worker: a plain data.frame plus
+#' coordinate/CRS metadata in; projected points, cross-validation, the final
+#' model and, with make_surface = TRUE, the grid prediction. Returns
+#' serialisable objects only (no SpatRaster, no fitted workflow): the caller
+#' rasterises `surface_df` with classif_surface_to_rasters(). The fitted
+#' workflow and its training metadata go to `model_rds_path` (when given) as an
+#' .rds bundle reusable on new data.
 run_classification_pipeline <- function(df, target, predictors,
                                         x_col, y_col, src_crs, proj_crs,
                                         method = "rf", strategy = "spatial",
@@ -2669,27 +2352,22 @@ run_classification_pipeline <- function(df, target, predictors,
 
   pts <- sf::st_as_sf(d, coords = c(x_col, y_col), crs = src_crs)
   pts <- sf::st_transform(pts, proj_crs)
-  # Metric working CRS (see classif_project_metric). The module hands over the
-  # CRS classif_resolve_scope already settled on, so this is normally a no-op;
-  # it protects direct calls and keeps `boundary_wkt` interpretable (it is read
-  # in `proj_crs`, then moved to the working CRS below).
+  # Metric working CRS (classif_project_metric): normally a no-op after
+  # classif_resolve_scope; `boundary_wkt` is read in `proj_crs` and moved below.
   pts <- classif_project_metric(pts)
   work_crs <- sf::st_crs(pts)
   co <- sf::st_coordinates(pts); pts$x <- co[, 1]; pts$y <- co[, 2]
-  # One row is one sampled location. Rows at exactly the same coordinates make
-  # the covariate kriging system singular and put one location on both sides
-  # of a CV split. The module merges co-located rows before it builds the
-  # target (classif_resolve_scope).
+  # One row per location: duplicates make covariate kriging singular and put a
+  # location on both sides of a CV split (classif_resolve_scope merges them).
   if (anyDuplicated(co[, 1:2, drop = FALSE])) {
     stop("The classification input holds more than one row at the same coordinates; ",
          "merge co-located rows first (classif_resolve_scope does).")
   }
 
-  # The scope boundary the maps are clipped to, resolved before the
-  # cross-validation: kNNDM matches its folds to the map's locations inside it
-  # (knndm_domain_points), and the CV Distance Match compares any strategy's
-  # folds with them. A boundary that cannot be resolved here leaves the grid to
-  # resolve its own, as it always did, and kNNDM without a domain.
+  # The scope boundary, resolved before CV: kNNDM matches its folds to the
+  # map's locations inside it, and the CV Distance Match compares any
+  # strategy's folds with them. If it cannot be resolved, the grid resolves its
+  # own and kNNDM runs without a domain.
   bnd_sf <- if (is.null(boundary_wkt)) NULL else {
     sf::st_transform(sf::st_as_sfc(boundary_wkt, crs = proj_crs), work_crs)
   }
@@ -2762,10 +2440,8 @@ run_classification_pipeline <- function(df, target, predictors,
                               progress_cb = function(frac, label = NULL) report("cv", frac, label),
                               domain_xy = domain_xy)
 
-  # The modelled level set, taken from the CV (complete cases, empty levels
-  # dropped) rather than re-derived from every scoped point: the two disagree
-  # whenever a class has no complete covariate row, and this vector names the
-  # surface probability columns, the raster legend and the exported bundle.
+  # The modelled levels (complete cases, empty levels dropped): they name the
+  # surface probability columns, the raster legend and the bundle's classes.
   levs <- cv$levels
   out <- list(
     cv_metrics = as.data.frame(cv$metrics),
@@ -2812,10 +2488,9 @@ run_classification_pipeline <- function(df, target, predictors,
   out$vif_threshold <- vif_threshold
 
   .classif_check_cancel(cancel_file)
-  # Out-of-fold importance was already scored inside the CV loop (each fold's
-  # model on its own held-out rows), so there is nothing left to do here; only
-  # the training-row design needs the final model. Falling back when the pooled
-  # frame is NULL covers the degenerate cases (no predictors, every fold empty).
+  # Out-of-fold importance was scored inside the CV loop; only the training-row
+  # design (or a NULL pooled frame: no predictors, every fold empty) needs the
+  # final model here.
   cv_imp <- if (identical(importance_mode, "oof")) cv$importance else NULL
   if (!is.null(cv_imp)) {
     out$importance <- cv_imp
@@ -2853,9 +2528,8 @@ run_classification_pipeline <- function(df, target, predictors,
       vif_threshold = out$vif_threshold,
       class_weights_applied = isTRUE(model$weights_applied),
       tuning_depth = depth,
-      # The exported workflow's OWN tuned hyperparameters (full-data tuning in
-      # fit_classification_model) — the CV loop's selection can differ and,
-      # under nested CV, doesn't even exist as a single set.
+      # This workflow's own full-data tuning result; the CV loop's selection
+      # can differ (and has no single set under nested CV).
       best_params  = if (is.null(model$best_params)) NULL else as.data.frame(model$best_params),
       # The CRS the run was actually computed in (the UTM fallback when the
       # requested target CRS was geographic), not the one that was asked for.
@@ -2923,12 +2597,8 @@ run_classification_pipeline <- function(df, target, predictors,
     # notification): a strict boundary too narrow for the cell size leaves
     # isolated samples with no mapped cell.
     out$grid_warning <- gr$strict_warning
-    # No area table here: the MAIN session rasterises surface_df through
-    # classif_surface_to_rasters(), whose table is the one the UI and the
-    # exports read (it alone knows the live confidence threshold and its
-    # "Unclassified" row). A second, always-tau-0 table shipped across the
-    # future boundary was dead payload and an invitation to report the wrong
-    # numbers.
+    # No area table here: the main session's classif_surface_to_rasters()
+    # builds the one the UI and exports read (it knows the live threshold).
   }
   # The covariate surfaces that came from the IDW fallback instead of kriging,
   # in the CV folds and on the prediction grid: the module reports them
@@ -2938,9 +2608,8 @@ run_classification_pipeline <- function(df, target, predictors,
                                    n_folds = cv$n_folds)
   }
   report("surface", 1, "Finishing...")
-  # A cancel requested during the last unguarded moments still counts: the module
-  # has already told the user the run is being cancelled, so a completed result
-  # must never arrive behind their back.
+  # A cancel requested in the last moments still counts: the user was already
+  # told the run is being cancelled.
   .classif_check_cancel(cancel_file)
   out
 }

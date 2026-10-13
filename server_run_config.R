@@ -1,6 +1,6 @@
-# server_run_config.R (sourced with local = TRUE inside server) - display/run
-# context resolvers (get_current_meta / get_display_meta), docs drawer,
-# classification params, config persistence, palette + selector UIs.
+# server_run_config.R (chunk E, sourced with local = TRUE inside server):
+# display/run context resolvers (get_current_meta / get_display_meta), docs
+# drawer, classification params, session configuration, palette and selectors.
 
   # The palette a variable is drawn in (resolve_var_palette): the one picked for
   # it this session, else its default. `fallback` serves a displayed run whose
@@ -46,12 +46,10 @@
     )
   }
 
-  # Display-side twin of get_current_meta(): returns the context committed at
-  # run dispatch (rv$disp) instead of reading the live sidebar inputs, so the
-  # Map Viewer and Scientific Analysis tabs keep describing the run that is
-  # actually on screen while the sidebar is reconfigured for the next run.
-  # Only the colour palette stays live: a palette picked for the displayed
-  # variable restyles the map on screen. Returns NULL before the first run.
+  # Display-side twin of get_current_meta(): the context committed at run
+  # dispatch (rv$disp), so the Map Viewer and Scientific Analysis describe the
+  # run on screen while the sidebar is reconfigured. Only the palette stays
+  # live. NULL before the first run.
   get_display_meta <- function() {
     d <- rv$disp
     if (is.null(d)) return(NULL)
@@ -115,9 +113,8 @@
     }
   })
 
-  # Open/close via the .open class (not inline right) so the drawer's CSS -
-  # including the floating nav buttons and the outside-click closer - keys on
-  # a single source of truth.
+  # Open/close via the .open class, which the drawer's CSS and the
+  # outside-click closer key on.
   observeEvent(input$info_btn, {
     shinyjs::runjs("document.getElementById('docs_drawer').classList.add('open');")
   })
@@ -170,23 +167,16 @@
   output$render_desc_exploratory_guide <- renderUI(withMathJax(DOCS_HTML$desc))
   output$render_scientific_guide <- renderUI(withMathJax(DOCS_HTML$sci))
   
-  # Unwrapped display-layer values of the merged run rasters, cached per run.
-  # rv$rast / rv$rast_pred are PackedSpatRasters (they crossed the future
-  # boundary) and Packed rasters are NOT subsettable, so every consumer must
-  # go through raster_value_layer() - and caching here means the unwrap +
-  # values() read happens once per run instead of on every styling tick.
+  # Display-layer values of the merged run rasters, cached per run
+  # (raster_value_layer(): Packed rasters are not subsettable).
   rast_vals_act <- reactive({ raster_value_layer(rv$rast) })
   rast_vals_pre <- reactive({ raster_value_layer(rv$rast_pred) })
 
   # ── Agronomical styling commit flow ─────────────────────────────────────
-  # Agro sub-settings (algorithm, class count, supervised limits) are edited
-  # freely and only take effect when Apply to maps and statistics is pressed:
-  # applying re-encodes every visible map layer and recomputes the class-area
-  # and agreement tables, which would otherwise run on every input tick.
-  # Continuous and Binned styling stay immediate - they have no sub-settings to
-  # stage.
-  # A box that has not rendered yet, or was cleared, counts as the limit it
-  # opens with (agro_limit_defaults).
+  # Agro sub-settings take effect only on Apply (applying re-encodes every map
+  # layer and recomputes the class-area and agreement tables); Continuous and
+  # Binned styling stay immediate. A box not yet rendered, or cleared, counts
+  # as its opening limit (agro_limit_defaults).
   gather_agro_limits <- function(n_c) {
     d <- tryCatch(agro_limit_defaults()$limits, error = function(e) NULL)
     sapply(seq_len(n_c - 1), function(i) {
@@ -214,10 +204,9 @@
          var = if (lims) agro_limits_var())
   }
   agro_applied <- reactiveVal(NULL)
-  # The committed settings as they apply to the displayed variable. Supervised
-  # limits are numbers in one variable's units, so they classify only the
-  # variable they were applied for; a Jenks or K-Means commitment is recomputed
-  # from whichever surface is displayed.
+  # The committed settings as they apply to the displayed variable: Supervised
+  # limits classify only the variable they were applied for; Jenks or K-Means
+  # are recomputed from the displayed surface.
   agro_applied_now <- reactive({
     ap <- agro_applied()
     if (is.null(ap) || !identical(ap$method, "limits") || identical(ap$var, agro_limits_var())) ap
@@ -225,18 +214,13 @@
   observeEvent(input$agro_apply, {
     live <- gather_agro_live()
     req(live)
-    # Committing the staged settings is instant, but what it triggers is not:
-    # classification_params() -> calc_class_breaks() -> the proxy restyler ->
-    # the class-area and kappa tables can take seconds, during which an idle
-    # button invites a second click. Re-enable on the next completed flush;
-    # that is the honest end point, because the work is spread over several
-    # independent reactives rather than one observable result.
+    # What Apply triggers can take seconds, so the button stays disabled until
+    # the next completed flush (the work spans several reactives).
     shinyjs::disable("agro_apply")
     updateActionButton(session, "agro_apply", label = "Applying...")
     session$onFlushed(function() {
       shinyjs::enable("agro_apply")
-      # Label must match ui_sidebar.R exactly: the button never comes back
-      # with different wording.
+      # Must match the label in ui_sidebar.R.
       updateActionButton(session, "agro_apply", label = "Apply to maps and statistics")
     }, once = TRUE)
     agro_applied(live)
@@ -261,17 +245,14 @@
   })
 
   # Match Scales counts only while its checkbox is on screen
-  # (match_scales_shown): the sidebar hides it outside a comparison but it
-  # keeps its value, so a box ticked for an earlier comparison went on pooling
-  # colour ranges and class breaks with no visible control saying so.
+  # (match_scales_shown()): the hidden box keeps its value.
   match_scales_on <- reactive({
     isTRUE(input$match_scales) &&
       match_scales_shown(input$comp_mode, input$value_type, disp_has_pred(), map_view_base())
   })
 
-  # Pooled prediction values of both surfaces under Match Scales. Always the
-  # PREDICTION band: class breaks are computed from it, and they describe the
-  # concentration surfaces whichever layer the Map Viewer is showing.
+  # Pooled prediction values of both surfaces under Match Scales: always the
+  # PREDICTION band, which class breaks describe whatever layer is shown.
   joint_vv <- reactive({
     get_joint_scale_values(rv$rast, rv$rast_pred, match_scales_on(), "value")
   })
@@ -283,11 +264,9 @@
     get_joint_scale_values(rv$rast, rv$rast_pred, match_scales_on(), layer)
   })
 
-  # Values ONE surface's class breaks are computed on: that surface's own
-  # values, so each map's classes describe the surface it shows, whichever map
-  # is on screen; both surfaces pooled under Match Scales, the explicit request
-  # for one common scale. Before the first run the raw data column stands in
-  # for the Actual surface.
+  # Values one surface's class breaks are computed on: its own values, or both
+  # surfaces pooled under Match Scales. Before the first run the raw data
+  # column stands in for the Actual surface.
   classification_values <- function(meta, n_min, surface = "act") {
     vv <- joint_vv()
     if (is.null(vv)) {
@@ -301,23 +280,18 @@
     vv
   }
 
-  # The inner class breaks of one surface ("act" or "pre"), or NULL. Kept apart
-  # from the colours, which follow the live palette: natural breaks over every
-  # cell take seconds on a large surface, and a palette change must not
-  # recompute them. rv$disp is the committed run context WITHOUT the palette
-  # that get_display_meta() adds.
+  # The inner class breaks of one surface ("act"/"pre"), or NULL, kept apart
+  # from the colours so a palette change does not recompute natural breaks.
+  # rv$disp is the committed context without get_display_meta()'s palette.
   compute_class_breaks <- function(surface) {
     req(input$color_style %in% c("agro", "bin"))
-    # Displayed run's variable when one exists (class breaks must describe the
-    # map on screen); live selection as pre-run fallback so the styling
-    # controls stay usable before the first interpolation.
+    # The displayed run's variable, else the live selection before a run.
     meta <- rv$disp %||% get_current_meta()
     req(meta)
 
     if (input$color_style == "agro") {
-      # Committed snapshot only: live agro inputs never reach the maps/stats
-      # until APPLY is pressed (the pending-note UI flags the divergence), and
-      # Supervised limits only for the variable they were applied for.
+      # Committed settings only (the pending note flags live edits); Supervised
+      # limits only for the variable they were applied for.
       ap <- agro_applied_now()
       if (is.null(ap)) return(NULL)
       if (ap$method == "limits") return(ap$limits)
@@ -385,8 +359,7 @@
   }
 
   # The agreement tables bin each measured value and its uploaded prediction
-  # with ONE class definition, or the agreement would compare two different
-  # class systems: the Actual surface's.
+  # with ONE class definition: the Actual surface's.
   agro_params <- reactive({
     req(input$color_style == "agro")
     classification_params_act()
@@ -462,26 +435,23 @@
     }
   )
 
-  # A configuration is restored stage by stage, because a parent control
-  # re-renders or re-chooses its children: the data mapping; the variable
-  # category; the variable; the rest of the context; the engine, domain and
-  # styling switches; the controls built for them (covariates, Supervised
-  # limits); then the tuning stores, once the data-mapping signature
-  # the stores are cleared on (tuning_data_sig, server_model_tuning.R) is
-  # current. Each item is re-sent until the browser reports the saved value; an
-  # item not accepted within CFG_STAGE_TIMEOUT_S is skipped, and one
-  # notification names every skipped setting, those that do not match the
-  # loaded data included.
+  # A configuration is restored in stages, because parent controls re-render
+  # their children: data mapping; variable category; variable; the rest of the
+  # context; engine, domain and styling switches; the controls built for them
+  # (covariates, Supervised limits); then the tuning stores, once the mapping
+  # signature they are cleared on (tuning_data_sig) is current. Each item is
+  # re-sent until the browser reports it; one not accepted within
+  # CFG_STAGE_TIMEOUT_S is skipped, and one notification lists every skipped
+  # setting.
   CFG_TICK_MS <- 250
   CFG_RESEND_S <- 1
   CFG_STAGE_TIMEOUT_S <- 8
   cfg_restore <- new.env(parent = emptyenv())
   cfg_restore_active <- reactiveVal(FALSE)
 
-  # The value a control built by renderUI (aux_vars, agro_limit_*) opens
-  # with: the restored one while a restore runs, and after
-  # it for a control that was not on screen, until its first render. Read in
-  # isolate(), so a restore never re-renders the control itself.
+  # The opening value of a renderUI control (aux_vars, agro_limit_*): the
+  # restored one during a restore, or until its first render if it was off
+  # screen. Read in isolate(), so a restore never re-renders the control.
   restore_ui_value <- function(id) {
     v <- cfg_restore$ui[[id]]
     if (!is.null(v) && !isTRUE(cfg_restore$running)) cfg_restore$ui[[id]] <- NULL
@@ -610,10 +580,9 @@
       plain("color_style", "radiogroup"), plain("agro_method", "select"),
       plain("agro_n_classes", "slider"))
 
-    # Controls built by renderUI for the settings above: covariates only where
-    # the method shows them, the Supervised limits at the saved class count.
-    # The limits live in a sidebar section that may be collapsed, so they are
-    # not reported when their boxes are not on screen to accept them.
+    # Controls built by renderUI: covariates only where the method shows them,
+    # the Supervised limits at the saved class count (quiet: their section may
+    # be collapsed).
     method <- one(cfg$method) %||% input$method
     population <- one(cfg$cv_population) %||% input$cv_population
     style <- one(cfg$color_style) %||% input$color_style
@@ -769,15 +738,13 @@
     cfg_restore_active(TRUE)
   })
 
-  # The picker styles the displayed run's variable once a run exists, so a
-  # context change cannot restyle the map on screen, and it opens on that
-  # variable's palette (palette_of): a run, a Styling switch or a restore redraws
-  # it without undoing a pick.
+  # The picker styles the displayed run's variable once a run exists and opens
+  # on its palette (palette_of()), so redraws never undo a pick.
   output$palette_ui <- renderUI({
     vid <- palette_var()
     req(vid, rv$mapping$vars)
     # Agronomical styling supplies its own class palette, so the manual
-    # colour-palette picker is irrelevant there — hide it.
+    # colour-palette picker is irrelevant there: hidden.
     if (isTruthy(input$color_style) && input$color_style == "agro") return(NULL)
     if (!any(vapply(rv$mapping$vars, function(x) identical(x$actual, vid), logical(1)))) return(NULL)
     choices <- palette_choices_precomputed
@@ -788,10 +755,9 @@
                 choicesOpt = list(content = names(choices)))
   })
 
-  # A pick belongs to the variable whose map it restyles and, when the sidebar
-  # already names another variable for the next run, to that one too, so the
-  # next run uses what the picker shows. A value equal to the palette the
-  # picker was drawn with is its redraw arriving, not a pick.
+  # A pick applies to the variable whose map it restyles and to the sidebar's
+  # next-run variable. A value equal to the palette the picker was drawn with
+  # is its redraw arriving, not a pick.
   observeEvent(input$palette_select, {
     pal <- as.character(input$palette_select)
     vid <- palette_var()
@@ -813,10 +779,8 @@
     vv
   }
 
-  # The limits the Supervised boxes open with (class_limit_defaults): the
-  # reference limits of a recognised nutrient at three classes, else the data
-  # quantiles of the Actual surface. The displayed run's variable and unit once
-  # a run exists, so a sidebar context change does not reset them.
+  # The limits the Supervised boxes open with (class_limit_defaults()), for
+  # the displayed run's variable and unit once a run exists.
   agro_limit_defaults <- reactive({
     n_c <- input$agro_n_classes
     req(isTruthy(n_c))
@@ -825,12 +789,10 @@
     class_limit_defaults(meta$actual, meta$unit, n_c, actual_surface_values(meta))
   })
 
-  # The variable and class count the Supervised boxes were last built for. The
-  # boxes are rebuilt whenever their defaults move (a run lands, the view
-  # changes before a run); for the same variable and class count they keep the
-  # values on screen, typed or applied, and open on the defaults only for a new
-  # variable or class count. Reopening on the defaults would leave the maps on
-  # the applied limits and the pending note reporting a change nobody made.
+  # The variable and class count the Supervised boxes were last built for: for
+  # the same pair they keep the values on screen (typed or applied), and open
+  # on the defaults only for a new one, so a rebuild never fakes a pending
+  # change.
   agro_box_ctx <- NULL
   output$agro_options <- renderUI({
     req(input$color_style == "agro", input$agro_method == "limits")

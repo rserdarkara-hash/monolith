@@ -1,29 +1,21 @@
-# ui_main.R - assembles the master UI from statically defined panel variables.
-# Pure variable assignment pattern: ui_sidebar.R / ui_main_tabs.R define
-# ui_sidebar_panel / ui_main_tabs (no function wrappers), preserving global UI
-# scope exactly as in the original inline fluidPage() block.
+# ui_main.R - assembles `ui` from ui_sidebar_panel (ui_sidebar.R) and
+# ui_main_tabs (ui_main_tabs.R), plain variables with no function wrappers.
 source("ui_sidebar.R")
 source("ui_main_tabs.R")
 
 ui <- fluidPage(
   useShinyjs(),
-  # Busy feedback while the server is synchronously re-encoding map layers or
-  # recomputing class-area/kappa tables (styling APPLY, view switches): a
-  # pulse banner during any server work plus per-output recalculation
-  # spinners. The interpolation run keeps its own premium progress overlay.
+  # Busy feedback for synchronous server work (styling APPLY, view switches);
+  # the interpolation run has its own progress overlay.
   useBusyIndicators(),
   render_docs_drawer(),
 
   tags$head(
-    # Variant first, stylesheet second: the boot script stamps data-theme on
-    # <html> before anything paints, so a reader who chose dark never sees the
-    # light variant flash. Both variants live in the one stylesheet below, so
-    # switching needs no server round-trip.
+    # The boot script stamps data-theme on <html> before first paint, so a dark
+    # reader never sees a light flash.
     monolith_theme_boot_js(),
     tags$style(HTML(monolith_theme_css())),
-    # Map ruler: sizes the measure control to match the drawing toolbar and
-    # trims its expanded panel. Kept in ui_components.R so the shipped rules
-    # are testable; see map_ruler_css() for why each selector is qualified.
+    # Map ruler sizing (map_ruler_css(), ui_components.R).
     tags$style(HTML(map_ruler_css())),
     # Positioning only - the button's own box is styled with the other icon
     # buttons in monolith_theme_css().
@@ -31,9 +23,8 @@ ui <- fluidPage(
       ".expand-icon-btn { position: absolute; top: 10px; right: 10px; z-index: 100; }
        .expand-icon-btn > * { margin: 0 !important; padding: 0 !important; }"
     )),
-    # Collapsible sidebar sections remember their open state per section key in
-    # localStorage; the resize trigger makes Shiny re-render outputs that were
-    # hidden inside a collapsed section when it opens.
+    # Sidebar sections remember their open state in localStorage; the resize
+    # trigger re-renders outputs hidden inside a section when it opens.
     tags$script(HTML("
       $(function () {
         $('details.sidebar-section').each(function () {
@@ -51,10 +42,8 @@ ui <- fluidPage(
         });
       });
     ")),
-    # The one-shot pass binds the icons present at startup. Icons that arrive
-    # later (renderUI: the descriptive suite's test picker, the CRS target
-    # note) were never reached by it and did nothing when clicked, so bind any
-    # unbound icon the moment it is first focused and show it in the same step.
+    # Bind popovers at startup and, for icons rendered later (renderUI), on
+    # first focus.
     tags$script(HTML(
       "$(function () { $('[data-toggle=\"popover\"]').popover({html: true, container: 'body'}); });
        $(document).on('focusin', '[data-toggle=\"popover\"]', function () {
@@ -62,13 +51,10 @@ ui <- fluidPage(
          if (!$t.data('bs.popover')) { $t.popover({html: true, container: 'body'}); $t.popover('show'); }
        });"
     )),
-    # ionRangeSlider centres the value bubble and the outermost grid labels on
-    # the track ends, so each overhangs the slider by half its own width - with
-    # the six-figure sills a variogram carries, that overhang left the sidebar
-    # card entirely. force_edges clamps every label inside the track, and
-    # sliderInput() exposes no passthrough for it, so it is switched on per
-    # slider as it binds. The data attribute is written too, so any later
-    # re-init (updateSliderInput) keeps it.
+    # ionRangeSlider centres edge labels on the track ends, so large values
+    # overhang the sidebar; force_edges (no sliderInput() passthrough) is set
+    # per slider as it binds, and written to the data attribute so a re-init
+    # keeps it.
     tags$script(HTML(
       "$(document).on('shiny:bound', function (e) {
          if (e.bindingType !== 'input') return;
@@ -90,16 +76,11 @@ ui <- fluidPage(
          });
        });"
     )),
-    # A scrollX DataTable is two tables - a cloned header and the body - kept
-    # aligned by pixel widths DataTables computes from the rendered cells. Those
-    # widths are wrong whenever they were computed against a container that was
-    # not its final size, which in this app is the normal case: the tables
-    # pre-render while their tab is hidden (suspendWhenHidden = FALSE) and
-    # several sit inside conditionalPanels. Realign on every event that can
-    # change a table's box: a tab reveal, Shiny making an output visible, and
-    # the table's own redraw. columns.adjust() only - NEVER .draw() from a draw
-    # handler - and once per animation frame per table, after the layout has
-    # settled, rather than on a fixed timer that can fire too early.
+    # A scrollX DataTable keeps its cloned header aligned by widths computed
+    # from the rendered cells, which are wrong when computed while hidden (tabs
+    # pre-render, conditionalPanels). Realign on tab reveal, output visibility
+    # and the table's own redraw: columns.adjust() only (never .draw() from a
+    # draw handler), once per animation frame per table.
     tags$script(HTML("
       (function () {
         function adjust(tbl) {
@@ -129,24 +110,17 @@ ui <- fluidPage(
         });
       })();
     ")),
-    # Four-significant-digit display formatting for numeric table cells, so a
-    # small value never reads as 0. Kept in ui_components.R beside its R twin
-    # format_sig(), so the shipped script is testable.
+    # Four-significant-digit display of numeric table cells (format_sig_js()).
     tags$script(HTML(format_sig_js())),
-    # Copy-a-result-table-to-the-clipboard: reads the rendered table off the
-    # DOM and puts HTML + tab-separated text on the clipboard together, so one
-    # click pastes into Word as a table and into Excel as cells. Kept in
-    # ui_components.R so the shipped script is testable.
+    # Copy-a-table-to-the-clipboard (copy_table_js()).
     tags$script(HTML(copy_table_js()))
   ),
 
   # Announces the result of a clipboard copy; visually hidden.
   div(id = "mn_copy_live", class = "mn-copy-live", role = "status", "aria-live" = "polite"),
 
-  # The wordmark is live text rather than the banner raster: it inverts with
-  # the dark variant, stays crisp at any pixel density, and is read out as the
-  # application name instead of as an image. assets/banner.png is still the
-  # README's masthead.
+  # The wordmark is live text (inverts with the dark variant, stays crisp, read
+  # as the app name); assets/banner.png remains the README masthead.
   div(class = "header-panel",
       div(class = "mn-wordmark",
           span(class = "name", "Monolith"),
@@ -155,9 +129,8 @@ ui <- fluidPage(
       ),
       uiOutput("dataset_context", inline = TRUE),
       div(class = "header-controls",
-          # role/aria-live: the chip is the only place a running job announces
-          # itself outside the run tab, so screen readers should hear it change
-          # ("Running · 40%" -> "Run ready · OK") without moving focus.
+          # The chip announces a running job outside the run tab without moving
+          # focus.
           uiOutput("run_status_chip", inline = TRUE,
                    role = "status", "aria-live" = "polite"),
           theme_switcher_ui("theme_mod"),

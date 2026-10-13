@@ -1,6 +1,5 @@
-# test-kriging-loocv.R — tests for perform_kriging_loocv.
-# This function requires real spatial data, variogram fitting, and kriging.
-# Tests are limited to verifying behaviour with small synthetic datasets.
+# perform_kriging_loocv(): the RK/RFK fold loop (trend, covariate kriging and
+# residual variogram refitted per fold), on small synthetic sets.
 
 test_that("perform_kriging_loocv returns NULL for fewer than 3 points", {
   pts <- make_test_points(2)
@@ -150,9 +149,8 @@ test_that("the per-fold covariate screen raises no pruning warning", {
   set.seed(11)
   df <- data.frame(a = rnorm(30))
   df$b <- df$a + rnorm(30, 0, 1e-6)
-  # One screen per fold would otherwise put one "VIF Iterative Pruning" warning
-  # per fold in the run log (measured: 30 for 30 folds) saying nothing the
-  # covariate-gate log line does not already say.
+  # Run once per fold, the screen would otherwise add one "VIF Iterative
+  # Pruning" warning per fold to the run log, repeating the covariate-gate line.
   expect_silent(res <- screen_covariates(df, c("a", "b")))
   expect_length(res$kept, 1)
   expect_identical(res$dropped_vif, setdiff(c("a", "b"), res$kept))
@@ -167,7 +165,7 @@ test_that("the RK fold screen reads only its own training rows", {
   # one; version B puts an outlier there, so the full-data screen sees VIF 2.4
   # and keeps both. The last row's own fold trains on the SAME rows in both
   # versions (VIF 38 either way), so a screen run inside the fold must hand it
-  # the same prediction — a screen run once on all the data cannot.
+  # the same prediction, which a screen run once on all the data cannot.
   set.seed(7)
   n <- 20L
   a1 <- rnorm(n)
@@ -221,8 +219,8 @@ test_that("a fold whose screen keeps no covariate reports NA, not another model"
 
 test_that("each RFK fold draws its forest from its own seed", {
   # A forest's number of RNG draws depends on the data it is grown on, so a
-  # single stream over the whole fold loop lets EARLIER folds — which train on
-  # the last row — decide where the last row's own forest starts. Raising only
+  # single stream over the whole fold loop lets EARLIER folds (which train on
+  # the last row) decide where the last row's own forest starts. Raising only
   # the last row's target must not move its own out-of-fold prediction.
   set.seed(42)
   n <- 30L

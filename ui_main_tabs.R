@@ -14,9 +14,8 @@ ui_main_tabs <- mainPanel(width = 9,
                              div(class = "setup-upload-field",
                                  fileInput("user_file", "Choose CSV or Excel File", accept = c(".csv", ".xlsx", ".xls"))
                              ),
-                             # The variable list sits beside the dataset it describes rather
-                             # than three cards below it: both files are chosen in one pass,
-                             # and the pairs it produces are still edited in step 4.
+                             # The variable list sits beside the dataset it describes (both
+                             # chosen in one pass); its pairs are edited in step 4.
                              div(class = "setup-upload-field",
                                  fileInput("meta_file",
                                            HTML(paste0("Variable List (Optional)", info_tooltip("meta_file_info", "A second table giving your columns readable labels, units, categories and their Actual/Predicted pairs. Headers containing 'label' or 'name' supply the labels shown on every map and report; headers containing 'cat' or 'group' file the variables into folders; a 'Unit' or 'Units' header supplies the units shown in map legends. Without one the pairs are auto-detected from the column names. Either way they are listed for review and editing under Variable Mapping & Verification, at the foot of this tab."))),
@@ -95,10 +94,8 @@ ui_main_tabs <- mainPanel(width = 9,
                                        div(id="map_progress_bar_inner", class="premium-progress-bar-inner")
                                    )
                                  ),
-                                 # The phase strip mirrors the checkpoints the
-                                 # engines write into their progress files. The
-                                 # second label is method-dependent and is set
-                                 # by the run observer.
+                                 # Phase strip of the engines' progress checkpoints; the
+                                 # run observer sets the method-dependent second label.
                                  shinyjs::hidden(
                                    div(id="map_run_steps", class="mn-run-steps",
                                        span(id="map_step_1", class="mn-run-step", "Validate"),
@@ -121,14 +118,11 @@ ui_main_tabs <- mainPanel(width = 9,
                                  checkboxInput("show_north", "North Arrow", FALSE, width = "auto"),
                                  checkboxInput("show_borders", "Borders", FALSE, width = "auto"),
                                  checkboxInput("show_scale", "Map Scale", FALSE, width = "auto"),
-                                 # Leaflet's own controls. Both are on by default - this is
-                                 # the way out for anyone who wants the bare surface, e.g.
-                                 # before a Quick export.
+                                 # Leaflet's own controls, on by default; off gives the bare
+                                 # surface (e.g. before a Quick export).
                                  checkboxInput("show_draw_tools", "Drawing Tools", TRUE, width = "auto"),
                                  checkboxInput("show_ruler", "Ruler", TRUE, width = "auto"),
-                                 # Off by default: the same label is already printed as the
-                                 # map heading, and a long one stretched the legend box out
-                                 # across the surface.
+                                 # Off by default: the map heading already shows the label.
                                  checkboxInput("show_legend_title", HTML(paste0("Variable Label in Legend", info_tooltip("legend_title_info", "Repeats the variable label (and its unit) inside the map legend. It is already shown as the map heading above, so it is off by default - turn it on for a legend that has to stand alone in an export."))), FALSE, width = "auto")
                              ),
                              div(class = "mn-tb-group",
@@ -168,9 +162,8 @@ ui_main_tabs <- mainPanel(width = 9,
                              # one writes GIS/data files straight to disk.
                              mn_popover("Downloads", icon_tag = icon("download"), align = "right", width = "300px",
                                  selectInput("polygon_export_format", "Vector format", choices = c("Shapefile (ZIP)" = "shp", "GeoJSON" = "geojson", "KML" = "kml", "GPKG" = "gpkg"), selected = "shp", width = "100%", selectize = FALSE),
-                                 # Wrapper spans exist to carry the tooltip while the button inside is
-                                 # disabled: a disabled .btn anchor has pointer-events: none, so its own
-                                 # title never fires and the wrapper is what the pointer actually sees.
+                                 # Wrapper spans carry the tooltip of a disabled button
+                                 # (a disabled .btn has pointer-events: none).
                                  tags$span(id = "polygon_dl_wrap", style = "display: inline-flex;",
                                    downloadButton("polygon_download_btn", "Drawn polygons", class = "btn-default btn-sm btn-block",
                                                   title = "Downloads all polygons drawn on the map, in the format selected above.")),
@@ -214,9 +207,7 @@ ui_main_tabs <- mainPanel(width = 9,
                          conditionalPanel(condition = "/^view_(comp(_se|_var)?|resid)$/.test(input.map_view || '')",
                                           fluidRow(column(6, h4(textOutput("comp_left_title")), leafletOutput("comp_map_left", height = "600px")),
                                                    column(6, h4(textOutput("comp_right_title")), leafletOutput("comp_map_right", height = "600px")))),
-                         # Scale controls are moved here directly by the
-                         # show_scale overlay observer when it creates them -
-                         # no DOM polling.
+                         # The show_scale overlay observer moves scale controls here.
                          div(id = "distance_scale_container", style = "margin-top: 15px; display: flex; justify-content: center; min-height: 30px;")
                  )),
         tabPanel("Scientific Analysis", value = "tab_analysis",
@@ -230,14 +221,10 @@ ui_main_tabs <- mainPanel(width = 9,
                  ),
                  conditionalPanel(
                    condition = "output.model_ready == 'yes'",
-                   # Flex column, not plain block flow: while the sidebar is in
-                   # variogram tuning the variogram cards have to sit directly
-                   # under the header (the sliders are useless if their curve is
-                   # three cards down the page) and the displayed run's own
-                   # cards have to step aside when they came from an engine with
-                   # no variogram. Both are one class on this container
-                   # (server_map_interactions.R) because every output id below
-                   # exists exactly once and cannot be rendered twice.
+                   # Flex column: in variogram tuning the variogram cards move up
+                   # under the header, and a non-variogram run's cards step aside
+                   # (one class on this container, server_map_interactions.R;
+                   # every output id exists once).
                    div(id = "sci_stack", class = "sci-stack",
                    div(class = "sci-stack-head",
                      fluidRow(
@@ -254,9 +241,8 @@ ui_main_tabs <- mainPanel(width = 9,
                             tags$b("Variogram tuning. "),
                             "The panels below describe the variograms you are fitting. The last interpolation run used an engine with no variogram of its own, so its result cards are held back until you run the analysis again; the maps from that run are untouched.")
                    ),
-                   # Warnings the workers raised during the run, kept here:
-                   # the progress overlay that shows them is gone once the
-                   # maps are revealed.
+                   # Worker warnings from the run, kept after the progress overlay
+                   # closes.
                    uiOutput("run_warnings_card"),
                             sci_card("Spatial Interpolation Statistics",
                               "Model-specific diagnostics and performance metrics (RMSE, R²).",
@@ -385,18 +371,13 @@ ui_main_tabs <- mainPanel(width = 9,
                                   h4("Diagnostic Mode Active"),
                                   p("The model diagnostics of a run appear here once it has finished."))
                             ),
-                            # Anisotropy is a property of the sampled field, not
-                            # of the engine, so this card is shown for every
-                            # method (including IDW/TPS, which have no variogram
-                            # of their own).
+                            # Anisotropy belongs to the field, not the engine: shown for
+                            # every method.
                             div(id = "directional_vgm_ui", class = "sci-keep",
                                hr(),
                                fluidRow(
-                                 # "Uploaded predictions" is added to the first
-                                 # switch by server_sci_analysis.R only for a run
-                                 # that has a prediction side, and the second
-                                 # switch's first label follows it, so the pair
-                                 # can never offer a column this run has not got.
+                                 # server_sci_analysis.R adds "Uploaded predictions" only for
+                                 # a run with a prediction side; the second switch follows.
                                  column(6, shinyWidgets::radioGroupButtons("dir_vgm_target", "Data:",
                                                         choices = c("Actual data" = "act"),
                                                         selected = "act", size = "sm")),
@@ -465,10 +446,8 @@ ui_main_tabs <- mainPanel(width = 9,
                          uiOutput("reset_archive_choice_ui")
                      )
                                   )),
-        # Every tab carries an explicit value=: without one the tab TITLE is the
-        # input$main_tabs value, so every renaming (including the numbering)
-        # would silently break the sidebar's conditionalPanels and the
-        # server-side reveal handlers that key on the tab id.
+        # Every tab has an explicit value=: the sidebar's conditionalPanels and
+        # the reveal handlers key on it, so titles can be renamed freely.
         tabPanel("Exploratory", value = "tab_desc",
                  div(class = "mn-suite", desc_exploratory_ui("exploratory"))
         ),

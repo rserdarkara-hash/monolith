@@ -1,8 +1,8 @@
-# server_sci_analysis.R (sourced with local = TRUE inside server) - model
-# diagnostics, variogram/importance/obs-pred plots, stats/area/metrics/kappa
-# tables, notifications, log and polygon export.
-  # Shared note box for the per-locality diagnostic panels (same look as the
-  # "select a locality" hints these panels already used).
+# server_sci_analysis.R (chunk I, sourced with local = TRUE inside server):
+# model diagnostics, variogram/importance/obs-pred plots, stats/area/metrics/
+# kappa tables, notifications, log and polygon export.
+
+  # Shared note box for the per-locality diagnostic panels.
   sci_ui_note <- function(msg) {
     div(style="padding: 12px; background-color: var(--mn-surface-2); border: 1px dashed var(--mn-line-2); border-radius: 6px; color: var(--mn-text-3); font-style: italic; text-align: center;",
         msg)
@@ -20,13 +20,9 @@
                      lapply(w, function(x) tags$li(x))))
   })
 
-  # A missing per-locality trend object is NOT "nothing worth saying": for
-  # RK/RFK it means the trend step did not run for that locality, so
-  # apply_kriging_pipeline took its Ordinary Kriging fallback (it writes
-  # "<engine> failed, using Ordinary Kriging fallback" via write_warning_file
-  # and logs the cause), or the locality failed outright. A bare req() blanked
-  # the panel and left the reason sitting in the Run Log; these panels name it
-  # in place instead.
+  # A missing per-locality trend object means, for RK/RFK, that the trend step
+  # did not run and the OK fallback was taken (or the locality failed): name it
+  # in the panel rather than blank it.
   trend_missing_msg <- function(loc, what) {
     m <- rv$disp$method %||% ""
     if (m %in% c("RK", "RFK")) {
@@ -39,9 +35,9 @@
     }
   }
 
-  # RK linear-trend panels: fit-statistic chips + coefficient table (raw
-  # summary.lm print kept behind a collapsible details element). Falls back to
-  # the verbatim print if the stored object is not a summary.lm.
+  # RK linear-trend panels: fit-statistic chips and coefficient table, with the
+  # raw summary.lm print behind a details element (or alone when the stored
+  # object is not a summary.lm).
   output$model_summary_ui_act <- renderUI({
     loc <- input$sel_loc_stats; req(loc)
     if (loc == "Total (Combined)") {
@@ -67,9 +63,8 @@
     loc <- input$sel_loc_stats
     req(loc, loc != "Total (Combined)")
     summary_obj <- rv$model_summaries[[paste0(loc, "_act")]]
-    # Always qualify: global.R attaches jsonlite after shiny, and
-    # jsonlite::validate() masks shiny::validate() - a bare call dies with
-    # "is.character(txt) is not TRUE". need() is qualified for the same reason.
+    # Always shiny::validate()/need(): jsonlite, attached after shiny, masks
+    # the bare name.
     shiny::validate(shiny::need(summary_obj, trend_missing_msg(loc, "coefficient table")))
     df <- rk_coef_table(summary_obj, sci_vars_meta())
     shiny::validate(shiny::need(df, "The stored trend model carries no estimable coefficients."))
@@ -143,9 +138,8 @@
           "Pooled residual variograms need per-locality CV to have succeeded;\n",
           "see the Run Log on this tab for the reported cause."), size = 4))
       }
-      # Unlike the per-locality plots (internal trend-residual variogram of
-      # the fitted model), the combined view pools CV residuals within
-      # localities (pooled_within_variogram), so label it as such.
+      # The combined view pools CV residuals within localities, unlike the
+      # per-locality trend-residual variogram, and is labelled so.
       v <- pooled_within_variogram(split(rv$sf[col_resid], rv$sf$loc), col_resid)
       if (is.null(v)) {
         return(sci_placeholder(sprintf("No locality has %d cross-validation residuals %s.",
@@ -200,16 +194,13 @@
     if (is.null(g)) {
       return(sci_placeholder("Cross-variogram is not available\n(LMC model fit failed, using Ordinary Kriging fallback.)"))
     }
-    # The empirical variogram the LMC was fitted to, stored with the fit
-    # (.ck_fit_lmc): the run's own lag classes, and cross-variograms from the
-    # locations carrying both variables. Recomputing it from the object would
-    # re-bin with gstat's defaults and, for a heterotopic design, return the
-    # pseudo cross-variogram.
+    # The empirical variogram the LMC was fitted to, stored with the fit:
+    # recomputing it would re-bin with gstat's defaults and, for a heterotopic
+    # design, return the pseudo cross-variogram.
     vm <- attr(g, "monolith_vm")
     req(vm)
-    # Panel strips carry the gstat ids (syntactic aliases of the target and
-    # covariate columns, ck_id_columns); map them to the run variable's display
-    # name and the covariate labels/column names per the tab's naming radio.
+    # Strips carry the syntactic gstat ids (ck_id_columns()): map them to the
+    # run variable's name and the covariates' labels per the naming radio.
     cols <- ck_id_columns(g)
     target_name <- sci_disp_label() %||% names(cols)[1]
     id_labels <- vapply(names(cols), function(id) {
@@ -232,13 +223,10 @@
   output$ck_variogram_plot_act <- render_ck_variogram_plot("act")
   output$ck_variogram_plot_pred <- render_ck_variogram_plot("pre")
 
-  # Table shape and the parameter arithmetic both live in vgm_params_table_df()
-  # (ui_formatting.R), shared with the export registry so a downloaded sheet
-  # cannot report a different sill or structural dependency than this card.
-  # sci_dt(NULL) is the empty state, not a NULL payload: a DT output must never
-  # be handed NULL (see sci_dt() in ui_components.R).
-  # The tuning store holds variograms of the measured values; the displayed
-  # run's fits are residual variograms for RK and RFK (vgm_params_title).
+  # The table and its arithmetic are vgm_params_table_df() (ui_formatting.R),
+  # shared with the export; sci_dt(NULL) is the empty state. The tuning store
+  # holds measured-value variograms; the displayed run's RK/RFK fits are
+  # residual variograms (vgm_params_title()).
   output$vgm_params_title <- renderText({
     paste(vgm_params_title(if (!isTRUE(sci_vgm_tuning())) rv$disp$method), "(per locality)")
   })
@@ -395,19 +383,12 @@
 
 
   # ── Directional variogram (anisotropy diagnostic) ────────────────────────
-  # Computed lazily in the main session from the displayed run's points, so a
-  # user who never opens this card pays nothing and every engine (including
-  # IDW/TPS, which fit no variogram) gets the same check. calc_directional_
-  # variogram re-projects to a metric CRS itself — rv$sf carries the user's
-  # chosen DISPLAY crs, which may well be geographic, and a bearing in degrees
-  # of longitude is not a bearing on the ground.
-  # The two switches over the card pick one of four columns of rv$sf: the DATA
-  # (measured values `v`, or the uploaded ML prediction column `pv`) times the
-  # SOURCE (those values, or that surface's CV residuals). An uploaded
-  # prediction column is a field in its own right — a model's output carries its
-  # own spatial structure, usually smoother than the measurements it
-  # approximates — so its anisotropy is read directly rather than inferred from
-  # the measured side.
+  # Computed lazily from the displayed run's points, for every engine;
+  # calc_directional_variogram() projects to metres itself (rv$sf may be
+  # geographic). The two switches pick one of four rv$sf columns: DATA
+  # (measured `v` or uploaded prediction `pv`) x SOURCE (values or that
+  # surface's CV residuals). An uploaded prediction column has its own spatial
+  # structure, so its anisotropy is read directly.
   dir_vgm_value_col <- function(tgt, src) {
     if (identical(src, "resid")) {
       if (identical(tgt, "pre")) "model_resid_pre" else "model_resid_act"
@@ -419,9 +400,8 @@
   build_directional_vgm_diag <- function() {
     loc <- input$sel_loc_stats; req(loc)
     req(rv$sf)
-    # Guarded rather than trusted: the switch loses its second choice when a run
-    # without a prediction side is displayed, and the stale input value can
-    # still reach a download handler before that update lands.
+    # Guarded: a stale "pre" can reach a download handler before the switch
+    # loses that choice.
     tgt <- if (identical(input$dir_vgm_target, "pre") && isTRUE(disp_has_pred())) "pre" else "act"
     src <- if (identical(input$dir_vgm_source, "resid")) "resid" else "v"
     surf <- if (identical(tgt, "pre")) "uploaded-prediction" else "measured-value"
@@ -436,11 +416,8 @@
     if (!value_col %in% colnames(pts) || !any(!is.na(pts[[value_col]]))) {
       return(sci_placeholder(
         if (identical(src, "resid")) {
-          # The two sources do not have the same precondition, and a reader who
-          # has just seen the values plot plausibly reads an empty residual
-          # panel as a fault: values are the uploaded column itself, residuals
-          # exist only where this run's interpolation AND its cross-validation
-          # completed for that surface. State that, not just the absence.
+          # Residuals, unlike values, exist only where this run's interpolation
+          # and cross-validation completed for the surface: say so.
           paste0("No cross-validation residuals are stored for the ", surf, " surface of this run.\n",
                  "Values are read from the uploaded table, so they plot whenever that column is\n",
                  "filled; residuals exist only where this run's interpolation and its\n",
@@ -550,10 +527,9 @@
            scroll_x = FALSE)
   })
 
-  # Both descriptive cards read stats_table_vectors() (ui_formatting.R), the
-  # frame their exports read too: the uploaded rows of the DISPLAYED run's
-  # localities ("Total (Combined)" = the localities that run covered), and
-  # the prediction column that run mapped, only when it mapped predictions.
+  # Both descriptive cards read stats_table_vectors(), as their exports do: the
+  # uploaded rows of the DISPLAYED run's localities and the prediction column
+  # it mapped (only when it mapped predictions).
   output$stats_table_total <- DT::renderDataTable({
     req(rv$user_data, length(rv$loc_names) > 1)
     meta <- get_display_meta()
@@ -561,8 +537,7 @@
     sv <- stats_table_vectors(rv$user_data, meta, rv$mapping$loc, meta$localities)
     if (is.null(sv)) return(sci_dt(NULL))
     st <- summary_stats_df(sv$act, sv$pre, labels = c("Total_Actual", "Total_Predicted"))
-    # scroll_x = FALSE: two or three narrow columns fit the smallest supported
-    # viewport, so the table stays ONE table and its header cannot drift.
+    # scroll_x = FALSE: a narrow table stays ONE table, header aligned.
     sci_dt(st, scroll_x = FALSE, signif_cols = setdiff(names(st), "Metric"))
   })
 
@@ -577,13 +552,10 @@
     sci_dt(st, scroll_x = FALSE, signif_cols = setdiff(names(st), "Metric"))
   })
 
-  # Hectares per class for ONE surface, UNROUNDED and in class order (0 for a
-  # class that wins no cell). NULL when the surface cannot be classified.
-  #
-  # terra::expanse() defaults to transform = TRUE, which reprojects every cell
-  # to lon/lat to get its geodesic area. That cost is linear in the raster's
-  # TOTAL cell count, NA padding included, so it must never be handed a sparse
-  # grid - see class_area_ha_sum() below.
+  # Hectares per class for ONE surface, UNROUNDED and in class order (0 for an
+  # empty class); NULL when unclassifiable. expanse() reprojects every cell,
+  # NA padding included, so it is never handed a sparse merged grid
+  # (class_area_ha_sum()).
   class_area_ha <- function(r_obj, params, r_id = NULL) {
     if (is.null(r_obj) || is.null(params)) return(NULL)
 
@@ -627,16 +599,10 @@
     out
   }
 
-  # Total across the localities of a run, summed on the UNROUNDED per-locality
-  # hectares so the total is the sum of the rows above it to the last decimal.
-  #
-  # Deliberately NOT computed on the merged rv$rast: terra::merge() spans the
-  # union of the locality extents, so two fields 25 km apart share a grid that
-  # is ~97% NA. expanse() charges for those cells - measured at 109 s and
-  # 1.1 GB of working set on a 13 M-cell merged grid holding 320 k real cells,
-  # against 1.4 s per locality - and four of these run in the flush that
-  # applies a classification. The total is allowed only after the domain
-  # overlap check below confirms that the locality areas can be added.
+  # Total across a run's localities, summed on UNROUNDED per-locality hectares
+  # (so it equals the rows above). Not computed on the merged rv$rast, which
+  # spans the union of extents and can be ~97% NA (109 s vs 1.4 s per locality
+  # measured). Reported only after the overlap check confirms the areas add.
   class_area_ha_sum <- function(r_list, id_prefix, params) {
     r_list <- Filter(Negate(is.null), r_list)
     if (length(r_list) == 0) return(NULL)
@@ -676,9 +642,8 @@
 
   calc_area_df <- function(r_obj, r_id = NULL, surface = "act") {
     if (is.null(r_obj)) return(NULL)
-    # error-only: catching `condition` here also unwound message() conditions
-    # escaping classification_params(), aborting the reactive mid-evaluation
-    # and poisoning it for the map renderers (Jenks fell back to continuous)
+    # error only: catching `condition` also unwound message() conditions from
+    # classification_params() and poisoned it for the map renderers.
     params <- tryCatch(classification_params(surface), error = function(e) NULL)
     if (is.null(params)) return(area_ha_to_df(NULL, NULL))
     area_ha_to_df(class_area_ha(r_obj, params, r_id), params)
@@ -693,9 +658,7 @@
     params <- tryCatch(classification_params("act"), error = function(e) NULL)
     if (is.null(params)) return(area_ha_to_df(NULL, NULL))
     ha <- class_area_ha_sum(rv$rast_list_act, "loc_act", params)
-    # Only a run that stored no per-locality surface falls back to the merged
-    # grid; every path that fills rv$rast fills rv$rast_list_act with the
-    # rasters it was merged from.
+    # The merged grid is a fallback only for a run without per-locality rasters.
     if (is.null(ha)) ha <- class_area_ha(rv$rast, params, "total_act_merged")
     area_ha_to_df(ha, params)
   })
@@ -729,21 +692,12 @@
     if(loc == "Total (Combined)") sci_dt(NULL) else area_card(calc_area_df(rv$rast_list_pre[[loc]], paste0("loc_pre_", loc), "pre"))
   })
 
-  # Class-area and class-agreement exports follow the CLASSIFICATION, not the
-  # run. Both tables come into existence only once the surface is classified,
-  # and Apply is normally pressed after a run - the sidebar hint says so - so
-  # registering them only at run completion left the Export panel without the
-  # two tables the Scientific Analysis tab had just gained. They are now
-  # (re-)registered whenever the committed classification changes, and
-  # calc_area_df's per-run cache means this costs nothing the on-screen tables
-  # have not already paid. Every previous area/agreement sheet is dropped
-  # first: a class system that changed (Agronomical -> Binned), a surface that
-  # went Continuous, or an agreement that became non-computable must not leave
-  # sheets from the old classification beside the new ones.
-  # classification_params() is read under tryCatch here as at every other call
-  # site: an error in an event expression is an unhandled observer error and
-  # ends the session.
-  # Each surface's sheets carry its own class breaks.
+  # Class-area and agreement exports follow the CLASSIFICATION, not the run:
+  # (re-)registered whenever the committed classification changes (usually
+  # after a run), at no extra cost thanks to calc_area_df's cache. Old sheets
+  # are dropped first so a changed or removed class system leaves none behind.
+  # classification_params() is read under tryCatch: an error in an event
+  # expression ends the session. Each surface's sheets use its own breaks.
   observeEvent(list(tryCatch(classification_params("act"), error = function(e) NULL),
                     tryCatch(classification_params("pre"), error = function(e) NULL),
                     rv$results_rev), {
@@ -786,9 +740,7 @@
     }
 
     # Agreement needs an uploaded prediction column AND agronomical classes;
-    # quartile binning is a screen-side choice with no map counterpart, so the
-    # export follows the map's class limits: the Actual surface's, one class
-    # definition for both columns of every pair (agro_params).
+    # the export uses the map's limits (the Actual surface's, for both columns).
     params_k <- tryCatch(agro_params(), error = function(e) NULL)
     if (has_pre && !is.null(params_k) && !is.null(rv$sf)) {
       df_k <- rv$sf %>% st_drop_geometry() %>% filter(!is.na(v), !is.na(pv))
@@ -812,11 +764,8 @@
       "knndm" = "kNNDM (map-matched 10-fold; LOOCV below n = 30)",
       "block" = "Spatial Block CV (10 k-means folds; LOOCV below n=30)",
       "Auto (LOOCV for n ≤ 50, random 10-fold above)")
-    # The pooled row's variance-explained scores are measured against the POOLED
-    # mean, so between-locality differences in level count as variance the model
-    # gets credit for explaining. That is an aggregation artifact, not skill, and
-    # it makes the pooled row incomparable with the per-locality rows above it.
-    # Message only - the computation is deliberately left as it is.
+    # Pooled R²/NSE are measured against the pooled mean, so between-locality
+    # level differences inflate them (an aggregation artefact): message only.
     pooled_note <- if (identical(input$sel_loc_stats, "Total (Combined)")) {
       tags$div(
         style = "font-size: 0.82em; color: var(--mn-text-2); margin: -4px 0 8px 0;",
@@ -831,10 +780,8 @@
       tags$span(style = "color: var(--mn-text-3);",
                 sprintf(" Repeated CV is on (%d fold realizations); the values here are realization 1, the spread is in the table below.", n_rep))
     }
-    # What each fold re-estimates. Every kriging engine refits from its own
-    # training samples, so the held-out sample contributes its coordinates and
-    # nothing else. IDW and TPS re-select a power or lambda set to Auto the same
-    # way, and use a fixed one as set; the run's fit records say which.
+    # What each fold re-estimates; IDW/TPS state Auto or fixed per the run's
+    # fit records.
     method_now <- rv$disp$method %||% ""
     fit_modes <- function(field) {
       modes <- unlist(lapply(rv$disp$regional_params, function(p) {
@@ -874,18 +821,15 @@
     )
     infos <- c(rv$cv_info_act, if (isTRUE(rv$has_predictions)) rv$cv_info_pre)
     infos <- Filter(Negate(is.null), infos)
-    # An applied manual model cannot be refitted without scoring a different
-    # model than the one that drew the map, so those localities are reused and
-    # labelled conditional. Name them: it is the one exception to the sentence
-    # above.
+    # An applied manual model is reused in every fold (conditional): name those
+    # localities, the one exception to the sentence above.
     cond_locs <- unique(names(Filter(function(x) !is.null(x$conditional), infos)))
     cond_txt <- if (length(cond_locs)) {
       paste0(" Conditional on an applied variogram (reused in every fold): ",
              paste(cond_locs, collapse = ", "), ".")
     }
-    # Only where the Predicted surface actually borrowed the measured-value
-    # variogram under Auto-Fit (the worker records its column). A borrowed
-    # APPLIED model is conditional instead, and cond_txt names it.
+    # Only where the Predicted surface borrowed the measured-value variogram
+    # under Auto-Fit; a borrowed APPLIED model is named by cond_txt.
     shared_txt <- if (isTRUE(rv$has_predictions) &&
                       any(vapply(rv$cv_info_pre, function(x) identical(x$vgm_col, "v"), logical(1)))) {
       " The Predicted surface is kriged with the measured-value variogram, refitted in each fold."
@@ -899,10 +843,8 @@
                ") the fold's covariate screen kept a different set than the map; see the Run Log.")
       }
     }
-    # A fold whose variogram fell back to the heuristic, kept a singular
-    # candidate, or converged to a range outside the lag support scored a
-    # different model than the one that drew the map. The run log names the
-    # individual folds and what happened to each.
+    # Folds whose variogram was degraded or range-unresolved scored a different
+    # model than the map; the run log names them.
     vgm_txt <- {
       bad <- lapply(infos, function(x) {
         tb <- x$vgm_status
@@ -955,39 +897,22 @@
   })
 
   # ── Model Performance ─────────────────────────────────────────────────────
-  # One reactive behind two outputs: the table and the footnote that explains
-  # its markers. They must agree about which markers the table contains, so
-  # neither re-derives them.
-  #
-  # Markers, all three distinct on purpose:
-  #   NA*   the statistic could not be computed for this point set (too few
-  #         points, no coordinates, a failed neighbour search) - it NEVER means
-  #         "no spatial structure was found".
-  #   n/a1  the metric does not apply to this target: mean- and
-  #         percentage-normalised errors have no interpretation where the
-  #         observed values span zero.
-  #   NA†   not reported under a contiguous fold design (Spatial Block CV,
-  #         kNNDM spatial folds), where Moran's reference distribution does
-  #         not hold.
+  # One reactive behind the table and its footnote, so they agree on markers:
+  #   NA*   not computable for this point set; NEVER "no spatial structure".
+  #   n/a1  not applicable: normalised errors where observed values span zero.
+  #   NA†   not reported under a contiguous fold design (Spatial Block, kNNDM
+  #         spatial folds), where Moran's reference distribution does not hold.
   metrics_rows <- reactive({
     req(input$sel_loc_stats)
     loc <- input$sel_loc_stats
     strat <- rv$cv_strategy_sel %||% "auto"
 
-    # One definition of the Model Performance column set, shared by the empty
-    # stub and by both populated branches so they cannot drift apart. The
-    # labels and their order mirror the uploaded-prediction metrics table so the
-    # two can be read side by side. Moran's I / p have no counterpart there
-    # (uploaded predictions carry no CV residual field).
-    # CV_METRIC_LABELS (ui_formatting.R) is that one definition; the export
-    # flavour of this table reads the same vector. Moran's null expectation is
-    # dropped here because it rides along as a per-row tooltip below - a file
-    # cannot carry a tooltip, so the export keeps it as a column.
+    # The column set is CV_METRIC_LABELS (shared with the export), minus
+    # Moran's E[I], which rides along here as a per-row tooltip.
     keys <- setdiff(names(CV_METRIC_LABELS), "moran_e")
     metric_cols <- c("Source", unname(CV_METRIC_LABELS[keys]))
-    # Displayed at four significant digits by the browser formatter; the two
-    # scale-dependent metrics and the two Moran cells are character, because
-    # they can carry a marker instead of a number.
+    # Four-significant-digit display; the two scale-dependent metrics and the
+    # Moran cells are character, since they can carry a marker.
     num_cols <- unname(CV_METRIC_LABELS[setdiff(keys, c("nrmse_mean", "smape",
                                                         "moran_i", "moran_p"))])
     na_marker <- '<span title="Not computable (see Run Log)">NA*</span>'
@@ -996,12 +921,9 @@
       sprintf('<span title="Not reported under %s (see the note under the table)">NA†</span>', mor$design)
     }
 
-    # The Source cell states WHAT was scored, not only how: the fold plan, the
-    # cross-validation population, how many of the expected samples got a
-    # prediction, and whether the folds were conditional on a model the user
-    # applied. The experiment id and the refit statement ride along as a hover,
-    # which a table cell can carry and a file cannot - the export has both as
-    # columns of their own.
+    # The Source cell states WHAT was scored: fold plan, CV population, how
+    # many expected samples got a prediction, and any conditional model. The
+    # id and refit statement ride along as a hover (columns in the export).
     source_cell <- function(label, design, res, info) {
       n_pred <- res$n %||% NA_integer_
       n_exp <- res$n_expected %||% NA_integer_
@@ -1028,13 +950,11 @@
     row_spec <- function(cv_list, data_list, label, info_list, pooled) {
       markers <- character(0)
       if (loc == "Total (Combined)") {
-        # Pooled in the auto-UTM zone of the combined centroid (pool_cv_sf):
-        # pooled Moran's I uses these coordinates, and EPSG:3857 distances are
-        # inflated by 1/cos(latitude). Computed once per run (pooled_cv_metrics).
+        # Pooled in the combined centroid's UTM zone (pool_cv_sf()), computed
+        # once per run (pooled_cv_metrics).
         res <- pooled()
-        # The pooled row mixes localities that need not share a fold design, so
-        # its Moran reading is the contiguous one only when every pooled
-        # locality resolved to the same contiguous design.
+        # Contiguous Moran reading only when every pooled locality resolved to
+        # the same contiguous design.
         types <- vapply(names(data_list), function(l) {
           applied_cv_plan(nrow(data_list[[l]]), strat, cv_list[[l]])$type
         }, character(1))
@@ -1047,10 +967,8 @@
       } else {
         res <- cv_list[[loc]]
         n_obs <- if (!is.null(data_list[[loc]])) nrow(data_list[[loc]]) else NA
-        # The APPLIED plan, not the requested strategy: a locality below
-        # CV_BLOCK_MIN_N was scored by LOOCV, and a failed k-means clustering
-        # left random folds. Neither may be reported as Spatial Block CV. A
-        # kNNDM request reports the design it chose (random or spatial folds).
+        # The APPLIED plan, not the requested strategy (LOOCV below
+        # CV_BLOCK_MIN_N, random folds after a failed k-means, kNNDM's choice).
         plan <- applied_cv_plan(n_obs, strat, res)
         mor <- moran_reading(plan$type)
         src_label <- if (!is.null(res)) {
@@ -1087,9 +1005,7 @@
         sprintf('<span title="%s: these residuals inherit the fold geometry and a shared extrapolation condition within each withheld group of samples. E[I] = -1/(n-1) = %s">%s†</span>',
                 mor$label, if (is.na(moran_e)) "NA" else format_sig(moran_e), format_sig(moran_i))
       } else {
-        # The null expectation rides along as a per-row tooltip: I is centred on
-        # E[I] = -1/(n-1), not on 0, so an I marginally above zero is not
-        # evidence of clustering at small n.
+        # E[I] = -1/(n-1) rides along as a tooltip: I is centred on it, not 0.
         sprintf('<span title="Expected I under no spatial autocorrelation: E[I] = -1/(n-1) = %s">%s</span>',
                 if (is.na(moran_e)) "NA" else format_sig(moran_e), format_sig(moran_i))
       }
@@ -1125,10 +1041,8 @@
                                       pooled_cv_metrics$pre)))
     }
     df <- do.call(rbind, lapply(specs, `[[`, "df"))
-    # The column heading can only carry one reading, so it takes the
-    # contiguous-design one only when every row in the table was scored under
-    # the same contiguous design; otherwise those rows are marked in their own
-    # cells.
+    # The column heading takes the contiguous reading only when every row was
+    # scored under the same contiguous design; otherwise rows are marked.
     labels <- unique(vapply(specs, `[[`, character(1), "label"))
     block_all <- all(vapply(specs, `[[`, logical(1), "block")) && length(labels) == 1
     if (block_all) names(df)[names(df) == "Moran's I"] <- labels
@@ -1158,18 +1072,13 @@
   })
 
   # ── Repeated cross-validation (opt-in) ────────────────────────────────────
-  # The table above reports ONE fold realization (seed CV_FOLD_SEED). When the
-  # user asked for repeated CV, this second table reports the mean and the
-  # standard deviation of the same metrics across the alternative realizations,
-  # which is the honest scale for comparing two methods: an RMSE gap smaller
-  # than this SD is fold luck, not skill.
+  # Mean and SD of the metrics across fold realizations (the table above is
+  # realization 1): an RMSE gap smaller than this SD is fold luck, not skill.
   cv_repeat_row <- function(summ, label) {
     if (is.null(summ)) return(NULL)
-    # Every cell is the string "mean ± SD", so the browser formatter cannot
-    # reach this table: the significant-digit rule is applied here instead.
-    # Both terms share one notation - a mean in fixed notation beside an SD in
-    # scientific reads as two different quantities - and the pair switches to
-    # scientific only when a term would otherwise be quantized to zero.
+    # Cells are "mean ± SD" strings, so the significant-digit rule is applied
+    # here; both terms share one notation, scientific only when a term would
+    # otherwise round to zero.
     fmt <- function(m, s, key) {
       if (isTRUE(summ$signed_target) && key %in% c("nrmse_mean", "smape")) return("n/a¹")
       if (!is.finite(m)) return("NA")
@@ -1244,14 +1153,8 @@
           
           if(nrow(df) < 3) return(sci_dt(data.frame(Status = "Not enough data points for numeric metrics.")))
 
-          # ONE metric dictionary: pred_perf_df() (ui_formatting.R) wraps
-          # perform_cv(), the app's metric authority, so this table, the Total
-          # and per-locality exports, and Model Performance cannot drift apart.
-          # It carries calc_ccc's population moments (yardstick's ccc_vec
-          # defaults to the sample-moment variant removed in 1.0.8), NRMSE
-          # against |mean| (a signed denominator reports a negative error
-          # percentage for an anomaly variable), and NA - never Inf or NaN -
-          # for every degenerate ratio.
+          # ONE metric dictionary: pred_perf_df() wraps perform_cv(), so this
+          # table, its exports and Model Performance cannot drift apart.
           perf <- pred_perf_df(df$v, df$pv)
           if (is.null(perf)) return(sci_dt(NULL))
           # The Note column explains the NAs of a signed target in the exported
@@ -1312,14 +1215,10 @@
 
   output$log_output <- renderText({ rv$log })
 
-  # Keep the Scientific Analysis tables computing while the tab is hidden:
-  # a run auto-pans the user to the Map Viewer, and with the default
-  # suspend-when-hidden these outputs would only start rendering when the
-  # tab is opened - the user then stares at the PREVIOUS run's tables behind
-  # Shiny's pale-grey recalculating overlay until the whole burst (pooled CV,
-  # area expanse, kappa, ...) finishes. Rendering them in the run-completion
-  # flush makes the tab current the moment it is opened. Plots stay
-  # suspended: hidden plots re-render on reveal anyway (client sizing).
+  # The Scientific Analysis tables keep computing while the tab is hidden (a
+  # run pans to the Map Viewer), so the tab is current when opened instead of
+  # showing the previous run's tables under the recalculating overlay. Plots
+  # stay suspended: they re-render on reveal anyway.
   for (out_id in c("vgm_params_table", "vgm_params_title", "vgm_params_note", "regional_params_table", "metrics_table",
                    "metrics_table_notes", "cv_repeats_notes", "uploaded_metrics_notes",
                    "cv_strategy_badge", "cv_repeats_table",
@@ -1328,18 +1227,15 @@
                    "area_table_loc_act", "area_table_loc_pre",
                    "uploaded_metrics_table", "kappa_table",
                    "run_config_display", "log_output", "run_warnings_card",
-                   # raw RK summaries live inside a collapsed <details>:
-                   # opening it fires no Shiny visibility event, so they must
-                   # render eagerly or they would stay blank until reveal
+                   # Raw RK summaries sit in a collapsed <details>, which
+                   # fires no visibility event.
                    "summ_act_static", "summ_pre_static")) {
     outputOptions(output, out_id, suspendWhenHidden = FALSE)
   }
 
   last_notified_warnings <- reactiveVal(character(0))
-  # The tally exists to stop one warning being re-notified as the log grows
-  # WITHIN a run; a new run rebuilds rv$log from scratch, so carrying it over
-  # would silence a warning that is still true the second time round (e.g. an
-  # unchanged strict buffer/resolution pair).
+  # The tally stops re-notifying a warning as the log grows WITHIN a run; it is
+  # reset per run, so a warning still true next time is announced again.
   observeEvent(rv$run_counter, last_notified_warnings(character(0)))
   log_warn_lines <- function(log) {
     grep("\\[WARN\\]", unlist(strsplit(log %||% "", "\n", fixed = TRUE)), value = TRUE)
@@ -1380,14 +1276,10 @@
     switch(fmt %||% "shp", "shp" = "zip", "geojson" = "geojson", "kml" = "kml", "gpkg" = "gpkg", "zip")
   }
 
-  # A downloadHandler cannot decline: whatever its content function does, the
-  # browser has already opened the download URL, and a content function that
-  # returns without writing its file leaves the user on a dead page with the
-  # app behind them. So the two vector exports state their requirements BEFORE
-  # the click - each reason below both greys its button out and becomes the
-  # wrapper's hover tooltip. The handlers keep the same checks as a backstop
-  # for the click-during-state-change race, raising them as errors so the
-  # sentence is at least readable wherever the browser lands.
+  # A downloadHandler cannot decline (the browser already opened the URL), so
+  # each vector export states its requirement BEFORE the click: the reason
+  # greys out the button and becomes its wrapper's tooltip. The handlers
+  # repeat the checks as errors for a click racing a state change.
   polygon_block_reason <- reactive({
     if (length(rv$drawn_polygons) == 0)
       return("No polygons to export. Draw one first, using the drawing toolbar on the left edge of the map.")
@@ -1444,9 +1336,8 @@
     }
   )
 
-  # Class zones of the surface on screen, as a GIS vector layer. It follows the
-  # Map Viewer's view switcher rather than the sidebar, for the same reason the
-  # Quick Export button does: what is exported must be what is being looked at.
+  # Class zones of the surface on screen (the view switcher, not the sidebar),
+  # as for Quick Export.
   class_zone_sf <- reactive({
     meta <- get_display_meta()
     if (is.null(meta)) return(NULL)

@@ -1,4 +1,4 @@
-# test-knndm.R — kNNDM cross-validation (k-fold nearest-neighbour distance
+# test-knndm.R: kNNDM cross-validation (k-fold nearest-neighbour distance
 # matching; Linnenbrink, Mila, Ludwig & Meyer 2024) and the CV Distance Match
 # record. Every reference below is recomputed from the data the test hands in:
 # a definition, a hand computation, a brute-force search or an independent
@@ -84,7 +84,6 @@ without_subgraph_notice <- function(expr) {
   })
 }
 
-# ── T1 ───────────────────────────────────────────────────────────────────────
 test_that("cv_wasserstein1 is the Wasserstein-1 distance between the empirical distributions", {
   # By hand: F(0,1) - F(0.5) is 1/2 on [0, 0.5) and -1/2 on [0.5, 1).
   expect_equal(cv_wasserstein1(c(0, 1), 0.5), 0.5)
@@ -101,7 +100,6 @@ test_that("cv_wasserstein1 is the Wasserstein-1 distance between the empirical d
   expect_equal(cv_wasserstein1(a, rev(a)), 0)
 })
 
-# ── T2 ───────────────────────────────────────────────────────────────────────
 test_that("cv_heldout_nnd is each sample's distance to the nearest sample outside its fold", {
   xy <- sf::st_coordinates(golden_sf("core"))[, 1:2]
   n <- nrow(xy)
@@ -115,7 +113,6 @@ test_that("cv_heldout_nnd is each sample's distance to the nearest sample outsid
   expect_equal(cv_heldout_nnd(xy, seq_len(n)), FNN::get.knn(xy, k = 1)$nn.dist[, 1])
 })
 
-# ── T3 ───────────────────────────────────────────────────────────────────────
 test_that("the map's locations are a lattice inside the boundary, independent of the grid", {
   hexagon <- sf::st_sf(geometry = sf::st_sfc(sf::st_polygon(list(rbind(
     c(0, 500), c(400, 0), c(1300, 0), c(1700, 500), c(1300, 1000), c(400, 1000), c(0, 500)))),
@@ -153,7 +150,6 @@ test_that("the map's locations are a lattice inside the boundary, independent of
   expect_equal(thin[nrow(thin), ], unname(g1[nrow(g1), ]))
 })
 
-# ── T4 ───────────────────────────────────────────────────────────────────────
 test_that("where random folds already match the map, kNNDM returns Auto's random folds", {
   xy <- lattice_xy()
   n <- nrow(xy)
@@ -170,7 +166,6 @@ test_that("where random folds already match the map, kNNDM returns Auto's random
   expect_identical(as.integer(make_cv_folds(xy, "knndm", n, domain_xy = D)), as.integer(f))
 })
 
-# ── T5 / T6 ──────────────────────────────────────────────────────────────────
 test_that("clustered samples under a wide map get spatial folds at the minimum W", {
   xy <- subgrids_xy()
   n <- nrow(xy)
@@ -190,8 +185,8 @@ test_that("clustered samples under a wide map get spatial folds at the minimum W
   expect_equal(info$W_random, W_random)
   expect_lte(W, W_random)
 
-  # T6: the independent search scores every candidate cut; kNNDM keeps the
-  # first minimum, which beats the random partition here.
+  # The independent search scores every candidate cut; kNNDM keeps the first
+  # minimum, which beats the random partition here.
   cand <- independent_candidates(xy, Gij)
   expect_lt(min(cand$Ws, na.rm = TRUE), W_random)
   expect_equal(info$W, min(cand$Ws, na.rm = TRUE))
@@ -199,10 +194,10 @@ test_that("clustered samples under a wide map get spatial folds at the minimum W
 })
 
 test_that("where no cluster partition beats random folds, kNNDM keeps the random folds", {
-  # The compact locality under the buffered boundary an Ordinary Kriging run draws (the
+  # The compact locality under the boundary an Ordinary Kriging run draws (the
   # concave hull widened by the dynamic buffer, 3 x half the mean
   # nearest-neighbour spacing): the gate only just rejects, and every cut of
-  # the published candidate set matches the map worse than random folds do.
+  # the candidate set matches the map worse than random folds do.
   pts <- golden_sf("full", localities = golden_case("knndm_random")$locality)
   xy <- sf::st_coordinates(pts)[, 1:2]
   n <- nrow(xy)
@@ -226,7 +221,6 @@ test_that("where no cluster partition beats random folds, kNNDM keeps the random
                "kNNDM chose random folds; they matched the map's distances better than any spatial partition")
 })
 
-# ── T7 ───────────────────────────────────────────────────────────────────────
 test_that("kNNDM is deterministic and leaves the caller's RNG alone", {
   xy <- subgrids_xy()
   D <- bbox_domain(xy)
@@ -240,7 +234,6 @@ test_that("kNNDM is deterministic and leaves the caller's RNG alone", {
   expect_identical(as.integer(knndm_folds(xy, D, seed = 1L)), as.integer(knndm_folds(xy, D, seed = 2L)))
 })
 
-# ── T8 ───────────────────────────────────────────────────────────────────────
 test_that("kNNDM falls back to LOOCV below 30 samples and to random folds without a partition", {
   xy25 <- subgrids_xy(nx = 1, ny = 1)
   expect_equal(nrow(xy25), 25L)
@@ -264,7 +257,6 @@ test_that("kNNDM falls back to LOOCV below 30 samples and to random folds withou
   expect_identical(as.integer(fb), random_folds_by_definition(n))
 })
 
-# ── T9 ───────────────────────────────────────────────────────────────────────
 test_that("the first principal axis has a fixed sign", {
   xy <- sf::st_coordinates(golden_sf("core"))[, 1:2]
   ax <- .knndm_pc_axis(xy)$axis
@@ -275,7 +267,6 @@ test_that("the first principal axis has a fixed sign", {
   expect_equal(.knndm_pc_axis(-xy)$axis, ax)
 })
 
-# ── T10 ──────────────────────────────────────────────────────────────────────
 test_that("above the exact limit the tree is built on at most KNNDM_MAX_CELLS cells", {
   xy <- subgrids_xy(nx = 10, ny = 5, gap = c(1000, 1000), side = c(10, 5), step = 5)
   n <- nrow(xy)
@@ -306,7 +297,6 @@ test_that("above the exact limit the tree is built on at most KNNDM_MAX_CELLS ce
   expect_identical(as.integer(one_cell), random_folds_by_definition(2100))
 })
 
-# ── T11 ──────────────────────────────────────────────────────────────────────
 test_that("a size-weighted tree on group centroids reproduces Ward's merges above the groups", {
   # hclust's ward.D2 carries d^2(A, B) = 2 nA nB / (nA + nB) |cA - cB|^2
   # (Lance & Williams 1967), so feeding those distances with the group sizes
@@ -333,7 +323,6 @@ test_that("a size-weighted tree on group centroids reproduces Ward's merges abov
   expect_identical(hc4$height, hc2$height)
 })
 
-# ── T12 ──────────────────────────────────────────────────────────────────────
 test_that("build_cv_plan keeps one realization for spatial folds and the Auto repeats otherwise", {
   xy <- subgrids_xy()
   D <- bbox_domain(xy)
@@ -355,7 +344,6 @@ test_that("build_cv_plan keeps one realization for spatial folds and the Auto re
   expect_null(auto$design)
 })
 
-# ── T13 ──────────────────────────────────────────────────────────────────────
 test_that("a kNNDM row is labelled by the design it chose, and spatial folds are read as contiguous", {
   pl <- function(branch) applied_cv_plan(100, "knndm", list(knndm_branch = branch))
   expect_identical(pl("random")[c("type", "label")], list(type = "knndm_random", label = "kNNDM CV [random folds]"))
@@ -389,7 +377,6 @@ test_that("a kNNDM row is labelled by the design it chose, and spatial folds are
   expect_true(is.na(perform_cv(NULL)$knndm_branch))
 })
 
-# ── T14 ──────────────────────────────────────────────────────────────────────
 test_that("repeated CV keeps one realization for kNNDM spatial folds and repeats random ones", {
   xy <- lattice_xy()[1:60, ]
   cv <- sf::st_as_sf(data.frame(x = xy[, 1], y = xy[, 2], observed = xy[, 1] / 100,
@@ -411,7 +398,6 @@ test_that("repeated CV keeps one realization for kNNDM spatial folds and repeats
   expect_identical(seen, CV_FOLD_SEED + 1:4)
 })
 
-# ── T15 ──────────────────────────────────────────────────────────────────────
 test_that("every engine folds under kNNDM, IDW's nested selection included", {
   xy <- subgrids_xy()
   n <- nrow(xy)

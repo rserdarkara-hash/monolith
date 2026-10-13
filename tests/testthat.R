@@ -1,8 +1,7 @@
 library(testthat)
 
-# Locate the project root by walking up the directory tree until we find
-# global.R.  This works regardless of whether the runner is invoked from the
-# project root, tests/, or tests/testthat/ (RStudio, CLI, etc.).
+# Walk up to the project root (the directory holding global.R), so the runner
+# works from the root, tests/ or tests/testthat/.
 proj_root <- getwd()
 while (!file.exists(file.path(proj_root, "global.R"))) {
   parent <- dirname(proj_root)
@@ -13,11 +12,7 @@ while (!file.exists(file.path(proj_root, "global.R"))) {
 }
 proj_root <- normalizePath(proj_root, winslash = "/")
 
-# helper.R handles all application sourcing (with shinyApp no-oping, setwd()
-# management, and idempotency) and requests sequential startup before sourcing.
-# setup.R retains the sequential future plan for the test files.
-# There is no need to source anything here — testthat will run helper.R and
-# setup.R automatically before the test files.
+# testthat sources helper.R (loads the app) and setup.R (suite options) itself.
 testthat::test_dir(
   file.path(proj_root, "tests", "testthat"),
   env = testthat::test_env()

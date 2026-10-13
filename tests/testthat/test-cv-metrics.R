@@ -1,5 +1,7 @@
-# test-cv-metrics.R — tests for detect_cv_columns, calc_ccc, augment_metrics,
-# perform_cv, .cv_to_df, and get_cv_residuals.
+# Cross-validation and its reporting: CV column detection, the metric
+# dictionary (calc_ccc, augment_metrics, perform_cv), fold plans and repeats,
+# the kriging fold runner, pooling, and the export and display builders that
+# carry the numbers.
 
 # ── detect_cv_columns ─────────────────────────────────────────────────────
 
@@ -51,8 +53,8 @@ test_that("calc_ccc returns 1.0 for perfectly identical vectors", {
 })
 
 test_that("calc_ccc returns NA whenever either vector is constant (CCC undefined)", {
-  # var(obs) = 0: the correlation term is 0/0 regardless of the means, so the
-  # 2026-07-19 convention reports NA instead of asserting agreement.
+  # var(obs) = 0: the correlation term is 0/0 regardless of the means, so CCC
+  # is NA rather than an assertion of agreement.
   obs <- c(5, 5, 5, 5)
   pre <- c(4, 5, 6, 5)
   expect_true(is.na(calc_ccc(obs, pre)))
@@ -74,9 +76,9 @@ test_that("calc_ccc matches known external value", {
   ccc_val <- calc_ccc(k$observed, k$predicted)
   expect_true(!is.na(ccc_val))
   # 1e-5 separates the population-moment definition (Lin 1989, DescTools) from
-  # the sample-moment one - they differ by 8e-5 on this fixture, which the
-  # previous 0.01 tolerance could not resolve. Re-derive the fixture externally
-  # if a formula ever changes; never relax this to make the test pass.
+  # the sample-moment one, which differ by 8e-5 on this fixture. Re-derive the
+  # fixture externally if a formula ever changes; never relax this to make the
+  # test pass.
   expect_equal(ccc_val, k$expected, tolerance = 1e-5)
 })
 
@@ -87,7 +89,7 @@ test_that("calc_ccc filters to jointly complete pairs before computing moments",
   expect_true(!is.na(ccc_val))
   # Misaligned NAs: means, variances and the covariance must all come from the
   # SAME jointly complete subset, so the value equals CCC of the pre-filtered
-  # pairs (the old per-vector na.rm mixed subsets here).
+  # pairs.
   ok <- !is.na(obs) & !is.na(pre)
   expect_equal(ccc_val, calc_ccc(obs[ok], pre[ok]))
   expect_true(ccc_val > 0.5)
@@ -126,10 +128,8 @@ test_that("augment_metrics RMSE-based metrics degrade with noise", {
 })
 
 test_that("augment_metrics RPD and RPIQ are positive for valid input", {
-  # Seeded: on a fixed draw the interquartile range is a known quantity, so
-  # RPIQ is defined and the assertion can be unconditional. The former
-  # `if (!is.na(res$rpiq))` guard let this block report a pass on one
-  # expectation instead of two whenever the draw happened to give IQR = 0.
+  # Seeded, so the interquartile range is known to be positive and both
+  # assertions are unconditional.
   set.seed(17)
   obs <- rnorm(30, 50, 10)
   pre <- obs + rnorm(30, 0, 3)
@@ -290,10 +290,9 @@ test_that("the metric dictionary reproduces its external known answers", {
   expect_equal(m$smape,      k$smape, tolerance = 1e-9)
   expect_equal(m$n, length(k$observed))
 
-  # The uploaded-prediction tables (server_sci_analysis.R, server_execution.R,
-  # server_setup.R) read these same fields instead of calling yardstick, whose
-  # ccc_vec defaults to the sample-moment variant this app removed in 1.0.8.
-  # Both halves are pinned: what the app's CCC IS, and what it is NOT.
+  # The uploaded-prediction tables read these same fields rather than calling
+  # yardstick, whose ccc_vec defaults to the sample-moment variant. Both halves
+  # are pinned: what the app's CCC IS, and what it is NOT.
   expect_equal(calc_ccc(k$observed, k$predicted),
                yardstick::ccc_vec(k$observed, k$predicted, bias = TRUE),
                tolerance = 1e-10)
@@ -598,12 +597,10 @@ test_that("summarise_cv_repeats reports mean and SD across realizations", {
 })
 
 # ── Metrics are computed at full precision; only the display rounds ────────
-# Rounding used to happen inside perform_cv() and augment_metrics(), so a
-# genuinely small value reached the Model Performance table, the exported CSV
-# and the repeated-CV aggregation already quantized - and printed as 0 beside
-# an NSE that said the fit was imperfect. Both are impossible statements about
-# the same residuals, which is what the invariant at the end of this block
-# pins.
+# A metric rounded before the table, the exported CSV or the repeated-CV
+# aggregation can print 0 beside an NSE that says the fit is imperfect: two
+# impossible statements about the same residuals, which the invariant at the
+# end of this block pins.
 
 test_that("perform_cv and augment_metrics return full precision", {
   cv_df <- data.frame(
@@ -613,8 +610,8 @@ test_that("perform_cv and augment_metrics return full precision", {
   m <- perform_cv(cv_df, moran = FALSE)
   res <- cv_df$var1.observed - cv_df$var1.pred
 
-  # Every value is the definition, not a rounded one: the old display lattice
-  # (1e-4 for RMSE, 0.01 for the ratios) is coarser than these differences.
+  # Every value is the definition, unrounded: a 1e-4 (RMSE) or 0.01 (ratio)
+  # display lattice is coarser than these differences.
   expect_equal(m$rmse, sqrt(mean(res^2)))
   expect_equal(m$mae, mean(abs(res)))
   expect_equal(m$me, mean(res))
@@ -627,8 +624,8 @@ test_that("perform_cv and augment_metrics return full precision", {
 })
 
 test_that("a near-constant target reports a non-zero error, not 0", {
-  # 7 + N(0, 1e-7) under a near-perfect prediction: at the old 4-decimal
-  # rounding RMSE, MAE and bias all printed 0 beside a negative NSE.
+  # 7 + N(0, 1e-7) under a near-perfect prediction: rounded to 4 decimals,
+  # RMSE, MAE and bias would print 0 beside a negative NSE.
   set.seed(19)
   obs <- 7 + rnorm(40, 0, 1e-7)
   pre <- obs + rnorm(40, 0, 1.2e-7)
@@ -642,8 +639,8 @@ test_that("a near-constant target reports a non-zero error, not 0", {
 })
 
 test_that("RMSE is zero if and only if NSE is one", {
-  # The internal consistency the rounding broke: RMSE 0 asserts a perfect fit,
-  # NSE below 1 asserts an imperfect one. Both cannot describe one residual set.
+  # RMSE 0 asserts a perfect fit and NSE below 1 an imperfect one; both cannot
+  # describe one residual set.
   set.seed(23)
   for (i in 1:20) {
     obs <- rnorm(25, 10, 3)
@@ -656,9 +653,9 @@ test_that("RMSE is zero if and only if NSE is one", {
 
 test_that("summarise_cv_repeats aggregates raw metrics, not a display lattice", {
   pts <- make_test_points(15, seed = 4)
-  # Offsets separated by far less than the old display rounding (1e-4 on RMSE):
-  # quantized, the three realizations collapse onto one lattice point and the
-  # SD reads 0, claiming perfect stability across folds.
+  # Offsets far closer than a 1e-4 RMSE display rounding: quantized, the three
+  # realizations would collapse onto one lattice point and the SD read 0,
+  # claiming perfect stability across folds.
   mk <- function(offset) {
     sf::st_as_sf(data.frame(observed = pts$v, var1.pred = pts$v + offset,
                             x = sf::st_coordinates(pts)[, 1],
@@ -677,7 +674,7 @@ test_that("summarise_cv_repeats aggregates raw metrics, not a display lattice", 
   # the per-realization values carry the spread the summary reports.
   raw_rmse <- vapply(reps, function(r) perform_cv(r, moran = FALSE)$rmse, numeric(1))
   expect_equal(sd(raw_rmse), sd(offsets))
-  # Quantizing them at the old display lattice is what erased it.
+  # Quantized at that lattice, the spread would vanish.
   expect_equal(sd(round(raw_rmse, 4)), 0)
 })
 
@@ -762,9 +759,8 @@ test_that("pool_cv_sf skips CRS-less entries and returns NULL when nothing is po
 })
 
 test_that("NRMSE normalises by the absolute mean, so negative-mean variables report a positive value", {
-  # rmse / mean(obs) with a signed mean gave centred/anomaly variables (or
-  # sub-zero temperatures) a NEGATIVE NRMSE%, a nonsensical sign for a
-  # normalised error. Positive-mean data are byte-identical under abs().
+  # With a signed mean, centred/anomaly variables (or sub-zero temperatures)
+  # would report a NEGATIVE NRMSE%, a nonsensical sign for a normalised error.
   obs <- c(-10, -12, -8, -11, -9)
   pre <- c(-9.5, -12.5, -8.2, -10.4, -9.3)
   neg <- augment_metrics(obs, pre)
@@ -1018,10 +1014,9 @@ test_that("spatial block folds are spatially compact and random folds are not", 
 })
 
 # ── export builders: the screen's table and the exported sheet ─────────────
-# These exist because each export site used to re-derive its own subset of the
-# metrics under its own labels. The assertion is parity with perform_cv (the
-# metric authority) and with the column set the card renders — never a
-# hardcoded number.
+# One builder per table, shared by the card and its export. The assertion is
+# parity with perform_cv (the metric authority) and with the column set the
+# card renders, never a hardcoded number.
 
 test_that("cv_metrics_export_df reports every perform_cv metric, numerically", {
   set.seed(11)
@@ -1129,7 +1124,7 @@ test_that("pred_perf_df reports the uploaded-prediction dictionary off perform_c
   # The SD-normalised error is carried here too, under the same label the CV
   # dictionary uses, so the two performance cards can be read side by side.
   expect_equal(val("NRMSE (SD)"), m$rmse / stats::sd(obs))
-  # A positive ratio-scale target reports the normalised errors as before.
+  # A positive ratio-scale target carries no suppression note.
   expect_true(all(!nzchar(out$Note)))
   expect_null(pred_perf_df(obs[1:2], pre[1:2]))
 })

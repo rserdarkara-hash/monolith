@@ -3,18 +3,13 @@
 # progress/warning files, CRS projection, co-located sample merging, the Auto
 # grid rule, raster and class-break utilities. Sourced via spatial_helpers.R.
 
-# How many bounding-box cells the prediction grid converts to sf points at a
-# time before testing them against the boundary. Peak memory is one block plus
-# the cells that survive the clip, instead of the whole bounding box. Named so
-# the suite can shrink it and assert the clip is block-invariant.
+# Bounding-box cells converted to sf points per block before the boundary clip,
+# so peak memory is one block plus the survivors (tests shrink it).
 .GRID_CLIP_BLOCK_CELLS <- 2e5
 
-# How many BOUNDING-BOX cells a prediction grid may consider before its
-# resolution is coarsened. The raster template spans the full bbox before the
-# boundary clip, so this bounds the candidate grid, not the surviving one, and
-# all three resolution modes are floored by it. Named, like the Classification
-# Suite's .CLASSIF_MAX_CANDIDATE_CELLS, so the suite can shrink it and exercise
-# the cap without allocating the budget.
+# Bounding-box cells a prediction grid may span before its resolution is
+# coarsened: bounds the candidate (pre-clip) grid in every resolution mode.
+# Named so the suite can shrink it.
 .INTERP_MAX_CANDIDATE_CELLS <- 4e6
 
 
@@ -24,12 +19,10 @@
   substr(unname(tools::md5sum(bytes = charToRaw(enc2utf8(s)))), 1, 8)
 }
 
-#' A key for a name, made of [A-Za-z0-9_] only, for file names and the export
-#' registry: the name itself when it is already made of those characters,
-#' otherwise its stem (every other character replaced by "_") plus "_" and
-#' .hash8() of the name. Names that differ only in punctuation or in
-#' non-Latin letters ("Field-1" / "Field 1", "Çal" / "Şal") therefore never
-#' share a key, and every key in use for such names is unchanged. Vectorised.
+#' A key for a name made of [A-Za-z0-9_] only (file names, export registry):
+#' the name itself when already so, else its stem (other characters -> "_")
+#' plus "_" and .hash8() of the name, so names differing only in punctuation
+#' or non-Latin letters never share a key. Vectorised.
 safe_key <- function(x) {
   x <- enc2utf8(as.character(x))
   # PCRE: the ranges are code points, so A-Z is ASCII under every locale.
@@ -39,12 +32,9 @@ safe_key <- function(x) {
   stem
 }
 
-# Workers cannot touch Shiny reactives, so run state travels to the main
-# session as small files under the session's progress directory. Both writers
-# share this body; `kind` is the file-name stem the pollers watch
-# ("progress_<sid>_<key>_<prefix>.txt" / "warn_...", key = safe_key(locality)).
-# Never let a status write break a run: the directory creation and the write
-# are both best-effort.
+# Workers cannot touch Shiny reactives, so run state reaches the main session
+# as small files ("<kind>_<sid>_<safe_key(l)>_<prefix>.txt") in the progress
+# directory. Best-effort: a status write never breaks a run.
 .write_status_file <- function(l, prefix, kind, content) {
   clean_l <- safe_key(l)
   progress_dir <- getOption("monolith_progress_dir", tempdir())
@@ -79,38 +69,17 @@ write_warning_file <- function(l, prefix, message) {
   "R² / NSE / CCC / RPD / RPIQ are undefined.")
 
 # ── Point-buffer boundary vs grid-resolution coherence ─────────────────────
-# Every surface here is a raster of `res` metre cells, and a cell survives the
-# boundary clip only when its CENTRE falls inside the boundary (st_intersects
-# in run_regional_interpolation, st_within in classif_build_grid, and
-# terra::mask's default centre rule on the rasterised output). Under a Point
-# buffer boundary the domain IS the union of `buffer` metre circles around
-# the samples, so an isolated sample paints a cell only when its own cell
-# centre lies within `buffer` of it.
-#
-# A sample sits anywhere in its cell, and on a square grid the centre of the
-# cell containing it is also the NEAREST cell centre (cells are the Voronoi
-# regions of their centres), so an isolated sample paints no cell at all
-# exactly when its own cell's centre escapes the buffer. That distance runs
-# from 0 to res/sqrt(2), hence coverage is guaranteed only when
-# buffer >= res / sqrt(2) (half the cell diagonal).
-#
-# Below that, the share of in-cell positions that lose their cell is the cell
-# area outside a disc of radius `buffer` centred on the cell centre. The disc
-# is inscribed only while buffer <= res/2; beyond that it spills over the cell
-# edges and four circular segments must come off, or the loss is understated
-# (and 1 - pi*buffer^2/res^2 even turns negative from buffer = res/sqrt(pi)
-# upwards, which would report a 0% gap inside the range this very function
-# flags). With the segments subtracted the covered area reaches the full cell
-# exactly at buffer = res/sqrt(2), so `fraction > 0` and `short` agree by
-# construction. Verified against Monte-Carlo sampling of the unit cell.
-#
-# The result is the expected fraction of ISOLATED samples left with no
-# coloured cell; samples in dense clusters are rescued by their neighbours'
-# buffers, so it is an upper bound on the visible gaps, not a prediction.
-#
-# Returns NULL when the inputs are unusable, otherwise a list carrying the
-# required buffer, the required resolution, the uncovered fraction, and
-# whether the pair is incoherent (`short`).
+# A cell survives the boundary clip only when its CENTRE is inside the
+# boundary. Under a Point buffer boundary an isolated sample's nearest cell
+# centre is that of its own cell, 0 to res/sqrt(2) away, so the sample is
+# guaranteed a cell only when buffer >= res / sqrt(2) (half the diagonal).
+# Below that, the expected share of isolated samples left without a cell is
+# the share of the cell outside a disc of radius `buffer` about its centre
+# (inscribed up to buffer = res/2, then minus the four circular segments that
+# spill over the edges; checked by Monte Carlo). Clustered samples are rescued
+# by neighbours, so it is an upper bound.
+# Returns NULL for unusable inputs, else the required buffer and resolution,
+# the uncovered fraction and whether the pair is incoherent (`short`).
 strict_buffer_gap <- function(buffer, res) {
   buffer <- suppressWarnings(as.numeric(buffer)[1])
   res <- suppressWarnings(as.numeric(res)[1])
@@ -135,15 +104,10 @@ strict_buffer_gap <- function(buffer, res) {
   )
 }
 
-# Plain-text advisory for an incoherent strict buffer/resolution pair; NULL
-# when the pair is fine (or unusable). `label` prefixes the locality/scope
-# name when there is one.
-#
-# `res_floor` is the smallest cell size the CALLING suite lets a user set, and
-# a corrective size below it is dropped from the message: advice the user
-# cannot act on is worse than the buffer arm alone. The interpolation suite
-# passes 1 (its Fixed slider), the Classification Suite takes the default 5
-# (its own slider, and the floor every Auto rule clamps to).
+# Plain-text advisory for an incoherent buffer/resolution pair, NULL when fine.
+# `label` prefixes the locality/scope. A corrective size below `res_floor` (the
+# smallest cell the calling suite allows: 1 for interpolation, 5 for
+# classification) is left out, since the user cannot act on it.
 strict_buffer_message <- function(buffer, res, label = NULL, res_floor = 5) {
   g <- strict_buffer_gap(buffer, res)
   if (is.null(g) || !g$short) return(NULL)
@@ -179,15 +143,10 @@ get_joint_scale_values <- function(r1_packed, r2_packed, match_scales, layer = "
 }
 
 
-# Per-observation worker for the governing-factors SHAP loop. TOP-LEVEL for the
-# same reason as interp_run_item / autofit_vgm_item: an inline lambda inside
-# compute_governing_factors would close
-# over that function's frame, so future would serialize df, df_clean, rf_model,
-# explainer_rf, imp, vip_agg, ale_prof, pdp_prof, old_plan AND shap_cl (the live
-# PSOCK cluster handle) to every SHAP worker, on top of the model copy already
-# inside the explainer. cancel_path is a PLAIN character path, never a closure,
-# and file.exists() consumes no RNG - so the per-observation L'Ecuyer streams,
-# and every SHAP value, are unchanged.
+# Per-observation worker of the Governing Factors SHAP loop. TOP-LEVEL (like
+# interp_run_item()): a lambda inside compute_governing_factors() would make
+# future serialize that whole frame, the live PSOCK cluster included, to every
+# SHAP worker. `cancel_path` is a plain path; file.exists() draws no RNG.
 gov_shap_item <- function(i, explainer, newdata, cancel_path = NULL) {
   if (!is.null(cancel_path) && file.exists(cancel_path)) {
     stop("Analysis cancelled by user.", call. = FALSE)
@@ -212,10 +171,8 @@ compute_governing_factors <- function(df, target_col, predictors, rf_ntree = 100
 
   if (nrow(df_clean) < 10) return(NULL) # Not enough data
 
-  # Cooperative cancellation, same file-flag contract as the classification
-  # pipeline: the module touches `cancel_file` from the main session and the
-  # worker aborts at its next checkpoint. The message is matched by the
-  # module's error handler; keep them in sync.
+  # Cooperative cancellation via a file flag the module touches; the message
+  # is matched by the module's error handler.
   check_cancel <- function() {
     if (!is.null(cancel_file) && file.exists(cancel_file)) {
       stop("Analysis cancelled by user.", call. = FALSE)
@@ -223,16 +180,13 @@ compute_governing_factors <- function(df, target_col, predictors, rf_ntree = 100
   }
   check_cancel()
 
-  # Everything that draws runs under the shared two-sided sandbox (with_seed,
-  # spatial_vgm.R). NOTE: the cluster-teardown on.exit() below is registered
-  # inside this block but belongs to THIS function's frame (the block is a
-  # promise evaluated in the caller's frame), so the cluster is still torn down
-  # at function exit, after the RNG state is restored - the same order as the
-  # hand-rolled sandbox this replaced.
+  # Everything that draws runs under with_seed(). The cluster-teardown
+  # on.exit() below belongs to THIS function's frame (the block is a promise
+  # evaluated here), so the cluster is torn down at exit, after the RNG state
+  # is restored.
   with_seed(12345, {
-    # Matrix interface, not a formula: the formula method re-reads column names
-    # through make.names() and fails on a target such as "Total N (%)" or a
-    # predictor such as "soil moisture". The forest is the same.
+    # Matrix interface: the formula method's make.names() fails on names such
+    # as "Total N (%)".
     rf_model <- randomForest::randomForest(x = df_clean[, predictors, drop = FALSE],
                                            y = df_clean[[target_col]],
                                            ntree = rf_ntree, importance = TRUE)
@@ -245,15 +199,11 @@ compute_governing_factors <- function(df, target_col, predictors, rf_ntree = 100
       verbose = FALSE
     )
 
-    # Importance is Breiman's (2001) permutation importance on the OUT-OF-BAG
-    # rows: for every tree, the increase in the MSE of its out-of-bag
-    # predictions when one predictor is permuted, averaged over the trees.
-    # A forest reproduces its own training rows closely, so permuting on the
-    # rows it was grown on scores what the forest memorised as well as what it
-    # learned; the out-of-bag rows are the ones each tree never saw. The
-    # unscaled increase ranks the factors; the scaled form randomForest prints
-    # as %IncMSE (divided by its standard error across trees) is kept beside
-    # it, but it grows with ntree and is not a z-score (Strobl & Zeileis 2008).
+    # Breiman's (2001) out-of-bag permutation importance: per tree, the rise in
+    # OOB MSE when one predictor is permuted, averaged (the training rows would
+    # also score what the forest memorised). The unscaled rise ranks; the scaled
+    # %IncMSE is kept beside it but grows with ntree and is not a z-score
+    # (Strobl & Zeileis 2008).
     imp <- randomForest::importance(rf_model, type = 1, scale = FALSE)
     imp_scaled <- randomForest::importance(rf_model, type = 1, scale = TRUE)
     vip_agg <- data.frame(variable = rownames(imp), mse_increase = unname(imp[, 1]),
@@ -272,16 +222,12 @@ compute_governing_factors <- function(df, target_col, predictors, rf_ntree = 100
     set.seed(12345)
     sample_idx <- sample(seq_len(nrow(df_clean)), min(shap_sample_size, nrow(df_clean)))
 
-    # Per-observation SHAP is embarrassingly parallel. This runs inside the
-    # gov-module future_promise worker, where the nested plan is sequential, so
-    # escalate only for workloads big enough to amortize worker startup.
-    # seed = TRUE gives each observation its own L'Ecuyer RNG stream, making
-    # results identical under any plan (sequential or parallel).
-    # A PSOCK worker reports availableCores() = 1 (the same constraint the run
-    # pipeline hits), so the caller passes the core count in from the main
-    # session (cores_hint); the in-process default keeps direct calls (tests,
-    # scripts) working. The cluster is owned explicitly and torn down on exit,
-    # with mc.cores restored for the reused promise worker.
+    # SHAP per observation is embarrassingly parallel. Inside the module's
+    # worker the nested plan is sequential, so escalate only for large enough
+    # workloads; seed = TRUE gives each observation its own L'Ecuyer stream, so
+    # results are identical under any plan. A PSOCK worker sees one core, so
+    # the main session passes `cores_hint`. The cluster is torn down on exit and
+    # mc.cores restored for the reused worker.
     if (is.null(cores_hint)) {
       cores_hint <- tryCatch(as.integer(future::availableCores()), error = function(e) 1L)
     }
@@ -300,12 +246,8 @@ compute_governing_factors <- function(df, target_col, predictors, rf_ntree = 100
       shap_cl <- parallelly::makeClusterPSOCK(n_shap_workers)
       future::plan(future::cluster, workers = shap_cl)
     }
-    # gov_shap_item is TOP-LEVEL (see its note above): plain-data arguments only,
-    # so nothing from this frame is serialized to the SHAP workers. Subsetting
-    # the predictor columns once here is identical to a per-observation
-    # df_clean[i, predictors, ] (column-then-row and row-then-column subsetting
-    # of a data.frame agree, row names included) and hands each worker a frame
-    # without the target column.
+    # gov_shap_item() takes plain data only; the predictor columns are subset
+    # once, without the target.
     shap_nd <- df_clean[, predictors, drop = FALSE]
     shap_list <- furrr::future_map(sample_idx, gov_shap_item,
       explainer = explainer_rf, newdata = shap_nd, cancel_path = cancel_file,
@@ -313,21 +255,15 @@ compute_governing_factors <- function(df, target_col, predictors, rf_ntree = 100
     shap_df <- do.call(rbind, shap_list)
     check_cancel()
 
-    # predict_parts(type = "shap") returns B+1 rows per variable: the aggregated
-    # attribution (B == 0) plus one row per permutation. Summing them inflates the
-    # value by a factor of B+1, so only the aggregated B == 0 row is used.
-    # ONE pass: the previous per-observation subset rescanned all
-    # shap_sample_size x (B+1) x n_predictors rows for each sampled observation
-    # (three full-length comparisons each). Filtering once and grouping by obs_id
-    # gives identical values (the per-observation mean of the same rows).
+    # predict_parts(type = "shap") returns B + 1 rows per variable; only the
+    # aggregated B == 0 row is the attribution (summing would inflate it).
     top_rows <- shap_df[shap_df$variable_name == top_var & shap_df$B == 0, , drop = FALSE]
     contrib_by_obs <- if (nrow(top_rows) > 0) {
       tapply(top_rows$contribution, as.character(top_rows$obs_id), mean)
     } else {
       numeric(0)
     }
-    # as.numeric(): tapply returns a 1-d array, and the column must be plain
-    # numeric like the sapply() it replaces.
+    # as.numeric(): tapply returns a 1-d array.
     contribution <- as.numeric(contrib_by_obs[as.character(sample_idx)])
     contribution[is.na(contribution)] <- 0
 
@@ -344,8 +280,7 @@ compute_governing_factors <- function(df, target_col, predictors, rf_ntree = 100
       ale = ale_df,
       pdp = pdp_df,
       shap = shap_val_df,
-      # The forest is fitted on the rows complete across the target and every
-      # predictor; report that sample so a silent drop cannot pass unnoticed.
+      # Rows complete across target and predictors, so a silent drop shows.
       n_used = nrow(df_clean),
       n_total = nrow(df)
     )
@@ -379,16 +314,12 @@ crs_metre_factor <- function(crs) {
   if (length(f) == 1 && is.finite(f) && f > 0) f else NA_real_
 }
 
-#' Reproject a finished surface (in the working CRS) into the Target Mapping
-#' CRS. When the two are the same system (terra::same.crs, which equates a
-#' proj4 UTM and its EPSG code but not two datums) the surface is relabelled,
-#' not resampled: terra::project() onto the same system rewrote every cell at
-#' float precision (up to 3e-8 relative on the golden digest) to change only
-#' the CRS's spelling, which the file now carries as the target's EPSG code.
-#' Another projected CRS gets cells of the run's resolution `res_m` (metres)
-#' on one lattice (origin 0): terra's own choice gives a 30 m grid 30.10 m
-#' cells from UTM 35N to 36N, and per-locality origins that the merged surface
-#' would have to resample. A geographic target keeps terra's choice of degrees.
+#' Reproject a finished surface (working CRS) into the Target Mapping CRS. The
+#' same system (terra::same.crs) is relabelled, not resampled, which would
+#' rewrite every cell at float precision. Another projected CRS gets cells of
+#' the run's resolution `res_m` (metres) on one lattice with origin 0, so
+#' localities merge without resampling and cell sizes stay exact; a
+#' geographic target keeps terra's choice of degrees.
 project_to_target <- function(r, crs_sel, res_m) {
   if (terra::same.crs(r, crs_sel)) {
     terra::crs(r) <- crs_sel
@@ -424,27 +355,15 @@ validate_and_project_sf <- function(pts_sf) {
   return(pts_sf)
 }
 
-#' Samples whose projected coordinates agree to `dp` decimals (1 cm) are one
-#' location. Numeric columns become the mean of the group's non-missing values
-#' (NA when all are missing), the geometry the group's mean coordinate, the CV
-#' row id (CV_ROW_ID_COL) the smallest id, any other column the value of the
-#' smallest-id row ("smallest id" is first appearance when the column is
-#' absent). With `count = TRUE` a `.mn_n_rep` column counts the rows (display
-#' set only). Output rows follow the table order of each group's first row.
-#' attr(, "merged") = c(groups, rows): the locations that carried two or more
-#' samples and how many rows they held; absent when nothing merged.
-#'
-#' Averaging is the standard estimate of a location's value from replicate
-#' samples: it uses every measurement and does not depend on file order. When
-#' no location repeats, the input comes back unchanged, so duplicate-free data
-#' keep their geometry, values, row order and fold assignment bit for bit.
-#'
-#' Each column named in `majority` (a class label: character or factor) takes
-#' instead the group's most frequent non-missing value, compared as text; a
-#' factor keeps its levels. A tie for most frequent, like a group with no
-#' value, gives NA, so the result never depends on file order.
-#' attr(, "majority_ties") counts, per such column, the locations a tie left
-#' at NA (set only when something merged).
+#' Merge samples whose projected coordinates agree to `dp` decimals (1 cm):
+#' numeric columns become the mean of the non-missing values (NA when none),
+#' the geometry the mean coordinate, CV_ROW_ID_COL the smallest id, any other
+#' column the smallest-id row's value. Columns in `majority` (class labels)
+#' take the most frequent non-missing value instead (a tie, like no value,
+#' gives NA; factors keep their levels). `count = TRUE` adds `.mn_n_rep`.
+#' Output follows each group's first row; data without repeats come back
+#' unchanged. attr(, "merged") = c(groups, rows) when something merged, and
+#' attr(, "majority_ties") counts the ties per `majority` column.
 merge_colocated <- function(pts_sf, dp = 2, count = FALSE, majority = character(0)) {
   if (is.null(pts_sf) || nrow(pts_sf) == 0) return(pts_sf)
   cc <- sf::st_coordinates(pts_sf)
@@ -523,12 +442,10 @@ replicate_merge_note <- function(l, n_rep) {
           l, length(multi), if (length(multi) == 1L) "" else "s", span, sum(multi))
 }
 
-# Build the point set for one interpolation surface: drop rows whose `target`
-# value is NA FIRST, then merge co-located samples (merge_colocated), so every
-# value of a fitted location - target, covariates, coordinates - comes from the
-# rows that measured the target: the pairs the model is fitted on. The variogram
-# preview and the manual-tuning bounds build their point sets the same way.
-# Returns an sf with refreshed x/y columns.
+# The point set of one interpolation surface: rows with a missing `target`
+# dropped FIRST, then co-located samples merged, so every value of a fitted
+# location comes from the rows that measured the target (as in the variogram
+# preview and the manual-tuning bounds). Returns an sf with refreshed x/y.
 dedup_valid_points <- function(pts_sf, target) {
   pts_sf <- pts_sf[!is.na(pts_sf[[target]]), ]
   if (nrow(pts_sf) == 0) return(pts_sf)
@@ -538,14 +455,11 @@ dedup_valid_points <- function(pts_sf, target) {
 }
 
 #' The two row sets of a co-kriging surface. `t`: every location with a
-#' measured `target`, built as dedup_valid_points() builds every fitted set, so
-#' its rows, row ids and order are those Ordinary Kriging's Native population
-#' holds. `x`: the locations with no measured target that measure at least one
-#' of `aux_vars` (the heterotopic rows; empty on isotopic data). A covariate
-#' value at a location is the mean of EVERY sample there that measured it,
-#' whether or not that sample carried the target (co-located samples merged
-#' across all rows first); the target keeps the mean of the samples that
-#' measured it.
+#' measured `target`, built as dedup_valid_points() builds it (OK's Native
+#' population). `x`: locations without the target that measure at least one
+#' of `aux_vars` (empty on isotopic data). A covariate's value at a location
+#' is the mean of EVERY sample there that measured it; the target keeps the
+#' mean of the samples that measured it.
 ck_design_rows <- function(pts_all, target, aux_vars) {
   cc <- sf::st_coordinates(pts_all)
   key <- paste(round(cc[, 1], 2), round(cc[, 2], 2))
@@ -567,11 +481,10 @@ ck_design_rows <- function(pts_all, target, aux_vars) {
   list(t = t_rows, x = x_rows)
 }
 
-#' A boundary uploaded without a .prj carries no CRS; it is taken to be in the
-#' Input Data CRS (the CRS of the sample coordinates), which is what the upload
-#' notice promises. One rule for the pipeline, the Data Setup note and the
-#' Classification Suite's polygon scope. A layer that has a CRS, or an
-#' unparseable `crs`, is returned unchanged.
+#' A boundary without a .prj is taken to be in the Input Data CRS, as the
+#' upload notice says (one rule for the pipeline, Data Setup and the
+#' Classification Suite). A layer with a CRS, or an unparseable `crs`, is
+#' returned unchanged.
 shp_assume_crs <- function(shp, crs) {
   if (is.null(shp) || !is.na(sf::st_crs(shp))) return(shp)
   co <- suppressWarnings(tryCatch(sf::st_crs(crs), error = function(e) NULL))
@@ -579,12 +492,9 @@ shp_assume_crs <- function(shp, crs) {
   sf::st_set_crs(shp, co)
 }
 
-#' An uploaded boundary as polygons. Polygon layers pass through unchanged;
-#' point or line layers become the convex hull of all their features (one row),
-#' the same treatment classif_scope_polygons() gives them. NULL when the hull
-#' does not enclose an area (fewer than 3 non-collinear vertices). Without this,
-#' a point layer reached the grid clip as a MULTIPOINT boundary of zero area and
-#' the locality failed.
+#' An uploaded boundary as polygons: polygon layers pass through; point or line
+#' layers become the convex hull of all features (as in
+#' classif_scope_polygons()). NULL when the hull encloses no area.
 shp_boundary_polygons <- function(shp) {
   is_poly <- function(g) all(as.character(sf::st_geometry_type(g)) %in% c("POLYGON", "MULTIPOLYGON"))
   if (is.null(shp) || length(sf::st_geometry(shp)) == 0) return(NULL)
@@ -632,12 +542,10 @@ AUTO_RES_MAX <- 1000
 
 #' Auto grid resolution from sampling density (Hengl 2006):
 #' p = min(0.0791 * sqrt(A / N), h / 2), bounded to [AUTO_RES_MIN,
-#' AUTO_RES_MAX] m, where A is the boundary area (m^2), N the number of
-#' distinct sample locations and h their mean nearest-neighbour distance (m).
-#' p <= h / 2 is the coarsest-legible condition; it binds only for clustered
-#' designs such as transects. With fewer than two locations or no finite
-#' spacing only the first term applies. The 1 m floor is the Fixed slider's own
-#' minimum: the cell count scales with N and cannot explode on a small boundary.
+#' AUTO_RES_MAX] m; A = boundary area (m^2), N = distinct sample locations,
+#' h = their mean nearest-neighbour distance (m). p <= h / 2 binds only for
+#' clustered designs such as transects; without a finite spacing only the
+#' first term applies.
 auto_grid_resolution <- function(area_m2, n, mean_nn) {
   p <- HENGL_POINT_FACTOR * sqrt(area_m2 / n)
   if (isTRUE(n >= 2) && isTRUE(is.finite(mean_nn))) p <- min(p, mean_nn / 2)
@@ -652,12 +560,10 @@ locality_auto_resolution <- function(bound, pts) {
                        calc_metric_spacing(pts)$mean_nn)
 }
 
-#' Raster template with SQUARE cells of exactly `res`, covering `bbox`.
-#' terra::rast(ext, resolution = res) keeps the extent and stretches the cells
-#' to fit it (a 1000 x 800 m box at 45 m gives 45.45 x 44.44 m cells), so the
-#' extent grows to whole cells instead, anchored at the box's lower-left corner.
-#' `snap = TRUE` anchors at the lattice of multiples of `res` in the CRS, so
-#' every locality gridded at the same `res` in the same CRS shares one lattice.
+#' Raster template with SQUARE cells of exactly `res` covering `bbox`: the
+#' extent grows to whole cells from the lower-left corner (terra::rast(ext,
+#' resolution) would stretch the cells instead). `snap = TRUE` anchors on
+#' multiples of `res`, so localities share one lattice.
 grid_template <- function(bbox, res, crs_wkt, snap = FALSE) {
   xmin <- bbox[["xmin"]]
   ymin <- bbox[["ymin"]]
@@ -686,26 +592,19 @@ grid_template <- function(bbox, res, crs_wkt, snap = FALSE) {
 
   pts_raw <- sf::st_as_sf(pts_raw, coords=c("x","y"), crs=current_crs)
 
-  # The locality is projected ONCE, from every row carrying coordinates,
-  # BEFORE any covariate filter. The working CRS - for a geographic upload,
-  # the UTM zone of the locality's centre - is a property of the locality,
-  # not of which covariates happen to be selected. Filtering first let OK and
-  # RK/RFK/CK land in different zones, so their coordinates, variogram lags
-  # and spatial folds described different grids. A no-op for metre-projected
-  # input, where validate_and_project_sf returns its argument.
+  # Projected ONCE, from every row with coordinates, BEFORE any covariate
+  # filter: the working CRS is a property of the locality, so OK and
+  # RK/RFK/CK share zone, lags and folds.
   pts_all <- validate_and_project_sf(pts_raw)
 
   if(nrow(pts_all) < 3) {
     return(list(ok = FALSE, msg = paste0("Warning in ", l, ": Insufficient data points after UTM conversion (needed >= 3, got ", nrow(pts_all), ").")))
   }
 
-  # The rows complete for every selected covariate: what RK/RFK map with, and
-  # the CV population OK scores under the Comparable switch. Computed only
-  # where it is used - IDW and TPS can carry a stale covariate selection that
-  # the dispatch never validated, and all_of() would stop on a name the
-  # uploaded table no longer has. CK maps with every row: a location that
-  # measures a covariate but not the target enters that covariate's data
-  # (heterotopic co-kriging, ck_design_rows).
+  # Rows complete for every selected covariate: RK/RFK map with them, and OK
+  # scores them under the Comparable switch. Only computed where used (IDW/TPS
+  # may carry a stale selection). CK maps with every row (heterotopic,
+  # ck_design_rows()).
   uses_covariates <- current_method %in% c("RK", "RFK") ||
     (identical(current_method, "OK") && identical(m_params$cv_population, "comparable"))
   covariate_complete <- if (uses_covariates && length(aux_vars) > 0) {
@@ -718,12 +617,9 @@ grid_template <- function(bbox, res, crs_wkt, snap = FALSE) {
     return(list(ok = FALSE, msg = paste0("Warning in ", l, ": Insufficient data points after covariate filtering (needed >= 3, got ", nrow(pts_projected), ").")))
   }
 
-  # The DISPLAY set: co-located samples merged (merge_colocated), NOT filtered
-  # on the target. A location's target value is the replicate mean over the
-  # rows that measured it, the value the fitted set (dedup_valid_points) carries
-  # for it; a location none of whose rows measured the target keeps v = NA and
-  # is styled apart on the map (add_styled_points, value_col). `.mn_n_rep`
-  # counts the merged rows for the point pop-up.
+  # The DISPLAY set: co-located samples merged, NOT filtered on the target. A
+  # location's value is the mean over the rows that measured it; one with none
+  # keeps NA and is styled apart on the map. `.mn_n_rep` feeds the pop-up.
   pts <- merge_colocated(pts_projected, count = TRUE)
   if(nrow(pts) < 3) {
     return(list(ok = FALSE, msg = paste0("Warning in ", l, ": Insufficient distinct sample locations after merging co-located samples (needed >= 3, got ", nrow(pts), ").")))
@@ -797,9 +693,7 @@ grid_template <- function(bbox, res, crs_wkt, snap = FALSE) {
         } else NULL
       }, error = function(e) NULL)
       if (is.null(local_shp)) {
-        # The user supplied a boundary shapefile but it cannot be applied to
-        # this locality (projection failure or no spatial overlap); say so
-        # instead of silently swapping in the point-derived boundary.
+        # Say so rather than silently using the point-derived boundary.
         msg <- if (length(shp_shared)) {
           "Uploaded boundary has features shared by several run localities, and no unshared feature could be applied here; using the selected sidebar boundary. Add an attribute column containing locality names to assign features explicitly."
         } else "Uploaded shapefile boundary could not be applied (projection or overlap issue); using point-derived boundary."
@@ -901,11 +795,8 @@ run_regional_interpolation <- function(item, current_method, current_crs, aux_va
 
     bbox <- sf::st_bbox(bound)
 
-    # The raster template spans the whole bounding box before the boundary
-    # clip, so a fine resolution over a large extent puts hundreds of millions
-    # of candidate cells through the clip. Cap the candidate grid at ~4M cells,
-    # matching the floor classif_build_grid applies to both of its resolution
-    # modes. Fires only in that pathological case.
+    # The template spans the whole bounding box before the clip, so cap the
+    # candidate grid at ~4M cells (as classif_build_grid() does).
     cap_res <- function(res, what) {
       dx <- as.numeric(bbox["xmax"] - bbox["xmin"])
       dy <- as.numeric(bbox["ymax"] - bbox["ymin"])
@@ -916,10 +807,8 @@ run_regional_interpolation <- function(item, current_method, current_crs, aux_va
           what, res,
           format(.INTERP_MAX_CANDIDATE_CELLS, big.mark = ",", scientific = FALSE),
           min_res_cap)
-        # Two channels, for the reason spelled out at the strict-buffer check
-        # below: the progress panel keeps one warning per locality and closes
-        # with the run, so the [WARN] log line is what still tells the user the
-        # surface was not computed at the size they asked for.
+        # Both channels: the progress panel keeps one warning per locality and
+        # closes with the run; the [WARN] log line persists.
         write_warning_file(l, "act", msg)
         res_out$log_msg <<- paste0(res_out$log_msg, "\n[WARN] ", l, ": ", msg)
         res <- min_res_cap
@@ -931,73 +820,48 @@ run_regional_interpolation <- function(item, current_method, current_crs, aux_va
 
     if (!is.null(res_mode) && res_mode == "fixed") {
       actual_res <- cap_res(grid_res_safe, "Fixed grid resolution")
-      # Absolute sanity floor only. The slider itself stops at 1 m, but a
-      # restored run-config could carry any value, and a sub-decimetre grid over
-      # any real extent is a memory accident rather than an intent.
+      # Sanity floor: the slider stops at 1 m, but a restored config may not.
       actual_res <- max(actual_res, 0.1)
     } else if (shared_grid) {
-      # Auto (Global): one cell size for every locality of the run, the finest
-      # of their own Auto sizes (shared_auto_resolution), on one snapped
-      # lattice. A strict-buffer boundary can span a far larger box than its
-      # area suggests, hence the same cap as Fixed.
+      # Auto (Global): one cell size for every locality (the finest of their
+      # own Auto sizes, shared_auto_resolution()) on one snapped lattice;
+      # capped as Fixed, since a strict buffer can span a far larger box.
       actual_res <- cap_res(shared_res, "Shared Auto (Global) resolution")
     } else {
-      # Auto (Per Locality): this locality's own sampling density
-      # (locality_auto_resolution, Hengl 2006). It never reads grid_res: that
-      # slider is hidden outside Fixed mode (ui_sidebar.R) and holds the
-      # dataset-wide suggestion there (server_data_setup.R), which describes no
-      # single locality.
+      # Auto (Per Locality): this locality's own sampling density (Hengl 2006).
+      # grid_res is hidden outside Fixed and holds a dataset-wide suggestion.
       if (identical(res_mode, "global")) {
         write_warning_file(l, "act", "The shared Auto (Global) resolution could not be computed; this locality uses its own Auto resolution.")
       }
-      # Capped like the other two modes: a strict point-buffer boundary
-      # occupies a small fraction of its own bounding box, which is what the
-      # template spans.
+      # Capped too: a strict point-buffer boundary fills a small share of its box.
       actual_res <- cap_res(locality_auto_resolution(bound, pts), "Auto grid resolution")
     }
 
-    # Authoritative strict-boundary coherence check: only here is the effective
-    # resolution known for every mode (Auto derives it from this locality's own
-    # boundary and samples, so no pre-run UI advisory can be exact). A buffer below
-    # half the cell diagonal silently drops the cells of isolated samples, which
-    # reads as sampled points sitting on blank map. Advisory only - the run is
-    # scientifically valid, the support is just under-resolved.
+    # Authoritative strict-buffer check: only here is the effective resolution
+    # known in every mode. Advisory only (the run is valid, the support
+    # under-resolved).
     if (identical(b_type, "strict") && is.null(local_shp)) {
-      # res_floor 1: the corrective cell size is set on the Fixed slider, which
-      # reaches 1 m. In an Auto mode that means switching to Fixed, the same
-      # move a 5 m suggestion would need.
+      # res_floor 1: the corrective size is set on the Fixed slider (1 m minimum).
       sb_msg <- strict_buffer_message(b_dist_local, actual_res, res_floor = 1)
       if (!is.null(sb_msg)) {
-        # Two channels, because neither alone reaches the user reliably. The
-        # progress panel holds ONE warning per locality/prefix (.write_status_file
-        # truncates), so a later engine fallback or VIF note overwrites this one
-        # mid-run. The [WARN] tag makes the durable log line double as a
-        # notification through the rv$log observer in server_sci_analysis.R,
-        # which is what gives the Auto resolution modes - the ones the sidebar
-        # advisory cannot cover - the same visibility the Classification Suite
-        # gets from its own showNotification.
+        # Both channels: the progress panel keeps one warning per surface (a
+        # later note overwrites it), and the [WARN] log line also raises a
+        # notification (server_sci_analysis.R), covering the Auto modes the
+        # sidebar advisory cannot.
         write_warning_file(l, "act", sb_msg)
         res_out$log_msg <- paste0(res_out$log_msg, "\n[WARN] ", l, ": ", sb_msg)
       }
     }
 
-    # Fixed and Auto (Global) grids sit on one lattice of multiples of the cell
-    # size, so localities that share a working CRS and a cell size share their
-    # cells: terra::merge resamples every raster whose origin differs from the
-    # first one's, which interpolated the merged surface of every locality but
-    # one. Auto (Per Locality) gives each locality its own cell size, so its
-    # grids start at their own boundary's corner.
+    # Fixed and Auto (Global) grids snap to one lattice of multiples of the
+    # cell size, so terra::merge need not resample localities onto the first
+    # one's origin. Auto (Per Locality) grids start at their boundary's corner.
     grid_r <- grid_template(bbox, actual_res, sf::st_crs(pts)$wkt,
                             snap = shared_grid || identical(res_mode, "fixed"))
 
-    # Cell centres as a plain MATRIX first. An sfc_POINT stores every node as its
-    # own classed numeric(2), ~430 bytes per cell against 16 for a matrix row:
-    # measured, a 1e6-cell bounding box costs 427 MB as an sf object (848 MB peak,
-    # 10.8 s to build), and the Fixed-mode ~4M-cell cap above extrapolates to
-    # ~1.7 GB - per locality, inside a nested PSOCK worker, with up to
-    # availableCores()-1 of them live, and roughly 3x that again for RK/RFK once
-    # grid_aux and res_sf exist. terra::crds returns exactly the centres
-    # terra::as.points does, in the same cell order, at matrix cost.
+    # Cell centres as a plain MATRIX first: an sfc_POINT costs ~430 bytes per
+    # cell against 16 (a 1e6-cell box: 427 MB as sf), per locality inside a
+    # nested worker. terra::crds gives the same centres in the same order.
     grid_xy <- terra::crds(grid_r, na.rm = FALSE)
 
     # `i` is either a start index paired with `e` (a contiguous block) or a
@@ -1008,19 +872,10 @@ run_regional_interpolation <- function(item, current_method, current_crs, aux_va
                    coords = c("x", "y"), crs = sf::st_crs(pts))
     }
 
-    # All engines predict pointwise, so cells outside the boundary - which the
-    # post-interpolation mask discards anyway - can be dropped up front. This
-    # cuts kriging cost substantially for concave/multi-part boundaries with
-    # zero change to within-boundary values. Testing in BLOCKS is what keeps the
-    # peak at one block plus the survivors instead of the whole bounding box:
-    # for a concave, wrapped or multi-part boundary the bbox routinely carries
-    # 1.5-3x the cells that survive, and a single-pass clip would run only after
-    # all of them existed. Same st_intersects predicate, same surviving rows, same
-    # order, same columns as the single-pass form. Only the keep MASK survives
-    # the loop (1 byte per bounding-box cell, ~4 MB at the ~4M-cell cap), never
-    # the surviving blocks: holding the blocks and then rbind()-ing them kept
-    # the survivors alive TWICE at the bind - measured 618 MB where 309 MB
-    # suffices, on a 1e6-cell box retaining 750,000 cells.
+    # Every engine predicts pointwise, so cells outside the boundary are dropped
+    # up front (same values inside). The clip runs in BLOCKS and keeps only a
+    # logical mask, so the peak is one block plus the survivors, not the whole
+    # bounding box.
     keep_mask <- tryCatch({
       blk_g <- max(1L, as.integer(.GRID_CLIP_BLOCK_CELLS))
       n_bbox <- nrow(grid_xy)
@@ -1035,17 +890,12 @@ run_regional_interpolation <- function(item, current_method, current_crs, aux_va
     }, error = function(e) NULL)
 
     if (is.null(keep_mask)) {
-      # Predicate failed (degenerate boundary geometry): fall back to the
-      # unclipped grid, exactly as the `inside <- NULL` branch did.
+      # Predicate failed (degenerate boundary geometry): use the unclipped grid.
       grid_p <- grid_block(1L, nrow(grid_xy))
     } else if (!any(keep_mask)) {
-      # A coarse cell size over a small boundary can leave NO grid node inside
-      # it - a Fixed value, or the shared Auto (Global) size taken from a much
-      # larger boundary elsewhere in the run. The engines would then krige the full bbox and the mask
-      # would discard every cell - a blank locality with no message, after
-      # paying for the whole interpolation. Name the cause and skip instead
-      # (the surface was all-NA in this state before; nothing displayable is
-      # lost). classif_build_grid stops loudly in the same situation.
+      # A coarse cell over a small boundary (Fixed, or a shared Auto (Global)
+      # size) can leave NO node inside: name the cause and skip instead of
+      # kriging the whole box into a blank map (classif_build_grid() stops too).
       write_warning_file(l, "act", sprintf(
         "No grid node falls inside this locality's boundary at %.1f m resolution; the surface would be empty. %s",
         actual_res,
@@ -1060,35 +910,24 @@ run_regional_interpolation <- function(item, current_method, current_crs, aux_va
     }
     rm(grid_xy, keep_mask)
 
-    # x/y attached ONCE, after the clip: the column order is (geometry, x, y)
-    # whatever the block count, and it is one st_coordinates pass over the
-    # survivors rather than over the whole bounding box.
+    # x/y attached once after the clip, over the survivors only.
     grid_cc <- sf::st_coordinates(grid_p)
     grid_p <- dplyr::mutate(grid_p, x = grid_cc[, 1], y = grid_cc[, 2])
     rm(grid_cc)
 
-    # The map's locations as the cross-validation reads them, for every
-    # strategy: kNNDM matches its folds to them, and the CV Distance Match
-    # panel compares any strategy's folds with them. A lattice inside the
-    # boundary, independent of the cell size, so the folds follow the boundary
-    # and never the resolution; the grid itself only where the boundary yields
-    # no lattice.
+    # The map's locations for the CV (kNNDM folds, CV Distance Match panel): a
+    # lattice inside the boundary, independent of the cell size; the grid only
+    # where the boundary yields no lattice.
     cv_domain_xy <- tryCatch(knndm_domain_points(bound, grid_xy = cbind(grid_p$x, grid_p$y)),
                              error = function(e) NULL)
 
     r_a <- NULL; r_p <- NULL
 
-    # The per-surface point sets are built BEFORE the covariate surfaces so the
-    # VIF gate can be resolved first: a covariate the gate will drop otherwise
-    # costs a full global kriging over the prediction grid (plus its own
-    # robust_vgm_fit candidate search, 4 models x 4 start ranges) before
-    # predict.lm/predict.randomForest silently ignores the surplus column.
-    # The gate must see the frames the engines actually fit - pts_a/pts_p are
-    # NA-filtered THEN deduped, while `pts` is only coordinate-deduped, so
-    # running it on `pts` could pick a different kept set and change results.
-    # Co-kriging splits every row into target locations (its fitted set and
-    # CV population) and covariate-only locations (ck_design_rows), and
-    # resolves its own collocation rule and screen on them (apply_CK).
+    # Per-surface point sets come BEFORE the covariate surfaces so the VIF gate
+    # resolves first (a covariate it drops would otherwise be kriged over the
+    # whole grid for nothing). The gate must see the frames the engines fit
+    # (NA-filtered, then deduplicated), not `pts`. CK splits target and
+    # covariate-only locations (ck_design_rows()) and gates itself in apply_CK().
     run_pre <- comp_mode || val_type != "actual"
     ck_a <- NULL; ck_p <- NULL
     if (identical(current_method, "CK")) {
@@ -1100,14 +939,11 @@ run_regional_interpolation <- function(item, current_method, current_crs, aux_va
       pts_p <- if (run_pre) dedup_valid_points(pts_projected, "pv") else NULL
     }
 
-    # Which samples each surface is cross-validated on. RK/RFK can only use
-    # the covariate-complete rows. OK maps every sample with a measured target
-    # and scores those by default (Native); under the Comparable switch it is
-    # TRAINED AND SCORED on the covariate-complete rows instead, deduplicated
-    # and folded exactly as RK and RFK fold them, so a comparison between
-    # engines rests on the same samples and the same partition. The OK map
-    # still uses every sample either way. CK scores every location with a
-    # measured target, the population OK Native scores.
+    # The CV population of each surface. RK/RFK: the covariate-complete rows.
+    # OK: every sample with a target (Native) or, under Comparable, trained AND
+    # scored on the covariate-complete rows folded as RK/RFK fold them, so the
+    # engines compare on the same samples and partition (the OK map still uses
+    # every sample). CK: the Native population.
     ok_comparable <- identical(current_method, "OK") &&
       identical(m_params$cv_population, "comparable") && length(aux_vars) > 0
     cv_pop_label <- if (current_method %in% c("RK", "RFK")) "common rows"
@@ -1117,10 +953,8 @@ run_regional_interpolation <- function(item, current_method, current_crs, aux_va
       if (!ok_comparable) return(surface_pts)
       dedup_valid_points(covariate_complete, target)
     }
-    # A population too small to fold leaves the engine's own CV plan unset; the
-    # engine then stops its CV with a named message and still draws the map.
-    # Only the kriging engines read a plan: IDW and TPS fold their own point
-    # set, so nothing is built for them.
+    # Below 3 samples no plan is built and the engine skips its CV with a named
+    # message (the map still runs). IDW and TPS fold their own point set.
     attach_cv_plan <- function(mp, pop, prefix) {
       if (is.na(cv_pop_label)) return(mp)
       mp$cv_data <- pop
@@ -1145,10 +979,8 @@ run_regional_interpolation <- function(item, current_method, current_crs, aux_va
            screen = res_list$cv_screen,
            vgm_status = res_list$cv_vgm_status)
     }
-    # The run-log line of a kNNDM request (knndm_log_line): the record the
-    # scored folds carry, else the plan's (a kriging CV that failed outright);
-    # nothing where no cross-validation ran. IDW and TPS fold their own point
-    # set, so their population is the surface's.
+    # The kNNDM run-log line: the scored folds' record, else the plan's (a
+    # kriging CV that failed outright); nothing where no CV ran.
     knndm_note <- function(mp, res_list, surface_pts, surface) {
       if (!identical(m_params$cv_strategy, "knndm")) return(NULL)
       info <- attr(res_list$cv_obj, "knndm") %||% attr(mp$cv_plan$folds[[1]], "knndm")
@@ -1161,14 +993,10 @@ run_regional_interpolation <- function(item, current_method, current_crs, aux_va
       if (is.null(p) || nrow(p) < 3) return(character(0))
       if (length(aux_vars) < 1) return(aux_vars)
       if (length(aux_vars) == 1) {
-        # The multicollinearity gate needs >= 2 covariates, so a sole
-        # degenerate covariate reaches the engines ungated. Every downstream
-        # path degrades visibly rather than wrongly (RK aliases the
-        # coefficient to an intercept-only trend, RFK grows a bagged-mean
-        # trend) - but nothing names the cause, so say it here. It is
-        # deliberately passed through, not dropped: emptying aux_vars would
-        # turn a degraded-but-working run into a hard dispatch error. Message
-        # only, no numeric change. apply_CK names the same case for CK.
+        # The gate needs >= 2 covariates, so a sole degenerate covariate passes
+        # ungated (RK then fits an intercept-only trend, RFK a bagged mean).
+        # Kept rather than dropped, which would turn a degraded run into a
+        # dispatch error; the warning names the cause (apply_CK() does the same).
         if (.is_degenerate_covariate(sf::st_drop_geometry(p)[[aux_vars]])) {
           write_warning_file(l, prefix, paste0(
             "Covariate '", aux_vars, "' is (near-)constant in this locality; ",
@@ -1181,23 +1009,19 @@ run_regional_interpolation <- function(item, current_method, current_crs, aux_va
       tryCatch(screen_covariates(p, aux_vars, vif_threshold)$kept, error = function(e) NULL)
     }
 
-    # The covariate surfaces' IDW fallback (krige_covariates), in the map and in
-    # every RK/RFK fold: the default p = 2 whatever the target's IDW setting,
-    # because it interpolates a covariate, not the target, and Auto (-1) is not
-    # a power.
+    # The covariate surfaces' IDW fallback, in the map and every RK/RFK fold:
+    # p = 2 whatever the target's IDW setting (Auto, -1, is not a power).
     mp_cov_fallback <- list(idw_p = 2, idw_nmax = m_params$idw_nmax)
     grid_aux <- grid_p
     cov_log_msg <- ""
     aux_kept_a <- NULL; aux_kept_p <- NULL
-    # CK is gated too, inside apply_CK: its collocation rule and screen run on
-    # the target AND covariate-only locations, and it predicts the covariates
-    # jointly instead of reading a kriged covariate grid.
+    # CK gates itself in apply_CK() on target and covariate-only locations and
+    # predicts the covariates jointly.
     if (current_method %in% c("RK", "RFK") && length(aux_vars) > 0) {
         aux_kept_a <- resolve_aux_kept(pts_a, "act")
         aux_kept_p <- resolve_aux_kept(pts_p, "pre")
-        # Krige the union of the surfaces' kept sets (they can differ: the two
-        # surfaces have different NA patterns). If either gate failed, fall
-        # back to kriging everything so the engine's own gate still has data.
+        # Krige the union of the two surfaces' kept sets (NA patterns differ);
+        # if either gate failed, krige everything so the engine's gate has data.
         cov_vars <- if (is.null(aux_kept_a) || is.null(aux_kept_p)) aux_vars else union(aux_kept_a, aux_kept_p)
         dropped_cov <- setdiff(aux_vars, cov_vars)
         if (length(dropped_cov) > 0) {
@@ -1206,10 +1030,8 @@ run_regional_interpolation <- function(item, current_method, current_crs, aux_va
         }
         if (length(cov_vars) > 0) {
           lags_cov <- calc_scientific_lags(pts)
-          # Cancel checkpoint per covariate. This loop kriges every covariate
-          # over the full prediction grid, the longest stretch between the
-          # surrounding checks, and gstat's krige() is a black box, so one
-          # covariate is the coarsest interruptible unit available.
+          # Cancel checkpoint per covariate: the longest stretch between checks,
+          # and krige() cannot be interrupted.
           cov_cancel <- if (!is.null(cancel_file_val)) {
             function(i, total) {
               if (file.exists(cancel_file_val)) stop("Model generation cancelled by user.")
@@ -1222,14 +1044,9 @@ run_regional_interpolation <- function(item, current_method, current_crs, aux_va
     }
 
     if(nrow(pts_a) >= 3) {
-        # A target with no variance in this locality produces a flat surface, an
-        # is_fallback variogram and all-NA R2/NSE/CCC/RPD/RPIQ (those metrics are
-        # ratios against the observed variance, i.e. UNDEFINED here, not zero).
-        # Without this the user only sees the amber "fallback model" banner,
-        # which names the symptom rather than the cause. Message only.
-        # BOTH channels, like the grid-coarsening warning: the progress panel
-        # holds one warning per locality and surface and is gone the moment the
-        # maps are revealed, so the run log is what makes this survive.
+        # A constant target gives a flat surface, a fallback variogram and
+        # undefined (NA) ratio metrics; name the cause on both channels (the
+        # progress panel closes when the maps are revealed).
         if (.is_degenerate_covariate(pts_a$v)) {
           write_warning_file(l, "act", .degenerate_target_msg)
           res_out$log_msg <- paste0(res_out$log_msg, "
@@ -1247,9 +1064,8 @@ run_regional_interpolation <- function(item, current_method, current_crs, aux_va
         res_out$cv_reps_act <- res_a_list$cv_obj_reps
         res_out$tps_fit_act <- res_a_list$tps_fit
         res_out$idw_fit_act <- res_a_list$idw_fit
-        # detach_model_frame: the fitted model's terms otherwise carry this
-        # locality's whole pipeline frame (point set, grids, kriging output)
-        # back to the main session and into every archived copy of the run.
+        # detach_model_frame(): otherwise the model's terms carry this
+        # locality's whole frame back to the main session and every archive.
         res_out$summ_act <- detach_model_frame(res_a_list$model_summary); res_out$rf_act <- res_a_list$rf_model; res_out$gstat_act <- res_a_list$gstat_obj
         # Covariates the mapped model used and the ones the screen removed
         # (RK/RFK/CK only), and CK's data design, for the run configuration.
@@ -1260,15 +1076,9 @@ run_regional_interpolation <- function(item, current_method, current_crs, aux_va
         if (!is.null(kn_a)) res_out$log_msg <- paste0(res_out$log_msg, "\n", kn_a)
         if (cov_log_msg != "") res_out$log_msg <- paste0(res_out$log_msg, "\n", cov_log_msg)
         
-        # A non-NULL res_sf whose predictions are ALL NA is not a surface. It
-        # reaches here whenever the kriging system could not be solved - gstat
-        # returns NA per location rather than raising (measured: a zero-nugget
-        # model over near-coincident samples returns 100% NA silently) - and the
-        # rasterize/mask/project chain accepts it happily, so the locality was
-        # stored and displayed as a completed run with a blank map and an all-NA
-        # metrics row. Name it instead. The column test comes first because
-        # all(is.na(NULL)) is TRUE, which would skip a locality whose engine
-        # named its prediction column something else.
+        # An all-NA res_sf (an unsolvable kriging system; gstat returns NA
+        # silently) is not a surface: name it rather than store a blank map.
+        # The column test comes first because all(is.na(NULL)) is TRUE.
         if (!is.null(res_a_list$res_sf) &&
             "var1.pred" %in% names(res_a_list$res_sf) &&
             all(is.na(res_a_list$res_sf$var1.pred))) {
@@ -1280,21 +1090,12 @@ run_regional_interpolation <- function(item, current_method, current_crs, aux_va
             res_out$log_msg <- paste0(res_out$log_msg, "\n[WARN] ", l,
               ": the ", current_method, " surface is entirely undefined; locality skipped.")
         } else if(!is.null(res_a_list$res_sf)) {
-            # gstat::idw() returns an all-NA `var1.var` alongside var1.pred (IDW
-            # is an exact deterministic weighting; it has no prediction variance
-            # to report). Rasterizing it doubled the size of every IDW surface
-            # and shipped a blank second band into the GeoTIFF export. Gate on
-            # the METHOD, not just on the column: apply_TPS's IDW fallback also
-            # returns a gstat idw object, and only the kriging engines produce a
-            # meaningful variance. Mirrors the map viewer's own guard.
+            # Only the kriging engines have a variance band: gstat::idw() (and
+            # the TPS IDW fallback) return an all-NA var1.var.
             fields_a <- if(method_has_variance(current_method) && "var1.var" %in% colnames(res_a_list$res_sf)) c("var1.pred", "var1.var") else "var1.pred"
             r_a <- terra::rasterize(res_a_list$res_sf, grid_r, field=fields_a) %>% terra::mask(terra::vect(bound)) %>% project_to_target(crs_sel, actual_res)
-            # terra names a SINGLE-field rasterization "last", which then travels
-            # into the exported GeoTIFF as the band description (TPS surfaces
-            # always shipped that way). Name it after the field it holds; every
-            # consumer already prefers "var1.pred" when it is there. The
-            # multi-field case is left alone -- terra names those from the
-            # fields, and renaming blind could mislabel the variance band.
+            # terra names a single-field rasterization "last", which would
+            # become the GeoTIFF band description.
             if (length(fields_a) == 1L) names(r_a) <- fields_a
             res_out$r_a <- terra::wrap(r_a)
         }
@@ -1322,14 +1123,13 @@ run_regional_interpolation <- function(item, current_method, current_crs, aux_va
                                            "; the Predicted surface fits its own variogram.")
               }
             }
-            # The TPS counterpart: unseparated, a lambda on Auto (GCV) is the one
-            # GCV selects for the MEASURED values of the same rows, reselected in
-            # every CV fold from that fold's training rows. A fixed lambda is
-            # shared at dispatch already.
+            # TPS unseparated: Auto (GCV) selects lambda on the MEASURED values
+            # of the same rows, again in every fold (a fixed lambda is already
+            # shared at dispatch).
             if (current_method == "TPS" && isFALSE(m_params$sep_fit)) mp_p$tps_gcv_col <- "v"
-            # The IDW counterpart: on Auto (CV) the power is the one the measured
-            # values select, on all rows and again inside every CV fold. TPS
-            # carries it too, for its IDW fallback.
+            # IDW unseparated: Auto (CV) selects the power on the measured
+            # values, on all rows and in every fold (TPS carries it for its IDW
+            # fallback).
             if (current_method %in% c("IDW", "TPS") && isFALSE(m_params$sep_fit)) mp_p$idw_select_col <- "v"
             res_p_list <- apply_interpolation(pts_p, "pv", current_method, grid_p, aux_vars, lags_p, mp_p, l, "pre", vif_threshold)
             res_out$cv_info_pre <- cv_info_of(mp_p, res_p_list)
@@ -1367,12 +1167,8 @@ run_regional_interpolation <- function(item, current_method, current_crs, aux_va
     }
     
     if(!is.null(r_a) && !is.null(r_p)) {
-      # Difference the PREDICTION layers only. Both rasters can carry a
-      # var1.var layer, and subtracting the full stacks writes a
-      # "difference of two kriging variances" band into the residual raster —
-      # a quantity with no meaning. The in-app viewer was safe because
-      # raster_value_layer() picks var1.pred, but the exported residual GeoTIFF
-      # shipped the bogus second band.
+      # Difference the PREDICTION layers only: a difference of two kriging
+      # variances has no meaning.
       pred_layer <- function(r) if ("var1.pred" %in% names(r)) r[["var1.pred"]] else r[[1]]
       r_res <- pred_layer(r_a) - pred_layer(r_p)
       names(r_res) <- "var1.pred"
@@ -1383,28 +1179,22 @@ run_regional_interpolation <- function(item, current_method, current_crs, aux_va
     # errors on NA coordinates, which would abort the rest of this locality
     pts_err_raw <- pts_data %>% dplyr::filter(!is.na(x), !is.na(y), !is.na(v), !is.na(pv))
     if(nrow(pts_err_raw) >= 3) {
-        # pts_data carries the RAW uploaded coordinates in current_crs; they
-        # must be projected, not just stamped with utm_crs (stamping lon/lat
-        # degrees as UTM metres put every sample ~10^6 m from the grid and
-        # made the point-error surface near-constant for geographic uploads)
+        # The raw coordinates are in current_crs and must be projected, not
+        # stamped with utm_crs.
         pts_err <- sf::st_as_sf(pts_err_raw, coords=c("x","y"), crs=current_crs) %>%
                    sf::st_transform(utm_crs) %>%
                    dplyr::mutate(err = v - pv)
-        # Deliberate asymmetries with the model point sets: this diagnostic
-        # surface keeps co-located twins (gstat's idw tolerates them; each row
-        # is a real ML error) and uses a FIXED idp = 2 rather than the run's
-        # optimized power, so error surfaces stay comparable across methods.
+        # Deliberately unlike the model point sets: co-located rows are kept
+        # (each is a real ML error) and idp is fixed at 2, so error surfaces
+        # stay comparable across methods.
         err_mod <- gstat::idw(err ~ 1, pts_err, grid_p, nmax = m_params$idw_nmax %||% 12, idp = 2, debug.level = 0)
         r_err <- terra::rasterize(err_mod, grid_r, field="var1.pred") %>% terra::mask(terra::vect(bound)) %>% project_to_target(crs_sel, actual_res)
         res_out$r_point_err <- terra::wrap(r_err)
     }
     
-    # The CV object is the only carrier of cross-validation residuals, and it
-    # names the samples it scored through its own geometry: a surface's CV
-    # population need not be its point set (OK Comparable scores the covariate-
-    # complete rows), so a positional vector would have to match a point set it
-    # does not name. Join on the rounded-coordinate key, the same 2-dp key both
-    # dedup passes use; `pts` is coordinate-deduped, so the key is unique there.
+    # CV residuals are joined by sample position (the dedup passes' 2-dp
+    # coordinate key), not by row: a CV population need not be the point set
+    # (OK Comparable). `pts` is deduplicated, so the key is unique.
     coord_key <- function(s) {
       cc <- sf::st_coordinates(s)
       paste(round(cc[, 1], 2), round(cc[, 2], 2))
@@ -1423,9 +1213,8 @@ run_regional_interpolation <- function(item, current_method, current_crs, aux_va
 
     res_out$bound <- sf::st_transform(bound, crs_sel)
     res_out$pts <- sf::st_transform(pts, crs_sel) %>% dplyr::mutate(loc = l, resid = v - pv)
-    # Row identity is internal plumbing for the CV plan. rv$sf IS res_out$pts,
-    # and the popup system, the point colour-by and the label field all offer
-    # its columns by name, so it must not survive the trip back.
+    # The CV row id is internal: rv$sf is res_out$pts, whose columns the popup,
+    # colour-by and label pickers offer by name.
     res_out$pts[[CV_ROW_ID_COL]] <- NULL
     res_out$actual_res <- actual_res
     
@@ -1452,10 +1241,7 @@ calc_metric_spacing <- function(pts) {
     crs_units <- sf::st_crs(pts)$units_gdal
   }
   if (!is.null(crs_units) && !is.na(crs_units) && grepl("degree", crs_units, ignore.case = TRUE)) {
-    # Flag the failure where it happens rather than inferring it afterwards from
-    # deep object equality: identical(pts_m, pts) tied a numeric scaling decision
-    # to sf's internal representation and compared two whole point sets to answer
-    # a yes/no question.
+    # Flag a failed transform where it happens.
     projected_ok <- TRUE
     pts_m <- tryCatch(sf::st_transform(pts, 3857),
                       error = function(e) { projected_ok <<- FALSE; pts })
@@ -1473,15 +1259,10 @@ calc_metric_spacing <- function(pts) {
     coords <- sf::st_coordinates(pts)
   }
 
-  # A CRS that cannot hold the numbers it was declared over - WGS 84 applied to
-  # projected eastings is the routine case, and it is the first entry in the
-  # Input Data CRS list - makes sf return a non-finite coordinate for every
-  # point WITHOUT raising, and leaves the degree branch above rescaling by a
-  # latitude that is not one. FNN::get.knn() answers non-finite input with an
-  # error, and this function is called from an observeEvent where nothing
-  # caught it, so the whole Shiny session ended. Report it as the same NA the
-  # too-few-points case returns: every caller already tests for that, and the
-  # sidebar's own plausibility guard is what tells the user their CRS is wrong.
+  # A CRS that cannot hold its numbers (WGS 84 over projected eastings) gives
+  # non-finite coordinates without an error, and FNN::get.knn() would then
+  # error inside an observer and end the session. Return the too-few-points
+  # NA instead; the sidebar's plausibility guard names the wrong CRS.
   if (!is.finite(dist_scale)) return(list(mean_nn = NA_real_, max_dim = NA_real_))
   coords <- coords[is.finite(coords[, 1]) & is.finite(coords[, 2]), , drop = FALSE]
   if (nrow(coords) < 2) return(list(mean_nn = NA_real_, max_dim = NA_real_))
@@ -1515,9 +1296,8 @@ get_buffer_multiplier <- function(method) {
 
 #' The resolution a Buffered boundary's dynamic buffer scales with: the Fixed
 #' cell size `grid_res`, else half the mean nearest-neighbour distance of the
-#' locality's distinct sample locations `pts` (the display set .locality_points
-#' builds, in the metric working CRS). The run and the sidebar preview both
-#' call it, on the same point set.
+#' locality's distinct locations `pts` (as .locality_points() builds them).
+#' Shared by the run and the sidebar preview.
 locality_buffer_res <- function(pts, res_mode, grid_res) {
   if (identical(res_mode, "fixed") || nrow(pts) < 2) return(grid_res)
   mean(FNN::get.knn(sf::st_coordinates(pts), k = 1)$nn.dist) * 0.5
@@ -1528,12 +1308,10 @@ dynamic_buffer_dist <- function(method, res) {
   max(5, min(2000, get_buffer_multiplier(method) * res))
 }
 
-# Value vector of a raster's display layer (var1.pred when present, else the
-# first layer), accepting both live and Packed SpatRasters. PackedSpatRaster
-# is NOT subsettable ([[/values error on it), so every consumer that can see
-# a raster that crossed a future boundary must go through this.
-# `band = "var1.var"` reads the prediction-variance band instead, and returns
-# NULL when the raster has none (never the prediction band in its place).
+# Values of a raster's display layer (var1.pred, else the first), live or
+# Packed (PackedSpatRaster is not subsettable, so every consumer of a raster
+# that crossed a future boundary goes through this). `band = "var1.var"`
+# reads the variance band, NULL when there is none.
 raster_value_layer <- function(r, band = "var1.pred") {
   if (is.null(r)) return(NULL)
   if (inherits(r, "PackedSpatRaster")) r <- terra::unwrap(r)
@@ -1545,15 +1323,12 @@ raster_value_layer <- function(r, band = "var1.pred") {
 }
 
 #' Jenks natural breaks, computed exactly: the partition of `x` into `k`
-#' classes of consecutive values that minimises the within-class sum of squared
-#' deviations (Jenks 1977; Fisher 1958), found by dynamic programming over
-#' EVERY value (Ckmeans.1d.dp, Wang & Song 2011; deterministic, O(n log n)).
-#' Each break lies midway between the largest value of one class and the
-#' smallest of the next, so the partition of the data is the optimum under
-#' either interval closure. A break placed ON a class's largest value (as
-#' classInt's "jenks" returns it) moves that value into the next class under
-#' the app's [low, high) convention. Returns the inner breaks: fewer than
-#' k - 1 when `x` holds fewer than k distinct values.
+#' classes of consecutive values minimising the within-class sum of squares
+#' (Jenks 1977; Fisher 1958), by dynamic programming over EVERY value
+#' (Ckmeans.1d.dp, Wang & Song 2011). Each break lies midway between adjacent
+#' classes, so the partition holds under either interval closure (classInt
+#' puts it ON a class maximum, which [low, high) would move up a class).
+#' Returns the inner breaks; fewer than k - 1 for fewer distinct values.
 natural_breaks <- function(x, k) {
   x <- x[is.finite(x)]
   if (length(x) < 2 || k < 2) return(numeric(0))
@@ -1569,11 +1344,10 @@ natural_breaks <- function(x, k) {
   (xs[ends] + xs[ends + 1L]) / 2
 }
 
-# Class-break computation for the Agronomical styling algorithms. "jenks" is
-# natural_breaks() over every value. classInt's "kmeans" draws random starts,
-# so it runs under the app's two-sided seed sandbox (seed 12345, caller's
-# .Random.seed restored). Returns the n_c - 1 inner break values (fewer for
-# data with fewer distinct values), or NULL when vv is too short.
+# Class breaks for the Agronomical styling algorithms: "jenks" is
+# natural_breaks(); the classInt styles run under with_seed(12345) ("kmeans"
+# draws random starts). Returns the n_c - 1 inner breaks (fewer for fewer
+# distinct values), or NULL when vv is too short.
 calc_class_breaks <- function(vv, n_c, style) {
   vv <- vv[is.finite(vv)]
   if (length(vv) < n_c) return(NULL)
@@ -1581,9 +1355,7 @@ calc_class_breaks <- function(vv, n_c, style) {
 
   with_seed(12345, {
     tryCatch({
-      # suppressMessages: a message() escaping a reactive is caught by any
-      # consumer's tryCatch and aborts the reactive mid-evaluation, poisoning
-      # its cached state.
+      # suppressMessages: a message() escaping a reactive aborts it mid-evaluation.
       suppressMessages(suppressWarnings(
         classInt::classIntervals(vv, n = n_c, style = style)$brks[2:n_c]))
     }, error = function(e) {
@@ -1592,17 +1364,12 @@ calc_class_breaks <- function(vv, n_c, style) {
   })
 }
 
-# Dissolve a classified interpolation surface into class-zone polygons for GIS
-# export. The classification is the SAME call the map and the Area Coverage
-# table make (terra::classify on the params' rcl_mat with right = FALSE), and
-# the areas are taken from terra::expanse(byValue = TRUE) rather than from the
-# polygon geometry - both for the same reason: an exported zone layer that
-# disagreed with the on-screen map or with the reported hectares would be worse
-# than no export at all. Polygon boundaries are therefore cell boundaries and
-# inherit the grid resolution; they are not smoothed.
-# `params` is the classification_params() list (brks, rcl_mat, labels, n_c).
-# Returns one row per class PRESENT in the surface, or NULL when the surface
-# holds no classified cell.
+# Dissolve a classified surface into class-zone polygons for GIS export. The
+# classification is the map's and the Area Coverage table's own call
+# (terra::classify, rcl_mat, right = FALSE) and the areas come from
+# terra::expanse(byValue = TRUE), so the export agrees with both. Boundaries
+# are cell edges (not smoothed). `params` is classification_params() (brks,
+# rcl_mat, labels, n_c). One row per class present; NULL when none.
 build_class_zone_sf <- function(r, params, labels = NULL,
                                 surface = NA_character_,
                                 variable = NA_character_,
@@ -1655,13 +1422,10 @@ build_class_zone_sf <- function(r, params, labels = NULL,
 }
 
 # ── Top-level furrr worker entry points ─────────────────────────────────────
-# These MUST stay top-level named functions: an inline lambda defined inside a
-# Shiny observer closes over the observer -> server environment chain, and
-# future serializes that entire chain (reactiveValues, raster caches, the
-# whole session) to every worker. That is exactly the "globals exceed
-# future.globals.maxSize" failure seen in production once a session had
-# accumulated a few runs. Top-level functions are enclosed by the global
-# environment, which future never serializes.
+# These MUST stay top-level: a lambda defined inside a Shiny observer closes
+# over the session's environment chain, which future would serialize to every
+# worker (the "globals exceed future.globals.maxSize" failure). Top-level
+# functions are enclosed by the global environment, never serialized.
 
 # Per-locality worker for the run pipeline's nested furrr map. Sources
 # spatial_helpers.R itself (nested workers are fresh processes) and forwards

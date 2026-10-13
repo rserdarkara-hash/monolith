@@ -1,14 +1,13 @@
-# test-core-plots.R — tests for generate_core_plot, generate_ghosted_plot and
+# test-core-plots.R: tests for generate_core_plot, generate_ghosted_plot and
 # generate_advanced_plot, plus the RF-importance, variogram and sci_dt builders.
 
 df <- make_test_df(30)
 
 # ── The three plot builders ────────────────────────────────────────────────
 #
-# expect_s3_class(p, "ggplot") does not build the plot. ggplot() is lazy, so an
-# aesthetic naming a column that does not exist survives the class check and
-# fails only when the panel is drawn. ggplot_build() is what turns
-# "constructed" into "renders", so these sweep the plot types through it.
+# expect_s3_class(p, "ggplot") does not build the plot, so an aesthetic naming a
+# missing column survives it and fails only when the panel is drawn; these sweep
+# every plot type through ggplot_build().
 
 build_ok <- function(p) expect_no_error(suppressWarnings(ggplot2::ggplot_build(p)))
 placeholder_label <- function(p) ggplot2::ggplot_build(p)$data[[1]]$label
@@ -36,11 +35,6 @@ test_that("every core plot type renders", {
 })
 
 test_that("every scatter fit renders, with and without a y variable", {
-  # This path used to wrap the call in tryCatch and convert any error into
-  # skip("Known .data pronoun bug in scatter+fit path"). The aes() defers
-  # .data[[x_col]] and resolves x_col from the enclosing frame, so the path
-  # does not error and the skip absorbed nothing - which under a SKIP 0 policy
-  # means a future regression here would have been reported as a skip.
   for (fit in c("none", "linear", "loess", "polynomial", "gam")) {
     build_ok(generate_core_plot(df, "a", y_var = "b", plot_type = "scatter",
                                 scatter_fit = fit))
@@ -104,9 +98,6 @@ test_that("every advanced plot type renders", {
 })
 
 test_that("a selection too small for the plot draws its own explanation", {
-  # These names used to promise a requirement the bodies never checked: the
-  # radar test passed two variables and asserted success, and the density
-  # heatmap test passed exactly two and asserted nothing about the rule.
   expect_match(placeholder_label(generate_advanced_plot(df, vars = c("a", "b"),
                                                         plot_type = "radar")),
                "Radar requires at least 3 variables with observed values", fixed = TRUE)
@@ -174,13 +165,13 @@ test_that("relabel_ck_variogram matches dotted ids exactly and keeps unknowns", 
   out <- relabel_ck_variogram(vm, NULL, c("Ca.Mg" = "Ca/Mg Ratio"))
   expect_equal(levels(out$vm$id), c("Ca/Mg Ratio", "other"))
 
-  # Duplicate labels stay unique so lattice panels cannot collapse.
+  # Duplicate labels stay unique, so facet panels cannot merge.
   vm2 <- data.frame(id = factor(c("a", "b"), levels = c("a", "b")))
   out2 <- relabel_ck_variogram(vm2, NULL, c(a = "Same", b = "Same"))
   expect_equal(anyDuplicated(levels(out2$vm$id)), 0L)
 })
 
-# ── ggplot variogram builders (lattice replacements; same numbers) ──────────
+# ── ggplot variogram builders ──────────────────────────────────────────────
 
 test_that("build_variogram_ggplot draws empirical points and the fitted variogramLine", {
   v_emp <- data.frame(np = c(20, 40, 60), dist = c(50, 150, 300),

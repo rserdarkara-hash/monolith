@@ -1,10 +1,10 @@
-# test-agreement-metrics.R — tests for compute_agreement_metrics(), the
+# test-agreement-metrics.R: tests for compute_agreement_metrics(), the
 # arithmetic behind the Scientific Analysis tab's "Agreement (Kappa)" table and
 # the matching "Total Classification Performance" export.
 #
 # Every expected value here is derived from the confusion-matrix definition of
 # the statistic, or from an independent implementation (stats::quantile,
-# base::cut, terra::classify) — never read off compute_agreement_metrics().
+# base::cut, terra::classify), never read off compute_agreement_metrics().
 
 # A 3-class break set whose class limits are 10 and 20, so the class centres
 # 5 / 15 / 25 map cleanly onto A / B / C.
@@ -168,7 +168,7 @@ test_that("agro binning reproduces terra::classify(right = FALSE)", {
 
 test_that("a value on a break follows its mode's interval convention", {
   # x = 1:9 has type-7 quartiles 3 / 5 / 7, so 3, 5 and 7 are BOTH data values
-  # and break values — the case where the two conventions must disagree.
+  # and break values: the case where the two conventions must disagree.
   x <- 1:9
 
   quart <- compute_agreement_metrics(x, x, method = "quartile")
@@ -212,7 +212,7 @@ test_that("agreement metrics refuse too few points and a variance-free target", 
   expect_equal(const$status, "Not enough variance for quartiles.")
   expect_null(const$accuracy)
 
-  # A constant PREDICTION is not degenerate — the breaks come from the observed
+  # A constant PREDICTION is not degenerate: the breaks come from the observed
   # values, so it scores as a (poor) single-class prediction.
   ok <- compute_agreement_metrics(seq_len(20), rep(7, 20), method = "quartile")
   expect_null(ok$status)

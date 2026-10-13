@@ -1,4 +1,4 @@
-# test-grouping.R — tests for process_grouping_vars and filter_active_groups.
+# test-grouping.R: tests for process_grouping_vars and filter_active_groups.
 
 # ── process_grouping_vars ─────────────────────────────────────────────────
 

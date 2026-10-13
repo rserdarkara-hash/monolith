@@ -1,7 +1,7 @@
-# test-crs-validation.R — tests for validate_crs from monolith.R.
-# NOTE: validate_crs returns an sf crs object (S3 class 'crs', which is a list),
-# not a character string. It uses showNotification on error which requires a
-# running Shiny session.
+# CRS handling: validation and metric axis units, metric spacing, the Map
+# Viewer ruler, input-CRS identification (Tiers 1-3) and Target CRS
+# suitability. validate_crs() returns an sf "crs" object; its showNotification()
+# refusal becomes an error outside a Shiny session.
 
 test_that("non-metre input coordinates and spacing use local UTM metres", {
   geo <- sf::st_as_sf(data.frame(x = c(-74, -73.99, -73.98), y = c(40.7, 40.71, 40.705)),
@@ -108,14 +108,12 @@ test_that("calc_metric_spacing returns NA for NULL or single-point input", {
   expect_true(is.na(calc_metric_spacing(pts1)$mean_nn))
 })
 
-# A geographic CRS declared over projected eastings is an ordinary user
-# mistake - it is the first entry in the Input Data CRS list, and the sidebar's
-# plausibility guard exists precisely to catch it. sf answers it by returning a
-# non-finite coordinate for every point rather than by raising, and
-# FNN::get.knn() answers non-finite input with an error. That error was raised
-# inside the grid-resolution observeEvent, where nothing caught it, so choosing
-# WGS 84 for metre coordinates ended the Shiny session. The contract is the one
-# the function already has for too-few points: NA, which every caller tests.
+# A geographic CRS declared over projected eastings is an ordinary user mistake
+# (it is the first entry in the Input Data CRS list). sf answers it with a
+# non-finite coordinate for every point, and FNN::get.knn() errors on
+# non-finite input, which inside the grid-resolution observer would end the
+# session. The contract is the one for too-few points: NA, which every caller
+# tests.
 
 test_that("calc_metric_spacing returns NA rather than raising on unprojectable points", {
   # Metre eastings/northings declared as degrees, then asked for in a metric
@@ -495,7 +493,7 @@ test_that("add_map_ruler puts the measure control on the widget", {
   expect_true(grepl("Finish measurement", hook, fixed = TRUE))
 })
 
-# ── Input-CRS identification (Phase A of the 2026-08-22 placement fix) ──────
+# ── Input-CRS identification ───────────────────────────────────────────────
 # A UTM easting/northing pair is equally valid in all 60 zones, so the app must
 # never assume one. It identifies the CRS only from evidence carried by the
 # upload, and otherwise asks.
@@ -675,8 +673,8 @@ test_that("crs_landing_position states where the data lands, in degrees", {
   wrong <- crs_landing_position(fx, "x", "y", "EPSG:32635")
   expect_equal(right$lon, 12.96, tolerance = 1e-2)
   expect_equal(wrong$lon, 24.96, tolerance = 1e-2)
-  # Two zones east is exactly 12 degrees: the 812 km misplacement of the
-  # 2026-08-22 incident, and the number this readout puts on screen.
+  # Two zones east is exactly 12 degrees (about 810 km at this latitude), the
+  # misplacement this readout puts on screen.
   expect_equal(wrong$lon - right$lon, 12, tolerance = 1e-6)
   expect_match(right$text, "12.9", fixed = TRUE)
   expect_match(right$text, "N", fixed = TRUE)
@@ -697,8 +695,8 @@ test_that("neither CRS selector carries a default zone", {
   tabs <- paste(readLines(file.path(root, "ui_main_tabs.R"), warn = FALSE), collapse = "\n")
   setup <- paste(readLines(file.path(root, "server_setup.R"), warn = FALSE), collapse = "\n")
 
-  # The root cause of the incident: a hardcoded zone silently georeferenced
-  # every user's data into the Turkey/Ukraine/Belarus longitude band.
+  # A default zone would silently georeference every upload into its longitude
+  # band.
   expect_false(grepl('selected = "EPSG:', tabs, fixed = TRUE))
   expect_match(tabs, 'selectizeInput("map_crs", "Input Data CRS", choices = crs_choice_groups(common_crs_input), selected = ""',
                fixed = TRUE)
@@ -750,10 +748,8 @@ test_that("a run is refused VISIBLY until both CRS selectors are set", {
   exec <- paste(readLines(file.path(root, "server_execution.R"), warn = FALSE), collapse = "\n")
   ds <- paste(readLines(file.path(root, "server_data_setup.R"), warn = FALSE), collapse = "\n")
 
-  # ONE refusal, called from both gates. Written twice, the copy in the
-  # rv$proceed_run observer sat downstream of a req() that had already aborted
-  # the run in silence, so the modal could never execute; test-app-smoke.R
-  # covers the behaviour end to end.
+  # ONE refusal, called from both gates, so no copy can sit behind a req() that
+  # aborts the run in silence; test-app-smoke.R covers the behaviour end to end.
   expect_match(exec, "crs_selection_gate <- function()", fixed = TRUE)
   expect_equal(length(gregexpr("if (!crs_selection_gate()) return()", exec,
                                fixed = TRUE)[[1]]), 2L)
@@ -788,7 +784,7 @@ test_that("every CRS refusal happens before the run commits any state", {
   expect_lt(line_of("crs_target_suitability(input$crs_selection, crs_suit_pos$lon, crs_suit_pos$lat)"), commit)
 })
 
-# ── Tier 3: the candidate shortlist (Phase B of the 2026-08-22 fix) ────────
+# ── Tier 3: the candidate shortlist ────────────────────────────────────────
 # With no evidence in the file the zone is not recoverable, so the question is
 # turned around: the user says where the data is and the app reports which
 # projections put it there. The catalogue is PROJ's own proj.db, read through
@@ -820,8 +816,7 @@ test_that("the extent filter prunes the catalogue arithmetically, anywhere on ea
 
   pots <- crs_registry_filter_extent(reg, 12.958, 52.466)
   expect_true(32633 %in% pots$code)
-  # Zone 35 declares 24E-30E: it cannot claim Potsdam, which is the whole
-  # point - the app default that caused the incident is pruned on sight.
+  # Zone 35 declares 24E-30E, so it cannot claim Potsdam and is pruned on sight.
   expect_false(32635 %in% pots$code)
   expect_false(any(duplicated(pots$code)))
 
@@ -887,9 +882,9 @@ test_that("Tier 3 shortlists one row per place, carrying its equivalent codes", 
   expect_lte(nrow(sl), 8)
 
   # The right answer leads, and its datum siblings ride on the same row rather
-  # than competing for rows of their own. WGS 72, WGS 72BE and ED50 UTM 33N
-  # land 10-210 m away - far below what a map click resolves - so ranking them
-  # as separate rows by distance to that click let an obsolete datum lead.
+  # than competing for rows of their own: WGS 72, WGS 72BE and ED50 UTM 33N land
+  # 10-210 m away, far below what a map click resolves, so as separate rows
+  # ranked by distance to that click an obsolete datum could lead.
   expect_equal(sl$epsg[1], 32633)
   expect_true(all(c(3045, 10733, 25833, 23033, 32233, 32433) %in% sl$equivalent[[1]]))
   expect_false(any(c(23033, 32233, 32433) %in% sl$epsg))
@@ -922,9 +917,9 @@ test_that("Tier 3 narrows by country text when there is no click", {
 test_that("a text filter narrows the shortlist and never widens it", {
   skip_without_registry()
   fx <- make_utm33_fixture()
-  # Text that matches nothing INSIDE the area the click already bounded must
-  # narrow to empty. It used to empty the pool and fall through to the
-  # four-code zone family, i.e. reopen the very search the text restricted.
+  # Text that matches nothing INSIDE the area the click already bounded narrows
+  # to empty; it never falls through to the four-code zone family, which would
+  # reopen the search the text restricted.
   z <- crs_candidate_shortlist(fx$x, fx$y, lon = 12.958, lat = 52.466,
                                area_text = "Zimbabwe")
   expect_equal(nrow(z), 0L)
@@ -1034,12 +1029,11 @@ test_that("the Map Viewer flags results computed under a different mapping", {
 })
 
 
-# -- Target Mapping CRS suitability (Phase C of the 2026-08-22 fix) ----------
-# The run gate used to ask only whether the target CRS's axis unit was the
-# metre. Web Mercator passes that test and inflates every distance by 64% at
-# Potsdam. The suitability gate asks the two questions that matter: does the
-# CRS declare an area of use containing the data, and what is its point scale
-# factor there. Reference values, measured at 12.958E 52.466N:
+# -- Target Mapping CRS suitability ------------------------------------------
+# A metre axis unit is not enough: Web Mercator has one and inflates every
+# distance by 64% at Potsdam. The suitability gate asks whether the CRS declares
+# an area of use containing the data, and what its point scale factor is there.
+# Reference values, measured at 12.958E 52.466N:
 #   EPSG:32633 0.999836 | EPSG:25833 0.999836 | EPSG:5514 1.000356
 #   EPSG:32634 1.003260 | EPSG:32635 1.010729 | EPSG:3857  1.637952 (parallel)
 
@@ -1088,8 +1082,8 @@ test_that("a CRS declaring several extents is judged against their union", {
   skip_without_registry()
   # 17 codes in this catalogue declare more than one extent. EPSG:2393 (KKJ /
   # Finland Uniform Coordinate System) declares a 3-degree zone strip AND the
-  # whole of onshore Finland; reading only the first row told a Finnish user at
-  # 22 deg E that their data landed outside a CRS that covers it.
+  # whole of onshore Finland; judged on its first row alone, data at 22 deg E
+  # would read as outside a CRS that covers it.
   ext <- crs_area_of_use("EPSG:2393")
   expect_gt(nrow(ext), 1L)
   expect_true(any(ext$west < 20))
@@ -1129,7 +1123,7 @@ test_that("the point scale factor reproduces the measured values at Potsdam", {
     expect_equal(r$parallel, r$meridian, tolerance = 1e-6, info = cc)
     expect_equal(r$dev, abs(r$k - 1), tolerance = 1e-12, info = cc)
   }
-  # Web Mercator: the case the unit-only gate waved through.
+  # Web Mercator: a metre axis, far from unit scale.
   r <- crs_scale_factor("EPSG:3857", 12.958, 52.466)
   expect_gt(r$k, 1.6)
   expect_equal(r$parallel, 1.637952, tolerance = 1e-4)
@@ -1192,14 +1186,14 @@ test_that("the suitability verdict separates fit, doubtful and unusable", {
   expect_null(ok$msg)
   expect_false(ok$outside)
 
-  # Two zones east: the incident's CRS. Refused, and the number is stated.
+  # Two zones east: refused, and the number is stated.
   bad <- crs_target_suitability("EPSG:32635", lon, lat)
   expect_equal(bad$level, "block")
   expect_equal(bad$k, 1.010729, tolerance = 1e-4)
   expect_match(bad$msg, "1.010729")
   expect_true(bad$outside)
 
-  # Web Mercator: metric axis, and 64% wrong. The whole point of the gate.
+  # Web Mercator: metric axis, and 64% wrong.
   wm <- crs_target_suitability("EPSG:3857", lon, lat)
   expect_equal(wm$level, "block")
   expect_gt(wm$k, 1.6)
@@ -1221,8 +1215,8 @@ test_that("a study area is outside the box when any of its corners is", {
   skip_without_registry()
   # An area straddling the 12 deg E zone boundary, projected in UTM 32N
   # (declared 6-12 deg E): sound to measure with (+0.03%) and outside the
-  # declared box at its eastern edge. Warned, never refused - the corner the
-  # centroid alone would have missed.
+  # declared box at its eastern edge, a corner the centroid alone would miss.
+  # Warned, never refused.
   s <- crs_target_suitability("EPSG:32632", c(11.5, 12.5), c(52.4, 52.5))
   expect_true(s$outside)
   expect_equal(s$level, "warn")
@@ -1232,9 +1226,9 @@ test_that("a study area is outside the box when any of its corners is", {
 })
 
 test_that("the suitability gate never blocks on a question it cannot answer", {
-  # A geographic target CRS skips the gate entirely: refusing EPSG:4326 would
-  # be a regression, and validate_crs(require_metric) exempts it for the same
-  # reason.
+  # A geographic target CRS skips the gate entirely: the pipeline projects it
+  # to a metric UTM zone itself, which is also why validate_crs(require_metric)
+  # exempts it.
   geo <- crs_target_suitability("EPSG:4326", 12.958, 52.466)
   expect_equal(geo$level, "ok")
   expect_true(is.na(geo$k))
@@ -1246,8 +1240,8 @@ test_that("the suitability gate never blocks on a question it cannot answer", {
 })
 
 test_that("the advisory names the CRS that is right, not only the one that is wrong", {
-  # The Potsdam incident: data at 12.96 E, target left on UTM 35N. The gate
-  # said the CRS was wrong; this says the answer is EPSG:32633.
+  # Data at 12.96 E with the target on UTM 35N: the gate says the CRS is wrong;
+  # this says the answer is EPSG:32633.
   rec <- crs_recommend_target(12.958, 52.466)
   expect_equal(rec$crs, "EPSG:32633")
   expect_equal(rec$code, 32633L)
@@ -1256,9 +1250,8 @@ test_that("the advisory names the CRS that is right, not only the one that is wr
   # The label is a name a user recognises, not a bare code.
   expect_match(rec$label, "UTM zone 33N")
 
-  # Denizli, the user's usual sampling area, really is UTM 35N: the sticky
-  # default was the right answer there and the wrong one 800 km away, which is
-  # exactly why the recommendation has to be computed per dataset.
+  # Denizli really is UTM 35N: a fixed default would be right there and wrong
+  # 800 km away, so the recommendation is computed per dataset.
   expect_equal(crs_recommend_target(29.09, 37.78)$crs, "EPSG:32635")
 
   # Southern hemisphere takes the 327xx family.
@@ -1378,8 +1371,8 @@ test_that("the suitability gate is advisory at selection time and enforced at ru
   # the user acts on it.
   expect_match(ds, "crs_target_suitability(sel, pos$lon, pos$lat)", fixed = TRUE)
   expect_match(ds, "output$crs_target_note <- renderUI", fixed = TRUE)
-  # The toasts it replaced are gone: three channels for one verdict could queue
-  # together and could contradict each other.
+  # One channel for the verdict: separate toasts could queue together and
+  # contradict each other.
   expect_false(grepl("crs_suit_guard", ds, fixed = TRUE))
   expect_false(grepl("crs_unit_guard", ds, fixed = TRUE))
 

@@ -1,9 +1,6 @@
-# test-robust-vgm-fit.R — candidate screening, diagnostics, and selection
-# policy for robust_vgm_fit.
-# Spec: docs/superpowers/specs/2026-07-04-robust-vgm-fit-convergence-design.md
-# Pinned values captured 2026-07-04 via app-context discovery (see plan).
-# NOTE: pinned psill/range values are gstat-version-anchored fit.variogram
-# outputs; after a gstat upgrade a mismatch is a fixture refresh, not a regression.
+# robust_vgm_fit(): candidate screening, diagnostics and selection policy.
+# Pinned psill/range values are gstat-version-anchored fit.variogram outputs:
+# after a gstat upgrade a mismatch is a fixture refresh, not a regression.
 
 test_that("manual Matern uses nu 1.5 and the Auto-Fit weighted criterion", {
   mat <- manual_vgm(1, "Mat", 100, 0)
@@ -27,8 +24,8 @@ test_that("a manual model with no total sill is refused; a pure nugget is not", 
 })
 
 test_that("manual sliders are scaled to the data, not to fixed decimals", {
-  # Kale total nitrogen: variance 7.2e-4, auto-fit nugget 2.49e-4. Fixed
-  # rounding gave a sill axis of max 0 and a step of 0.01.
+  # A small-variance variable (Kale total nitrogen: variance 7.2e-4, auto-fit
+  # nugget 2.49e-4): fixed decimals would give a sill axis of max 0, step 0.01.
   fit <- gstat::vgm(psill = 3.7e-4, model = "Sph", range = 3371, nugget = 2.49e-4)
   s <- manual_vgm_slider_spec(7.2e-4, 5000, fit)
   expect_gt(s$nugget$max, fit$psill[1])
@@ -68,7 +65,7 @@ test_that("manual sliders are scaled to the data, not to fixed decimals", {
 })
 
 test_that("candidate screening emits no warnings on hostile data", {
-  h <- make_hostile_vgm_input(seed = 1) # emits 17 warnings before this change
+  h <- make_hostile_vgm_input(seed = 1)
   expect_no_warning(robust_vgm_fit(h$v_emp, h$v_data))
 })
 
@@ -84,7 +81,7 @@ test_that("returned fit carries the vgm_diagnostics contract", {
   expect_identical(d$n_flawed, 16L)
   expect_true(is.logical(d$flawed_winner))
   expect_true(d$status %in% VGM_FIT_STATUSES)
-  # The categorical and the two legacy booleans must agree: they are read by
+  # The categorical status and the two booleans must agree: they are read by
   # the CK seed guard and the map banner respectively.
   expect_identical(vgm_fit_status(fit), d$status)
   expect_equal(isTRUE(attr(fit, "flawed_winner")), identical(d$status, "singular_selected"))
@@ -93,9 +90,9 @@ test_that("returned fit carries the vgm_diagnostics contract", {
 })
 
 test_that("a converged fit outside the lag window beats a flawed one and a guess", {
-  # The range window is a DIAGNOSTIC, not an eligibility rule. On a
-  # trend-bearing field no candidate converges inside the window, so the old
-  # rule found nothing eligible and returned the heuristic Spherical guess.
+  # The range window is a DIAGNOSTIC, not an eligibility rule: on a
+  # trend-bearing field no candidate converges inside the window, and a rule
+  # admitting only in-window fits would return the heuristic Spherical guess.
   # Among converged eligible candidates the lowest SSErr wins, whatever its range.
   h <- make_trend_vgm_input()
   fit <- suppressWarnings(robust_vgm_fit(h$v_emp, h$v_data))
@@ -219,9 +216,9 @@ test_that("the candidate screen refuses a negative nugget", {
   # locality behind a clean-looking variogram panel. Eligibility must exclude
   # such a candidate so it cannot win the lowest-SSErr contest.
   #
-  # gstat 2.1.5 clamps negative sills itself, but ONLY for an empirical
-  # variogram carrying attr(, "direct") - so drive the screen directly rather
-  # than trying to coax a negative nugget out of fit.variogram.
+  # gstat clamps negative sills itself only for an empirical variogram carrying
+  # attr(, "direct"), so drive the screen directly rather than trying to coax a
+  # negative nugget out of fit.variogram.
   fit_neg <- gstat::vgm(psill = 2, model = "Sph", range = 300, nugget = -0.05)
   fit_ok  <- gstat::vgm(psill = 2, model = "Sph", range = 300, nugget = 0.05)
   max_dist <- 700
@@ -261,10 +258,9 @@ test_that("diagnostics present on the tiny-variogram early return", {
 
 test_that("robust_vgm_fit tolerates an NA empirical-variogram bin", {
   # gstat::variogram drops empty bins, so gamma is finite in practice; this
-  # pins the initial_nugget seed against min(NA) -> the "missing value where
-  # TRUE/FALSE needed" crash on the `== 0` test (na.rm now matches the
-  # var()/max() seeds in the same function). Runs inside PSOCK workers, where
-  # the crash would surface only as a generic "Parallel ... Failed" modal.
+  # pins the initial nugget seed against min(NA), which would crash the `== 0`
+  # test inside a PSOCK worker and surface only as a generic "Parallel ...
+  # Failed" modal.
   pts <- make_test_points(30)
   lags <- calc_scientific_lags(pts)
   v_emp <- gstat::variogram(v ~ 1, pts, width = lags$width, cutoff = lags$cutoff)
@@ -281,9 +277,8 @@ test_that("diagnostics survive clean_gstat_env (worker serialization path)", {
 })
 
 test_that("muffling does not change selection on a clean-winner fixture", {
-  # Invariance guard (green before AND after this target): seed 12's
-  # lowest-SSErr candidate is already clean, so neither Task 1 (neutral)
-  # nor Task 2 (clean preference) may alter this selection.
+  # Seed 12's lowest-SSErr candidate is already clean, so neither muffling the
+  # screen's warnings nor preferring clean candidates may alter this selection.
   h <- make_hostile_vgm_input(seed = 12)
   fit <- suppressWarnings(robust_vgm_fit(h$v_emp, h$v_data))
   expect_identical(as.character(fit$model[2]), "Gau")
@@ -294,11 +289,10 @@ test_that("muffling does not change selection on a clean-winner fixture", {
 })
 
 test_that("a clean candidate is preferred over a lower-SSErr flawed one", {
-  # Candidate table for this fixture (2026-09-16, gstat 2.1.6): clean Mat at
-  # nugget 0 (SSErr 11.4508), clean Exp at nugget 0 (12.1713), flawed Sph
-  # (lowest 11.9040) and flawed Gau at nugget 0 (10.9345). The zero-nugget
-  # Mat and Gau are ineligible, so the converged Exp must beat the
-  # lower-SSErr flawed Sph.
+  # Candidate table for this fixture (gstat 2.1.6): clean Mat at nugget 0
+  # (SSErr 11.4508), clean Exp at nugget 0 (12.1713), flawed Sph (lowest
+  # 11.9040) and flawed Gau at nugget 0 (10.9345). The zero-nugget Mat and Gau
+  # are ineligible, so the converged Exp must beat the lower-SSErr flawed Sph.
   pts <- make_test_points(30)
   lags <- calc_scientific_lags(pts)
   v_emp <- gstat::variogram(v ~ 1, pts, width = lags$width, cutoff = lags$cutoff)
@@ -385,9 +379,10 @@ test_that("tiny empirical variogram fallback is tagged is_fallback", {
 })
 
 test_that("the sanity window is applied to the PRACTICAL range, per family", {
-  # gstat's `a` means a different ground distance per family, so screening on it
-  # made the window ~3x tighter (at the low end) for Exp than for Sph and let an
-  # Exp structure three times longer than the data extent through at the top.
+  # gstat's `a` means a different ground distance per family, so the window is
+  # applied to the practical range: on `a` it would be ~3x tighter at the low
+  # end for Exp than for Sph, and admit an Exp structure three times longer
+  # than the data extent at the top.
   expect_equal(.vgm_practical_range_factor("Sph"), 1)
   expect_equal(.vgm_practical_range_factor("Exp"), 3)
   expect_equal(.vgm_practical_range_factor("Gau"), sqrt(3))
@@ -975,7 +970,7 @@ test_that("the four directional variograms pool back to the omnidirectional one"
 # ── fitted-parameter presentation (ui_formatting.R) ────────────────────────
 # The Variogram Parameters card and its export read one builder. Sill is the
 # TOTAL sill C0 + C; structural dependency is the partial-sill share of it,
-# C / (C0 + C) x 100 — the complement of Cambardella's nugget-to-sill ratio,
+# C / (C0 + C) x 100, the complement of Cambardella's nugget-to-sill ratio,
 # so 100% is a pure spatial structure and 0% a pure nugget.
 
 test_that("vgm_params_row reports the total sill and the partial-sill share", {
@@ -993,9 +988,9 @@ test_that("vgm_params_row reports the total sill and the partial-sill share", {
 })
 
 test_that("vgm_params_row keeps small-unit parameters at full precision", {
-  # Total N: a fitted nugget of 2.151e-4 on a total sill of 3.722e-4. At a
-  # fixed 4 dp these exported as 2e-04 / 4e-04, and the SD% a reader
-  # recomputed from that pair read 50% where the fit says 42.2%.
+  # Total N: a fitted nugget of 2.151e-4 on a total sill of 3.722e-4. Rounded
+  # to 4 dp they would read 2e-04 / 4e-04, and an SD% recomputed from that pair
+  # 50% where the fit says 42.2%.
   m <- gstat::vgm(psill = 3.722e-4 - 2.151e-4, model = "Exp", range = 250,
                   nugget = 2.151e-4)
   p <- vgm_params_row(m)

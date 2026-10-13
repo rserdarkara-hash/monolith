@@ -1,4 +1,4 @@
-# test-discretization.R — tests for discretize_numeric_var.
+# test-discretization.R: tests for discretize_numeric_var.
 
 test_that("mean split produces two factor levels", {
   x <- c(1, 2, 3, 4, 5)

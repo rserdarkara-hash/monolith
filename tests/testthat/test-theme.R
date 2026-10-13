@@ -1,12 +1,10 @@
-# test-theme.R — the single Monolith theme: tokens, stylesheet, variant toggle.
+# test-theme.R: the single Monolith theme (tokens, stylesheet, variant toggle),
+# plus the export writer, the clipboard copy and DataTable column alignment.
 
 # ── helpers ───────────────────────────────────────────────────────────────
 
-# WCAG 2.x relative luminance / contrast ratio, used to hold the palette to
-# the 4.5:1 body-text floor in BOTH variants. These are the checks the old
-# per-theme palettes kept failing by hand (a body colour dark enough to vanish
-# on a dark content background, and so on); with one token set they are cheap
-# to assert once and for all.
+# WCAG 2.x relative luminance / contrast ratio, holding the palette to the
+# 4.5:1 body-text floor in BOTH variants.
 rel_luminance <- function(hex) {
   ch <- grDevices::col2rgb(hex)[, 1] / 255
   lin <- ifelse(ch <= 0.03928, ch / 12.92, ((ch + 0.055) / 1.055)^2.4)
@@ -93,11 +91,9 @@ test_that("on-accent text clears 4.5:1 against the accent it sits on", {
 test_that("state colours stay distinguishable from the accent", {
   tk <- monolith_tokens()
 
-  # Petrol replaced an indigo accent that sat beside a near-identical "live"
-  # blue; the live role was dropped for exactly that reason. What separates a
-  # state colour from the accent is HUE, not luminance — green and petrol can
-  # share a luminance and still be unmistakable — so contrast ratio is the
-  # wrong instrument here and hue distance is the right one.
+  # What separates a state colour from the accent is HUE, not luminance: green
+  # and petrol can share a luminance and still be unmistakable, so hue distance,
+  # not contrast ratio, is the instrument here.
   for (variant in names(tk)) {
     v <- tk[[variant]]
     acc_h <- grDevices::rgb2hsv(grDevices::col2rgb(v[["accent"]]))["h", 1]
@@ -178,9 +174,8 @@ test_that("every heading level is sized", {
 test_that("readonly and disabled fields resolve to theme surfaces", {
   css <- monolith_theme_css()
 
-  # Bootstrap paints them #eee. In the dark variant that is a near-white field
-  # carrying near-white text, which made the file input's filename box (it is
-  # readonly) unreadable as soon as a file was chosen.
+  # Bootstrap paints them #eee: in the dark variant a near-white field carrying
+  # near-white text, the file input's readonly filename box included.
   expect_match(css, ".form-control[readonly]", fixed = TRUE)
   expect_match(css, ".form-control[disabled]", fixed = TRUE)
   block <- regmatches(
@@ -230,8 +225,8 @@ test_that("the file-input progress bar is tall enough for its own label", {
   css <- monolith_theme_css()
 
   # Shiny writes the upload state INTO the bar ("Upload complete", or the error
-  # text on failure). The 6px .progress used everywhere else let that label
-  # overflow and print itself across the controls underneath.
+  # text on failure); at the 6px .progress used elsewhere that label would
+  # overflow across the controls underneath.
   block <- regmatches(
     css, regexpr("\\.progress\\.shiny-file-input-progress \\{[^}]*\\}", css)
   )
@@ -246,17 +241,16 @@ test_that("controls centre their own contents", {
   css <- monolith_theme_css()
 
   # actionButton() emits an .action-label span even for an empty label, and
-  # .btn puts a 7px gap between flex children, so an icon-only button laid its
-  # glyph out left of centre. The theme toggle, which has no label span, was
-  # the only one that looked right.
+  # .btn puts a 7px gap between flex children, which would push an icon-only
+  # button's glyph left of centre.
   expect_match(css, ".btn.mn-iconbtn { gap: 0 !important;", fixed = TRUE)
   expect_match(css, ".btn.mn-iconbtn > .action-label { display: none !important; }",
                fixed = TRUE)
   expect_match(css, ".btn.mn-iconbtn > .action-icon", fixed = TRUE)
 
   # bootstrap-select's label box stretches to the toggle's full height and
-  # leaves its text on the first line of it, so the selected value sat above
-  # the centre of a control whose chevron was centred.
+  # leaves its text on the first line, above the centre of a control whose
+  # chevron is centred.
   expect_match(css, ".bootstrap-select > .dropdown-toggle .filter-option", fixed = TRUE)
   block <- regmatches(
     css,
@@ -266,9 +260,8 @@ test_that("controls centre their own contents", {
   expect_match(block, "display: flex !important", fixed = TRUE)
   expect_match(block, "align-items: center !important", fixed = TRUE)
 
-  # The sidebar scrolls, which clips its x axis, so an open picker menu sized
-  # to its longest label was cut off at the sidebar's edge on a narrow screen
-  # (measured in Edge at 1100 px: menu to 317 px, sidebar edge at 260 px). In
+  # The sidebar scrolls, which clips its x axis, so a picker menu sized to its
+  # longest label would be cut off at the sidebar's edge on a narrow screen. In
   # the sidebar the menu keeps its control's width and labels wrap.
   expect_match(css, ".well[role='complementary'] .bootstrap-select .dropdown-menu { max-width: 100%; }",
                fixed = TRUE)
@@ -282,12 +275,11 @@ test_that("the sticky run dock reaches the bottom of the sidebar card", {
   css <- monolith_theme_css()
 
   # A sticky child resolves bottom: 0 against its containing block's CONTENT
-  # box, so the well's bottom padding parked the dock 15px short of the card
-  # edge and the controls it was scrolled past showed through the strip
-  # underneath. The dock supplies that padding itself now.
-  # Scoped to the sidebar: sidebarPanel() is the only .well that is its own
-  # scroll container. Applied to every wellPanel it turned the analytics
-  # grouping panel into a clipping box that cut off its own select menus.
+  # box, so the well's bottom padding would park the dock short of the card edge
+  # with scrolled-past controls showing beneath it; the dock supplies that
+  # padding itself. Scoped to the sidebar, the only .well that is its own scroll
+  # container: on every wellPanel it would clip the analytics grouping panel's
+  # select menus.
   well <- regmatches(css, regexpr("\\.well\\[role='complementary'\\] \\{[^}]*\\}", css))
   expect_length(well, 1)
   expect_match(well, "padding: 14px 14px 0 14px !important", fixed = TRUE)
@@ -339,9 +331,9 @@ test_that("the Fixed resolution slider keeps its frame after CRS selection", {
 test_that("button focus is shown to keyboard users only", {
   css <- monolith_theme_css()
 
-  # Bootstrap rings every CLICKED button with its own outline, and the
-  # .btn-default:focus rule additionally repainted the border, so the header's
-  # icon buttons kept a box around them after opening their panel.
+  # Bootstrap rings every CLICKED button with an outline, and .btn-default:focus
+  # repaints the border, leaving icon buttons boxed after a click; the ring is
+  # for keyboard focus only.
   expect_match(css, ".btn:focus, .btn:active:focus, .btn.active:focus { outline: none; }",
                fixed = TRUE)
   expect_match(css, ".btn:focus-visible { outline: 2px solid var(--mn-accent);",
@@ -360,9 +352,6 @@ test_that("no fresh/AdminLTE remnant survives in the stylesheet", {
 test_that("no UI file paints a colour outside the token set", {
   # A literal colour in an inline style is a one-variant colour: it survives the
   # theme toggle and takes whatever token-coloured text sits on it down with it.
-  # This is what left the Export tab's asset list as pale grey on white, the
-  # RK trend chips as near-black on the dark surface, and the variogram
-  # fallback warning unreadable once the dark variant was on.
   root <- normalizePath(file.path(testthat::test_path(), "..", ".."), winslash = "/")
   files <- setdiff(
     list.files(root, pattern = "\\.R$"),
@@ -396,9 +385,8 @@ test_that("no UI file paints a colour outside the token set", {
 })
 
 test_that("every variogram banner band is painted with tokens", {
-  # The banner is drawn over the map in both variants; a literal colour here is
-  # what left the fallback warning unreadable once the dark variant was on.
-  # One fit per band, so no band can be added without a token.
+  # The banner is drawn over the map in both variants, so every band is painted
+  # with tokens. One fit per band, so no band can be added without a token.
   fb <- gstat::vgm(0.5, "Sph", 200, 0.1); attr(fb, "is_fallback") <- TRUE
   fw <- gstat::vgm(0.5, "Sph", 200, 0.1); attr(fw, "flawed_winner") <- TRUE
   ru <- gstat::vgm(2, "Exp", 300, 0.5)
@@ -443,7 +431,7 @@ test_that("theme_switcher_ui renders a namespaced client-side toggle", {
   expect_false(grepl("Shiny.setInputValue", html, fixed = TRUE))
 })
 
-# ── export writer (unchanged behaviour, kept covered) ──────────────────────
+# ── export writer ─────────────────────────────────────────────────────────
 
 test_that("export_plot_to_file writes at the requested size and format", {
   p <- ggplot2::ggplot(data.frame(x = 1:3, y = 1:3), ggplot2::aes(x, y)) + ggplot2::geom_point()
@@ -552,13 +540,13 @@ test_that("the clipboard payload carries no colour of its own", {
 # heading) ─────────────────────────────────────────────────────────────────
 # Under scrollX DataTables splits a table in two and keeps the halves aligned
 # with the pixel widths it writes on both. A `width: 100% !important` beats
-# those inline widths, and with nowrap cells each half then resolves 100%
-# against its own min-content - the header against the labels, the body
-# against the data - which is what moved values under the wrong column.
+# those inline widths, and with nowrap cells each half would then resolve 100%
+# against its own min-content (the header against the labels, the body against
+# the data), moving values under the wrong column.
 
 test_that("the stylesheet leaves a scrolling DataTable its computed widths", {
   css <- monolith_theme_css()
-  # The rule that broke it: a forced width on any table inside the container.
+  # No forced width on every table inside the container.
   expect_false(grepl("\\.table-container table,\\s*\\n\\s*\\.table-container \\.dataTables_wrapper \\{[^}]*width:\\s*100%\\s*!important",
                      css, perl = TRUE))
   # What replaces it: the wrapper, and a table that is its DIRECT child (which

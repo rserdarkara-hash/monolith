@@ -1,9 +1,6 @@
-# ui_helpers.R - thin master file. The former 2,200-line helper monolith is
-# split into four cohesive fragments; sourcing THIS file loads all of them, so
-# every existing call site (global.R, tests) keeps working unchanged.
-# All fragments are pure R functions/constants - never introduce reactive()
-# or observe() hooks inside them. Fragments are resolved relative to this
-# file's own location (same self-locating pattern as spatial_helpers.R).
+# ui_helpers.R - master file for the four pure UI fragments (no reactive() or
+# observe() inside them). Fragments resolve relative to this file, as in
+# spatial_helpers.R.
 local({
   src_dir <- tryCatch({
     f <- NULL

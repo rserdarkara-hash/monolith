@@ -1,9 +1,9 @@
-# test-moran.R — tests for calc_moran.
+# calc_moran() and how its statistic is read under each fold design.
 #
 # calc_moran returns list(i, e_i, p): the statistic, its null expectation
 # E[I] = -1/(n-1), and a two-sided permutation p-value (MORAN_NSIM seeded
 # permutations, doubled smaller tail, (b + 1) / (m + 1)). Every "cannot compute"
-# branch returns all-NA — NA never means "no spatial structure".
+# branch returns all-NA: NA never means "no spatial structure".
 
 expect_moran_all_na <- function(m) {
   expect_named(m, c("i", "e_i", "p"))
@@ -101,8 +101,8 @@ test_that("calc_moran's duplicate jitter scales to the coordinate magnitude", {
   # were actually separated rather than merely nudged below representability.
   expect_false(any(grepl("identical points", warns, fixed = TRUE)))
 
-  # Guard the mechanism directly: at this magnitude the historical amount is
-  # not enough to keep six copies of one coordinate distinct.
+  # The mechanism directly: at this magnitude a fixed 1e-8 amount cannot keep
+  # six copies of one coordinate distinct.
   v <- rep(4500000, 6)
   set.seed(1); old_amt <- jitter(v, amount = 1e-8)
   set.seed(1); new_amt <- jitter(v, amount = max(1e-8, 1e4 * 1e-9, 4500000 * 1e-12))
@@ -252,12 +252,10 @@ test_that("structure raises I above E[I] and shuffling collapses it back", {
 
 
 # ── How the statistic is READ, per fold design ─────────────────────────────
-# calc_moran itself is unchanged by the block-CV round (the tests above pin
-# that). What changed is the reading: under Spatial Block CV the pooled
-# out-of-fold residuals inherit the fold geometry and a shared extrapolation
-# condition inside each withheld block, so spdep's reference distribution does
-# not describe them. The presentation layer must decide that from the APPLIED
-# fold plan, never from the strategy the user selected.
+# Under Spatial Block CV the pooled out-of-fold residuals inherit the fold
+# geometry and a shared extrapolation condition inside each withheld block, so
+# spdep's reference distribution does not describe them. The reading follows
+# the APPLIED fold plan, never the strategy the user selected.
 
 test_that("the block-CV reading follows the applied plan, not the requested strategy", {
   block <- moran_reading(applied_cv_plan(100, "block")$type)
@@ -267,8 +265,7 @@ test_that("the block-CV reading follows the applied plan, not the requested stra
   expect_match(block$context, "extrapolation")
 
   # Below CV_BLOCK_MIN_N the run was scored by LOOCV however the selector was
-  # set, so it reads the ordinary way and keeps its p-value. This is the case
-  # that would have shipped mislabelled.
+  # set, so it reads the ordinary way and keeps its p-value.
   small <- moran_reading(applied_cv_plan(CV_BLOCK_MIN_N - 1L, "block")$type)
   expect_false(small$block)
   expect_equal(small$label, "Moran's I")

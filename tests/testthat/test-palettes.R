@@ -1,5 +1,6 @@
-# test-palettes.R — tests for get_agro_colors, get_nut_key, get_default_palette,
-# get_method_label, get_buffer_multiplier, and generate_group_palette.
+# Palettes and labels: nutrient detection (get_nut_key), default, group and
+# Descriptive Suite palettes, reference class limits, method and resolution
+# labels, buffer multipliers, and the palette picked per variable.
 
 # ── get_agro_colors ────────────────────────────────────────────────────────
 
@@ -73,8 +74,8 @@ test_that("get_nut_key returns NULL for unrecognized input", {
 })
 
 test_that("a unit in a name never reads as magnesium", {
-  # "mg" of mg/kg is the symbol of magnesium; it named Fe, Mn, Cu and Zn as Mg,
-  # and gave organic matter and sodium Mg's palette and limits.
+  # The "mg" of mg/kg is magnesium's symbol, so units are removed before a name
+  # is matched.
   for (nm in c("Fe (mg/kg)", "Fe mg/kg", "Fe mg kg-1", "Fe..mg.kg.", "Fe_mg_kg", "Fe [mg kg⁻¹]"))
     expect_identical(get_nut_key(nm), "Fe", info = nm)
   expect_identical(get_nut_key("Zn (mg kg⁻¹)"), "Zn")
@@ -294,7 +295,7 @@ test_that("get_nut_key handles whitespace-padded input", {
 })
 
 test_that("get_nut_key handles numeric-looking string", {
-  # "B4" could be a Landsat band — not a nutrient
+  # "B4" could be a Landsat band, not a nutrient.
   expect_null(get_nut_key("B4"))
 })
 
@@ -355,8 +356,8 @@ test_that("apply_desc_palette colours discrete groups beyond a Brewer max", {
 test_that("apply_desc_palette works on the 2D density heatmap's discrete fill", {
   df <- make_test_df(n = 200)
   p <- generate_advanced_plot(df, vars = c("a", "b"), plot_type = "density_heatmap")
-  # regression: the old code added scale_fill_viridis_c/_distiller here, which
-  # errors on geom_density_2d_filled's ordered-factor fill
+  # A continuous fill scale would error on geom_density_2d_filled's
+  # ordered-factor fill.
   p2 <- apply_desc_palette(p, "viridis")
   expect_no_error(ggplot2::ggplot_build(p2))
   p3 <- apply_desc_palette(p, "Set1")

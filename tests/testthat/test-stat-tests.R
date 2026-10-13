@@ -1,9 +1,10 @@
-# test-stat-tests.R — tests for get_stat_letters (ANOVA, Tukey HSD, Duncan).
+# get_stat_letters() / add_stat_layer(): ANOVA, Tukey HSD, Duncan and
+# Kruskal-Wallis letters.
 
 test_that("the None choice draws nothing, including for two groups", {
-  # The test control became radioButtons with a "None" = "" choice (2026-08-14).
-  # get_stat_letters' if-chain ends in `test_type == "anova" || n_groups == 2`,
-  # so without an explicit guard "None" still annotated every two-group plot.
+  # "None" is "" (or no selection). get_stat_letters' if-chain ends in
+  # `test_type == "anova" || n_groups == 2`, so only an explicit guard keeps
+  # "None" off a two-group plot.
   set.seed(42)
   df <- data.frame(
     value = c(rnorm(10, 10, 2), rnorm(10, 15, 2)),
@@ -95,9 +96,8 @@ test_that("get_stat_letters uses ANOVA for 2 groups even when tukey requested", 
     value = c(rnorm(10, 10, 2), rnorm(10, 12, 2)),
     group = factor(rep(c("A", "B"), each = 10))
   )
-  # With only 2 groups there is nothing for a post-hoc to compare, so the
-  # tukey request must fall through to the ANOVA banner - which is what the
-  # label says, so assert the label rather than mere non-NULL.
+  # Two groups leave a post-hoc nothing to compare, so a tukey request falls
+  # through to the ANOVA banner; assert the label, not mere non-NULL.
   result <- get_stat_letters(df, "value", "group", "tukey")
   expect_s3_class(result, "data.frame")
   expect_match(result$letter[1], "ANOVA: F")
@@ -105,10 +105,9 @@ test_that("get_stat_letters uses ANOVA for 2 groups even when tukey requested", 
 })
 
 test_that("post-hoc letters separate genuinely different groups and join equal ones", {
-  # Structural assertions alone cannot tell a correct compact-letter display
-  # from a broken one: agricolae's `groups` column, its descending-mean row
-  # order and its test choice are all things a version bump can move, and these
-  # letters are drawn onto figures the user exports into papers.
+  # Structural assertions cannot tell a correct compact-letter display from a
+  # broken one, and agricolae's `groups` column, row order and test choice can
+  # all move with a version bump; these letters go onto exported figures.
   set.seed(42)
   sep <- data.frame(
     value = c(rnorm(10, 10, 1), rnorm(10, 15, 1), rnorm(10, 20, 1)),

@@ -1,4 +1,5 @@
-# test-multicollinearity.R — tests for detect_multicollinearity_engine and check_vif.
+# test-multicollinearity.R: tests for detect_multicollinearity_engine and
+# check_vif.
 
 # ── detect_multicollinearity_engine ────────────────────────────────────────
 
@@ -44,16 +45,15 @@ test_that("handles all-NA columns", {
   df <- make_test_df(10)
   df$z <- NA_real_
   res <- detect_multicollinearity_engine(df, vars = c("a", "z"))
-  # z is excluded because it's not numeric or has zero variance
+  # An all-NA column has no variance to screen.
   expect_true("a" %in% res$kept)
 })
 
 test_that("zero-variance column is pruned instead of crashing the VIF path", {
   df <- make_test_df(10)
   df$const <- 5
-  # A constant column used to produce NA rows in the correlation matrix and
-  # crash the solve() fallback ("subscript out of bounds"); it is now dropped
-  # before the iterative loop.
+  # A constant column would put NA rows in the correlation matrix and break the
+  # solve() fallback; it is dropped before the iterative loop.
   res <- suppressWarnings(
     detect_multicollinearity_engine(df, vars = c("a", "b", "const"))
   )
@@ -62,18 +62,17 @@ test_that("zero-variance column is pruned instead of crashing the VIF path", {
 })
 
 test_that("small-unit covariates survive the constant check (scale-free)", {
-  # The old absolute floor (var > 1e-6) treated any covariate whose natural
-  # units put its variance below 1e-6 as a constant and pruned it before the
-  # VIF loop even ran - and constants are dropped even under Keep All, so the
-  # user could not rescue it. Fractions, ratios, normalized indices and
-  # anything in km or Mg live in this range.
+  # Constancy is judged relative to the column's own magnitude, not by an
+  # absolute variance floor: fractions, ratios, normalized indices and anything
+  # in km or Mg have variances below 1e-6, and constants are dropped even under
+  # Keep All, so the user could not rescue them.
   set.seed(42)
   df <- data.frame(
     ph = rnorm(30, 6.5, 0.4),
     om = rnorm(30, 2.0, 0.5),
-    clay_frac = rnorm(30, 0.25, 5e-4)   # 0-1 fraction: var ~ 1.7e-7
+    clay_frac = rnorm(30, 0.25, 5e-4)   # 0-1 fraction: var ~ 1.5e-7
   )
-  expect_lt(var(df$clay_frac), 1e-6)    # the case the old floor pruned
+  expect_lt(var(df$clay_frac), 1e-6)    # below any absolute 1e-6 floor
 
   res <- suppressWarnings(
     detect_multicollinearity_engine(df, vars = c("ph", "om", "clay_frac"))
@@ -129,9 +128,9 @@ test_that("the singular-matrix fallback drops the globally redundant member, wha
   # matrix is singular and solve() throws -> the fallback picks the drop. `b`
   # carries four times the variance of `a`, so the maximally correlated pair is
   # (b, ab); of those two, `ab` is the more globally redundant one (it
-  # correlates with BOTH other covariates, `b` only with `ab`). The old rule
-  # dropped whichever member came first in column order, so the surviving
-  # covariate - and hence the fitted model - depended on the upload's layout.
+  # correlates with BOTH other covariates, `b` only with `ab`). The drop must
+  # not depend on column order, or the fitted model would depend on the
+  # upload's layout.
   set.seed(20260811)
   n <- 40
   a <- rnorm(n, 0, 1)
@@ -221,8 +220,8 @@ test_that("the VIF gate drops exactly what an lm-based VIF says it should", {
   expect_equal(res$dropped_vif, ref_dropped)
   expect_setequal(res$kept, ref_kept)
   # Recorded for this golden set, so a change of gate rule is visible even if
-  # someone weakens the reference above. On the shipped survey the two
-  # temperature variables and one of the slope/ruggedness pair go.
+  # the reference above is weakened. On the shipped survey: annual mean
+  # temperature, slope, then warmest-quarter temperature.
   recorded <- golden_baseline("vif_drop_order")
   if (!is.null(recorded)) {
     expect_equal(ref_dropped, recorded, info = golden_baseline_info())
@@ -266,7 +265,7 @@ test_that("the VIF gate is invariant to rescaling and to column order", {
 })
 
 test_that("an infinite threshold keeps every covariate however collinear", {
-  # The two most collinear pairs this golden set carries.
+  # Every covariate in a pair this golden set correlates above 0.99.
   all_cov <- golden_meta()$columns$covariates
   cm <- cor(golden_soil("full")[all_cov]); diag(cm) <- 0
   hits <- which(abs(cm) > 0.99, arr.ind = TRUE)

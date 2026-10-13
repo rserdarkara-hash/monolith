@@ -1,4 +1,5 @@
-# test-fuzzy-matching.R — tests for fuzzy_match_column and detect_pred_column.
+# Column matching: fuzzy_match_column(), detect_pred_column() and the
+# coordinate and column-reference guards.
 
 # ── fuzzy_match_column ─────────────────────────────────────────────────────
 
@@ -149,16 +150,16 @@ test_that("fuzzy_match_column handles very long column names", {
 })
 
 test_that("fuzzy_match_column handles duplicate cleaned names", {
-  # Two columns clean to the same string — first match wins
+  # Two columns clean to the same string: the first match wins.
   cols <- c("pH_H2O", "pH-H2O", "Clay")
   result <- fuzzy_match_column("pH H2O", cols)
   expect_equal(result, "pH_H2O")
 })
 
 # ── is_valid_col_ref ──────────────────────────────────────────────────────
-# Guards the "uploaded predictions" panels: detect_pred_column returns NA
-# (not NULL) when no prediction column exists, and a bare is.null() check
-# used to treat that NA as "predictions present".
+# Guards the "uploaded predictions" panels: detect_pred_column() returns NA (not
+# NULL) when no prediction column exists, which an is.null() check would read
+# as "predictions present".
 
 test_that("is_valid_col_ref accepts a real column name", {
   expect_true(is_valid_col_ref("pH_cve"))
@@ -182,7 +183,7 @@ test_that("is_valid_col_ref is FALSE for detect_pred_column's no-match result", 
 test_that("is_coord_col matches only whole-name coordinate tokens", {
   expect_true(all(is_coord_col(c("x", "Y", "lon", "LAT", "Longitude",
                                  "latitude", " easting ", "Northing", "lng"))))
-  # Substring false-positives the old regex excluded from variable mapping
+  # Names that merely contain a coordinate token are variables.
   expect_false(any(is_coord_col(c("Precipitation_cumulative", "correlation_index",
                                   "latent_heat", "longevity", "along_slope",
                                   "Platinum", "x_offset", "pH"))))
@@ -191,15 +192,13 @@ test_that("is_coord_col matches only whole-name coordinate tokens", {
 # ── pick_coord_column ─────────────────────────────────────────────────────
 
 test_that("pick_coord_column pre-selects only whole-name coordinate columns", {
-  # The upload observer used substring matching ("^lon" / "^lat") long after
-  # every other call site moved to is_coord_col()'s exact-name policy, so a
-  # variable like Longevity_index was pre-selected as the X coordinate.
+  # Whole-name matching, as is_coord_col(): a variable like Longevity_index is
+  # never pre-selected as the X coordinate.
   cols <- c("Longevity_index", "Lateral_flow", "pH", "Longitude", "Latitude")
   expect_identical(pick_coord_column(cols, "x"), "Longitude")
   expect_identical(pick_coord_column(cols, "y"), "Latitude")
 
-  # No coordinate column at all: NULL leaves the first column selected, which
-  # is what the old NA-valued grep result did.
+  # No coordinate column: NULL, which leaves the input's first column selected.
   expect_null(pick_coord_column(c("Longevity_index", "Lateral_flow", "pH"), "x"))
   expect_null(pick_coord_column(c("Longevity_index", "Lateral_flow", "pH"), "y"))
   expect_null(pick_coord_column(character(0), "x"))
@@ -210,9 +209,7 @@ test_that("pick_coord_column pre-selects only whole-name coordinate columns", {
 })
 
 test_that("match_metadata_columns tolerates empty and blank metadata rows", {
-  # 1:nrow(m_df) iterated c(1, 0) on a headers-only sheet, feeding an NA name
-  # into the fuzzy matcher before the NA check ran. seq_len + the hoisted
-  # check make an empty sheet yield an empty mapping and skip NA/blank names
+  # A headers-only sheet yields an empty mapping, and NA/blank names are skipped
   # before they reach adist().
   empty <- data.frame(Variable = character(0), Label = character(0))
   expect_identical(match_metadata_columns(empty, c("pH", "EC")), list())

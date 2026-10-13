@@ -3,11 +3,9 @@
 # Sourced via ui_helpers.R.
 
 
-# Single source of truth for turning the sidebar locality selection into the
-# locality set an analysis should run on. "ALL", an empty selection, and NULL
-# all resolve to every non-NA locality in the data; anything else is taken
-# verbatim. Returns character(0) when the data or locality column is missing,
-# so callers can length()-guard without NULL checks.
+# The locality set an analysis runs on: "ALL", an empty selection or NULL means
+# every non-NA locality in the data; anything else is taken verbatim.
+# character(0) when the data or locality column is missing.
 resolve_selected_localities <- function(sel, user_data, loc_col) {
   all_locs <- if (!is.null(user_data) && !is.null(loc_col) &&
                   loc_col %in% colnames(user_data)) {
@@ -41,11 +39,9 @@ pooled_within_caption <- function(v) {
                  paste(excl, collapse = ", ")))
 }
 
-#' Which column should an axis dropdown default to after an upload?
-#' Whole-name matching on the same token lists is_coord_col() (spatial_metrics.R)
-#' uses; substring matching ("^lon" / "^lat") would take variables such as
-#' Longevity_index or Lateral_flow for a coordinate.
-#' Returns NULL when nothing matches, which leaves the first column selected.
+#' Which column an axis dropdown defaults to after an upload: whole-name
+#' matching on is_coord_col()'s token lists (substring matching would take
+#' Longevity_index for a longitude). NULL leaves the first column selected.
 pick_coord_column <- function(cols, axis = c("x", "y")) {
   axis <- match.arg(axis)
   tokens <- if (axis == "x") .coord_names_x else .coord_names_y
@@ -67,39 +63,26 @@ melt_cormat <- function(cormat, value_name = "Corr") {
   df
 }
 
-# Partial correlation matrix for `vars`, controlling for `control_vars`.
-# Single source for BOTH the Partial Correlation heatmap and the correlation
-# summary table, so the two cannot residualize differently or disagree on
-# quoting (labels containing spaces).
+# Partial correlation matrix for `vars` controlling for `control_vars`; the one
+# source for the Partial Correlation heatmap and the summary table.
 #
-# Conventions follow ppcor, which the table's p-value block already cites:
-#   pearson  - residualize the RAW values on the controls, product-moment
-#              correlation of the residuals (algebraically identical to
-#              inverting the Pearson correlation matrix of the pair plus the
-#              controls).
-#   spearman - rank-transform EVERY column first, then residualize and take the
-#              product-moment correlation of the rank residuals. Correlating
-#              raw-value residuals with method = "spearman" is NOT a partial
-#              rank correlation: ppcor residualizes the ranks,
-#              and cor(method = "spearman") of the residuals would instead
-#              re-rank residuals of an unranked fit.
-#   kendall  - no residualization analogue exists; ppcor inverts the Kendall
-#              tau matrix (the multi-control generalisation of Kendall's
-#              first-order partial tau). Each PAIR inverts the tau matrix of
-#              that pair plus the controls only: inverting one matrix of every
-#              target would condition each pair on the other targets as well,
-#              so adding a target to the table would change every estimate
-#              while the p-values still counted only the controls.
-# Residualization uses one pivoted QR over the shared control design matrix
-# (model.matrix keeps factor controls and awkward column names working) — the
-# same fit lm() would produce, but computed once for all variables.
+# Conventions follow ppcor:
+#   pearson  - residualize the raw values on the controls, then correlate the
+#              residuals (identical to inverting the correlation matrix).
+#   spearman - rank EVERY column first, then residualize and correlate the
+#              rank residuals (cor(method = "spearman") of raw-value residuals
+#              is not a partial rank correlation).
+#   kendall  - no residualization analogue: invert the Kendall tau matrix of
+#              each PAIR plus the controls only (one matrix of all targets
+#              would condition each pair on the other targets too).
+# Residualization uses one pivoted QR over the shared control design
+# (model.matrix keeps factor controls working): lm()'s fit, computed once.
 #
-# Returns list(cormat, n, k, df, method, failed, reason). For Pearson/Spearman,
-# k is the control design's rank minus its intercept, and df = n - k - 2.
-# `cormat` is NULL when the partial correlation could not be computed; `failed`
-# then names the offending columns and `reason` says why, so the caller can
-# abort (partial_correlation_refusal() words it) instead of silently reporting
-# raw correlations under a "partial" label.
+# Returns list(cormat, n, k, df, method, failed, reason); for Pearson/Spearman
+# k is the control design's rank minus the intercept and df = n - k - 2.
+# `cormat` is NULL when not computable; `failed` names the columns and
+# `reason` says why (worded by partial_correlation_refusal()), so raw
+# correlations are never reported under a "partial" label.
 compute_partial_correlation <- function(df, vars, control_vars = NULL,
                                         method = "pearson") {
   vars <- unique(vars)
@@ -351,11 +334,9 @@ idw_panel_metrics <- function(disp_method, cv_metrics) {
              Value = c(sqrt(sum(ns[ok] * rmses[ok]^2) / n), sum(ns[ok] * mes[ok]) / n))
 }
 
-#' The IDW power profile as an export sheet: each candidate named
-#' (idw_power_text), its power as a number, empty at the nearest-neighbour
-#' limit because a spreadsheet cell cannot hold Inf, its pooled CV RMSE and
-#' whether it is within one standard error of the best (the panel's filled
-#' points).
+#' The IDW power profile as an export sheet: each candidate named, its power
+#' (empty at the nearest-neighbour limit: a cell cannot hold Inf), its pooled
+#' CV RMSE and whether it lies within one SE of the best.
 idw_profile_export_df <- function(profile) {
   out <- data.frame(Candidate = vapply(profile$p, idw_power_text, character(1)),
                     `Power (p)` = ifelse(is.finite(profile$p), profile$p, NA_real_),
@@ -371,16 +352,12 @@ idw_fold_power_text <- function(fold_p) {
          format_power(max(fold_p)), "]")
 }
 
-# Regional Parameters table for IDW/TPS, built from the run-committed
-# per-locality snapshot (rv$disp$regional_params): the setting each surface ran
-# with and the engine's own fit record (an IDW run's map and fold powers, a TPS
-# run's fitted lambda and effective df). Never the live tuning store: a
-# locality without a stored value ran with the setting for all localities,
-# which the store does not hold. has_pre = FALSE means the displayed run mapped
-# no prediction surface, so the Predicted column is dropped rather than filled
-# with "N/A". The export states, for a selecting run, whose values the power or
-# lambda was selected on: an unseparated Predicted surface takes the measured
-# values' selection.
+# Regional Parameters table for IDW/TPS from the run-committed snapshot
+# (rv$disp$regional_params): each surface's setting and fit record (IDW map
+# and fold powers, TPS lambda and effective df), never the live tuning store.
+# has_pre = FALSE drops the Predicted column. The export also states whose
+# values a selecting run selected on (an unseparated Predicted surface takes
+# the measured values' selection).
 build_regional_params_df <- function(type, loc, regional_params, has_pre, export = FALSE) {
   if (is.null(regional_params) || length(regional_params) == 0) return(NULL)
   locs <- if (loc == "Total (Combined)") names(regional_params) else intersect(loc, names(regional_params))
@@ -400,9 +377,8 @@ build_regional_params_df <- function(type, loc, regional_params, has_pre, export
           fp <- as.numeric(fit$fold_p)
           auto <- identical(param_value_mode("IDW", val), "cv")
           map_p <- as.numeric(fit$p %||% if (auto) NA_real_ else val)
-          # A spreadsheet cell cannot hold Inf (openxlsx writes it empty): the
-          # nearest-neighbour limit is named in Selected and counted over the
-          # folds, and its numeric cells stay empty.
+          # A cell cannot hold Inf (openxlsx writes it empty): the
+          # nearest-neighbour limit is named in Selected and counted over folds.
           fin <- function(x) if (length(x) == 1 && is.finite(x)) x else NA_real_
           out$Mode <- if (auto) "Auto (CV)" else "Fixed"
           out$Selected <- if (is.na(map_p)) NA_character_ else idw_power_text(map_p)
@@ -427,9 +403,7 @@ build_regional_params_df <- function(type, loc, regional_params, has_pre, export
           out[["Selected on"]] <- if (auto && isTRUE(is.finite(fit$lambda))) selected_on(fit$gcv_source, tgt) else NA_character_
           out$Lambda <- as.numeric(fit$lambda %||% if (auto) NA_real_ else val)
           out[["Effective df"]] <- as.numeric(fit$eff_df %||% NA_real_)
-          # Where GCV's minimum sat on its grid, and at the least-smoothing end
-          # exact interpolation's cross-validation beside the run's
-          # (tps_gcv_end, apply_TPS).
+          # Where GCV's minimum sat, and exact interpolation's CV beside the run's.
           out[["GCV minimum"]] <- if (!auto || !isTRUE(is.finite(fit$lambda))) NA_character_ else {
             switch(fit$gcv_end %||% "", plane = "smoothest end (least-squares plane)",
                    interpolation = "least-smoothing end", "inside the grid")
@@ -489,29 +463,17 @@ build_regional_params_df <- function(type, loc, regional_params, has_pre, export
 }
 
 # ── Shared result-table builders ─────────────────────────────────────────────
-# One definition per result table, consumed by BOTH the on-screen card and the
-# export registry. Before these existed each export re-derived its own subset
-# of the metrics under its own labels, so an exported workbook reported fewer
-# statistics than the screen it was taken from. Values stay NUMERIC: a metric
-# written to a worksheet as text cannot be sorted, charted or recomputed.
+# One definition per result table for both the on-screen card and the export
+# registry. Values stay NUMERIC so a worksheet can sort, chart and recompute.
+# The Model Performance columns are CV_METRIC_LABELS (spatial_metrics.R).
 
-# Column order and labels of the Model Performance table: CV_METRIC_LABELS,
-# defined in spatial_metrics.R beside CV_REPEAT_METRICS, which it extends.
-
-# One wide row of cross-validation metrics from a perform_cv() result.
-# `cv_design` is the fold plan the row was scored under (applied_cv_plan()); it
-# is a column of its own here because the on-screen Source string that carries
-# it is not machine-readable. `cv_info` carries the same row's cross-validation
-# population: which samples it scored (`population`), the id that lets two
-# archived runs be checked for having scored the same rows in the same folds
-# (`pop_id`), and what the folds re-estimated (`refit`). Coverage comes off
-# perform_cv: metrics are computed on the predicted samples, so a row below
-# 100% describes fewer samples than the design asked for. `moran` is the
-# row's moran_reading(): under a contiguous fold design (Spatial Block CV,
-# kNNDM spatial folds) the p-value is not reported
-# and `Moran Context` names what the statistic measures there, so a reader of
-# the file alone cannot take it for the random-CV quantity. `Target spans
-# zero` explains an NA in NRMSE (mean) and SMAPE, which do not apply there.
+# One wide row of CV metrics from a perform_cv() result. `cv_design` is the
+# fold plan (applied_cv_plan()) as its own column; `cv_info` adds the CV
+# population (`population`), its id for comparing archived runs (`pop_id`)
+# and what the folds re-estimated (`refit`). Coverage below 100% means fewer
+# samples than the design asked for. `moran` (moran_reading()): under a
+# contiguous fold design the p-value is dropped and `Moran Context` names what
+# the statistic measures. `Target spans zero` explains NA NRMSE (mean)/SMAPE.
 cv_metrics_export_df <- function(res, source_label, cv_design = NA_character_,
                                  cv_info = NULL, moran = moran_reading(NA_character_)) {
   if (is.null(res)) return(NULL)
@@ -536,13 +498,10 @@ cv_metrics_export_df <- function(res, source_label, cv_design = NA_character_,
   out
 }
 
-# The fold design one CV metrics row was scored under: the plan the strategy
-# resolves to at this n (resolve_cv_plan), unless the metrics record otherwise:
-# a Spatial Block request fell back to random folds because k-means failed, or
-# a kNNDM request chose between random and spatial folds (`knndm_branch`,
-# perform_cv) - "knndm_random" / "knndm_spatial", or random folds with the
-# reason where kNNDM had no domain or no valid partition. Returns
-# resolve_cv_plan()'s list, retyped and relabelled in those cases.
+# The fold design one CV metrics row was scored under: resolve_cv_plan() at
+# this n, retyped and relabelled when the metrics record a Spatial Block
+# fallback to random folds or a kNNDM choice (`knndm_branch`: "knndm_random",
+# "knndm_spatial", or random folds with the reason).
 applied_cv_plan <- function(n_obs, strategy = "auto", res = NULL) {
   plan <- resolve_cv_plan(strategy, n_obs)
   if (identical(plan$type, "block") && isTRUE(res$block_fallback)) {
@@ -566,16 +525,13 @@ applied_cv_plan <- function(n_obs, strategy = "auto", res = NULL) {
 # group is withheld at once, so its residuals share one prediction condition.
 CONTIGUOUS_CV_DESIGNS <- c("block", "knndm_spatial")
 
-# How the residual Moran's I of a CV metrics row is read, from the fold
-# designs behind it (one type for a locality; one per pooled locality for a
-# "Total (Combined)" row). Under ordinary CV it diagnoses model-error
-# structure and its p-value is reported. Under a contiguous design (Spatial
-# Block CV, kNNDM spatial folds) the pooled out-of-fold residuals also inherit
-# the fold geometry and a shared extrapolation condition inside each withheld
-# group; spdep's reference distribution knows neither, so the statistic is
-# reported as residual clustering of that design and the p-value is not. A
-# pool of localities scored under different designs is read the ordinary way
-# and flagged `mixed`. `block` means a contiguous design, and `design` names it.
+# How the residual Moran's I of a CV metrics row is read, from its fold
+# designs (one per pooled locality for "Total (Combined)"). Under ordinary CV
+# it diagnoses model-error structure and p is reported. Under a contiguous
+# design (Spatial Block, kNNDM spatial folds) the residuals also inherit the
+# fold geometry and a shared extrapolation condition, which spdep's reference
+# distribution ignores, so p is not reported. Mixed designs read the ordinary
+# way, flagged `mixed`.
 moran_reading <- function(plan_types) {
   plan_types <- unique(plan_types[!is.na(plan_types)])
   block <- length(plan_types) == 1 && plan_types %in% CONTIGUOUS_CV_DESIGNS
@@ -635,15 +591,11 @@ cv_repeats_export_df <- function(summ, source_label) {
   )
 }
 
-# Metric dictionary for an externally supplied prediction column (uploaded ML
-# predictions). perform_cv() owns every definition, so this table and Model
-# Performance cannot drift apart. Two documented departures from Model
-# Performance (Scientific Guide 5): MBE is reported predicted-minus-observed,
-# and NMAE has no CV counterpart, so it is computed here under the same
-# sign-crossing rule as NRMSE (mean). moran = FALSE: an uploaded prediction
-# column carries no CV residual field. `Note` names a value that is NA because
-# the metric does not apply (the target spans zero), so the exported sheet
-# can tell it from one that could not be computed.
+# Metric dictionary for an uploaded prediction column; perform_cv() owns the
+# definitions, so it cannot drift from Model Performance. Departures
+# (Scientific Guide 5): MBE is predicted minus observed, and NMAE (no CV
+# counterpart) follows NRMSE (mean)'s sign-crossing rule. No Moran (no CV
+# residual field). `Note` marks values NA because the metric does not apply.
 pred_perf_df <- function(obs, pre) {
   ok <- !is.na(obs) & !is.na(pre)
   obs <- obs[ok]; pre <- pre[ok]
@@ -666,14 +618,10 @@ pred_perf_df <- function(obs, pre) {
   )
 }
 
-# The uploaded-prediction card and the Model Performance table can score
-# different samples, and neither number is wrong. The model's point set drops
-# rows with no measured target FIRST and deduplicates co-located points after
-# (dedup_valid_points); the displayed set deduplicates first and is then
-# filtered to rows carrying both values, so a co-located pair whose measurement
-# sits on one member and whose prediction sits on the other contributes a
-# different member to each. Returns NULL when the two agree - a note that fires
-# on every run is noise.
+# The uploaded-prediction card and Model Performance can score different
+# samples, both correctly: the model drops rows without a measured target
+# before deduplicating, the display deduplicates first, so a co-located pair
+# can contribute a different member to each. NULL when the counts agree.
 pred_pop_note <- function(card_n, model_n) {
   if (!isTRUE(is.finite(card_n)) || !isTRUE(is.finite(model_n))) return(NULL)
   if (isTRUE(card_n == model_n)) return(NULL)
@@ -696,16 +644,11 @@ agreement_metrics_df <- function(ag) {
   )
 }
 
-# Display formatting for every statistic the app prints: four significant
-# digits, so a small value never reads as zero. Zero prints as "0", a whole
-# number prints exactly (a count must not lose digits), a value of 1000 or more
-# keeps every integer digit (123456.7 ha reads 123457, not 123500), values
-# below 1e-4 in magnitude switch to scientific notation, everything else is
-# fixed notation at four significant digits. Returns character, NA for a
-# non-finite value.
-# mnFormatSig() (format_sig_js(), ui_components.R) applies the same rule in
-# the browser to numeric table columns, so the two must change together; they
-# can differ in the last digit only at an exact decimal tie.
+# Display formatting for every statistic: four significant digits, so a small
+# value never reads as zero. Zero prints "0", whole numbers exactly, values
+# >= 1000 keep every integer digit, |x| < 1e-4 goes scientific. Character; NA
+# for non-finite. mnFormatSig() (format_sig_js(), ui_components.R) applies the
+# same rule in the browser: change both together.
 format_sig <- function(x) {
   x <- suppressWarnings(as.numeric(x))
   out <- rep(NA_character_, length(x))
@@ -836,14 +779,10 @@ RUN_CANCELLED_NOTE <- paste(
 # the export's Note column and the screen's footnote say the same thing.
 SIGNED_TARGET_NOTE <- "not reported: observed values span zero"
 
-# summary() of one or two numeric vectors as a tidy frame, values left numeric.
-# A FIXED row set keeps the two columns in step: summary() appends an "NA's"
-# element only for a vector that actually has missing values, so building the
-# second column by assignment failed outright ("replacement has 6 rows, data
-# has 7") whenever exactly one of the two sides carried them. The
-# missing-value row is shown only when there is something to report. A second
-# vector with no observed value keeps its column (statistics NA, the NA's row
-# counting it), so an empty predicted side reads as empty rather than absent.
+# summary() of one or two numeric vectors as a tidy numeric frame over a FIXED
+# row set (summary() adds "NA's" only when values are missing, which would
+# misalign the columns). The NA's row shows only when non-zero; an all-NA
+# second vector keeps its column.
 summary_stats_df <- function(a, b = NULL, labels = c("Value", "Predicted")) {
   rows <- c("Min.", "1st Qu.", "Median", "Mean", "3rd Qu.", "Max.", "NA's")
   stat_rows <- rows[rows != "NA's"]
@@ -870,13 +809,11 @@ summary_stats_df <- function(a, b = NULL, labels = c("Value", "Predicted")) {
   out
 }
 
-# The two vectors a Descriptive Statistics table summarises, shared by the card
-# and its export so both describe ONE sample: the uploaded rows of `localities`
-# (every row when NULL). Not the run's point set, which is coordinate-
-# deduplicated and gives a different n, mean and quartiles wherever co-located
-# samples exist. The predicted side is the column the displayed run mapped
-# (_ss for a Single-Split run, never a fallback to the other), and only when
-# that run mapped predictions. NULL when the displayed variable is not in `df`.
+# The two vectors a Descriptive Statistics table summarises (card and export):
+# the uploaded rows of `localities` (all when NULL), not the run's deduplicated
+# point set. The predicted side is the column the displayed run mapped (_ss
+# for Single-Split), only when it mapped predictions. NULL when the displayed
+# variable is not in `df`.
 stats_table_vectors <- function(df, meta, loc_col, localities = NULL) {
   if (is.null(df) || is.null(meta)) return(NULL)
   if (!is.null(localities) && !is.null(loc_col) && loc_col %in% names(df)) {
@@ -895,27 +832,15 @@ stats_table_vectors <- function(df, meta, loc_col, localities = NULL) {
 }
 
 # ── Fitted variogram parameters ──────────────────────────────────────────────
-# The reported parameters of one fitted gstat variogramModel. Sill is the TOTAL
-# sill (nugget + partial sills) and Structural Dependency is the partial-sill
-# share of it in percent, so 100% is a pure spatial structure and 0% a pure
-# nugget (NA when the sill is zero).
-#
-# Range (a) is gstat's range PARAMETER, which is not comparable across model
-# families: the distance at which the model reaches 95% of its sill is a for
-# Sph, 3a for Exp, sqrt(3)a for Gau and about 4.75a for Mat nu = 1.5
-# (.vgm_practical_range_factor, spatial_vgm.R). Practical Range is that
-# distance, so rows fitted with different families compare on it. Kappa is
-# reported for a Matern structure only (it is inert for the others). A nested
-# model names every structure, and its ranges are those of the structure that
-# reaches its sill last. A pure-nugget model reports nugget and sill with no
-# range. Values are unrounded; displays format them.
-#
-# `max_lag` and `sill_resolved` come from the fit's own diagnostics: a sill the
-# empirical variogram never reached is MODEL-EXTRAPOLATED, so the structural
-# dependency derived from it is not identified by the data. NA for a supplied
-# (manual) model, where the user chose the parameters and no empirical support
-# was recorded - "not reliably identified" is a statement about a FIT, not
-# about a model the user applied.
+# The reported parameters of one fitted variogramModel. Sill is the TOTAL sill
+# and Structural Dependency the partial-sill share of it in % (NA at zero
+# sill). Range (a) is gstat's parameter, not comparable across families;
+# Practical Range (.vgm_practical_range_factor()) is. Kappa only for Matern.
+# A nested model names every structure and reports the ranges of the one that
+# reaches its sill last; a pure nugget has no range. Values are unrounded.
+# `max_lag`/`sill_resolved` come from the fit's diagnostics (a sill reached
+# beyond the longest lag is model-extrapolated); NA for a supplied model,
+# which has none.
 vgm_params_row <- function(f) {
   out <- list(model = NA_character_, kappa = NA_real_, nugget = NA_real_,
               sill = NA_real_, range = NA_real_, practical_range = NA_real_,
@@ -951,13 +876,10 @@ vgm_params_row <- function(f) {
   out
 }
 
-# One-line plot subtitle of a variogram model, read from the record the
-# Variogram Parameters card reports (vgm_params_row): what the model is (a
-# fit, a flawed fit, the heuristic stand-in when nothing could be fitted, or a
-# model the user applied), its family (with the smoothness of a Matern),
-# nugget, partial sill, the range parameter a and the practical range, which
-# is model-extrapolated where the sill lies beyond the longest lag and says
-# so. NULL for no model.
+# One-line plot subtitle of a variogram model from vgm_params_row(): what it is
+# (fit, flawed fit, heuristic stand-in, applied manual model), family (with a
+# Matern's kappa), nugget, partial sill, range a and practical range, flagged
+# model-extrapolated beyond the longest lag. NULL for no model.
 vgm_fit_subtitle <- function(fit) {
   p <- vgm_params_row(fit)
   if (is.na(p$model)) return(NULL)
@@ -984,13 +906,10 @@ VGM_DEGENERATE_NOTE <- paste(
   "Target has no usable variance in this locality. No spatial structure can be",
   "estimated; the fitted parameters below the numerical noise floor are not reported.")
 
-# Screen flavour: "NA" for an absent value, the smoothness beside a Matern
-# model name and the percent sign on Structural Dependency, all character so
-# one column can mix the model name with numbers. Where the sill is not
-# resolved inside the observed lag range the Structural Dependency cell states
-# that instead of a percentage, and carries the model-extrapolated figure in
-# its tooltip - a number a reader would otherwise take as measured. Cells are
-# HTML, so the card renders with escape = FALSE.
+# Screen flavour, all character so one column mixes model names and numbers:
+# "NA" for absent values, kappa beside a Matern name, % on Structural
+# Dependency. An unresolved sill shows "Not reliably identified" with the
+# extrapolated figure in a tooltip. Cells are HTML (escape = FALSE).
 .vgm_params_chr <- function(f) {
   p <- vgm_params_row(f)
   if (is.na(p$model)) return(rep("NA", 6))
@@ -1025,10 +944,9 @@ VGM_OF_RESIDUALS <- "Residuals"
 VGM_OF_FALLBACK <- "Measured values (OK fallback)"
 
 # The Variogram Parameters card. "Total (Combined)" lists every fitted
-# locality/target (variograms are fitted per locality); a named locality is
-# transposed so Actual and Predicted sit side by side. NULL when nothing in the
-# store was fitted, which sci_dt() renders as the empty state. `of` is passed
-# to the Total listing (vgm_params_export_df).
+# locality/target (vgm_params_export_df(), with `of`); a named locality is
+# transposed with Actual and Predicted side by side. NULL when nothing was
+# fitted (sci_dt()'s empty state).
 vgm_params_table_df <- function(v_fit_list, loc, of = NULL) {
   if (identical(loc, "Total (Combined)")) {
     return(vgm_params_export_df(v_fit_list, of = of))
@@ -1036,9 +954,8 @@ vgm_params_table_df <- function(v_fit_list, loc, of = NULL) {
   f_a <- v_fit_list[[paste0(loc, "_act")]]
   f_p <- v_fit_list[[paste0(loc, "_pre")]]
   if (is.null(f_a) && is.null(f_p)) return(NULL)
-  # A target with no usable variance produces a sill 60 orders of magnitude
-  # below the data and a "Structural Dependence 100%" manufactured from
-  # numerical noise. Report the cause instead of the parameters.
+  # A constant target yields a noise-level sill and a spurious 100% structural
+  # dependency: report the cause instead.
   fits <- Filter(Negate(is.null), list(f_a, f_p))
   if (all(vapply(fits, vgm_target_degenerate, logical(1)))) {
     return(data.frame(Status = VGM_DEGENERATE_NOTE, stringsAsFactors = FALSE))
@@ -1085,13 +1002,11 @@ vgm_params_export_df <- function(v_fit_list, locs = NULL, of = NULL) {
 }
 
 # Manual variogram sliders for one locality and target. Bounds come from the
-# data being tuned (its variance and bounding-box diagonal) and widen only when
-# the stored model lies beyond them, so applying a model never narrows them.
-# Nugget and partial sill share one axis. Steps are 1/200 of each axis at two
-# significant digits. ion.rangeSlider reads its decimal count from the step's
-# JavaScript string, which switches to exponent notation below 1e-6, so
-# `step_ok` is FALSE when the sill axis cannot be represented (variance below
-# about 1e-4). NULL without a positive variance and extent.
+# data being tuned (variance, bounding-box diagonal) and widen only for a
+# stored model beyond them. Nugget and partial sill share one axis; steps are
+# 1/200 of an axis at two significant digits. ion.rangeSlider breaks on steps
+# below 1e-6 (exponent notation), so `step_ok` is FALSE for variances below
+# ~1e-4. NULL without a positive variance and extent.
 manual_vgm_slider_spec <- function(variance, max_dist, fit = NULL) {
   if (!isTRUE(is.finite(variance) && variance > 0 && is.finite(max_dist) && max_dist > 0)) {
     return(NULL)
@@ -1130,12 +1045,9 @@ RF_IMPORTANCE_LABELS <- c(
   purity = "IncNodePurity")
 
 # Every importance measure a randomForest recorded, one row per covariate,
-# ordered by the first. A regression forest grown with importance = TRUE
-# carries the out-of-bag permutation importance, given unscaled (the increase
-# in MSE, squared target units, which orders the covariates) and divided by its
-# standard error across trees (randomForest's %IncMSE, which grows with ntree),
-# then IncNodePurity; without it, only IncNodePurity. Raw covariate names: this
-# is the numeric record behind the labelled importance plot.
+# ordered by the first: with importance = TRUE the OOB permutation importance
+# unscaled (MSE increase, which ranks) and scaled (%IncMSE, grows with ntree),
+# then IncNodePurity; otherwise IncNodePurity only. Raw covariate names.
 rf_importance_df <- function(rf_mod) {
   imp <- randomForest::importance(rf_mod, scale = FALSE)
   out <- data.frame(Variable = rownames(imp), stringsAsFactors = FALSE)
@@ -1152,18 +1064,9 @@ rf_importance_df <- function(rf_mod) {
   out
 }
 
-# --- RK linear-trend presentation --------------------------------------------
-# Structured replacement for the raw print(summary.lm) dump on the Scientific
-# Analysis tab: compact fit-statistic chips + a publication-style coefficient
-# table. rk_coef_table() is the panel's text flavour; the export registers the
-# numeric flavours rk_coef_export_df() and rk_fit_stats_df().
-
 # --- Ruler readouts -----------------------------------------------------------
-# Length and area formatting for the Map Viewer ruler. Metres and hectares are
-# the app's units everywhere else (grid resolution, buffer radii, class areas),
-# so the ruler stays on them and adds the larger unit in brackets rather than
-# switching to it: a reader comparing a measured separation against a variogram
-# range needs the metres, not a rounded kilometre.
+# Map Viewer ruler lengths and areas stay in metres and hectares (the app's
+# units for grid, buffers and class areas), with the larger unit in brackets.
 format_measure_length <- function(m) {
   if (is.null(m) || length(m) != 1 || !is.finite(m)) return("n/a")
   if (m >= 1000) {
@@ -1185,6 +1088,7 @@ format_measure_area <- function(m2) {
   }
 }
 
+# --- p-values -----------------------------------------------------------------
 format_p_value <- function(p) {
   if (is.null(p) || length(p) == 0 || is.na(p)) return("NA")
   if (p < 0.001) return("< 0.001")
@@ -1200,9 +1104,12 @@ signif_stars <- function(p) {
   ""
 }
 
-# Fit statistics from a summary.lm object; NULL when the object does not look
-# like one (rv$model_summaries entries are only ever summary.lm today, but the
-# UI degrades to the raw print if that ever changes).
+# --- RK linear-trend presentation --------------------------------------------
+# Fit-statistic chips and a coefficient table for the Scientific Analysis tab:
+# rk_coef_table() is the panel's text flavour; rk_coef_export_df() and
+# rk_fit_stats_df() are the numeric export flavours.
+
+# Fit statistics from a summary.lm object; NULL when it does not look like one.
 rk_fit_stats <- function(lm_sum) {
   if (is.null(lm_sum) || is.null(lm_sum$coefficients) || is.null(lm_sum$df)) return(NULL)
   f <- lm_sum$fstatistic
@@ -1281,10 +1188,8 @@ rk_coef_export_df <- function(lm_sum, vars_metadata = NULL, conf_level = 0.95) {
   out
 }
 
-# The fit-statistic chips above the coefficient table, as an exportable frame:
-# the chips are the only place R², the residual SE, the F test and n are
-# reported, so an export of the coefficients alone loses the model's fit.
-# Full precision: the chips format for the screen, the sheet keeps the numbers.
+# The fit-statistic chips as an exportable frame at full precision (the chips
+# are the only place R², residual SE, the F test and n are reported).
 rk_fit_stats_df <- function(lm_sum) {
   s <- rk_fit_stats(lm_sum)
   if (is.null(s)) return(NULL)
@@ -1342,9 +1247,8 @@ fuzzy_match_column <- function(act_name, user_cols) {
   return(NULL)
 }
 
-# A presentation map, never a rename of analysis columns. Ambiguous labels
-# include their source identifier; even a user label containing that suffix
-# cannot collide with another variable's displayed name.
+# Display labels for variables (a presentation map, never a column rename);
+# duplicated labels get their column name appended until unique.
 desc_var_labels <- function(vars, vars_metadata = NULL) {
   vars <- unique(vars)
   labels <- unname(get_var_labels(vars, vars_metadata))
@@ -1375,9 +1279,8 @@ filter_active_groups <- function(df, active_groups) {
   return(df)
 }
 
-# TRUE only for a usable single column name. detect_pred_column returns NA
-# (not NULL) when no prediction column exists, so a bare is.null() check
-# wrongly treats "no predictions uploaded" as "predictions present".
+# TRUE only for a usable single column name (detect_pred_column() returns NA,
+# not NULL, when there is no prediction column).
 is_valid_col_ref <- function(x) {
   !is.null(x) && length(x) == 1 && !is.na(x) && nzchar(x)
 }
@@ -1458,11 +1361,9 @@ covariate_record_text <- function(cfg) {
          paste0(names(ret), ": ", used, " (removed: ", gone, ")", collapse = "; "), des_txt)
 }
 
-# Where the Context panel opens: the first category holding a variable with an
-# uploaded prediction column, and in the category the first such variable.
-# Those are the variables the app can map end to end; the variable list has no
-# target/covariate flag, so this is the one signal there is. Falls back to the
-# first category and its first variable.
+# Where the Context panel opens: the first category with a variable that has
+# an uploaded prediction column (the variables the app can map end to end) and
+# its first such variable; else the first category and variable.
 default_var_pick <- function(vars, category = NULL) {
   cat_of <- vapply(vars, function(x) as.character(x$category %||% ""), character(1))
   has_pred <- vapply(vars, function(x) is_valid_col_ref(x$pred) || is_valid_col_ref(x$pred_ss),
@@ -1556,9 +1457,8 @@ match_metadata_columns <- function(m_df, user_cols) {
   col_unit <- grep("^units?$|\\bunits?\\b", cols, ignore.case = TRUE, value = TRUE)[1]
 
   new_vars <- list()
-  # seq_len, not 1:nrow: a headers-only metadata upload (0 rows) must yield an
-  # empty mapping, not an iteration over the phantom row 1:0 produces. The NA
-  # check runs BEFORE the fuzzy match so an NA name never reaches adist().
+  # seq_len: a headers-only upload yields an empty mapping. The NA check runs
+  # before the fuzzy match, so adist() never sees NA.
   for (i in seq_len(nrow(m_df))) {
     act_name <- as.character(m_df[i, col_act])
     if (is.na(act_name) || act_name == "") next
@@ -1659,22 +1559,15 @@ process_grouping_vars <- function(df, vars, types) {
 
 
 # --- Descriptive Suite statistics ---------------------------------------------
-# Pure counterparts of the Descriptive/Exploratory module's summary table,
-# per-group trend fits and PCA. The module keeps the reactive reads and the
-# formatting; the arithmetic lives here so it is reachable from the test suite.
+# Pure arithmetic of the Descriptive/Exploratory module (summary table, group
+# trend fits, PCA), kept here so the tests can reach it.
 
-# Per-group summary plus a pooled row, at full precision (the module formats).
-# `x` and `group` are parallel vectors. Each group is summarised on its rows
-# with both values present, while the pooled row summarises every non-NA x
-# regardless of its group, with the same statistics. `is_pooled` identifies the
-# pooled row; it is labelled TOTAL, or "TOTAL (pooled)" when a real group
-# already carries that name.
-# Beside the mean and SD, which a few outliers can move a long way, the table
-# carries their robust counterparts: the median, the quartiles (quantile type 7,
-# R's default, so it agrees with summary() elsewhere in the app), the IQR
-# (Q3 - Q1) and the MAD. MAD is stats::mad(): the median absolute deviation
-# scaled by 1.4826, a consistent estimator of sigma for a normal sample, so it
-# reads on the same scale as the SD beside it.
+# Per-group summary plus a pooled row, at full precision. Each group uses its
+# rows with both `x` and `group` present, the pooled row every non-NA x. The
+# pooled row (`is_pooled`) is labelled TOTAL, or "TOTAL (pooled)" when a group
+# already has that name. Robust counterparts sit beside mean and SD: median,
+# quartiles (type 7, as summary()), IQR and MAD (stats::mad(), scaled by
+# 1.4826 to estimate sigma on the SD's scale).
 DESC_SUMMARY_STATS <- c("Mean", "SD", "Median", "Q1", "Q3", "IQR", "MAD", "Min", "Max")
 
 desc_summary_table <- function(x, group) {
@@ -1689,10 +1582,8 @@ desc_summary_table <- function(x, group) {
   grouped <- split(x[observed], droplevels(factor(group[observed])))
   ok <- !is.na(x)
   m <- do.call(rbind, c(lapply(grouped, stats_of), list(stats_of(x[ok]))))
-  # unname(): with a single group a column of the statistics matrix is a
-  # length-1 vector that still carries the COLUMN name, which data.frame()
-  # would then adopt as the row name - and DT renders row names, so the default
-  # "All" grouping showed a leading column reading "mean".
+  # unname(): with one group, data.frame() would adopt a column name as the
+  # row name, which DT renders.
   pooled_label <- "TOTAL"
   while (pooled_label %in% as.character(group)) pooled_label <- paste0(pooled_label, " (pooled)")
   res <- data.frame(Group = c(names(grouped), pooled_label),
@@ -1703,18 +1594,13 @@ desc_summary_table <- function(x, group) {
   res
 }
 
-# Trend statistic per group for the scatter panel's fitted curve.
-# `groups` is the label vector to report on, in order; `pooled` explicitly
-# identifies rows fitted on the whole frame. Groups with fewer than `min_n`
-# rows, and any fit that errors, return NA for both columns.
-#
-# What each fit reports, and why they are not interchangeable:
-#   linear / polynomial - summary(lm)$r.squared with the model's overall F test.
-#   loess               - cor(y, fitted)^2. A loess has no R^2: this is the
-#                         squared correlation between observed and fitted, which
-#                         is why the caller labels it as such, and there is no
-#                         F test to report with it.
-#   gam                 - summary(gam)$r.sq (adjusted) and the smooth's p-value.
+# Trend statistic per group for the scatter panel's fitted curve. `groups` are
+# the labels to report, `pooled` marks fits on the whole frame. Groups below
+# `min_n` rows, or a failing fit, give NA.
+#   linear / polynomial - summary(lm)$r.squared and the overall F test p.
+#   loess               - cor(y, fitted)^2 (loess has no R^2; the caller
+#                         labels it so), no p.
+#   gam                 - summary(gam)$r.sq (adjusted) and the smooth's p.
 desc_group_fit_stats <- function(df, x_var, y_var, fit, groups,
                                  group_col = "group_id", min_n = 5,
                                  pooled = rep(FALSE, length(groups))) {
@@ -1744,11 +1630,8 @@ desc_group_fit_stats <- function(df, x_var, y_var, fit, groups,
         c(r2 = s$r.squared, p = f_pval(s))
       } else if (fit == "loess") {
         mod <- stats::loess(form_lin, data = sub_df, span = 0.7)
-        # The response must come back from the FIT (y = fitted + residual), not
-        # from the unfiltered column: loess's na.action drops incomplete rows,
-        # so fitted() is shorter than sub_df whenever the group carries a
-        # missing x or y, and cor() on two different lengths errors - which the
-        # tryCatch below would report as a blank column rather than a number.
+        # y is rebuilt from the fit (fitted + residual): loess drops incomplete
+        # rows, so the raw column can be longer than fitted().
         fv <- stats::fitted(mod)
         c(r2 = stats::cor(fv + stats::residuals(mod), fv)^2, p = NA_real_)
       } else if (fit == "gam") {
@@ -1764,16 +1647,13 @@ desc_group_fit_stats <- function(df, x_var, y_var, fit, groups,
              p  = vapply(out, function(v) unname(v[["p"]]), numeric(1)))
 }
 
-# Complete-case PCA on source identifiers `vars`; `labels` describe refusals.
-# Returns the prcomp object, the frame it was fitted on, the row mask (so the
-# caller can align a grouping vector to it) and how many rows the complete-case
-# filter removed. `scale = TRUE` is a correlation PCA, FALSE a covariance PCA;
-# both centre.
-# A column with exactly or effectively no variance over those rows (the
-# engines' own rule, .is_degenerate_covariate) carries no information and
-# cannot be standardised, so it is left out and named; the remaining columns
-# keep the requested scaling. Below five complete rows or two informative
-# columns the PCA is refused: `res` is NULL and `refusal` says why.
+# Complete-case PCA on `vars` (`labels` name them in refusals). Returns the
+# prcomp object, the frame it was fitted on, the row mask (to align a grouping
+# vector) and the rows the complete-case filter removed. `scale = TRUE` is a
+# correlation PCA, FALSE a covariance PCA; both centre. Columns without usable
+# variance (.is_degenerate_covariate()) are left out and named. Below five
+# complete rows or two informative columns the PCA is refused (`res` NULL,
+# `refusal` says why).
 desc_pca_fit <- function(df, vars, labels = vars, scale = TRUE) {
   keep <- stats::complete.cases(df[, vars, drop = FALSE])
   df_clean <- df[keep, vars, drop = FALSE]

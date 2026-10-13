@@ -4,50 +4,37 @@ source("global_utils.R")   # static config + pure functions (no reactivity)
 
 source("ui_main.R")        # assembles `ui` from ui_sidebar.R + ui_main_tabs.R
 
-# The server body is sliced into sequentially sourced chunks that share ONE
-# evaluation environment via source(local = TRUE): `rv`, session_state and all
-# helper closures remain visible across every chunk. The files are sourced in a
-# fixed order - do not reorder them, and do not wrap any chunk in
-# moduleServer(): later chunks rely on names defined in earlier ones.
+# The server is split into chunks sourced with local = TRUE into ONE shared
+# environment, in this fixed order: later chunks read names defined by earlier
+# ones, so never reorder them or wrap one in moduleServer().
 server <- function(input, output, session) {
 
-  # A. Core setup: session dirs, raster caches, diagnostics closures,
-  #    decoupled module wiring (desc/classif), session_state, map_overlay_rev
-  #    and the central `rv` reactiveValues object.
+  # A. Session dirs, caches, diagnostics closures, module wiring, session_state, rv.
   source("server_setup.R", local = TRUE)
 
-  # B. Export manager: export registry, run-config/run-history panels,
-  #    WYSIWYG styler, config download/upload, confirm/batch export handlers.
+  # B. Export registry, run-config/history panels, styler, config + batch export.
   source("server_export.R", local = TRUE)
 
-  # C. Map interactions: draw handlers, locality assignment, regional params,
-  #    popup system, point styling and header status chips.
+  # C. Draw handlers, locality assignment, regional params, popups, status chips.
   source("server_map_interactions.R", local = TRUE)
 
-  # D. Data setup: file/shp/metadata upload, CRS parsing + plausibility
-  #    guards, variable mapping and the Setup-tab minimap.
+  # D. Data/shapefile/metadata upload, CRS guards, variable mapping, minimap.
   source("server_data_setup.R", local = TRUE)
 
-  # E. Run configuration + display context: get_current_meta/get_display_meta,
-  #    docs drawer, classification params, config persistence, palette and
-  #    locality/covariate selectors.
+  # E. get_current_meta()/get_display_meta(), docs drawer, session config, selectors.
   source("server_run_config.R", local = TRUE)
 
-  # F. Model tuning: per-locality IDW power / TPS lambda values, variogram
-  #    manual tuning and the expert variogram auto-fit.
+  # F. Per-locality IDW/TPS values, manual variogram tuning, variogram auto-fit.
   source("server_model_tuning.R", local = TRUE)
 
-  # G. Execution engine: run estimates, archive/VIF gates and the
-  #    future_promise interpolation pipeline (run_params decoupling and the
-  #    nested makeClusterPSOCK topology live here - keep them intact).
+  # G. Run estimates, archive/VIF gates and the future_promise run (keep the
+  #    run_params decoupling and the nested PSOCK topology intact).
   source("server_execution.R", local = TRUE)
 
-  # H. Map viewer: draw_map, proxy-managed overlays, view switcher and the
-  #    main/comparison renderLeaflet blocks.
+  # H. draw_map, proxy overlays, view switcher, main/comparison maps.
   source("server_map_viewer.R", local = TRUE)
 
-  # I. Scientific analysis: model diagnostics, variogram/importance/obs-pred
-  #    plots, stats/area/metrics/kappa tables, log + polygon export.
+  # I. Diagnostics plots, stats/metrics/kappa tables, log + polygon export.
   source("server_sci_analysis.R", local = TRUE)
 }
 

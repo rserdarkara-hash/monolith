@@ -1,14 +1,13 @@
-# make_baselines.R — record the values that can only be measured, not derived.
+# make_baselines.R: record the values that can only be measured, not derived.
 #
 # Run from the project root, after building a fixture with make_golden.R:
 #
 #   "C:/Program Files/R/R-4.5.2/bin/Rscript.exe" tests/testthat/fixtures/make_baselines.R
 #
-# Most of the suite needs nothing from this script: those tests recompute their
-# reference from the data they are handed (GOLDEN_MANIFEST.md lists the
-# properties some of them require). A few quantities have no closed form to check against - Jenks
-# breaks, the VIF pruning order, the fixture's own identity, the end-to-end
-# surface digest - and those are recorded here, for THIS golden set.
+# Most of the suite recomputes its reference from the data it is handed. The few
+# quantities with no closed form to check against (the fixture's own identity,
+# the VIF pruning order, Jenks breaks, the end-to-end surface digest) are
+# recorded here, for THIS golden set.
 #
 # THE GATE. A recorded value is only meaningful if the code that produced it was
 # already known good, so this script runs the full suite first, with the
@@ -91,12 +90,11 @@ baselines$jenks_target_5 <- calc_class_breaks(gs[[target]], 5, "jenks")
 baselines$ok_surface_digest <- run_surface_digest(golden_sf("tiny"))
 
 # ── The environment these values came out of ────────────────────────────────
-# Carried as an attribute, so `names(baselines)` still lists only the baselines
-# themselves. Without it a moved value is ambiguous three ways - the code
-# changed, the fixture changed, or gstat/Ckmeans.1d.dp changed underneath both - and
-# the reader has no way to tell which without bisecting. golden_baseline_info()
-# puts these versions into the failure message of every baseline assertion, and
-# test-golden-fixture.R fails when the session no longer matches them.
+# Carried as an attribute, so `names(baselines)` lists only the baselines. It
+# tells a code or fixture change from a package change underneath both:
+# golden_baseline_info() puts these versions into every baseline assertion's
+# failure message, and test-golden-fixture.R fails when the session no longer
+# matches them.
 prov <- golden_env_snapshot()
 attr(baselines, "provenance") <- prov
 

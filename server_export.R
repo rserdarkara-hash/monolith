@@ -1,8 +1,8 @@
-# server_export.R (sourced with local = TRUE inside server) - export registry,
-# run-config/run-history panels, WYSIWYG styler and export download handlers.
-  # Returns the item's registry key (safe_key of `id`, spatial_pipeline.R):
-  # names that differ only in punctuation or non-Latin letters keep separate
-  # entries, and a caller that selects the item must use this key.
+# server_export.R (chunk B, sourced with local = TRUE inside server): export
+# registry, run-config/run-history panels, WYSIWYG styler and export handlers.
+
+  # Returns the item's registry key (safe_key() of `id`), which a caller that
+  # selects the item must use.
   register_export_item <- function(id, label, type, obj, category = "General", kind = "value",
                                    var_label = NULL, legend = NULL, derived = NULL,
                                    surface = NULL) {
@@ -10,9 +10,8 @@
     # (global_utils.R) rebuilds them from a raster the registry already holds.
     req(!is.null(obj) || !is.null(derived))
     clean_id <- safe_key(id)
-    # The variable label every registry label opens with ("<label> - ..."),
-    # kept so a batch workbook can drop exactly that prefix from sheet names
-    # (export_sheet_name). Defaults to the displayed run's variable.
+    # The variable label that opens every registry label, so a batch workbook
+    # can drop that prefix from sheet names; defaults to the displayed run's.
     if (is.null(var_label)) {
       var_label <- tryCatch(isolate(get_display_meta()$label), error = function(e) NULL)
     }
@@ -24,11 +23,8 @@
       type = type, # "plot", "table", "map"
       obj = obj,
       category = category,
-      # For maps: "value" (concentration surface, may be agro/bin classified),
-      # "residual" (diverging scale, never classified), "uncertainty"
-      # (sequential continuous, never classified). Agronomic class limits are
-      # defined on the variable's units, so classifying errors or variances
-      # with them is scientifically meaningless.
+      # Maps: "value" (may be class-styled), "residual" or "uncertainty" (never
+      # classified: class limits are in the variable's units).
       kind = kind,
       # A map's legend title (map_legend_title): the variable and its unit,
       # as the Map Viewer's legend reads.
@@ -53,10 +49,7 @@
       return(tags$p(class = "mn-empty-line", "Registry is empty. Run models to populate."))
     }
 
-    # choiceNames/choiceValues rather than a named character vector: the values
-    # stay exactly names(reg), so every downstream reader of
-    # input$selected_assets is untouched, while the label becomes a row -- kind
-    # chip, name, timestamp -- instead of one run-on string.
+    # choiceValues stay names(reg); each label is a row (kind chip, name, time).
     checkboxGroupInput(
       "selected_assets", NULL, width = "100%",
       choiceValues = names(reg),
@@ -91,22 +84,18 @@
       if (!is.null(covariate_record_text(cfg))) tagList(tags$br(), tags$span(covariate_record_text(cfg))),
       tags$br(),
       tags$span(paste0("Boundary: ", cfg$boundary_type, " | Buffer: ", if (is.null(cfg$buffer_mode) || cfg$buffer_mode == "fixed") paste0(cfg$buffer_dist, "m") else "Dynamic", " | Resolution: ", cfg$resolution, " (", res_mode_label(cfg$res_mode), ")")),
-      # Method-agnostic settings that change the reported numbers; the
-      # method-specific ones print only where they apply (they are NA for the
-      # other engines).
+      # Settings that change the reported numbers; method-specific ones print
+      # only where they apply.
       tags$br(),
       tags$span(paste0(
-        # An absent field means the entry predates this record (an archived run
-        # restored from an older session), so nothing is asserted about it.
+        # An absent field (an archive from an older session) asserts nothing.
         if (!is.null(cfg$cv_strategy)) paste0("CV strategy: ", switch(cfg$cv_strategy,
                                                                      "loocv" = "Standard LOOCV",
                                                                      "knndm" = "kNNDM (map-matched)",
                                                                      "block" = "Spatial Block CV",
                                                                      "Auto")) else "CV strategy: not recorded",
         if (!is.null(cfg$cv_repeats) && !is.na(cfg$cv_repeats) && cfg$cv_repeats > 1) paste0(" | Repeated CV: ", cfg$cv_repeats, " fold realizations") else "",
-        # What the metrics were measured on and what each fold re-estimated:
-        # two runs that differ only here produce different numbers from the
-        # same data, so the record has to separate them.
+        # What the metrics were measured on and what each fold re-estimated.
         if (!is.null(cfg$cv_population) && !is.na(cfg$cv_population)) paste0(" | CV population: ", cfg$cv_population) else "",
         if (!is.null(cfg$cv_refit) && !is.na(cfg$cv_refit)) paste0(" | Model refit: ", cfg$cv_refit) else "",
         if (!is.null(cfg$cv_covariate_screen) && !is.na(cfg$cv_covariate_screen)) paste0(" | Covariate screen: ", cfg$cv_covariate_screen) else "",
@@ -126,13 +115,9 @@
     )
   })
 
-  # Reproducibility record for the CURRENT run: the same summary the run-history
-  # entries store, plus the per-locality tuning actually consumed and the
-  # versions of every package whose code computes a reported number: the
-  # engines and their fitting (sf, gstat, fields, randomForest, terra), the
-  # residual Moran test (spdep), spacing and the IDW selection kernel (FNN),
-  # class breaks (classInt, Ckmeans.1d.dp), hulls (concaveman) and area units
-  # (units).
+  # Reproducibility record of the CURRENT run: the run-history summary, the
+  # per-locality tuning consumed, and the versions of every package that
+  # computes a reported number.
   output$download_run_config <- downloadHandler(
     filename = function() {
       cfg <- rv$run_config_summary
@@ -266,12 +251,9 @@
     }
   }, ignoreNULL = FALSE)
   
-  # Legend placement follows the item's shape, not whatever was styled last: a
-  # paired comparison map is two panels side by side with no room for a
-  # right-hand legend, so it takes a horizontal legend underneath; everything
-  # else keeps the right-hand default. The styler's controls are built with
-  # these already selected; this re-applies them after the remembered config
-  # has been replayed over the freshly built modal.
+  # Legend placement follows the item's shape: a paired comparison map takes a
+  # horizontal legend underneath, everything else the right-hand default.
+  # Re-applied after the remembered config is replayed over the new modal.
   item_legend_defaults <- function(item) {
     combined <- identical(item$type, "map_combined")
     list(pos = if (combined) "bottom" else "right",
@@ -289,11 +271,10 @@
     invisible(NULL)
   }
 
-  # The class definition(s) an exported map is drawn with, the same ones the
-  # Map Viewer uses: the classes of the surface the map shows, both surfaces'
-  # for the Actual vs Predicted figure. NULL draws the map continuous. Every
-  # value map is registered with its `surface`; residual and uncertainty maps
-  # carry none and are never classified (generate_base_plot).
+  # The class definition(s) an exported map is drawn with, as in the Map
+  # Viewer: the shown surface's classes (both for the Actual vs Predicted
+  # figure); NULL draws it continuous. Residual and uncertainty maps are never
+  # classified.
   export_class_params <- function(item) {
     if (!isTRUE(input$color_style %in% c("agro", "bin"))) return(NULL)
     get <- function(s) tryCatch(classification_params(s), error = function(e) NULL)
@@ -337,16 +318,9 @@
   styled_preview_obj_d <- styled_preview_obj %>% debounce(500)
 
   # The preview is drawn on a canvas of the EXPORT's physical size and only
-  # rasterised coarser, so its layout is the file's layout. Shrinking the canvas
-  # instead would leave point-sized text and millimetre margins competing for
-  # less room, crowding and clipping axis labels the export has space for,
-  # worst on wide areas and on two-panel comparisons.
-  #
-  # The rasterised canvas is then fitted to the pane the browser actually
-  # reports rather than to a fixed guess. A guess wider than the pane overflows
-  # it, and the pane centres its content, so that overflow goes off the LEFT
-  # edge where no scrollbar reaches it: the file was complete but the preview
-  # lost its title, y-axis labels and grid numbers.
+  # rasterised coarser, so its layout is the file's. The canvas is fitted to
+  # the width the browser reports: a wider guess would overflow the centred
+  # pane off its left edge, out of the scrollbar's reach.
   preview_geom <- reactive({
     w_in <- if (isTruthy(input$styler_width)) input$styler_width else 10
     h_in <- if (isTruthy(input$styler_height)) input$styler_height else 8
@@ -362,8 +336,7 @@
          # the pane; surplus pixels are just scaled down by the browser.
          res = max(48, 96 * fit * 2))
   })
-  # Window resizes arrive as a stream of widths; re-rendering the figure on each
-  # one would redraw the whole plot dozens of times per drag.
+  # Debounced: a window drag streams widths.
   preview_geom_d <- preview_geom %>% debounce(300)
 
   # renderImage, not renderPlot: the preview goes through the very writer the
@@ -377,9 +350,7 @@
                         width = g$w_in, height = g$h_in, dpi = g$res)
     list(src = f, contentType = "image/png",
          width = g$w_disp, height = g$h_disp,
-         # Belt and braces: even if the reported pane width is stale, the image
-         # scales into the pane instead of spilling out of it. Scaling keeps the
-         # layout exact - only the pixel count changes.
+         # Scales into the pane even if the reported width is stale.
          style = paste0("max-width: 100%; height: auto; display: block; margin: 0 auto;",
                         " background-color: var(--mn-surface); box-shadow: var(--mn-shadow);"),
          alt = "Preview of the figure as it will be exported")
@@ -404,9 +375,8 @@
     # the currently selected view.
     meta <- get_display_meta(); req(meta)
     view <- map_view_base()
-    # Same authority as the view menu and the viewer: what the run produced,
-    # so a stale menu value cannot send an uncertainty export from a map that
-    # is showing concentrations.
+    # The run's own has_variance decides, so a stale menu value cannot export
+    # an uncertainty layer from a concentration map.
     layer <- if (isTRUE(meta$has_variance)) map_view_layer() else "value"
     # An SE or variance view exports that layer as its own single-band raster,
     # the same product the run registered as "Uncertainty Map".
@@ -466,10 +436,8 @@
   })
 
   observeEvent(input$open_styler, {
-    # priority: 'event' forces the sync to re-fire on every open: Shiny
-    # dedupes identical input payloads, and the modal re-creates its inputs
-    # with default values each time, so a deduped (skipped) restore would let
-    # the debounced persist observer overwrite the saved config with defaults.
+    # priority: 'event' re-fires the restore on every open (Shiny dedupes equal
+    # payloads), or the persist observer would save the new modal's defaults.
     shinyjs::runjs("
       var cfg = localStorage.getItem('monolith_styler_config');
       if(cfg) {
@@ -477,14 +445,11 @@
       }
     ")
     
-    # A GeoTIFF is the data rather than a picture of it, so it is offered only
-    # for items whose payload IS one raster surface, and every styling control
-    # switches off while it is selected.
+    # GeoTIFF is offered only for items whose payload IS one raster surface;
+    # every styling control switches off while it is selected.
     styler_item <- tryCatch(rv$export_registry[[active_styler_item()]], error = function(e) NULL)
     fmt_choices <- c("PNG" = "png", "TIFF (image)" = "tiff", "PDF" = "pdf", "JPEG" = "jpg")
-    # Resolved ONCE: a derived uncertainty item has no stored payload, so each
-    # call rebuilds the band from its source surface rather than reading a
-    # field (export_item_obj, global_utils.R).
+    # Resolved once: a derived uncertainty item is rebuilt on each call.
     styler_raster <- export_raster_payload(styler_item)
     if (!is.null(styler_raster)) {
       fmt_choices <- c(fmt_choices, "GeoTIFF (data)" = "gtiff")
@@ -604,9 +569,8 @@
         column(8,
                conditionalPanel(
                  condition = "input.styler_format != 'gtiff'",
-                 # min-width: 0 on the image output lets it report (and take)
-                 # the pane's real width; overflow: hidden is a guard, nothing
-                 # should reach it now that the canvas is fitted to the pane.
+                 # min-width: 0 lets the image output report the pane's real
+                 # width; overflow: hidden is only a guard.
                  div(style = paste0("background-color: var(--mn-surface-2); border: 1px solid var(--mn-line); height: 600px;",
                                     " padding: 10px; display: flex; justify-content: center;",
                                     " align-items: center; overflow: hidden;"),
@@ -641,9 +605,8 @@
 
   observeEvent(input$styler_local_config, {
     cfg <- input$styler_local_config
-    # A remembered "GeoTIFF" choice must not be restored onto an item that has
-    # no raster payload: that choice is not in the select for such an item, so
-    # restoring it would leave the format blank.
+    # A remembered "GeoTIFF" is dropped for an item without a raster payload
+    # (it is not among that item's formats).
     if (identical(cfg$format, "gtiff") || identical(cfg$styler_format, "gtiff")) {
       item <- tryCatch(rv$export_registry[[active_styler_item()]], error = function(e) NULL)
       if (is.null(export_raster_payload(item))) {
@@ -652,9 +615,8 @@
       }
     }
     sync_styler_config(cfg, session)
-    # The remembered config is whatever item was styled last, so it must not
-    # carry that item's legend layout onto a differently shaped one. An
-    # explicitly uploaded config still wins: that is a deliberate user action.
+    # The remembered config belongs to the last item styled, so the legend
+    # layout is re-derived for this one (an uploaded config still wins).
     apply_item_legend_defaults()
   })
 
@@ -706,12 +668,9 @@
     })
   })
   
-  # One writer for every table sheet, single-item download and batch workbook
-  # alike. openxlsx's bare writeData() lays the frame down unstyled at the
-  # default 8.43-character column width, so metric labels and the Source
-  # strings arrived in Excel truncated and with no header to freeze against.
-  # The fill is a literal because it is a worksheet colour, not app chrome:
-  # Excel has no access to the interface tokens.
+  # One writer for every table sheet: bold frozen header and auto widths (bare
+  # writeData() truncated labels at 8.43 characters). The fill is a worksheet
+  # colour, not app chrome, so a literal is correct.
   .export_header_style <- createStyle(textDecoration = "bold", fgFill = "#EFEFEF",
                                       border = "bottom", halign = "left",
                                       valign = "center")
@@ -722,19 +681,16 @@
     setColWidths(wb, sheet, cols = seq_len(max(1L, ncol(df))), widths = "auto")
   }
 
-  # One place decides what a registry item is written as. "gtiff" only survives
-  # for items that actually hold a raster; anything else silently written as a
-  # GeoTIFF would be a corrupt file, so it falls back to PNG (and the batch
-  # handler says so in the run log).
+  # What a registry item is written as: "gtiff" only for items holding a
+  # raster, else PNG (the batch handler logs the swap).
   export_ext_for <- function(item, fmt) {
     if (!item$type %in% c("plot", "map", "map_combined")) return("xlsx")
     if (identical(fmt, "gtiff") && is.null(export_raster_payload(item))) return("png")
     styler_format_ext(fmt)
   }
 
-  # What a GeoTIFF export carries in its metadata to identify its run. The
-  # registry and rv$disp / rv$run_config_summary always describe the same run
-  # (a restore swaps them together), so the displayed run is the item's run.
+  # GeoTIFF metadata identifying the run. The registry and rv$disp always
+  # describe the same run (a restore swaps them together).
   geotiff_tags <- function(item) {
     d <- rv$disp
     cfg <- rv$run_config_summary
@@ -844,9 +800,8 @@
           used_sheet_names <- c()
           n_sheets <- 0L
           for(item in table_items) {
-            # 31 characters, the variable-label prefix every label in a run
-            # shares dropped, unique ignoring case: export_sheet_name()
-            # (global_utils.R).
+            # export_sheet_name(): 31 characters, shared variable prefix
+            # dropped, unique ignoring case.
             sheet_name <- export_sheet_name(item$label, item$id, used_sheet_names,
                                             item$var_label)
             used_sheet_names <- c(used_sheet_names, sheet_name)
