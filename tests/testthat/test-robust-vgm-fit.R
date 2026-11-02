@@ -317,20 +317,26 @@ test_that("the smooth-origin nugget share covers Gaussian and Matern only", {
 })
 
 test_that("auto-fit never returns a Gaussian or Matern structure at a zero nugget", {
-  # make_test_points(30): the lowest-SSErr clean candidate is a Matern at
-  # nugget 0 (see the candidate table above).
+  # The rule changes the selection: make_test_points(30)'s converged candidates
+  # are led by a Matern at nugget 0 (see the candidate table above). Converged
+  # fits are stable to rounding, so this premise holds on every platform.
   pts <- make_test_points(30)
   lags <- calc_scientific_lags(pts)
   v_emp <- gstat::variogram(v ~ 1, pts, width = lags$width, cutoff = lags$cutoff)
+  converged <- Filter(function(x) x$admissible && !x$flawed,
+                      screen_vgm_candidates(list(v_emp = v_emp, v_data = pts$v)))
+  best <- converged[[which.min(vapply(converged, function(x) x$sse, numeric(1)))]]
+  expect_true(best$smooth_zero_nugget)
   expect_false(isTRUE(vgm_smooth_nugget_share(robust_vgm_fit(v_emp, pts$v)) <= 1e-8))
 
   # Golden case vgm_zero_nugget: CaCO3 on the compact locality in the shipped
   # fixture, 79 points whose sampling suits the convex hull drawn below. No
-  # candidate converges, and without the rule the lowest-SSErr one is a
-  # Gaussian at nugget 0 whose ordinary-kriging surface leaves the observed
-  # range by 0.3 of its span, going negative for a non-negative variable. The
-  # premise is re-derived with the selection's own tiers: converged candidates
-  # first, the others only when none converged.
+  # candidate converges here, so which one has the lowest SSErr is decided by
+  # rounding: a zero-nugget Gaussian or Matern on some platforms, a singular
+  # Spherical on others. Asserted is what holds on every platform: the screen
+  # fits Gaussian and Matern candidates at nugget 0, the best-fitting of them
+  # krigs this non-negative variable outside its observed range (all of them
+  # go below zero, 0.12-0.32 of the span), and the auto-fit returns none.
   case <- golden_case("vgm_zero_nugget")
   g <- golden_sf("full", localities = case$locality)
   g$v <- g[[case$target]]
@@ -339,10 +345,13 @@ test_that("auto-fit never returns a Gaussian or Matern structure at a zero nugge
   v_emp <- gstat::variogram(v ~ 1, g, width = lags$width, cutoff = lags$cutoff)
   pool <- Filter(function(x) x$admissible,
                  screen_vgm_candidates(list(v_emp = v_emp, v_data = g$v)))
-  tier <- Filter(function(x) !x$flawed, pool)
-  if (!length(tier)) tier <- pool
-  unguarded <- tier[[which.min(vapply(tier, function(x) x$sse, numeric(1)))]]
-  expect_true(unguarded$smooth_zero_nugget)
+  # The rule can only see these fits while gstat returns a smooth structure's
+  # nugget at its bound as exactly 0, never as a share just above the 1e-8 it
+  # tests.
+  share <- vapply(pool, function(x) vgm_smooth_nugget_share(x$fit), numeric(1))
+  expect_false(any(share > 1e-8 & share <= 1e-3, na.rm = TRUE))
+  removed <- Filter(function(x) x$smooth_zero_nugget, pool)
+  expect_gt(length(removed), 0)
 
   hull <- sf::st_convex_hull(sf::st_union(g))
   grid <- sf::st_as_sf(sf::st_make_grid(hull, n = c(40, 40), what = "centers"))
@@ -350,7 +359,7 @@ test_that("auto-fit never returns a Gaussian or Matern structure at a zero nugge
   grid <- grid[lengths(sf::st_intersects(grid, hull)) > 0, ]
   bounds <- range(g$v) + c(-0.1, 0.1) * diff(range(g$v))
   surface <- function(model) range(gstat::krige(v ~ 1, g, grid, model = model, debug.level = 0)$var1.pred)
-  left <- surface(unguarded$fit)
+  left <- surface(removed[[which.min(vapply(removed, function(x) x$sse, numeric(1)))]]$fit)
   expect_true(left[1] < bounds[1] || left[2] > bounds[2])
 
   fit <- suppressWarnings(robust_vgm_fit(v_emp, g$v))

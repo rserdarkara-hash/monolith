@@ -168,7 +168,7 @@ if (isTRUE(getOption("monolith_test_sequential", FALSE))) {
   # on 16 cores a per-core pool held 7.5 GB against 2.9 GB at six. Further
   # tasks queue in future_promise.
   future::plan(future::multisession,
-               workers = min(6L, future::availableCores()))
+               workers = min(6L, parallelly::availableCores()))
 }
 
 source("ui_helpers.R")

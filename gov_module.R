@@ -236,7 +236,7 @@ gov_factors_server <- function(id, data_reactive, vars_metadata_reactive) {
       df <- df[, unique(c(target_col, preds)), drop = FALSE]
       # Read the core count here in the main session: inside the promise worker
       # availableCores() reports 1, which would suppress the SHAP escalation.
-      cores_hint_val <- tryCatch(as.integer(future::availableCores()), error = function(e) 1L)
+      cores_hint_val <- tryCatch(as.integer(parallelly::availableCores()), error = function(e) 1L)
       cancel_file_ship <- gov_cancel_file
       proj_root_ship <- getwd()
 

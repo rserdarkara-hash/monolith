@@ -204,9 +204,10 @@ can name `list(locality = "my site", target = "canonical_column")` for
 with Exact winning the independent CV comparison), `tps_smoothed_better`
 (the same end with the selected smoothing winning), `tps_interior`
 (an interior GCV optimum) and `vgm_zero_nugget` (a variable whose variogram
-candidates, without the zero-nugget smooth rule, would select a Gaussian or
-Matérn structure at nugget 0 whose kriged surface leaves the observed range;
-the test krigs it inside the locality's convex hull). `knndm_random` names a
+screen fits a Gaussian or Matérn candidate at nugget 0 and none with a nugget
+share in (1e-8, 1e-3], the best-fitting zero-nugget one kriging a surface that
+leaves the observed range; the test krigs it inside the locality's convex
+hull). `knndm_random` names a
 locality whose buffered hull makes the seeded random partition better than
 every spatial candidate; it needs only `locality`. Defaults use the smallest
 population with at least 8 rows (plane: ph; exact-better: mn), the smallest

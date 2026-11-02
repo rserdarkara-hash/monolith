@@ -61,7 +61,7 @@
     
     comp_mode <- isTruthy(input$comp_mode) || isTruthy(input$value_type != "actual")
     # mirror the nested-worker topology the run pipeline actually uses
-    cores <- tryCatch(as.integer(future::availableCores()), error = function(e) 1L)
+    cores <- tryCatch(as.integer(parallelly::availableCores()), error = function(e) 1L)
     if (is.null(cores) || is.na(cores) || cores < 1) cores <- 1L
     cores <- if (n_locs > 1) max(1L, min(cores - 1L, n_locs)) else 1L
     
@@ -901,7 +901,7 @@
     # decided here (availableCores() is unreliable inside a PSOCK worker) and
     # shipped as plain data. Numerics are plan-independent: furrr's fixed seed
     # gives one L'Ecuyer stream per locality whatever the topology.
-    cores_hint <- tryCatch(as.integer(future::availableCores()), error = function(e) 1L)
+    cores_hint <- tryCatch(as.integer(parallelly::availableCores()), error = function(e) 1L)
     nested_workers <- if (length(df_list) > 1L) max(1L, min(cores_hint - 1L, length(df_list))) else 1L
     # Record the ACTUAL parallelism for the duration estimator.
     log_cores <- nested_workers

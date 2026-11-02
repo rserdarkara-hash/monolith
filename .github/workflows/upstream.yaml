@@ -11,11 +11,14 @@ name: upstream
 # Those are three properties a second matrix leg cannot have, which is why this
 # is a file and not a leg.
 #
-# A failure here is news, not a regression: it says a package moved a number the
-# fixture records. The baselines carry the versions they were recorded under
-# (tests/testthat/fixtures/, the `provenance` attribute), so the failure message
-# names what changed. The response is to reproduce it locally, decide whether the
-# new behaviour is more correct, and only then re-record.
+# A failure here is news, not a regression: upstream moved a number the suite
+# checks. Either a package moved it (the baselines carry the versions they were
+# recorded under - tests/testthat/fixtures/, the `provenance` attribute - so the
+# failure message names it), or the runner image did: this job follows
+# ubuntu-latest on purpose, and a new Ubuntu brings its own BLAS, GDAL/GEOS/PROJ
+# and compiler (the job log's "Runner Image" block names it). The response is to
+# reproduce it locally, decide whether the new behaviour is more correct, and
+# only then re-record.
 on:
   schedule:
     # Mondays, 04:17 UTC. Off-hour on purpose: a scheduled job that collides

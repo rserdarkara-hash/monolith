@@ -2,6 +2,14 @@
 
 All notable changes to Monolith are documented in this file.
 
+## [Unreleased]
+
+### Fixed
+- **Core counts come from `parallelly::availableCores()`.** parallelly 1.50.0 deprecates the `future::availableCores()` re-export; once it is removed, the run, optimizer and Governing Factors workers would fall back to one core without notice and startup would stop.
+
+### Testing
+- **The zero-nugget auto-fit test holds on every platform.** No variogram candidate converges on the golden `vgm_zero_nugget` case, so which one fits best is decided by rounding (Ubuntu 26.04 picks another). The rule's effect on the selection is shown on converged synthetic candidates; on the golden case the test asserts that the best-fitting zero-nugget Gaussian or Matérn krigs outside the observed range, that no smooth nugget sits just above the rule's zero, and that the auto-fit returns none of them. `GOLDEN_MANIFEST.md` states the case contract the same way.
+
 ## [1.1.4] - 2026-09-26 - kNNDM cross-validation / CV Distance Match panel / IDW Auto (CV) power over the whole family / TPS GCV range ends / Nested power and lambda selection / Heterotopic co-kriging / Pooled within-locality variograms / Variable units / Complete session configuration / Co-located sample averaging / Density-based Auto grids / Permutation Moran p-values / Full-fold classification CV / Classification by sampled location / Palettes kept per variable / Partial correlation effective control range / PCA and Parallel/Radar chart optimizations / Method and locality specific Golden Fixture
 
 ### Added

@@ -46,7 +46,7 @@ run_optimizer_async <- function(
   tuning_revision <- rv$tuning_revision %||% 0L
   main_wd <- getwd()
   cores_hint <- tryCatch(
-    as.integer(future::availableCores()),
+    as.integer(parallelly::availableCores()),
     error = function(e) 1L
   )
 

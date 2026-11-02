@@ -229,7 +229,7 @@ compute_governing_factors <- function(df, target_col, predictors, rf_ntree = 100
     # the main session passes `cores_hint`. The cluster is torn down on exit and
     # mc.cores restored for the reused worker.
     if (is.null(cores_hint)) {
-      cores_hint <- tryCatch(as.integer(future::availableCores()), error = function(e) 1L)
+      cores_hint <- tryCatch(as.integer(parallelly::availableCores()), error = function(e) 1L)
     }
     n_shap_workers <- min(max(0L, cores_hint - 1L), 8L)
     if (length(sample_idx) >= 50 && n_shap_workers >= 2L && future::nbrOfWorkers() == 1L) {
