@@ -88,12 +88,12 @@ suggest_lmc_model <- function(primary_vgm) {
   return(m_type[1])
 }
 
-# gstat's `range` (a) is not the practical range, where ~95% of the sill is
-# reached: that is a for Spherical (the full sill, exactly), 3a for
-# Exponential, sqrt(3)a for Gaussian and ~4.75a for Matern nu = 1.5. The factor
-# puts every family on the ground-distance scale for the range search and the
-# resolution window. kappa is not fitted (see scientific_guide), so Matern
-# stays at 1.5.
+# gstat's `range` (a) is not the practical range, the distance at which the
+# model completes ~95% of its rise above the nugget (all of it, at a, for
+# Spherical): 3a for Exponential, sqrt(3)a for Gaussian and ~4.75a for Matern
+# nu = 1.5. The factor puts every family on the ground-distance scale for the
+# range search and the resolution window. kappa is not fitted (see
+# scientific_guide), so Matern stays at 1.5.
 .vgm_practical_range_factor <- function(model, kappa = NA_real_) {
   m <- as.character(model)[1]
   if (identical(m, "Mat")) {
@@ -586,9 +586,11 @@ clean_gstat_env <- function(vgm_obj) {
 #' Two separate questions, never to be merged:
 #'  * ELIGIBILITY (.vgm_autofit_eligible()): an ineligible family is not
 #'    compared on SSErr at all.
-#'  * IDENTIFIABILITY (`range_resolved`: practical range within max lag / 100
-#'    to 2 x max lag) is a DIAGNOSTIC that never ranks candidates; what an
-#'    unresolved winner claims is qualified downstream (status, sill_resolved).
+#'  * IDENTIFIABILITY (`range_resolved`: practical range strictly between max
+#'    lag / 100 and 2 x max lag, the equally-fitting set clear of the search
+#'    floor) is a DIAGNOSTIC: in selection it only breaks a numerical tie and
+#'    never outranks a measurably better fit. What an unresolved winner claims
+#'    is qualified downstream (status, sill_resolved).
 #'
 #' Selection: the eligible family with the lowest SSErr, range resolution and
 #' then the family order settling numerical ties only (.vgm_pick_best()). With
@@ -640,7 +642,7 @@ robust_vgm_fit <- function(v_emp, v_data, target_degenerate = .is_degenerate_cov
          range_interval = if (is.null(fam)) c(NA_real_, NA_real_) else fam$p_interval,
          nugget_share_interval = shares,
          nugget_identified = if (anyNA(shares)) NA else diff(shares) <= VGM_NUGGET_ID_WIDTH,
-         # A sill the lags never reached (or none at all, for a pure nugget)
+         # A sill the lags never reached (or no structured sill for a pure nugget)
          # AND an empirical variogram still climbing at the cutoff. Both,
          # because either alone is weak.
          trend_suspected = (identical(sill_resolved, FALSE) || identical(status, "pure_nugget")) &&

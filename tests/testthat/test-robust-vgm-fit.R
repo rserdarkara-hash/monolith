@@ -14,8 +14,8 @@ test_that("a manual model with no total sill is refused; a pure nugget is not", 
 })
 
 test_that("manual sliders are scaled to the data, not to fixed decimals", {
-  # A small-variance variable (Kale total nitrogen: variance 7.2e-4, auto-fit
-  # nugget 2.49e-4): fixed decimals would give a sill axis of max 0, step 0.01.
+  # A small-unit example with variance 7.2e-4 and a supplied nugget 2.49e-4:
+  # fixed decimals would give a sill axis of max 0, step 0.01.
   fit <- gstat::vgm(psill = 3.7e-4, model = "Sph", range = 3371, nugget = 2.49e-4)
   s <- manual_vgm_slider_spec(7.2e-4, 5000, fit)
   expect_gt(s$nugget$max, fit$psill[1])
@@ -780,7 +780,7 @@ test_that("an out-of-window fit gets its own band, not the failure band", {
   expect_match(html, "Practical range extends beyond sampled lag support for: LocA (actual)", fixed = TRUE)
   expect_no_match(html, "Variogram fit failed", fixed = TRUE)
   expect_no_match(html, "search limit", fixed = TRUE)
-  # Convergence is not a notion of this search, so no band speaks of it.
+  # Range resolution describes lag support, not optimizer convergence.
   expect_no_match(html, "converged", fixed = TRUE)
 
   # The window fails at both ends, and the two mean opposite things.
@@ -1250,9 +1250,8 @@ test_that("the pooled directional cones partition the pooled omnidirectional pai
 })
 
 test_that("the practical-range factor is the 95 % correlation-decay solution", {
-  # The practical range is where the correlation has decayed to 0.05. Each
-  # factor below is that solution for its family, re-derived here rather than
-  # copied from the implementation.
+  # Exponential, Gaussian and Matern factors approximate structured correlation
+  # decay to 0.05, re-derived here. Spherical uses its exact sill distance.
   decay_root <- function(rho) {
     stats::uniroot(function(t) rho(t) - 0.05, c(1e-6, 30))$root
   }
@@ -1395,7 +1394,7 @@ test_that("vgm_params_row reports the total sill and the partial-sill share", {
 })
 
 test_that("vgm_params_row keeps small-unit parameters at full precision", {
-  # Total N: a fitted nugget of 2.151e-4 on a total sill of 3.722e-4. Rounded
+  # A supplied nugget of 2.151e-4 on a total sill of 3.722e-4. Rounded
   # to 4 dp they would read 2e-04 / 4e-04, and an SD% recomputed from that pair
   # 50% where the fit says 42.2%.
   m <- gstat::vgm(psill = 3.722e-4 - 2.151e-4, model = "Exp", range = 250,
@@ -1418,7 +1417,8 @@ test_that("vgm_params_row keeps small-unit parameters at full precision", {
 })
 
 test_that("the practical range makes families comparable; kappa travels with Matern", {
-  # 95%-of-sill distance: a (Sph), 3a (Exp), sqrt(3)a (Gau), ~4.75a (Mat nu 1.5)
+  # Full sill for Sph; ~95% of the structured rise above the nugget otherwise:
+  # a (Sph), 3a (Exp), sqrt(3)a (Gau), ~4.75a (Mat nu 1.5).
   mk <- function(model, ...) gstat::vgm(psill = 1, model = model, range = 100, nugget = 0.1, ...)
   expect_equal(vgm_params_row(mk("Exp"))$practical_range, 300)
   expect_equal(vgm_params_row(mk("Gau"))$practical_range, 100 * sqrt(3))

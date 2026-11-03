@@ -30,6 +30,9 @@ test_that("property-based golden selectors are invariant to locality names", {
 })
 
 test_that("the fixture generator maps ordered role vectors and derives named scopes", {
+  # This fixture's own variogram scan, read before the directory changes.
+  scanned <- function() unname(vapply(golden_vgm_pairs("tiny"), `[[`, "", "var"))
+  ref_vars <- scanned()
   generator <- new.env(parent = globalenv())
   source(file.path(proj_root, "tests", "testthat", "fixtures", "make_golden.R"), local = generator)
   withr::local_dir(proj_root)
@@ -55,6 +58,8 @@ test_that("the fixture generator maps ordered role vectors and derives named sco
   expect_true(all(names(meta$scopes$core) %in% d$locality))
   expect_true(all(names(meta$scopes$tiny) %in% d$locality))
   expect_identical(meta$scopes, generator$.golden_default_scopes(mapped))
+  # The renamed soil columns are scanned under their canonical names.
+  expect_identical(withr::with_options(list(monolith_golden_dir = out), scanned()), ref_vars)
   expect_error(generator$make_golden(input, out_dir = out, roles = list(target = "Laboratory pH")), "Unknown roles")
 })
 

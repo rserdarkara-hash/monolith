@@ -715,9 +715,9 @@ desc_exploratory_server <- function(id, data_reactive, vars_metadata_reactive,
         } else if (p_type == "correlogram") {
           p <- generate_correlogram(df, vars, method = method, cormat = corr_matrix_reactive(), labels = display_labels())
         }
-        # These four panels share one matrix, estimated on the rows complete
-        # across every variable involved (controls included); n travels with
-        # the exported figure.
+        # Heatmap, network and correlogram share a matrix on complete selected
+        # variables. Partial correlation also requires complete controls and
+        # computes its own matrix; each figure exports its complete-case count.
         if (inherits(p, "ggplot") && all(cc_vars %in% colnames(df))) {
           p <- p + labs(caption = complete_case_note(
             sum(stats::complete.cases(df[, cc_vars, drop = FALSE])), nrow(df)))

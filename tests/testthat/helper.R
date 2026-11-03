@@ -381,13 +381,13 @@ brute_vgm_profile <- function(v_emp, n = 5000L, families = VGM_AUTOFIT_FAMILIES)
   })
 }
 
-#' Every golden locality x canonical variable of `scope` with at least 10
+#' Every golden locality x canonical soil column of `scope` with at least 10
 #' distinct located samples, a non-zero variance and 5 lag bins, prepared as
 #' the app prepares an auto-fit (dedup_valid_points, calc_scientific_lags):
 #' a named list of list(locality, var, pts, v_emp). Cached per scope.
 golden_vgm_pairs <- function(scope = "full") {
   # Read first: a changed fixture directory empties the cache.
-  vars <- golden_meta()$roles$soil
+  vars <- golden_meta()$columns$soil
   key <- paste0("vgm_pairs_", scope)
   if (!is.null(.golden_cache[[key]])) return(.golden_cache[[key]])
   d <- golden_soil(scope)
@@ -678,8 +678,8 @@ golden_baseline_info <- function() {
 #' authority and this only reports when the session has stopped matching it,
 #' which is the cheap half of what an activated renv would guarantee. Its caller
 #' reports a difference as a SKIP, not a failure - a deliberate local upgrade is
-#' not a defect, and `golden_provenance_drift()` is what speaks up when a
-#' version actually moves a recorded number.
+#' not a defect. `golden_provenance_drift()` separately checks the R and package
+#' versions recorded with the baselines, whether or not a value has moved.
 renv_lock_drift <- function(pkgs = NULL) {
   root <- normalizePath(file.path(testthat::test_path(), "..", ".."), mustWork = FALSE)
   lf <- file.path(root, "renv.lock")
@@ -789,7 +789,7 @@ golden_pin_boundary <- function(pts, res = 300, reach = 600) {
 #'
 #' Runs sequentially, so it does NOT cover the future/PSOCK dispatch layer.
 #'
-#' @return A named numeric vector, ready to paste into a baseline.
+#' @return A named numeric vector, recorded by make_baselines.R after its suite gate.
 run_surface_digest <- function(pts, target = "ph", method = "OK",
                                grid_res = 300, b_type = "wrapped",
                                b_dist = 300, crs = NULL,

@@ -842,8 +842,8 @@
                ") the fold's covariate screen kept a different set than the map; see the Run Log.")
       }
     }
-    # Folds whose variogram was not a resolved structured fit scored a different
-    # model than the map; the run log names them.
+    # Count the folds without a resolved structured fit and name their
+    # localities; the run log lists each such fold with its state.
     vgm_txt <- {
       bad <- lapply(infos, function(x) {
         tb <- x$vgm_status

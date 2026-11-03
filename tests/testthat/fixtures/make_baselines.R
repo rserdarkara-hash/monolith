@@ -1,6 +1,6 @@
 # make_baselines.R: record the values that can only be measured, not derived.
 #
-# Run from the project root, after building a fixture with make_golden.R:
+# Run from the project root when a baseline update is justified (see below):
 #
 #   "C:/Program Files/R/R-4.5.2/bin/Rscript.exe" tests/testthat/fixtures/make_baselines.R
 #
@@ -15,9 +15,10 @@
 # run is clean. Pinning a number from a broken tree would enshrine the breakage
 # as the expected answer, which is the one way a golden-file test can do harm.
 #
-# Re-run it when, and only when, you deliberately change the golden fixture.
-# Never run it to make a failing test pass: a moved baseline is something to
-# explain first.
+# Re-run after a deliberate fixture change, an independently verified scientific
+# correction, an approved convention change, or an investigated environment
+# change. Follow GOLDEN_MANIFEST.md: explain any moved value before recording
+# it, and never run the recorder to make a failing test pass.
 
 if (!file.exists("global.R")) {
   stop("run make_baselines.R from the project root (the directory holding global.R)")

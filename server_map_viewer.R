@@ -427,8 +427,8 @@
           marker_size = input$pt_marker_size %||% 3,
           popup_fn = popup_fn,
           legend_layer_id = "styled_points_legend",
-          # rv$sf is the DISPLAY set (never NA-target filtered), so points the
-          # surface was not fitted from are styled apart.
+          # rv$sf is the DISPLAY set (never NA-target filtered). Missing measured
+          # targets are styled apart even when covariates or predictions exist.
           value_col = "v"
         )
       }
