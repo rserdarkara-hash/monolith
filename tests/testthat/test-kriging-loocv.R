@@ -100,14 +100,17 @@ test_that("an RK or RFK fold whose covariate was kriged flat is named in the run
                                "the training mean: aux1 in %d of %d folds."), length(meta), length(meta)),
                  fixed = TRUE)
   }
-  # Unmocked, the note appears exactly when a fold recorded a flat covariate
-  # (aux1 is independent noise, so some folds do).
+  # Unmocked, aux1 is independent noise, so some folds' training rows fit it a
+  # pure nugget and others do not, and the note counts those folds only.
   assign("krige_covariates", original, envir = globalenv())
   cv0 <- suppressWarnings(perform_kriging_loocv(pts, "v", "aux1", calc_scientific_lags,
                                                 robust_vgm_fit, model_type = "lm"))
-  flat0 <- unlist(lapply(attr(cv0, "cv_fold_meta"), `[[`, "cov_flat"))
-  expect_identical(grepl("pure nugget", safe_run_cv(init_interpolation_res(), cv0, "RK")$log_msg,
-                         fixed = TRUE), length(flat0) > 0)
+  meta0 <- attr(cv0, "cv_fold_meta")
+  n_flat <- sum(vapply(meta0, function(m) identical(m$cov_flat, "aux1"), logical(1)))
+  expect_gt(n_flat, 0L)                                                        # the premises
+  expect_lt(n_flat, length(meta0))
+  expect_match(safe_run_cv(init_interpolation_res(), cv0, "RK")$log_msg,
+               sprintf("the training mean: aux1 in %d of %d folds.", n_flat, length(meta0)), fixed = TRUE)
 })
 
 test_that("perform_kriging_loocv refuses a fold vector that does not match its rows", {

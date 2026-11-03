@@ -1604,6 +1604,27 @@ test_that("a covariate kriged flat from a pure-nugget variogram is reported, per
   expect_identical(attr(aux, "cov_flat"), "noise")
   expect_null(attr(aux, "cov_fallback"))
 
+  # Through the pipeline, with krige_covariates() reporting slope flat wherever
+  # it runs: every fold and the grid enter the record.
+  original <- krige_covariates
+  withr::defer(assign("krige_covariates", original, envir = globalenv()))
+  assign("krige_covariates", function(...) {
+    kc <- original(...)
+    kc$flat <- "slope"
+    kc
+  }, envir = globalenv())
+  res <- run_classification_pipeline(df = make_classif_scope_df(nA = 35, nB = 30), target = "soil",
+                                     predictors = c("elev", "slope"), x_col = "x", y_col = "y",
+                                     src_crs = 32633, proj_crs = "EPSG:32633", method = "rf",
+                                     strategy = "standard", v = 4, grid_res = 250, make_surface = TRUE)
+  assign("krige_covariates", original, envir = globalenv())
+  rec <- res$covariate_flat
+  expect_identical(rec$grid, "slope")
+  expect_equal(rec$n_folds, 4L)
+  expect_setequal(rec$folds$fold, 1:4)
+  expect_identical(unique(rec$folds$covariate), "slope")
+  expect_null(res$covariate_fallback)
+
   flat <- list(folds = data.frame(fold = c(1, 3), covariate = "noise"), grid = "noise", n_folds = 4L)
   expect_identical(
     classif_covariate_notes(NULL, label_of = toupper, flat = flat),

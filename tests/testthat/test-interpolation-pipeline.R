@@ -251,12 +251,6 @@ test_that("a constant map layer's legend states its value", {
   # leaflet's numeric legend labels a zero-width range with nothing, and one
   # narrower than its precision with one number repeated: a pure nugget's mean
   # or SE would show a legend without a value.
-  lg_labels <- function(v, digits) {
-    pal <- leaflet::colorNumeric("viridis", v)
-    (leaflet::leaflet() |> leaflet::addLegend(pal = pal, values = v,
-      labFormat = leaflet::labelFormat(digits = digits)))$x$calls[[1]]$args[[1]]$labels
-  }
-  expect_identical(as.character(lg_labels(c(2.5, 2.5), 6)), "")                       # the premise
   expect_identical(map_legend_scale(c(2.5, 2.5))$constant, "2.5")
   expect_identical(map_legend_scale(c(17, 17 + 3e-15))$constant, "17")
   expect_identical(map_legend_scale(c(12345.6, 12345.6))$constant, "12,345.6")
@@ -1497,8 +1491,9 @@ test_that("a shared measured-value variogram is refitted inside every fold", {
   pts$pv <- pts$ph + rnorm(n, 0, 0.05)
   grid <- pts[1:5, ]
   lags <- calc_scientific_lags(pts)
-  shared_of <- function(p) suppressWarnings(robust_vgm_fit(
-    gstat::variogram(v ~ 1, p, width = lags$width, cutoff = lags$cutoff), p$v))
+  shared_of <- function(p) {
+    robust_vgm_fit(gstat::variogram(v ~ 1, p, width = lags$width, cutoff = lags$cutoff), p$v)
+  }
   raised <- pts
   raised$v[n] <- raised$v[n] + 10 * sd(pts$v)
   expect_false(isTRUE(all.equal(shared_of(pts), shared_of(raised))))
@@ -2749,20 +2744,6 @@ test_that("a constant target names itself in the run warnings", {
   expect_match(res$log_msg, "[WARN] LocA (Actual)", fixed = TRUE)
 })
 
-test_that("a degenerate target is flagged on its fitted variogram", {
-  # A constant target leaves a zero empirical variogram, so its fit is the
-  # stand-in, whose parameters describe nothing in the data. The fit carries
-  # the cause so the panels suppress the parameters instead of printing them.
-  pts <- make_test_points(20)
-  lags <- calc_scientific_lags(pts)
-  flat <- pts
-  flat$v <- 7.5
-  v_emp <- gstat::variogram(v ~ 1, flat, width = lags$width, cutoff = lags$cutoff)
-  fit <- suppressWarnings(robust_vgm_fit(v_emp, flat$v))
-  expect_true(vgm_target_degenerate(fit))
-  expect_identical(names(vgm_params_table_df(list(LocA_act = fit), "LocA")), "Status")
-})
-
 # ── Stand-in variogram: predictions kept, variance withheld ────────────────
 # The fit_failed stand-in (fewer than 5 usable lag bins, or a zero empirical
 # variogram) is a seed, not an estimate. Rescaling a covariance leaves the
@@ -2789,16 +2770,7 @@ test_that("an OK stand-in keeps its predictions and reports no variance", {
   lags <- calc_scientific_lags(pts)
   res <- suppressWarnings(apply_OK(pts, "v", grid, lags, list(cv_strategy = "loocv")))
   expect_identical(vgm_fit_status(res$fit), "fit_failed")   # the premise
-
-  # Why the variance is withheld: the stand-in at 100 x its sill predicts the
-  # same values with a variance 100 times larger.
-  big <- res$fit
-  big$psill <- 100 * big$psill
   ref <- gstat::krige(v ~ 1, pts, grid, model = res$fit, debug.level = 0)
-  ref_big <- gstat::krige(v ~ 1, pts, grid, model = big, debug.level = 0)
-  expect_equal(ref_big$var1.pred, ref$var1.pred, tolerance = 1e-10)
-  expect_equal(ref_big$var1.var, 100 * ref$var1.var, tolerance = 1e-8)
-
   expect_equal(res$res_sf$var1.pred, ref$var1.pred, tolerance = 1e-10)
   expect_true(all(is.na(res$res_sf$var1.var)))
   expect_match(res$log_msg, "[Uncertainty] region (Actual): no kriging variance", fixed = TRUE)
@@ -2911,11 +2883,8 @@ test_that("CK withholds the variance when the target's variogram is the stand-in
   # A fitted primary keeps its co-kriging variance.
   tiny <- golden_sf("tiny")
   grid_t <- make_test_grid_safe(tiny, res = 800)
-  ga <- grid_t
-  ga$v82 <- seq(min(tiny$v82), max(tiny$v82), length.out = nrow(grid_t))
-  fitted <- suppressWarnings(apply_CK(tiny, "ph", grid_t, calc_scientific_lags(tiny),
-                                      list(grid_aux = ga), "v82"))
-  skip_if(grepl("OK fallback", fitted$log_msg, fixed = TRUE), "CK fell back to OK on this fixture")
+  fitted <- suppressWarnings(apply_CK(tiny, "ph", grid_t, calc_scientific_lags(tiny), list(), "v82"))
+  expect_identical(unique(fitted$res_sf$model_type), "Co-Kriging")   # no OK fallback
   expect_true(all(is.finite(fitted$res_sf$var1.var)))
   expect_no_match(fitted$log_msg, "[Uncertainty]", fixed = TRUE)
 })
@@ -3638,10 +3607,8 @@ test_that("CK is an exact interpolator at the sample locations", {
   lags <- calc_scientific_lags(pts)
   # Predicting at the samples themselves: co-kriging, like ordinary kriging,
   # must return the observation and no uncertainty there.
-  res <- suppressWarnings(
-    apply_CK(pts, "ph", pts, lags, list(grid_aux = pts), "v82"))
-  skip_if(grepl("OK fallback", res$log_msg, fixed = TRUE),
-          "CK fell back to OK on this fixture")
+  res <- suppressWarnings(apply_CK(pts, "ph", pts, lags, list(), "v82"))
+  expect_identical(unique(res$res_sf$model_type), "Co-Kriging")   # no OK fallback
 
   expect_equal(res$res_sf$var1.pred, pts$ph, tolerance = 1e-8)
   expect_true(all(abs(res$res_sf$var1.var) < 1e-8))

@@ -778,9 +778,7 @@ test_that("NRMSE normalises by the absolute mean, so negative-mean variables rep
 test_that("perform_cv agrees with yardstick on the metrics they share", {
   pts <- golden_sf("tiny")
   lags <- calc_scientific_lags(pts)
-  fit <- suppressWarnings(
-    robust_vgm_fit(gstat::variogram(ph ~ 1, pts, width = lags$width,
-                                    cutoff = lags$cutoff), pts$ph))
+  fit <- robust_vgm_fit(gstat::variogram(ph ~ 1, pts, width = lags$width, cutoff = lags$cutoff), pts$ph)
   cv <- gstat::krige.cv(ph ~ 1, pts, model = fit, nfold = nrow(pts),
                         debug.level = 0)
 
