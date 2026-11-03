@@ -1,6 +1,8 @@
-# robust_vgm_fit(): candidate screening, diagnostics and selection policy.
-# Pinned psill/range values are gstat-version-anchored fit.variogram outputs:
-# after a gstat upgrade a mismatch is a fixture refresh, not a regression.
+# robust_vgm_fit(): the profile weighted-least-squares auto-fit, its
+# diagnostics and its selection policy. Expected values come from references
+# independent of the fit under test: gstat's shapes and criterion, the
+# brute-force profile brute_vgm_profile() (helper.R), hand computations, and
+# gstat::fit.variogram where it converges cleanly.
 
 test_that("manual Matern uses nu 1.5 and the Auto-Fit weighted criterion", {
   mat <- manual_vgm(1, "Mat", 100, 0)
@@ -64,84 +66,246 @@ test_that("manual sliders are scaled to the data, not to fixed decimals", {
   expect_null(manual_vgm_slider_spec(0, 5000))
 })
 
-test_that("candidate screening emits no warnings on hostile data", {
-  h <- make_hostile_vgm_input(seed = 1)
-  expect_no_warning(robust_vgm_fit(h$v_emp, h$v_data))
+# ── The estimator: gstat's shapes and criterion, solved exactly ────────────
+
+test_that("the unit-sill shapes are gstat's, the Matern at any smoothness", {
+  x <- exp(seq(log(1e-3), log(50), length.out = 400))
+  line <- function(m, kappa = 0.5) {
+    gstat::variogramLine(gstat::vgm(1, m, 1, kappa = kappa), dist_vector = x)$gamma
+  }
+  for (m in c("Sph", "Exp", "Gau")) expect_equal(.vgm_shape(m, x), line(m), tolerance = 1e-12)
+  for (k in c(0.5, 1.5, 2.5)) expect_equal(.vgm_shape("Mat", x, k), line("Mat", k), tolerance = 1e-12)
 })
 
-test_that("returned fit carries the vgm_diagnostics contract", {
-  h <- make_hostile_vgm_input(seed = 1)
-  fit <- suppressWarnings(robust_vgm_fit(h$v_emp, h$v_data))
-  d <- attr(fit, "vgm_diagnostics")
-  expect_type(d, "list")
-  expect_named(d, c("n_tried", "n_flawed", "flawed_winner", "status",
-                    "practical_range", "max_lag", "sill_resolved", "range_side",
-                    "trend_suspected", "target_degenerate"), ignore.order = TRUE)
-  expect_identical(d$n_tried, 16L)
-  expect_identical(d$n_flawed, 16L)
-  expect_true(is.logical(d$flawed_winner))
-  expect_true(d$status %in% VGM_FIT_STATUSES)
-  # The categorical status and the two booleans must agree: they are read by
-  # the CK seed guard and the map banner respectively.
-  expect_identical(vgm_fit_status(fit), d$status)
-  expect_equal(isTRUE(attr(fit, "flawed_winner")), identical(d$status, "singular_selected"))
-  expect_equal(isTRUE(attr(fit, "is_fallback")),
-               d$status %in% c("fit_failed", "heuristic_fallback"))
+test_that("the auto-fit minimises gstat's own criterion", {
+  # gstat's fit of each automatic family reports SSErr = sum N/h^2 (gamma -
+  # model)^2 written with the shapes above, and the auto-fit reports that same
+  # criterion for the model it returns.
+  pts <- make_test_points(60)
+  lags <- calc_scientific_lags(pts)
+  emp <- gstat::variogram(v ~ 1, pts, width = lags$width, cutoff = lags$cutoff)
+  w <- emp$np / emp$dist^2
+  for (m in VGM_AUTOFIT_FAMILIES) {
+    fit <- suppressWarnings(gstat::fit.variogram(emp, manual_vgm(80, m, 300, 20)))
+    model_gamma <- fit$psill[1] + fit$psill[2] * .vgm_shape(m, emp$dist / fit$range[2])
+    expect_equal(sum(w * (emp$gamma - model_gamma)^2), attr(fit, "SSErr"), tolerance = 1e-12)
+  }
+  auto <- robust_vgm_fit(emp, pts$v)
+  expect_equal(attr(auto, "SSErr"), vgm_weighted_sse(emp, auto), tolerance = 1e-12)
 })
 
-test_that("a converged fit outside the lag window beats a flawed one and a guess", {
-  # The range window is a DIAGNOSTIC, not an eligibility rule: on a
-  # trend-bearing field no candidate converges inside the window, and a rule
-  # admitting only in-window fits would return the heuristic Spherical guess.
-  # Among converged eligible candidates the lowest SSErr wins, whatever its range.
+test_that("nugget and partial sill solve the non-negative least squares exactly", {
+  # At every range of the domain: the KKT conditions of min sum w (g - c0 -
+  # c1 r)^2 over c0, c1 >= 0 hold at the returned pair (gradient zero where a
+  # parameter is free, non-negative where it sits at 0), and no point of a
+  # dense (c0, c1) grid fits better. A constant column is a pure nugget.
+  v <- make_mixed_vgm_input()$v_emp
+  g <- v$gamma
+  w <- v$np / v$dist^2
+  a <- exp(seq(log(max(v$dist) / 100), log(10 * max(v$dist)), length.out = 40))
+  R <- cbind(do.call(cbind, lapply(VGM_AUTOFIT_FAMILIES, function(m) .vgm_shape(m, outer(v$dist, 1 / a)))), 1)
+  nn <- .vgm_nnls_cols(g, R, w)
+  tol <- 1e-9 * 2 * sum(w * g)
+  active <- character(0)
+  for (j in seq_len(ncol(R))) {
+    r <- R[, j]
+    res <- g - nn$c0[j] - nn$c1[j] * r
+    expect_equal(nn$sse[j], sum(w * res^2), tolerance = 1e-12)
+    expect_gte(nn$c0[j], 0)
+    expect_gte(nn$c1[j], 0)
+    d0 <- -2 * sum(w * res)
+    d1 <- -2 * sum(w * res * r)
+    if (nn$c0[j] > 0) expect_lt(abs(d0), tol) else expect_gt(d0, -tol)
+    if (nn$c1[j] > 0) expect_lt(abs(d1), tol) else expect_gt(d1, -tol)
+    active <- c(active, if (nn$c0[j] > 0 && nn$c1[j] > 0) "free" else if (nn$c1[j] > 0) "c0 = 0" else "c1 = 0")
+  }
+  expect_true(all(c("free", "c0 = 0", "c1 = 0") %in% active))   # every branch exercised
+  expect_equal(nn$c0[ncol(R)], sum(w * g) / sum(w))
+  expect_identical(nn$c1[ncol(R)], 0)
+
+  cg <- seq(0, 2 * max(g), length.out = 301)
+  for (j in round(seq(1, ncol(R) - 1, length.out = 9))) {
+    grid_min <- min(vapply(cg, function(c1) min(colSums(w * outer(g - c1 * R[, j], cg, "-")^2)),
+                           numeric(1)))
+    expect_lte(nn$sse[j], grid_min * (1 + 1e-12))
+  }
+})
+
+test_that("each family's fit is the global minimum over its range domain", {
+  # Brute force over 5,000 log-spaced ranges of the same domain
+  # (brute_vgm_profile()). The fit returned is the representative of the ranges
+  # fitting within VGM_SSE_TIE_REL of the minimum; at a domain bound, where the
+  # criterion is still falling, that set's midpoint lies half the band above the
+  # minimum, so the band is the tolerance.
+  inputs <- c(lapply(golden_vgm_pairs("core"), `[[`, "v_emp"),
+              list(trend = make_trend_vgm_input()$v_emp, mixed = make_mixed_vgm_input()$v_emp),
+              lapply(stats::setNames(1:12, paste0("hostile", 1:12)),
+                     function(s) make_hostile_vgm_input(seed = s)$v_emp))
+  for (k in names(inputs)) {
+    v <- inputs[[k]]
+    ref <- brute_vgm_profile(v)
+    for (m in VGM_AUTOFIT_FAMILIES) {
+      f <- .vgm_profile_family(v$dist, v$gamma, v$np / v$dist^2, m, max(v$dist) / 100,
+                               VGM_RANGE_CEILING_MULT * max(v$dist))
+      expect_lte(f$sse, ref[[m]]$sse * (1 + VGM_SSE_TIE_REL), label = paste(k, m))
+      expect_gte(f$n_basins, 1L)
+    }
+  }
+})
+
+test_that("each family's fit is gstat's where gstat converges cleanly", {
+  # The same estimator: on fields simulated from known models, wherever gstat's
+  # fit of a family converges without a warning, the profile optimum is no
+  # worse and lies within gstat's own convergence tolerance of it.
+  for (tr in list(list(model = gstat::vgm(1, "Sph", 1200, 0.2), seed = 11),
+                  list(model = gstat::vgm(1, "Exp", 400, 0.1), seed = 23))) {
+    sim <- simulate_vgm_field(tr$model, tr$seed)
+    lags <- calc_scientific_lags(sim)
+    v <- gstat::variogram(z ~ 1, sim, width = lags$width, cutoff = lags$cutoff)
+    md <- max(v$dist)
+    for (m in VGM_AUTOFIT_FAMILIES) {
+      prof <- .vgm_profile_family(v$dist, v$gamma, v$np / v$dist^2, m, md / 100,
+                                  VGM_RANGE_CEILING_MULT * md)
+      clean <- Filter(Negate(is.null), lapply(md / c(10, 5, 4, 2), function(r) {
+        warned <- FALSE
+        f <- withCallingHandlers(
+          tryCatch(gstat::fit.variogram(v, manual_vgm(0.8 * var(sim$z), m, r, 0.2 * var(sim$z))),
+                   error = function(e) NULL),
+          warning = function(w) {
+            warned <<- TRUE
+            invokeRestart("muffleWarning")
+          })
+        if (is.null(f) || warned || isTRUE(attr(f, "singular"))) NULL else f
+      }))
+      expect_gt(length(clean), 0)
+      best <- clean[[which.min(vapply(clean, function(f) attr(f, "SSErr"), numeric(1)))]]
+      sse <- attr(best, "SSErr")
+      tot <- sum(best$psill)
+      expect_lte(prof$sse, sse * (1 + 1e-9))
+      expect_gte(prof$sse, sse * (1 - 1e-6))
+      expect_lt(abs(prof$c0 - best$psill[1]) / tot, 1e-3)
+      expect_lt(abs(prof$c1 - best$psill[2]) / tot, 1e-3)
+      expect_lt(abs(prof$a / best$range[2] - 1), 1e-3)
+    }
+  }
+})
+
+# ── Reproducibility: the fit is a function of the data ──────────────────────
+
+test_that("the fit does not move with the last bits or the order of the empirical variogram", {
+  # Every golden locality and variable. A nudge of gamma by 1e-15 or 1e-13
+  # (relative), or permuted bins, leaves the family, the nugget and partial
+  # sill (to 1e-6 of the sill) and the range (to 1e-6 relative) unchanged.
+  nudge <- function(v, seed, eps) {
+    v$gamma <- v$gamma * (1 + eps * with_seed(seed, stats::runif(nrow(v), -1, 1)))
+    v
+  }
+  same <- function(a, b) {
+    if (!identical(as.character(a$model), as.character(b$model))) return(FALSE)
+    tot <- sum(a$psill)
+    all(abs(a$psill - b$psill) <= 1e-6 * tot) &&
+      (NROW(a) < 2 || abs(b$range[2] / a$range[2] - 1) <= 1e-6)
+  }
+  pairs <- golden_vgm_pairs("full")
+  expect_gt(length(pairs), 0)
+  for (k in names(pairs)) {
+    P <- pairs[[k]]
+    f0 <- robust_vgm_fit(P$v_emp, P$pts$v)
+    for (eps in c(1e-15, 1e-13)) {
+      expect_true(same(f0, robust_vgm_fit(nudge(P$v_emp, 1, eps), P$pts$v)), label = paste(k, eps))
+    }
+    o <- with_seed(2, sample(nrow(P$v_emp)))
+    expect_true(same(f0, robust_vgm_fit(P$v_emp[o, ], P$pts$v)), label = paste(k, "permuted"))
+  }
+})
+
+test_that("the fit is unit-free: rescaling distances and values rescales it and nothing else", {
+  # Distances x 1000 and values x 1000 (semivariances x 1e6): the same family
+  # and state, sills x 1e6 and the range x 1000, to 1e-9.
+  synthetic <- list(trend = make_trend_vgm_input(), mixed = make_mixed_vgm_input(),
+                    noise = make_hostile_vgm_input(seed = 1))
+  inputs <- c(lapply(golden_vgm_pairs("core"), function(P) list(v = P$v_emp, z = P$pts$v)),
+              lapply(synthetic, function(h) list(v = h$v_emp, z = h$v_data)))
+  for (k in names(inputs)) {
+    I <- inputs[[k]]
+    f0 <- robust_vgm_fit(I$v, I$z)
+    v2 <- I$v
+    v2$dist <- v2$dist * 1e3
+    v2$gamma <- v2$gamma * 1e6
+    f2 <- robust_vgm_fit(v2, I$z * 1e3)
+    expect_identical(as.character(f2$model), as.character(f0$model), label = k)
+    expect_identical(vgm_fit_status(f2), vgm_fit_status(f0), label = k)
+    expect_equal(f2$psill / 1e6, f0$psill, tolerance = 1e-9, label = k)
+    if (NROW(f0) > 1) expect_equal(f2$range[2] / 1e3, f0$range[2], tolerance = 1e-9, label = k)
+  }
+})
+
+test_that("the auto-fit raises no condition, even on hostile inputs", {
+  for (s in 1:12) {
+    h <- make_hostile_vgm_input(seed = s)
+    expect_no_condition(robust_vgm_fit(h$v_emp, h$v_data))
+  }
   h <- make_trend_vgm_input()
-  fit <- suppressWarnings(robust_vgm_fit(h$v_emp, h$v_data))
-  d <- attr(fit, "vgm_diagnostics")
-
-  # Re-derive the selection here rather than reading it off the output.
-  cands <- screen_vgm_candidates(h)
-  converged <- Filter(function(x) x$valid && !x$flawed, cands)
-  expect_gt(length(converged), 0)
-  expect_false(any(vapply(converged, function(x) x$resolved, logical(1))))  # the premise
-  expected <- converged[[which.min(vapply(converged, function(x) x$sse, numeric(1)))]]$fit
-
-  expect_identical(as.character(fit$model[2]), as.character(expected$model[2]))
-  expect_equal(fit$range[2], expected$range[2], tolerance = 1e-8)
-  expect_false(isTRUE(attr(fit, "is_fallback")))
-  expect_false(isTRUE(attr(fit, "flawed_winner")))
-  expect_identical(d$status, "range_unresolved")
-  # Used, but not presented as identified: the range sits beyond the cutoff
-  # and the empirical variogram is still climbing there.
-  expect_false(d$sill_resolved)
-  expect_identical(d$range_side, "beyond")
-  expect_true(d$trend_suspected)
-  expect_gt(d$practical_range, d$max_lag)
+  expect_no_condition(robust_vgm_fit(h$v_emp, h$v_data))
 })
 
-test_that("a better-fitting unresolved fit is not beaten by a resolved one", {
-  # The case a hard resolved-first tier gets wrong: both a converged candidate
-  # whose range the lags resolve and a converged one whose range they do not,
-  # and the unresolved one fits the empirical variogram better. Range
-  # resolution is a diagnostic; the fitting criterion decides.
+test_that("a PSOCK worker that sources only the model code fits the same variogram", {
+  # The worker contract: every worker sources spatial_helpers.R and nothing
+  # else from the app, so the auto-fit must be complete inside its fragments.
+  # parallelly, as the app: its workers get this session's library paths.
+  root <- normalizePath(file.path(testthat::test_path(), "..", ".."), mustWork = TRUE)
   h <- make_mixed_vgm_input()
-  cands <- screen_vgm_candidates(h)
-  converged <- Filter(function(x) x$valid && !x$flawed, cands)
-  sse <- vapply(converged, function(x) x$sse, numeric(1))
-  res <- vapply(converged, function(x) x$resolved, logical(1))
-  expect_true(any(res) && any(!res))                 # the premise
-  best_res <- min(sse[res]); best_unres <- min(sse[!res])
-  expect_gt(best_res / best_unres, 1.5)               # a real gap, not a tie
+  cl <- parallelly::makeClusterPSOCK(1L)
+  on.exit(parallel::stopCluster(cl), add = TRUE)
+  remote <- parallel::clusterCall(cl, function(root, v_emp, v_data) {
+    suppressPackageStartupMessages({
+      library(sf)
+      library(gstat)
+      library(dplyr)
+    })
+    source(file.path(root, "spatial_helpers.R"), local = FALSE)
+    robust_vgm_fit(v_emp, v_data)
+  }, root, h$v_emp, h$v_data)[[1]]
+  expect_identical(remote, robust_vgm_fit(h$v_emp, h$v_data))
+})
 
-  fit <- suppressWarnings(robust_vgm_fit(h$v_emp, h$v_data))
-  winner <- converged[[which.min(sse)]]$fit
-  expect_identical(as.character(fit$model[2]), as.character(winner$model[2]))
-  expect_equal(attr(fit, "SSErr"), best_unres, tolerance = 1e-10)
-  expect_identical(attr(fit, "vgm_diagnostics")$status, "range_unresolved")
-  expect_false(isTRUE(attr(fit, "flawed_winner")))
+# ── Selection ───────────────────────────────────────────────────────────────
 
-  # The resolved candidate would have been the resolved-first answer.
-  resolved_first <- converged[res][[which.min(sse[res])]]$fit
-  expect_false(isTRUE(all.equal(attr(fit, "SSErr"), attr(resolved_first, "SSErr"))))
+test_that("the lowest criterion wins whatever its range: range resolution never ranks", {
+  # On every golden pair the auto-fit returns the eligible family with the
+  # lowest brute-force criterion, and a pure nugget exactly when no family is
+  # eligible.
+  for (P in golden_vgm_pairs("full")) {
+    ref <- Filter(function(x) x$admissible && !x$smooth_zero_nugget, brute_vgm_profile(P$v_emp))
+    fit <- robust_vgm_fit(P$v_emp, P$pts$v)
+    expect_equal(identical(vgm_fit_status(fit), "pure_nugget"), !length(ref))
+    if (!length(ref)) next
+    sse <- vapply(ref, `[[`, numeric(1), "sse")
+    expect_lte(attr(fit, "SSErr"), min(sse) * (1 + VGM_SSE_TIE_REL))
+    if (sum(sse <= min(sse) * (1 + VGM_SSE_TIE_REL)) == 1L) {
+      expect_identical(as.character(fit$model[2]), names(ref)[which.min(sse)],
+                       label = paste(P$locality, P$var))
+    }
+  }
+
+  # Built so a resolved-first rule would take a measurably poorer fit: an
+  # exponential structure with a practical range of 3 x the longest lag and a
+  # 1% alternating wiggle. Its own family fits best, beyond the lag support;
+  # Spherical and Matern optima have resolved ranges and fit far worse.
+  h <- seq(100, 1500, by = 100)
+  gam <- 0.1 + (1 - exp(-h / 1500)) * (1 + 0.01 * rep(c(1, -1), length.out = 15))
+  v <- data.frame(np = rep(50, 15), dist = h, gamma = gam, dir.hor = 0, dir.ver = 0, id = factor("var1"))
+  class(v) <- c("gstatVariogram", "data.frame")
+  ref <- brute_vgm_profile(v)
+  sse <- vapply(ref, `[[`, numeric(1), "sse")
+  expect_identical(names(which.min(sse)), "Exp")                                  # the premises
+  expect_false(ref$Exp$resolved)
+  expect_true(ref$Sph$resolved && ref$Mat$resolved && !ref$Mat$smooth_zero_nugget)
+  expect_gt(min(sse[c("Sph", "Mat")]) / sse[["Exp"]], 2)
+  fit <- robust_vgm_fit(v, gam)
+  expect_identical(as.character(fit$model[2]), "Exp")
+  expect_identical(vgm_fit_status(fit), "range_unresolved")
+  expect_identical(attr(fit, "vgm_diagnostics")$range_side, "beyond")
 })
 
 test_that("range resolution breaks a numerical tie and nothing more", {
@@ -159,27 +323,219 @@ test_that("range resolution breaks a numerical tie and nothing more", {
   expect_lte(VGM_SSE_TIE_REL, 1e-6)
 })
 
-test_that("the five fit statuses map to the attributes the UI reads", {
+test_that("inside the tie band the family order decides, never rounding", {
+  # Two resolved candidates within the band: the first in family order wins,
+  # whichever reports the lower criterion, so a last-bit change cannot swap them.
+  sph <- list(fit = manual_vgm(2, "Sph", 300, 0.5), sse = 1e-4 * (1 + 1e-10), range_resolved = TRUE)
+  exp_ <- list(fit = manual_vgm(2, "Exp", 100, 0.5), sse = 1e-4, range_resolved = TRUE)
+  expect_identical(as.character(.vgm_pick_best(list(sph, exp_))$fit$model[2]), "Sph")
+  sph$sse <- 1e-4 * (1 - 1e-10)
+  expect_identical(as.character(.vgm_pick_best(list(sph, exp_))$fit$model[2]), "Sph")
+  # Outside the band the criterion decides.
+  sph$sse <- 1.01e-4
+  expect_identical(as.character(.vgm_pick_best(list(sph, exp_))$fit$model[2]), "Exp")
+})
+
+test_that("a trend field's fit is unresolved beyond the lags, at the search limit, with the trend hint", {
+  h <- make_trend_vgm_input()
+  ref <- brute_vgm_profile(h$v_emp)
+  # The premise: every family's best range is the ceiling, and the best of all
+  # is a Matern at a zero nugget, which the rule refuses.
+  expect_true(all(vapply(ref, function(x) x$p, numeric(1)) >= 0.999 * VGM_RANGE_CEILING_MULT * max(h$v_emp$dist)))
+  expect_true(ref$Mat$smooth_zero_nugget)
+  el <- Filter(function(x) x$admissible && !x$smooth_zero_nugget, ref)
+  sse <- vapply(el, `[[`, numeric(1), "sse")
+
+  fit <- robust_vgm_fit(h$v_emp, h$v_data)
+  d <- attr(fit, "vgm_diagnostics")
+  expect_identical(as.character(fit$model[2]), names(el)[which.min(sse)])
+  expect_identical(d$status, "range_unresolved")
+  expect_identical(d$range_side, "beyond")
+  expect_true(d$range_at_ceiling)
+  expect_equal(d$practical_range, VGM_RANGE_CEILING_MULT * d$max_lag, tolerance = 1e-6)
+  # Used, but not presented as identified: the sill lies beyond the cutoff and
+  # the empirical variogram is still climbing there.
+  expect_false(d$sill_resolved)
+  expect_true(d$trend_suspected)
+})
+
+test_that("the better-fitting unresolved Matern wins on the mixed field", {
+  h <- make_mixed_vgm_input()
+  ref <- Filter(function(x) x$admissible && !x$smooth_zero_nugget, brute_vgm_profile(h$v_emp))
+  sse <- vapply(ref, `[[`, numeric(1), "sse")
+  expect_identical(names(ref)[which.min(sse)], "Mat")                  # the premise
+  expect_gt(min(sse[names(sse) != "Mat"]) / sse[["Mat"]], 1.5)        # a real gap, not a tie
+
+  fit <- robust_vgm_fit(h$v_emp, h$v_data)
+  d <- attr(fit, "vgm_diagnostics")
+  expect_identical(as.character(fit$model[2]), "Mat")
+  expect_equal(attr(fit, "SSErr"), sse[["Mat"]], tolerance = VGM_SSE_TIE_REL)
+  expect_identical(d$status, "range_unresolved")
+  expect_identical(d$range_side, "beyond")
+  expect_false(d$range_at_ceiling)
+})
+
+# ── The zero-nugget rule (Matern) and the Gaussian ─────────────────────────
+
+test_that("the auto-fit never returns a Matern at a zero nugget, and the rule changes picks", {
+  # make_test_points(30): the best fit of all is a Matern at nugget 0; the
+  # auto-fit refuses it and returns the best eligible family.
+  pts <- make_test_points(30)
+  lags <- calc_scientific_lags(pts)
+  v_emp <- gstat::variogram(v ~ 1, pts, width = lags$width, cutoff = lags$cutoff)
+  ref <- brute_vgm_profile(v_emp)
+  sse <- vapply(ref, `[[`, numeric(1), "sse")
+  expect_identical(names(which.min(sse)), "Mat")
+  expect_true(ref$Mat$smooth_zero_nugget)
+  fit <- robust_vgm_fit(v_emp, pts$v)
+  el <- setdiff(names(ref), "Mat")
+  expect_identical(as.character(fit$model[2]), el[which.min(sse[el])])
+  expect_false(isTRUE(vgm_smooth_nugget_share(fit) <= 1e-8))
+
+  # The Gaussian is not auto-selected, and stays a valid manual model.
+  expect_false("Gau" %in% VGM_AUTOFIT_FAMILIES)
+  expect_null(validate_manual_vgm(psill = 1, nugget = 0.1, range = 300))
+  expect_identical(as.character(manual_vgm(1, "Gau", 300, 0.1)$model[2]), "Gau")
+})
+
+test_that("on real data the zero-nugget rule changes picks and keeps surfaces in range", {
+  # On every golden pair the auto-fit returns no Matern whose equally-fitting
+  # set reaches a zero nugget. Pairs whose best fit is a Matern at nugget 0 get
+  # another family, and one of them has at least 30 samples, so the rule acts
+  # on real data, not only on small sets. (A Matern optimum with a small
+  # positive nugget is eligible: smooth, nearly noise-free fields have one, and
+  # the 5% advisory flags it.)
+  hits <- 0L
+  for (P in golden_vgm_pairs("full")) {
+    v <- P$v_emp
+    fit <- robust_vgm_fit(v, P$pts$v)
+    if (identical(as.character(fit$model[2]), "Mat")) {
+      expect_gt(attr(fit, "vgm_diagnostics")$nugget_share_interval[1], 1e-8)
+    }
+    ref <- brute_vgm_profile(v)
+    sse <- vapply(ref, function(x) if (x$admissible) x$sse else Inf, numeric(1))
+    if (ref[[which.min(sse)]]$smooth_zero_nugget) {
+      expect_false(isTRUE(vgm_smooth_nugget_share(fit) <= 1e-8))
+      if (nrow(P$pts) >= 30) hits <- hits + 1L
+    }
+  }
+  expect_gt(hits, 0L)
+
+  # Golden case vgm_zero_nugget: the Matern optimum sits at nugget 0 and krigs
+  # this variable outside its observed range by more than 10% of the span
+  # (below zero, for a variable that cannot be negative); the auto-fit's model
+  # stays inside, on the convex hull of the samples.
+  case <- golden_case("vgm_zero_nugget")
+  g <- golden_sf("full", localities = case$locality)
+  g$v <- g[[case$target]]
+  g <- dedup_valid_points(g, "v")
+  lags <- calc_scientific_lags(g)
+  v_emp <- gstat::variogram(v ~ 1, g, width = lags$width, cutoff = lags$cutoff)
+  ref <- brute_vgm_profile(v_emp)
+  expect_true(ref$Mat$smooth_zero_nugget)
+  refused <- manual_vgm(ref$Mat$c1, "Mat", ref$Mat$p / 4.75, ref$Mat$c0)
+
+  hull <- sf::st_convex_hull(sf::st_union(g))
+  grid <- sf::st_as_sf(sf::st_make_grid(hull, n = c(40, 40), what = "centers"))
+  sf::st_geometry(grid) <- "geometry"
+  grid <- grid[lengths(sf::st_intersects(grid, hull)) > 0, ]
+  bounds <- range(g$v) + c(-0.1, 0.1) * diff(range(g$v))
+  surface <- function(model) range(gstat::krige(v ~ 1, g, grid, model = model, debug.level = 0)$var1.pred)
+  left <- surface(refused)
+  expect_true(left[1] < bounds[1] || left[2] > bounds[2])
+  fit <- robust_vgm_fit(v_emp, g$v)
+  expect_false(isTRUE(vgm_smooth_nugget_share(fit) <= 1e-8))
+  kept <- surface(fit)
+  expect_gte(kept[1], bounds[1])
+  expect_lte(kept[2], bounds[2])
+  if (min(g$v) >= 0) {
+    expect_lt(left[1], 0)
+    expect_gte(kept[1], 0)
+  }
+})
+
+# ── States: pure nugget, failed fits, the stand-in ─────────────────────────
+
+test_that("white noise gets the flat fit: a pure nugget at the weighted mean semivariance", {
+  h <- make_hostile_vgm_input(seed = 1)
+  ref <- brute_vgm_profile(h$v_emp)
+  expect_true(all(vapply(ref, function(x) x$c1 == 0, logical(1))))   # every family is flat
+  fit <- robust_vgm_fit(h$v_emp, h$v_data)
+  w <- h$v_emp$np / h$v_emp$dist^2
+  expect_identical(as.character(fit$model), "Nug")
+  expect_equal(fit$psill, sum(w * h$v_emp$gamma) / sum(w), tolerance = 1e-12)
+  expect_equal(attr(fit, "SSErr"), sum(w * (h$v_emp$gamma - fit$psill)^2), tolerance = 1e-12)
+  d <- attr(fit, "vgm_diagnostics")
+  expect_identical(d$status, "pure_nugget")
+  expect_identical(d$pure_nugget_cause, "no_structure")
+  expect_equal(d$pairs_per_lag, range(h$v_emp$np))
+  # No range, so nothing is claimed about one.
+  expect_true(is.na(d$practical_range))
+  expect_true(is.na(d$sill_resolved))
+  expect_true(is.na(d$range_at_ceiling))
+  expect_false(isTRUE(attr(fit, "is_fallback")))
+  # Kriged, it predicts the sample mean away from the samples.
+  grid <- make_test_grid_safe(h$pts, res = 200)
+  kr <- gstat::krige(v ~ 1, h$pts, grid, model = fit, debug.level = 0)
+  expect_equal(kr$var1.pred, rep(mean(h$v_data), nrow(grid)), tolerance = 1e-10)
+})
+
+test_that("a zero empirical variogram is fit_failed with a stand-in that krigs the constant", {
+  # A constant target (or a CV fold whose training values are all equal) has no
+  # variance to estimate a variogram from; its flat fit would be a zero-sill
+  # model gstat cannot krige.
+  pts <- make_test_points(20)
+  pts$v <- 7.5
+  lags <- calc_scientific_lags(pts)
+  v_emp <- gstat::variogram(v ~ 1, pts, width = lags$width, cutoff = lags$cutoff)
+  expect_true(all(v_emp$gamma == 0))   # the premise
+  fit <- robust_vgm_fit(v_emp, pts$v)
+  d <- attr(fit, "vgm_diagnostics")
+  expect_identical(d$status, "fit_failed")
+  expect_true(isTRUE(attr(fit, "is_fallback")))
+  expect_gt(sum(fit$psill), 0)
+  expect_true(d$target_degenerate)
+  grid <- make_test_grid_safe(pts, res = 200)
+  kr <- gstat::krige(v ~ 1, pts, grid, model = fit, debug.level = 0)
+  expect_equal(kr$var1.pred, rep(7.5, nrow(grid)))
+})
+
+test_that("every fit carries the vgm_diagnostics contract", {
+  fields <- c("status", "practical_range", "max_lag", "sill_resolved", "range_side",
+              "range_at_ceiling", "range_interval", "nugget_share_interval", "nugget_identified",
+              "trend_suspected", "pure_nugget_cause", "pairs_per_lag", "target_degenerate")
+  h <- make_hostile_vgm_input(seed = 1)
+  fits <- list(robust_vgm_fit(NULL, rnorm(10)), robust_vgm_fit(h$v_emp, h$v_data),
+               robust_vgm_fit(make_mixed_vgm_input()$v_emp, make_mixed_vgm_input()$v_data),
+               robust_vgm_fit(make_hostile_vgm_input(seed = 2)$v_emp, make_hostile_vgm_input(seed = 2)$v_data))
+  expect_setequal(vapply(fits, vgm_fit_status, character(1)), VGM_FIT_STATUSES)
+  for (f in fits) {
+    d <- attr(f, "vgm_diagnostics")
+    expect_named(d, fields, ignore.order = TRUE)
+    expect_identical(vgm_fit_status(f), d$status)
+    # is_fallback, which the CK seed guard reads, marks the stand-in and nothing
+    # else; only the stand-in has no criterion.
+    expect_equal(isTRUE(attr(f, "is_fallback")), identical(d$status, "fit_failed"))
+    expect_equal(is.null(attr(f, "SSErr")), identical(d$status, "fit_failed"))
+  }
+})
+
+test_that("the four fit states map to the attributes the UI reads", {
+  expect_identical(VGM_FIT_STATUSES, c("fit_failed", "pure_nugget", "range_unresolved", "ok"))
   # fit_failed is reachable end to end: fewer than 5 bins.
   h <- make_hostile_vgm_input(seed = 1)
   expect_identical(vgm_fit_status(robust_vgm_fit(h$v_emp[1:3, ], h$v_data)), "fit_failed")
   expect_identical(vgm_fit_status(robust_vgm_fit(NULL, rnorm(10))), "fit_failed")
-
-  # heuristic_fallback needs every candidate to be ineligible, which
-  # no real empirical variogram in this suite produces; pin the mapping.
   fb <- make_mock_vgm()
   attr(fb, "is_fallback") <- TRUE
-  attr(fb, "vgm_diagnostics") <- list(status = "heuristic_fallback", n_tried = 16L)
-  expect_identical(vgm_fit_status(fb), "heuristic_fallback")
-
-  fw <- make_mock_vgm(); attr(fw, "flawed_winner") <- TRUE
-  expect_identical(vgm_fit_status(fw), "singular_selected")
+  expect_identical(vgm_fit_status(fb), "fit_failed")
   # A supplied (manual) model carries no diagnostics and is not degraded.
   expect_identical(vgm_fit_status(make_mock_vgm()), "ok")
   expect_identical(vgm_fit_status(NULL), "fit_failed")
 
   expect_match(vgm_status_label("range_unresolved"), "range unresolved by lag support")
-  expect_match(vgm_status_label("heuristic_fallback"), "heuristic")
+  expect_match(vgm_status_label("pure_nugget"), "pure nugget")
+  expect_no_match(vgm_status_label("ok"), "converged")
 })
 
 test_that("the rising-at-the-cutoff detector needs a rise, not a wobble", {
@@ -209,36 +565,25 @@ test_that("a degenerate target is reported on the fit, not hidden in its sill", 
   expect_false(vgm_target_degenerate(make_mock_vgm()))
 })
 
-test_that("the candidate screen refuses a negative nugget", {
+test_that("auto-fit eligibility refuses a negative nugget", {
   # gamma(h) < 0 near the origin is not a valid variogram: the model is not
   # conditionally negative definite and gstat::krige() answers with 100% NA
   # predictions and NO condition raised, which reaches the user as a blank
   # locality behind a clean-looking variogram panel. Eligibility must exclude
-  # such a candidate so it cannot win the lowest-SSErr contest.
-  #
-  # gstat clamps negative sills itself only for an empirical variogram carrying
-  # attr(, "direct"), so drive the screen directly rather than trying to coax a
-  # negative nugget out of fit.variogram.
+  # such a candidate, and the non-negative least squares never returns one.
   fit_neg <- gstat::vgm(psill = 2, model = "Sph", range = 300, nugget = -0.05)
   fit_ok  <- gstat::vgm(psill = 2, model = "Sph", range = 300, nugget = 0.05)
-  max_dist <- 700
-  screen <- function(f) {
-    prange <- f$range[2] * .vgm_practical_range_factor(f$model[2], f$kappa[2])
-    prange > (max_dist / 100) && prange < max_dist * 2 && f$psill[2] > 0 &&
-      is.finite(f$psill[1]) && f$psill[1] >= 0
-  }
-  expect_false(screen(fit_neg))
-  expect_true(screen(fit_ok))
+  expect_false(.vgm_autofit_eligible(fit_neg, sse = 1, practical_range = 300))
+  expect_true(.vgm_autofit_eligible(fit_ok, sse = 1, practical_range = 300))
 
-  # And the shipped function never returns one on a real empirical variogram.
   pts <- make_test_points(40)
   lags <- calc_scientific_lags(pts)
   v_emp <- gstat::variogram(v ~ 1, pts, width = lags$width, cutoff = lags$cutoff)
-  fit <- suppressWarnings(robust_vgm_fit(v_emp, pts$v))
+  fit <- robust_vgm_fit(v_emp, pts$v)
   expect_true(is.finite(fit$psill[1]) && fit$psill[1] >= 0)
 })
 
-test_that("auto-fit eligibility rejects non-finite criteria and structural sills", {
+test_that("auto-fit eligibility rejects non-finite criteria, structural sills and zero-nugget sets", {
   fit <- gstat::vgm(psill = 2, model = "Sph", range = 300, nugget = 0.05)
   expect_true(.vgm_autofit_eligible(fit, sse = 1, practical_range = 300))
   expect_false(.vgm_autofit_eligible(fit, sse = Inf, practical_range = 300))
@@ -247,26 +592,40 @@ test_that("auto-fit eligibility rejects non-finite criteria and structural sills
   infinite_sill <- fit
   infinite_sill$psill[2] <- Inf
   expect_false(.vgm_autofit_eligible(infinite_sill, sse = 1, practical_range = 300))
+
+  # The zero-nugget rule judged over the equally-fitting set: a Matern that fits
+  # as well at nugget 0 is refused, whatever nugget its representative carries.
+  mat <- manual_vgm(1, "Mat", 300, 0.1)
+  expect_true(.vgm_autofit_eligible(mat, sse = 1, practical_range = 1425))
+  expect_false(.vgm_autofit_eligible(mat, sse = 1, practical_range = 1425, share_min = 0))
+  expect_true(.vgm_autofit_eligible(mat, sse = 1, practical_range = 1425, share_min = 0.05))
+  # Spherical and Exponential rise linearly from the origin: the rule does not apply.
+  expect_true(.vgm_autofit_eligible(manual_vgm(1, "Sph", 300, 0), sse = 1, practical_range = 300,
+                                    share_min = 0))
 })
 
-test_that("diagnostics present on the tiny-variogram early return", {
+test_that("the fit_failed stand-in claims nothing about range or sill", {
   fit <- robust_vgm_fit(NULL, rnorm(10))
   d <- attr(fit, "vgm_diagnostics")
-  expect_identical(d$n_tried, 0L)
-  expect_identical(d$n_flawed, 0L)
+  expect_identical(d$status, "fit_failed")
+  expect_true(is.na(d$practical_range))
+  expect_true(is.na(d$sill_resolved))
+  expect_true(is.na(d$range_at_ceiling))
+  expect_true(is.na(d$max_lag))
+  expect_false(d$trend_suspected)
+  ex <- vgm_params_export_df(list(L_act = fit))
+  expect_true(is.na(ex$`Range At Search Limit`))
 })
 
-test_that("robust_vgm_fit tolerates an NA empirical-variogram bin", {
-  # gstat::variogram drops empty bins, so gamma is finite in practice; this
-  # pins the initial nugget seed against min(NA), which would crash the `== 0`
-  # test inside a PSOCK worker and surface only as a generic "Parallel ...
-  # Failed" modal.
+test_that("an NA, zero-distance or empty empirical bin is ignored", {
   pts <- make_test_points(30)
   lags <- calc_scientific_lags(pts)
   v_emp <- gstat::variogram(v ~ 1, pts, width = lags$width, cutoff = lags$cutoff)
-  v_emp$gamma[1] <- NA_real_
-  fit <- suppressWarnings(robust_vgm_fit(v_emp, pts$v))
-  expect_s3_class(fit, "variogramModel")
+  ref <- robust_vgm_fit(v_emp[-1, ], pts$v)
+  bad <- list(function(v) { v$gamma[1] <- NA_real_; v },
+              function(v) { v$np[1] <- 0; v },
+              function(v) { v$dist[1] <- 0; v })
+  for (b in bad) expect_equal(robust_vgm_fit(b(v_emp), pts$v), ref)
 })
 
 test_that("diagnostics survive clean_gstat_env (worker serialization path)", {
@@ -274,35 +633,6 @@ test_that("diagnostics survive clean_gstat_env (worker serialization path)", {
   fit <- suppressWarnings(robust_vgm_fit(h$v_emp, h$v_data))
   cleaned <- clean_gstat_env(fit)
   expect_false(is.null(attr(cleaned, "vgm_diagnostics")))
-})
-
-test_that("muffling does not change selection on a clean-winner fixture", {
-  # Seed 12's lowest-SSErr candidate is already clean, so neither muffling the
-  # screen's warnings nor preferring clean candidates may alter this selection.
-  h <- make_hostile_vgm_input(seed = 12)
-  fit <- suppressWarnings(robust_vgm_fit(h$v_emp, h$v_data))
-  expect_identical(as.character(fit$model[2]), "Gau")
-  expect_equal(fit$psill[1], 21.239390, tolerance = 1e-3)
-  expect_equal(fit$psill[2], 84.136984, tolerance = 1e-3)
-  expect_equal(fit$range[2], 379.252147, tolerance = 1e-3)
-  expect_type(attr(fit, "vgm_diagnostics"), "list") # contract holds on the clean-winner path too
-})
-
-test_that("a clean candidate is preferred over a lower-SSErr flawed one", {
-  # Candidate table for this fixture (gstat 2.1.6): clean Mat at nugget 0
-  # (SSErr 11.4508), clean Exp at nugget 0 (12.1713), flawed Sph (lowest
-  # 11.9040) and flawed Gau at nugget 0 (10.9345). The zero-nugget Mat and Gau
-  # are ineligible, so the converged Exp must beat the lower-SSErr flawed Sph.
-  pts <- make_test_points(30)
-  lags <- calc_scientific_lags(pts)
-  v_emp <- gstat::variogram(v ~ 1, pts, width = lags$width, cutoff = lags$cutoff)
-  fit <- robust_vgm_fit(v_emp, pts$v)
-  expect_identical(as.character(fit$model[2]), "Exp")
-  expect_equal(fit$psill[1], 0, tolerance = 1e-6)
-  expect_equal(fit$psill[2], 124.889, tolerance = 1e-3)
-  expect_equal(fit$range[2], 93.046, tolerance = 1e-3)
-  expect_false(isTRUE(attr(fit, "flawed_winner")))
-  expect_gt(attr(fit, "vgm_diagnostics")$n_flawed, 0)
 })
 
 test_that("the smooth-origin nugget share covers Gaussian and Matern only", {
@@ -316,67 +646,94 @@ test_that("the smooth-origin nugget share covers Gaussian and Matern only", {
   expect_true(is.na(vgm_smooth_nugget_share(NULL)))
 })
 
-test_that("auto-fit never returns a Gaussian or Matern structure at a zero nugget", {
-  # The rule changes the selection: make_test_points(30)'s converged candidates
-  # are led by a Matern at nugget 0 (see the candidate table above). Converged
-  # fits are stable to rounding, so this premise holds on every platform.
-  pts <- make_test_points(30)
-  lags <- calc_scientific_lags(pts)
-  v_emp <- gstat::variogram(v ~ 1, pts, width = lags$width, cutoff = lags$cutoff)
-  converged <- Filter(function(x) x$admissible && !x$flawed,
-                      screen_vgm_candidates(list(v_emp = v_emp, v_data = pts$v)))
-  best <- converged[[which.min(vapply(converged, function(x) x$sse, numeric(1)))]]
-  expect_true(best$smooth_zero_nugget)
-  expect_false(isTRUE(vgm_smooth_nugget_share(robust_vgm_fit(v_emp, pts$v)) <= 1e-8))
+test_that("an exact ridge is represented by the middle of its nugget interval", {
+  # Only the first lag lies inside the Spherical range, so the model has two
+  # free fitted values: that lag, and a plateau at the weighted mean m2 of the
+  # rest. Every range from the zero-nugget point a0, where rho(h1/a0) = m1/m2,
+  # up to h2 fits identically, the nugget sliding from 0 to
+  # m2 - (m2 - m1)/(1 - rho(h1/h2)). Built so that this two-level step is the
+  # best any non-decreasing model can do, hence every family's optimum. The
+  # 1e-8 tie band extends the ridge by about 1e-5 at each end.
+  h <- seq(100, 1500, by = 100)
+  gam <- c(0.80, 1.03, rep(c(0.99, 1.01), length.out = 13))
+  np <- rep(50, 15)
+  w <- np / h^2
+  m1 <- gam[1]
+  m2 <- sum(w[-1] * gam[-1]) / sum(w[-1])
+  rho <- function(x) ifelse(x < 1, 1.5 * x - 0.5 * x^3, 1)
+  # The premises: the first lag lies below the plateau, above the Spherical's
+  # value at h1/h2, every leading run of the later lags averages at least m2,
+  # and the plateau does not fit the later lags exactly.
+  expect_lt(m1, m2)
+  expect_gt(m1 / m2, rho(h[1] / h[2]))
+  expect_true(all(cumsum(w[-1] * gam[-1]) / cumsum(w[-1]) >= m2 * (1 - 1e-12)))
+  expect_gt(sum(w[-1] * (gam[-1] - m2)^2), 0)
 
-  # Golden case vgm_zero_nugget: CaCO3 on the compact locality in the shipped
-  # fixture, 79 points whose sampling suits the convex hull drawn below. No
-  # candidate converges here, so which one has the lowest SSErr is decided by
-  # rounding: a zero-nugget Gaussian or Matern on some platforms, a singular
-  # Spherical on others. Asserted is what holds on every platform: the screen
-  # fits Gaussian and Matern candidates at nugget 0, the best-fitting of them
-  # krigs this non-negative variable outside its observed range (all of them
-  # go below zero, 0.12-0.32 of the span), and the auto-fit returns none.
-  case <- golden_case("vgm_zero_nugget")
-  g <- golden_sf("full", localities = case$locality)
-  g$v <- g[[case$target]]
-  g <- dedup_valid_points(g, "v")
-  lags <- calc_scientific_lags(g)
-  v_emp <- gstat::variogram(v ~ 1, g, width = lags$width, cutoff = lags$cutoff)
-  pool <- Filter(function(x) x$admissible,
-                 screen_vgm_candidates(list(v_emp = v_emp, v_data = g$v)))
-  # The rule can only see these fits while gstat returns a smooth structure's
-  # nugget at its bound as exactly 0, never as a share just above the 1e-8 it
-  # tests.
-  share <- vapply(pool, function(x) vgm_smooth_nugget_share(x$fit), numeric(1))
-  expect_false(any(share > 1e-8 & share <= 1e-3, na.rm = TRUE))
-  removed <- Filter(function(x) x$smooth_zero_nugget, pool)
-  expect_gt(length(removed), 0)
+  c0_at <- function(a) m2 - (m2 - m1) / (1 - rho(h[1] / a))
+  a0 <- stats::uniroot(c0_at, c(h[1] * (1 + 1e-9), h[2]), tol = 1e-14)$root
+  c0_hi <- c0_at(h[2])
+  a_mid <- stats::uniroot(function(a) c0_at(a) - c0_hi / 2, c(a0, h[2]), tol = 1e-14)$root
 
-  hull <- sf::st_convex_hull(sf::st_union(g))
-  grid <- sf::st_as_sf(sf::st_make_grid(hull, n = c(40, 40), what = "centers"))
-  sf::st_geometry(grid) <- "geometry"
-  grid <- grid[lengths(sf::st_intersects(grid, hull)) > 0, ]
-  bounds <- range(g$v) + c(-0.1, 0.1) * diff(range(g$v))
-  surface <- function(model) range(gstat::krige(v ~ 1, g, grid, model = model, debug.level = 0)$var1.pred)
-  left <- surface(removed[[which.min(vapply(removed, function(x) x$sse, numeric(1)))]]$fit)
-  expect_true(left[1] < bounds[1] || left[2] > bounds[2])
-
-  fit <- suppressWarnings(robust_vgm_fit(v_emp, g$v))
-  expect_false(isTRUE(vgm_smooth_nugget_share(fit) <= 1e-8))
-  kept <- surface(fit)
-  expect_gte(kept[1], bounds[1])
-  expect_lte(kept[2], bounds[2])
+  v <- data.frame(np = np, dist = h, gamma = gam, dir.hor = 0, dir.ver = 0, id = factor("var1"))
+  class(v) <- c("gstatVariogram", "data.frame")
+  fit <- robust_vgm_fit(v, gam)
+  d <- attr(fit, "vgm_diagnostics")
+  expect_identical(as.character(fit$model[2]), "Sph")
+  expect_identical(d$status, "ok")
+  expect_false(d$nugget_identified)
+  expect_equal(d$range_interval, c(a0, h[2]), tolerance = 1e-4)
+  expect_equal(d$nugget_share_interval[2], c0_hi / m2, tolerance = 1e-4)
+  expect_lt(d$nugget_share_interval[1], 1e-8)
+  expect_equal(fit$psill[1], c0_hi / 2, tolerance = 1e-4)
+  expect_equal(fit$range[2], a_mid, tolerance = 1e-4)
 })
 
-test_that("flawed winner is tagged when no clean candidate exists", {
-  h <- make_hostile_vgm_input(seed = 1) # 16/16 candidates flawed, 5 in-window
+test_that("a ridge holding one profile point is represented by its nugget midpoint, on any machine", {
+  # White noise, 100 points, seed 7: a Spherical exact ridge (nugget 0 to 4.7%
+  # of the sill) that holds exactly one point of the range profile. Whether
+  # that grid point or Brent's point beside it seeds the search is decided by
+  # the last bits; the representative must not depend on it. Along the ridge
+  # the total sill is the plateau, so the middle of the nugget interval is the
+  # middle of the nugget-share interval (D2).
+  h <- make_hostile_vgm_input(n = 100, seed = 7)
   fit <- robust_vgm_fit(h$v_emp, h$v_data)
-  expect_true(isTRUE(attr(fit, "flawed_winner")))
-  expect_true(attr(fit, "vgm_diagnostics")$flawed_winner)
+  d <- attr(fit, "vgm_diagnostics")
+  expect_identical(as.character(fit$model[2]), "Sph")                             # the premises
+  expect_false(d$nugget_identified)
+  grid_p <- exp(seq(log(d$max_lag / 100), log(VGM_RANGE_CEILING_MULT * d$max_lag),
+                    length.out = VGM_PROFILE_GRID_N))
+  expect_identical(sum(grid_p > d$range_interval[1] & grid_p < d$range_interval[2]), 1L)
+  expect_lt(abs(fit$psill[1] / sum(fit$psill) - mean(d$nugget_share_interval)), 1e-5)
+  for (s in 1:4) for (eps in c(1e-15, 1e-13)) {
+    v <- h$v_emp
+    v$gamma <- v$gamma * (1 + eps * with_seed(s, stats::runif(nrow(v), -1, 1)))
+    f <- robust_vgm_fit(v, h$v_data)
+    expect_lt(max(abs(f$psill - fit$psill)) / sum(fit$psill), 1e-6)
+    expect_lt(abs(f$range[2] / fit$range[2] - 1), 1e-6)
+  }
+})
+
+test_that("a dip just past a flat ridge is found on any machine", {
+  # White noise, 100 points, seed 29: the Spherical profile is flat up to the
+  # second lag distance h2 (a ridge, nugget 0 to 47%) and dips about 3e-6
+  # lower just past it, where a second lag enters the range. Brent's method
+  # over the mostly flat bracket found the dip or not by the last bits; the
+  # global minimum is the dip.
+  h <- make_hostile_vgm_input(n = 100, seed = 29)
+  h2 <- sort(h$v_emp$dist)[2]
+  ref <- brute_vgm_profile(h$v_emp)
+  expect_gt(ref$Sph$p, h2)                                                        # the premise
+  expect_lt(ref$Sph$p, 1.05 * h2)
+  fit <- robust_vgm_fit(h$v_emp, h$v_data)
   expect_identical(as.character(fit$model[2]), "Sph")
-  expect_equal(fit$psill[2], 123.891310, tolerance = 1e-3)
-  expect_false(isTRUE(attr(fit, "is_fallback")))
+  expect_lte(attr(fit, "SSErr"), ref$Sph$sse * (1 + VGM_SSE_TIE_REL))
+  for (s in 1:4) for (eps in c(1e-15, 1e-13)) {
+    v <- h$v_emp
+    v$gamma <- v$gamma * (1 + eps * with_seed(s, stats::runif(nrow(v), -1, 1)))
+    f <- robust_vgm_fit(v, h$v_data)
+    expect_lt(max(abs(f$psill - fit$psill)) / sum(fit$psill), 1e-6)
+    expect_lt(abs(f$range[2] / fit$range[2] - 1), 1e-6)
+  }
 })
 
 test_that("tiny empirical variogram fallback is tagged is_fallback", {
@@ -387,7 +744,7 @@ test_that("tiny empirical variogram fallback is tagged is_fallback", {
   expect_true(isTRUE(attr(fit_tiny, "is_fallback")))
 })
 
-test_that("the sanity window is applied to the PRACTICAL range, per family", {
+test_that("the resolution window is judged on the PRACTICAL range, per family", {
   # gstat's `a` means a different ground distance per family, so the window is
   # applied to the practical range: on `a` it would be ~3x tighter at the low
   # end for Exp than for Sph, and admit an Exp structure three times longer
@@ -396,41 +753,58 @@ test_that("the sanity window is applied to the PRACTICAL range, per family", {
   expect_equal(.vgm_practical_range_factor("Exp"), 3)
   expect_equal(.vgm_practical_range_factor("Gau"), sqrt(3))
   expect_equal(.vgm_practical_range_factor("Mat", 1.5), 4.75)
-  # Matern with nu = 0.5 IS the exponential model and must screen like one.
+  # Matern with nu = 0.5 IS the exponential model and must be judged like one.
   expect_equal(.vgm_practical_range_factor("Mat", 0.5), 3)
   # Unknown/nugget-only families fall back to "a is the practical range".
   expect_equal(.vgm_practical_range_factor("Nug"), 1)
 
-  pts <- make_test_points(30)
-  lags <- calc_scientific_lags(pts)
-  v_emp <- gstat::variogram(v ~ 1, pts, width = lags$width, cutoff = lags$cutoff)
-  fit <- robust_vgm_fit(v_emp, pts$v)
-  max_dist <- max(v_emp$dist, na.rm = TRUE)
-  prange <- fit$range[2] * .vgm_practical_range_factor(fit$model[2], fit$kappa[2])
-  expect_gt(prange, max_dist / 100)
-  expect_lt(prange, max_dist * 2)
+  # A structured fit is `ok` exactly when its practical range lies inside
+  # (max lag / 100, 2 x max lag), and `range_unresolved` otherwise.
+  for (s in 2:12) {
+    h <- make_hostile_vgm_input(seed = s)
+    fit <- robust_vgm_fit(h$v_emp, h$v_data)
+    if (NROW(fit) < 2) next
+    d <- attr(fit, "vgm_diagnostics")
+    prange <- fit$range[2] * .vgm_practical_range_factor(fit$model[2], fit$kappa[2])
+    expect_equal(d$practical_range, prange, tolerance = 1e-12)
+    inside <- prange > d$max_lag / 100 && prange < 2 * d$max_lag
+    expect_identical(d$status, if (inside) "ok" else "range_unresolved")
+  }
 })
+
+# ── The map banner, worded for the engine that fitted the variogram ─────────
+
+# A hand-built pure-nugget fit with the diagnostics the auto-fit records.
+mock_pure_nugget <- function(cause = "no_structure", trend = FALSE) {
+  f <- gstat::vgm(0.4, "Nug", 0)
+  attr(f, "vgm_diagnostics") <- list(status = "pure_nugget", practical_range = NA_real_, max_lag = 700,
+                                     sill_resolved = NA, range_side = NA_character_,
+                                     range_at_ceiling = FALSE, nugget_share_interval = c(1, 1),
+                                     nugget_identified = TRUE, trend_suspected = trend,
+                                     pure_nugget_cause = cause, pairs_per_lag = c(3, 8),
+                                     target_degenerate = FALSE)
+  f
+}
 
 test_that("build_vgm_warning_html returns NULL when nothing is flagged", {
   expect_null(build_vgm_warning_html(list(A_act = make_mock_vgm())))
   expect_null(build_vgm_warning_html(list()))
 })
 
-test_that("build_vgm_warning_html renders red fallback and amber flawed sections", {
+test_that("build_vgm_warning_html renders the red failure band and the amber pure-nugget band", {
   f_fb <- make_mock_vgm(); attr(f_fb, "is_fallback") <- TRUE
-  f_fw <- make_mock_vgm(); attr(f_fw, "flawed_winner") <- TRUE
-  html <- build_vgm_warning_html(list(LocA_act = f_fb, LocB_pre = f_fw, LocC_act = make_mock_vgm()))
+  html <- build_vgm_warning_html(list(LocA_act = f_fb, LocB_pre = mock_pure_nugget(),
+                                      LocC_act = make_mock_vgm()))
   expect_match(html, "LocA (actual)", fixed = TRUE)
   expect_match(html, "LocB (predicted)", fixed = TRUE)
   expect_match(html, "default spherical variogram model", fixed = TRUE)
-  expect_match(html, "non-converged or singular", fixed = TRUE)
+  expect_match(html, "No spatial structure detected in the variogram", fixed = TRUE)
   expect_no_match(html, "LocC", fixed = TRUE)
 })
 
 test_that("build_vgm_warning_html filters by target and strips the suffix", {
   f_fb <- make_mock_vgm(); attr(f_fb, "is_fallback") <- TRUE
-  f_fw <- make_mock_vgm(); attr(f_fw, "flawed_winner") <- TRUE
-  fits <- list(LocA_act = f_fb, LocB_pre = f_fw)
+  fits <- list(LocA_act = f_fb, LocB_pre = mock_pure_nugget())
 
   html_act <- build_vgm_warning_html(fits, target = "act")
   expect_match(html_act, "LocA", fixed = TRUE)
@@ -452,11 +826,11 @@ test_that("build_vgm_warning_html flags a Gaussian or Matern model with a small 
   expect_match(html, "nugget below 5% of the sill for: LocA (actual)", fixed = TRUE)
   expect_no_match(html, "LocB", fixed = TRUE)
   expect_no_match(html, "LocC", fixed = TRUE)
-  expect_no_match(html, "non-converged or singular", fixed = TRUE)
+  expect_no_match(html, "No spatial structure", fixed = TRUE)
   expect_null(build_vgm_warning_html(list(LocB_act = manual_vgm(1, "Mat", 300, 0.2))))
 })
 
-test_that("a converged out-of-window fit gets its own band, not the failure band", {
+test_that("an out-of-window fit gets its own band, not the failure band", {
   f <- gstat::vgm(psill = 2, model = "Exp", range = 300, nugget = 0.5) # practical 900
   attr(f, "vgm_diagnostics") <- list(status = "range_unresolved", practical_range = 900,
                                      max_lag = 700, sill_resolved = FALSE,
@@ -466,7 +840,9 @@ test_that("a converged out-of-window fit gets its own band, not the failure band
   expect_match(html, "Variogram range not resolved", fixed = TRUE)
   expect_match(html, "Practical range extends beyond sampled lag support for: LocA (actual)", fixed = TRUE)
   expect_no_match(html, "Variogram fit failed", fixed = TRUE)
-  expect_no_match(html, "non-converged or singular", fixed = TRUE)
+  expect_no_match(html, "search limit", fixed = TRUE)
+  # Convergence is not a notion of this search, so no band speaks of it.
+  expect_no_match(html, "converged", fixed = TRUE)
 
   # The window fails at both ends, and the two mean opposite things.
   below <- f
@@ -526,17 +902,114 @@ test_that("the rising-variogram advisory never tells a detrending engine to detr
   expect_no_match(html_ck, "Residual variogram still rising", fixed = TRUE)
 })
 
+test_that("a pure-nugget band follows the engine and names no engine on the residual scale", {
+  pn <- mock_pure_nugget()
+  for (eng in list(NULL, "OK", "CK")) {
+    html <- build_vgm_warning_html(list(LocA_act = pn), engine = eng)
+    expect_match(html, "No spatial structure detected in the variogram for: LocA (actual) (3 to 8 pairs per lag)",
+                 fixed = TRUE)
+    # Not detected is not absent: the test has little power with few pairs.
+    expect_match(html, "does not show that no structure exists", fixed = TRUE)
+    # Naming IDW and TPS is not circular under a value-scale engine.
+    expect_match(html, "IDW and TPS", fixed = TRUE)
+    expect_match(html, "Manual Tuning", fixed = TRUE)
+  }
+  for (eng in c("RK", "RFK")) {
+    html <- build_vgm_warning_html(list(LocA_act = pn), engine = eng)
+    expect_match(html, "No spatial structure remains in the trend residuals for: LocA (actual)", fixed = TRUE)
+    expect_match(html, "the trend plus the mean residual", fixed = TRUE)
+    expect_no_match(html, "IDW", fixed = TRUE)
+    expect_no_match(html, "Regression Kriging", fixed = TRUE)
+    expect_no_match(html, "Manual Tuning", fixed = TRUE)
+  }
+
+  # A pure nugget left by the zero-nugget rule never claims that no structure
+  # was detected: a structured Matern was refused.
+  for (eng in c("OK", "RK")) {
+    html <- build_vgm_warning_html(list(LocA_act = mock_pure_nugget("zero_nugget_rule")), engine = eng)
+    expect_match(html, "Pure nugget used for", fixed = TRUE)
+    expect_match(html, "a Mat&eacute;rn at a zero nugget", fixed = TRUE)
+    expect_no_match(html, "detected", fixed = TRUE)
+  }
+
+  # A pure nugget whose variogram still rises carries the engine-aware trend band.
+  rising <- mock_pure_nugget(trend = TRUE)
+  expect_match(build_vgm_warning_html(list(LocA_act = rising), engine = "OK"),
+               "Sill not observed; possible large-scale trend", fixed = TRUE)
+  expect_match(build_vgm_warning_html(list(LocA_act = rising), engine = "RK"),
+               "Residual variogram still rising", fixed = TRUE)
+
+  # Under RK or RFK, a locality whose trend fell back to OK holds the measured
+  # values' variogram (`of`, as the Variogram Parameters card reads it), so its
+  # bands take the value-scale wording beside the residual ones.
+  of <- c(A_act = VGM_OF_RESIDUALS, B_act = VGM_OF_FALLBACK)
+  html <- build_vgm_warning_html(list(A_act = rising, B_act = rising), engine = "RFK", of = of)
+  expect_match(html, "No spatial structure remains in the trend residuals for: A (actual).", fixed = TRUE)
+  expect_match(html, "No spatial structure detected in the variogram for: B (actual) (3 to 8 pairs per lag)",
+               fixed = TRUE)
+  expect_match(html, "Residual variogram still rising at the lag cutoff for: A (actual).", fixed = TRUE)
+  expect_match(html, "Sill not observed; possible large-scale trend for: B (actual).", fixed = TRUE)
+  refused <- mock_pure_nugget("zero_nugget_rule")
+  html <- build_vgm_warning_html(list(A_act = refused, B_act = refused), engine = "RK", of = of)
+  expect_match(html, "Pure nugget used for the trend residuals of: A (actual).", fixed = TRUE)
+  expect_match(html, "Pure nugget used for: B (actual).", fixed = TRUE)
+})
+
+test_that("a range at the search limit is a bound under every engine, naming none", {
+  f <- manual_vgm(2, "Sph", 7000, 0.5)
+  attr(f, "vgm_diagnostics") <- list(status = "range_unresolved", practical_range = 7000,
+                                     max_lag = 700, sill_resolved = FALSE, range_side = "beyond",
+                                     range_at_ceiling = TRUE, trend_suspected = FALSE,
+                                     target_degenerate = FALSE)
+  for (eng in list(NULL, "OK", "CK", "RK", "RFK")) {
+    html <- build_vgm_warning_html(list(LocA_act = f), engine = eng)
+    expect_match(html, "Range at the search limit for: LocA (actual)", fixed = TRUE)
+    expect_match(html, paste0("up to ", VGM_RANGE_CEILING_MULT, " &times; the longest lag"), fixed = TRUE)
+    expect_match(html, "a bound, not an estimate", fixed = TRUE)
+    expect_no_match(html, "Kriging", fixed = TRUE)
+    expect_no_match(html, "IDW", fixed = TRUE)
+  }
+})
+
+test_that("a nugget the data do not identify is reported as an interval, naming the locality", {
+  f <- manual_vgm(41.9, "Sph", 295, 7.35)
+  attr(f, "vgm_diagnostics") <- list(status = "ok", practical_range = 295, max_lag = 3216,
+                                     sill_resolved = TRUE, range_side = NA_character_,
+                                     range_at_ceiling = FALSE, range_interval = c(271, 335),
+                                     nugget_share_interval = c(0, 0.298), nugget_identified = FALSE,
+                                     trend_suspected = FALSE, target_degenerate = FALSE)
+  for (eng in list(NULL, "OK", "RK")) {
+    html <- build_vgm_warning_html(list(Kale_act = f), engine = eng)
+    expect_match(html, "Nugget not identified for: Kale (actual) (nugget 0 to 29.8% of the sill)",
+                 fixed = TRUE)
+  }
+  chr <- .vgm_params_chr(f)
+  expect_match(chr[6], "Not reliably identified (70.2 to 100%)", fixed = TRUE)
+  expect_match(chr[5], "Practical ranges from 271 to 335 fit equally well.", fixed = TRUE)
+  expect_match(vgm_fit_subtitle(f), "nugget not identified: 0 to 29.8% of the sill fit equally well",
+               fixed = TRUE)
+  ex <- vgm_params_export_df(list(Kale_act = f))
+  expect_false(ex$`Nugget Identified`)
+  expect_equal(c(ex$`Structural Dep. Low (%)`, ex$`Structural Dep. High (%)`), c(70.2, 100))
+  expect_equal(c(ex$`Practical Range Low`, ex$`Practical Range High`), c(271, 335))
+  expect_false(ex$`Range At Search Limit`)
+})
+
 test_that("banner close button targets its own container, not a fixed id", {
-  f_fw <- make_mock_vgm(); attr(f_fw, "flawed_winner") <- TRUE
-  html <- build_vgm_warning_html(list(L1_act = f_fw))
+  html <- build_vgm_warning_html(list(L1_act = mock_pure_nugget()))
   expect_match(html, "this.parentElement.style.display", fixed = TRUE)
   expect_no_match(html, "getElementById", fixed = TRUE)
 })
 
+test_that("a locality name from the data is escaped in the banner", {
+  html <- build_vgm_warning_html(list(`Plot <2> & B_act` = mock_pure_nugget()))
+  expect_match(html, "Plot &lt;2&gt; &amp; B (actual)", fixed = TRUE)
+  expect_no_match(html, "<2>", fixed = TRUE)
+})
+
 test_that("amber-only banner omits the red section", {
-  f_fw <- make_mock_vgm(); attr(f_fw, "flawed_winner") <- TRUE
-  html <- build_vgm_warning_html(list(L1_act = f_fw))
-  expect_match(html, "non-converged or singular", fixed = TRUE)
+  html <- build_vgm_warning_html(list(L1_act = mock_pure_nugget()))
+  expect_match(html, "No spatial structure detected", fixed = TRUE)
   expect_no_match(html, "Variogram fit failed", fixed = TRUE)
 })
 
@@ -544,7 +1017,8 @@ test_that("red-only banner omits the amber section", {
   f_fb <- make_mock_vgm(); attr(f_fb, "is_fallback") <- TRUE
   html <- build_vgm_warning_html(list(L1_act = f_fb))
   expect_match(html, "default spherical variogram model", fixed = TRUE)
-  expect_no_match(html, "non-converged or singular", fixed = TRUE)
+  expect_no_match(html, "No spatial structure", fixed = TRUE)
+  expect_no_match(html, "var(--mn-warn)", fixed = TRUE)
 })
 
 # ── Sill-derived diagnostics and their qualifier ────────────────────────────
@@ -594,6 +1068,10 @@ test_that("a variogram subtitle reads the fitted parameters the Variogram Parame
                                      sill_resolved = FALSE, target_degenerate = FALSE)
   expect_match(vgm_fit_subtitle(f),
                "Practical Range: 900, model-extrapolated beyond the longest lag 700)", fixed = TRUE)
+  # At the search limit the range is a bound, and the subtitle says so.
+  attr(f, "vgm_diagnostics")$range_at_ceiling <- TRUE
+  expect_match(vgm_fit_subtitle(f), "Practical Range: 900 at the search limit, model-extrapolated",
+               fixed = TRUE)
   # A Matern names its smoothness; small values keep their digits.
   m <- gstat::vgm(psill = 3.873e-05, model = "Mat", range = 6510, nugget = 0.000172, kappa = 1.5)
   expect_match(vgm_fit_subtitle(m),
@@ -601,8 +1079,8 @@ test_that("a variogram subtitle reads the fitted parameters the Variogram Parame
                fixed = TRUE)
   expect_identical(vgm_fit_subtitle(gstat::vgm(0.4, "Nug", 0)), "Fitted: pure nugget (Nugget: 0.4)")
   expect_null(vgm_fit_subtitle(NULL))
-  # Never "Fitted" for a model nothing was fitted to: the heuristic stand-in
-  # of a failed fit, or a model the user applied.
+  # Never "Fitted" for a model nothing was fitted to: the stand-in of a failed
+  # fit, or a model the user applied.
   fb <- robust_vgm_fit(NULL, c(1, 2, 3))
   expect_match(vgm_fit_subtitle(fb), "^Heuristic fallback, not fitted: Sph ")
   applied <- stamp_vgm(manual_vgm(2, "Exp", 300, 0.5), "ph", "manual")
@@ -645,21 +1123,23 @@ test_that("the per-fold variogram status is summarised and logged by fold", {
   attr(cv, "cv_fold_meta") <- list(
     "1" = list(vgm_status = "ok"),
     "2" = list(vgm_status = "range_unresolved"),
-    "3" = list(vgm_status = "heuristic_fallback"),
-    "7" = list(vgm_status = "singular_selected"),
+    "3" = list(vgm_status = "fit_failed"),
+    "7" = list(vgm_status = "pure_nugget"),
     "10" = list(vgm_status = "ok"))
   tb <- .cv_fold_status_table(cv)
-  expect_identical(tb$status, c("heuristic_fallback", "singular_selected",
-                                "range_unresolved", "ok"))   # worst first
+  expect_identical(tb$status, c("fit_failed", "pure_nugget", "range_unresolved", "ok"))   # worst first
   expect_identical(tb$n, c(1L, 1L, 1L, 2L))
   expect_identical(tb$folds[tb$status == "ok"], "1, 10")
   expect_identical(tb$folds[tb$status == "range_unresolved"], "2")
 
   res <- .log_vgm_fold_status(list(cv_obj = cv, log_msg = ""), "OK", "West_Field")
-  expect_match(res$log_msg, "West_Field: 3 of 5 folds", fixed = TRUE)
-  expect_match(res$log_msg, "Fold 2: converged fit, range unresolved by lag support", fixed = TRUE)
-  expect_match(res$log_msg, "Fold 3: heuristic fallback", fixed = TRUE)
-  expect_match(res$log_msg, "Fold 7: singular/non-converged fit selected", fixed = TRUE)
+  expect_match(res$log_msg, "West_Field: in 3 of 5 folds the variogram fitted to the training rows was not a resolved structured fit.",
+               fixed = TRUE)
+  expect_match(res$log_msg, "Fold 2: range unresolved by lag support", fixed = TRUE)
+  expect_match(res$log_msg, "Fold 3: variogram fit failed", fixed = TRUE)
+  expect_match(res$log_msg, "Fold 7: pure nugget, no structured fit selected", fixed = TRUE)
+  # A pure-nugget fold is a finding about its rows, not a degraded fit.
+  expect_no_match(res$log_msg, "degraded", fixed = TRUE)
 
   # Every fold clean: nothing to say.
   clean <- structure(list(), class = "list")
@@ -854,7 +1334,7 @@ test_that("the practical-range factor is the 95 % correlation-decay solution", {
 
   # Matern nu = 0.5 IS the exponential, so it must report the same factor.
   expect_equal(.vgm_practical_range_factor("Mat", 0.5), 3)
-  # nu = 1.5 (the screen's fixed smoothness): (1 + t) exp(-t) = 0.05
+  # nu = 1.5 (the auto-fit's fixed smoothness): (1 + t) exp(-t) = 0.05
   # 4.75 is the rounded solution (4.7439), so the tolerance has to admit the
   # rounding the implementation deliberately applies.
   expect_equal(.vgm_practical_range_factor("Mat", 1.5),
@@ -898,15 +1378,7 @@ test_that("robust_vgm_fit recovers the model a field was simulated from", {
   # generating parameters exactly, and a band tight enough to be violated by
   # sampling noise would be a flaky test rather than a strict one.
   truth <- gstat::vgm(psill = 1, model = "Sph", range = 1200, nugget = 0.2)
-  sim <- with_seed(11, {
-    g <- expand.grid(x = seq(0, 4000, by = 200), y = seq(0, 4000, by = 200))
-    s <- gstat::krige(z ~ 1, locations = NULL,
-                      newdata = sf::st_as_sf(g, coords = c("x", "y"), crs = 32635),
-                      dummy = TRUE, beta = 0, model = truth, nmax = 25,
-                      nsim = 1, debug.level = 0)
-    names(s)[1] <- "z"
-    s
-  })
+  sim <- simulate_vgm_field(truth, 11)
 
   lags <- calc_scientific_lags(sim)
   v <- gstat::variogram(z ~ 1, sim, width = lags$width, cutoff = lags$cutoff)
@@ -931,15 +1403,7 @@ test_that("the fitted total sill tracks the sample variance", {
   # variance must be of the same size. A fit that reports a sill orders away
   # from var(z) is not describing this data.
   truth <- gstat::vgm(psill = 1, model = "Exp", range = 400, nugget = 0.1)
-  sim <- with_seed(23, {
-    g <- expand.grid(x = seq(0, 4000, by = 200), y = seq(0, 4000, by = 200))
-    s <- gstat::krige(z ~ 1, locations = NULL,
-                      newdata = sf::st_as_sf(g, coords = c("x", "y"), crs = 32635),
-                      dummy = TRUE, beta = 0, model = truth, nmax = 25,
-                      nsim = 1, debug.level = 0)
-    names(s)[1] <- "z"
-    s
-  })
+  sim <- simulate_vgm_field(truth, 23)
 
   lags <- calc_scientific_lags(sim)
   fit <- suppressWarnings(
@@ -1079,15 +1543,21 @@ test_that("vgm_params_export_df is one tidy numeric row per fitted target", {
 
   expect_equal(names(out), c("Locality", "Target", "Model", "Kappa", "Nugget", "Sill",
                              "Range (a)", "Practical Range", "Structural Dep. (%)",
-                             "Max Lag", "Sill Resolved"))
+                             "Max Lag", "Sill Resolved", "Nugget Identified",
+                             "Structural Dep. Low (%)", "Structural Dep. High (%)",
+                             "Practical Range Low", "Practical Range High",
+                             "Range At Search Limit"))
   expect_equal(nrow(out), 3)
   expect_equal(out$Locality, c("A", "A", "B"))
   expect_equal(out$Target, c("Actual", "Predicted", "Actual"))
-  expect_true(all(vapply(out[4:10], is.numeric, logical(1))))
-  # These fits carry no diagnostics (hand-built, not from the screen), so the
-  # lag support is unknown and nothing is claimed about the sill.
+  expect_true(all(vapply(out[c(4:10, 13:16)], is.numeric, logical(1))))
+  # These fits carry no diagnostics (hand-built, not from the auto-fit), so
+  # the lag support and the equally-fitting set are unknown and nothing is
+  # claimed about the sill or the nugget.
   expect_true(all(is.na(out$`Max Lag`)))
   expect_true(all(is.na(out$`Sill Resolved`)))
+  expect_true(all(is.na(out$`Nugget Identified`)))
+  expect_true(all(is.na(out$`Practical Range Low`)))
   expect_equal(out$Sill, c(1.0, 1.0, 1.0))
   expect_equal(out$`Range (a)`, c(300, 500, 200))
   # Sph 300 x 1, Exp 500 x 3, Gau 200 x sqrt(3): comparable across the rows

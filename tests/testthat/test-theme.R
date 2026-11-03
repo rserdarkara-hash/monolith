@@ -388,20 +388,40 @@ test_that("every variogram banner band is painted with tokens", {
   # The banner is drawn over the map in both variants, so every band is painted
   # with tokens. One fit per band, so no band can be added without a token.
   fb <- gstat::vgm(0.5, "Sph", 200, 0.1); attr(fb, "is_fallback") <- TRUE
-  fw <- gstat::vgm(0.5, "Sph", 200, 0.1); attr(fw, "flawed_winner") <- TRUE
+  pure <- function(cause) {
+    f <- gstat::vgm(0.4, "Nug", 0)
+    attr(f, "vgm_diagnostics") <- list(status = "pure_nugget", pure_nugget_cause = cause,
+                                       pairs_per_lag = c(3, 8), target_degenerate = FALSE)
+    f
+  }
+  ridge <- gstat::vgm(2, "Sph", 300, 0.5)
+  attr(ridge, "vgm_diagnostics") <- list(status = "ok", nugget_share_interval = c(0, 0.3),
+                                         nugget_identified = FALSE, target_degenerate = FALSE)
   ru <- gstat::vgm(2, "Exp", 300, 0.5)
   attr(ru, "vgm_diagnostics") <- list(status = "range_unresolved", practical_range = 900,
                                       max_lag = 700, sill_resolved = FALSE,
-                                      range_side = "beyond", trend_suspected = TRUE,
-                                      target_degenerate = FALSE)
+                                      range_side = "beyond", range_at_ceiling = TRUE,
+                                      trend_suspected = TRUE, target_degenerate = FALSE)
   sm <- manual_vgm(1, "Gau", 300, 0.02)
 
-  html <- build_vgm_warning_html(list(A_act = fb, B_act = fw, C_act = ru, D_act = sm))
+  html <- build_vgm_warning_html(list(A_act = fb, B_act = pure("no_structure"),
+                                      C_act = pure("zero_nugget_rule"), D_act = ridge,
+                                      E_act = ru, F_act = sm))
   expect_match(html, "Variogram fit failed", fixed = TRUE)
-  expect_match(html, "non-converged or singular", fixed = TRUE)
+  expect_match(html, "No spatial structure detected", fixed = TRUE)
+  expect_match(html, "Pure nugget used for", fixed = TRUE)
+  expect_match(html, "Nugget not identified", fixed = TRUE)
   expect_match(html, "Variogram range not resolved", fixed = TRUE)
+  expect_match(html, "Range at the search limit", fixed = TRUE)
   expect_match(html, "Sill not observed", fixed = TRUE)
   expect_match(html, "nugget below 5% of the sill", fixed = TRUE)
+  # The residual-scale bands an RK or RFK run words separately.
+  res_html <- build_vgm_warning_html(list(B_act = pure("no_structure"), C_act = pure("zero_nugget_rule"),
+                                          E_act = ru), engine = "RK")
+  expect_match(res_html, "No spatial structure remains in the trend residuals", fixed = TRUE)
+  expect_match(res_html, "Pure nugget used for the trend residuals", fixed = TRUE)
+  expect_match(res_html, "Residual variogram still rising", fixed = TRUE)
+  html <- paste(html, res_html)
 
   colours <- regmatches(html, gregexpr("color[[:space:]]*:[[:space:]]*[^;']+", html))[[1]]
   expect_gt(length(colours), 0)

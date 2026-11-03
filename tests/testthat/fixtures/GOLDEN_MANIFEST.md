@@ -51,10 +51,10 @@ Running the suite and getting `FAIL 0` establishes that, on this fixture:
 - **The pipeline as a whole** still assembles the same surface from those parts
   (`ok_surface_digest`). Its variogram and its boundary are pinned by
   `golden_pin_vgm()` and `golden_pin_boundary()` rather than fitted and derived,
-  so the lock measures the driver rather than two floating-point near-ties that
-  follow the platform: which of sixteen screened variogram candidates wins, and
-  whether a cell centre 1.2 m from the hull edge falls inside it. `helper.R`
-  derives both pins from the data and records the measurements behind them.
+  so the lock measures the driver alone: the auto-fit has its own tests, and a
+  cell centre 1.2 m from the hull edge falls inside it or not by the
+  platform's floating-point path. `helper.R` derives both pins from the data and
+  records the measurements behind them.
 
 ### What it does not prove
 
@@ -203,16 +203,19 @@ can name `list(locality = "my site", target = "canonical_column")` for
 `tps_plane` (GCV at the plane end), `tps_exact_better` (least-smoothing end
 with Exact winning the independent CV comparison), `tps_smoothed_better`
 (the same end with the selected smoothing winning), `tps_interior`
-(an interior GCV optimum) and `vgm_zero_nugget` (a variable whose variogram
-screen fits a Gaussian or Matérn candidate at nugget 0 and none with a nugget
-share in (1e-8, 1e-3], the best-fitting zero-nugget one kriging a surface that
-leaves the observed range; the test krigs it inside the locality's convex
+(an interior GCV optimum) and `vgm_zero_nugget` (a variable whose best Matérn
+fit sits at nugget 0 and krigs a surface that leaves the observed range by more
+than 10% of its span, below zero for a non-negative variable, while the
+auto-fit's model stays inside; the test krigs both inside the locality's convex
 hull). `knndm_random` names a
 locality whose buffered hull makes the seeded random partition better than
 every spatial candidate; it needs only `locality`. Defaults use the smallest
 population with at least 8 rows (plane: ph; exact-better: mn), the smallest
 with at least 80 rows (smoothed-better: caco3; interior: ph), and the compact
-population with at least 30 rows (kNNDM; zero-nugget variogram: caco3). Each
+population with at least 30 rows (kNNDM; zero-nugget variogram: caco3). One
+variogram test scans every locality and variable of the full scope instead and
+needs, somewhere in it, a pair of at least 30 samples whose best fit is a
+Matérn at nugget 0. Each
 test independently verifies its case property. A missing property is a test
 failure: supply a suitable case or a fixture that covers it. No test is
 silently skipped and the recorder's full-suite gate remains mandatory.

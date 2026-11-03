@@ -387,14 +387,18 @@ screen_covariates <- function(df, candidates, vif_threshold = 10) {
 #' Krige each covariate onto the prediction grid, so the RK trend is evaluated
 #' wherever the target is predicted. Each uses its own robust variogram and
 #' falls back to IDW when kriging fails (error, repeated location, or any
-#' missing prediction). `on_var(i, total)` is an optional per-covariate hook
-#' (the classification pipeline's progress and cancel check). Returns
-#' `grid_aux`, the run-log text `log_msg` and `fallback`, the covariates that
-#' took IDW.
+#' missing prediction). A covariate whose variogram is a pure nugget keeps its
+#' kriged surface, the sample mean: under no spatial structure that is the best
+#' linear unbiased predictor, so the trend cannot vary with that covariate on
+#' the map, and the run log says so. `on_var(i, total)` is an optional
+#' per-covariate hook (the classification pipeline's progress and cancel
+#' check). Returns `grid_aux`, the run-log text `log_msg`, `fallback`, the
+#' covariates that took IDW, and `flat`, those kriged flat.
 krige_covariates <- function(data, grid_p, aux_vars, lags, method_params, on_var = NULL) {
   grid_aux <- grid_p
   log_msg <- ""
   fallback <- character(0)
+  flat <- character(0)
   n_av <- length(aux_vars)
   for(i in seq_along(aux_vars)) {
     av <- aux_vars[i]
@@ -419,24 +423,31 @@ krige_covariates <- function(data, grid_p, aux_vars, lags, method_params, on_var
         stop(sprintf("kriging returned no prediction at %d of %d locations",
                      n_na, length(res_av$var1.pred)))
       }
-      list(pred = res_av$var1.pred, warn = NULL)
+      list(pred = res_av$var1.pred, warn = NULL,
+           flat = identical(vgm_fit_status(fit_av), "pure_nugget"))
     }, error = function(e) {
       warn_msg <- sprintf(" [WARN] Covariate %s kriging failed (%s), falling back to IDW. ",
                           av, gsub("\\s+", " ", trimws(conditionMessage(e))))
       idw_p <- if(!is.null(method_params$idw_p)) method_params$idw_p else 2
       idw_nmax <- if(!is.null(method_params$idw_nmax)) method_params$idw_nmax else 12
       res_av <- idw(.mn_cov ~ 1, d_av, grid_p, nmax = idw_nmax, idp = idw_p, debug.level = 0)
-      list(pred = res_av$var1.pred, warn = warn_msg)
+      list(pred = res_av$var1.pred, warn = warn_msg, flat = FALSE)
     })
     grid_aux[[av]] <- kr_res$pred
     if (!is.null(kr_res$warn)) {
       log_msg <- paste0(log_msg, kr_res$warn)
       fallback <- c(fallback, av)
     }
+    if (kr_res$flat) {
+      log_msg <- paste0(log_msg, sprintf(paste0(
+        " [NOTE] Covariate %s: its variogram is a pure nugget (no structured fit selected), so its ",
+        "kriged surface is its sample mean and the trend cannot vary with it on the map. "), av))
+      flat <- c(flat, av)
+    }
     # A cancellation raised in the hook propagates out of the loop by design.
     if (is.function(on_var)) on_var(i, n_av)
   }
-  return(list(grid_aux = grid_aux, log_msg = log_msg, fallback = fallback))
+  return(list(grid_aux = grid_aux, log_msg = log_msg, fallback = fallback, flat = flat))
 }
 
 
@@ -484,15 +495,21 @@ safe_run_cv <- function(res, expr, label) {
     }
   }
   # A fold whose covariate kriging failed took the IDW fallback for its
-  # held-out covariates (krige_covariates), as the map does for its grid.
+  # held-out covariates (krige_covariates), as the map does for its grid; one
+  # whose covariate variogram was a pure nugget held them at the training mean.
   fold_meta <- attr(cv_obj, "cv_fold_meta")
-  fb <- unlist(lapply(fold_meta, `[[`, "cov_fallback"), use.names = FALSE)
-  if (length(fb)) {
-    fb <- table(fb)
-    res$log_msg <- paste0(
-      res$log_msg, "\n[", label, " CV] covariate kriging failed, so the held-out values came from IDW: ",
-      paste0(names(fb), " in ", as.integer(fb), " of ", length(fold_meta), " folds", collapse = ", "), ".")
+  fold_cov_note <- function(field, what) {
+    hits <- unlist(lapply(fold_meta, `[[`, field), use.names = FALSE)
+    if (!length(hits)) return("")
+    hits <- table(hits)
+    paste0("\n[", label, " CV] ", what, ": ",
+           paste0(names(hits), " in ", as.integer(hits), " of ", length(fold_meta), " folds", collapse = ", "), ".")
   }
+  res$log_msg <- paste0(
+    res$log_msg,
+    fold_cov_note("cov_fallback", "covariate kriging failed, so the held-out values came from IDW"),
+    fold_cov_note("cov_flat", paste("covariate variogram was a pure nugget, so the held-out values",
+                                    "were the training mean")))
 
   # Per-fold variogram state, summarised as plain data so the Model Performance
   # card can say that some folds were not `ok` without re-reading the CV object.
@@ -756,8 +773,9 @@ rf_infinitesimal_jackknife_var <- function(pred_individual, inbag, chunk = 2000L
   lines <- paste0("\n  Fold ", names(bad)[ord], ": ", vapply(bad[ord], vgm_status_label, character(1)))
   res$log_msg <- paste0(res$log_msg, "\n[", label, " CV] ",
                         if (!is.null(locality)) paste0(locality, ": "),
-                        length(bad), " of ", length(st),
-                        " folds used a degraded or extrapolative variogram.",
+                        "in ", length(bad), " of ", length(st),
+                        " folds the variogram fitted to the training rows was not a resolved",
+                        " structured fit.",
                         paste(lines, collapse = ""))
   res
 }
@@ -1104,8 +1122,12 @@ CK_MIN_COLLOCATED <- 10L
     lmc_range <- lags$cutoff / 2
     lmc_kappa <- 0.5
     log_msg <- paste0(log_msg,
-      "\n[CK] Primary variogram gave no usable range; LMC seeded with the extent heuristic (cutoff/2 = ",
-      signif(lmc_range, 4), ").")
+      if (identical(vgm_fit_status(fit_ok_init), "pure_nugget")) {
+        "\n[CK] Primary variogram is a pure nugget, so it has no range"
+      } else {
+        "\n[CK] Primary variogram gave no usable range"
+      },
+      "; LMC seeded with the extent heuristic (cutoff/2 = ", signif(lmc_range, 4), ").")
   } else {
     log_msg <- paste0(log_msg,
       "\n[CK] LMC range fixed at the primary variable's fitted range (",

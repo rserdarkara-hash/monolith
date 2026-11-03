@@ -444,13 +444,15 @@ classif_folds_to_rset <- function(train_df, fold_id, assess_df = NULL, target = 
 
 #' Each fold's covariates at its held-out locations, interpolated from that
 #' fold's analysis rows only (target labels kept for scoring, never passed to
-#' the surface builder). attr(, "cov_fallback"): (fold, covariate) rows whose
-#' values came from the IDW fallback; NULL when every fold kriged.
+#' the surface builder). attr(, "cov_fallback") and attr(, "cov_flat"):
+#' (fold, covariate) rows whose values came from the IDW fallback, or from a
+#' pure-nugget variogram's flat surface; NULL when no fold had one.
 .classif_fold_assessment <- function(keep_sf, train_df, predictors, fold_id,
                                      cancel_file = NULL, progress = NULL) {
   assess_df <- train_df
   ids <- sort(unique(fold_id))
   fallback <- list()
+  flat <- list()
   for (k in seq_along(ids)) {
     .classif_check_cancel(cancel_file)
     idx <- which(fold_id == ids[k])
@@ -465,6 +467,10 @@ classif_folds_to_rset <- function(train_df, fold_id, assess_df = NULL, target = 
     if (length(fb)) {
       fallback[[length(fallback) + 1]] <- data.frame(fold = ids[k], covariate = fb,
                                                      stringsAsFactors = FALSE)
+    }
+    fl <- attr(aux, "cov_flat")
+    if (length(fl)) {
+      flat[[length(flat) + 1]] <- data.frame(fold = ids[k], covariate = fl, stringsAsFactors = FALSE)
     }
     cov <- sf::st_drop_geometry(aux)
     for (p in predictors) {
@@ -482,25 +488,37 @@ classif_folds_to_rset <- function(train_df, fold_id, assess_df = NULL, target = 
     if (is.function(progress)) progress(k / length(ids))
   }
   attr(assess_df, "cov_fallback") <- if (length(fallback)) do.call(rbind, fallback)
+  attr(assess_df, "cov_flat") <- if (length(flat)) do.call(rbind, flat)
   assess_df
 }
 
 #' One sentence per numeric covariate whose surface came from the IDW fallback
-#' of krige_covariates(): where (the grid, how many CV folds). `fb` is the
-#' pipeline's `covariate_fallback` record; NULL when every surface was kriged.
-classif_covariate_notes <- function(fb, label_of = identity) {
-  if (is.null(fb)) return(NULL)
-  folds <- fb$folds
-  covs <- unique(c(if (!is.null(folds)) as.character(folds$covariate), fb$grid))
-  if (!length(covs)) return(NULL)
-  vapply(covs, function(cv) {
-    n_f <- if (is.null(folds)) 0L else length(unique(folds$fold[folds$covariate == cv]))
-    where <- c(if (cv %in% fb$grid) "on the prediction grid",
-               if (n_f > 0) sprintf("in %d of %d cross-validation folds", n_f, fb$n_folds))
-    sprintf("%s: kriging failed %s; inverse distance weighting (p = %s, %d nearest samples) was used instead.",
-            label_of(cv), paste(where, collapse = " and "),
-            format(.CLASSIF_COV_IDW$idw_p), as.integer(.CLASSIF_COV_IDW$idw_nmax))
-  }, character(1), USE.NAMES = FALSE)
+#' of krige_covariates(), then one per covariate kriged flat because its
+#' variogram was a pure nugget: where (the grid, how many CV folds). `fb` and
+#' `flat` are the pipeline's `covariate_fallback` and `covariate_flat` records;
+#' NULL when neither names a covariate.
+classif_covariate_notes <- function(fb, label_of = identity, flat = NULL) {
+  notes <- function(rec, say) {
+    if (is.null(rec)) return(character(0))
+    folds <- rec$folds
+    covs <- unique(c(if (!is.null(folds)) as.character(folds$covariate), rec$grid))
+    vapply(covs, function(cv) {
+      n_f <- if (is.null(folds)) 0L else length(unique(folds$fold[folds$covariate == cv]))
+      where <- c(if (cv %in% rec$grid) "on the prediction grid",
+                 if (n_f > 0) sprintf("in %d of %d cross-validation folds", n_f, rec$n_folds))
+      say(label_of(cv), paste(where, collapse = " and "))
+    }, character(1), USE.NAMES = FALSE)
+  }
+  out <- c(
+    notes(fb, function(cv, where) {
+      sprintf("%s: kriging failed %s; inverse distance weighting (p = %s, %d nearest samples) was used instead.",
+              cv, where, format(.CLASSIF_COV_IDW$idw_p), as.integer(.CLASSIF_COV_IDW$idw_nmax))
+    }),
+    notes(flat, function(cv, where) {
+      sprintf(paste("%s: its variogram is a pure nugget (no structured fit selected) %s, so its kriged",
+                    "surface is its sample mean there and the classifier cannot vary with it."), cv, where)
+    }))
+  if (length(out)) out else NULL
 }
 
 # ── Metrics ─────────────────────────────────────────────────────────────────
@@ -982,8 +1000,10 @@ run_classification_cv <- function(pts_sf, target, predictors,
     # training-row design in that case.
     importance = .classif_pool_fold_importance(imp_parts, predictors),
     fold_screen = if (length(fold_screen)) do.call(rbind, fold_screen) else NULL,
-    # (fold, covariate) pairs whose held-out values came from the IDW fallback.
+    # (fold, covariate) pairs whose held-out values came from the IDW fallback,
+    # or from a pure-nugget variogram's flat surface.
     cov_fallback = attr(assess_df, "cov_fallback"),
+    cov_flat = attr(assess_df, "cov_flat"),
     weights_applied = weights_applied
   )
 }
@@ -1753,7 +1773,7 @@ classif_build_grid <- function(pts_proj, res = NULL,
 #' krige_covariates() (as RK/RFK), categorical ones from the nearest training
 #' point (FNN), both approximations that propagate into the classifier's
 #' inputs. attr(, "cov_fallback") names numeric covariates whose surface is the
-#' IDW fallback.
+#' IDW fallback, attr(, "cov_flat") those kriged flat (a pure-nugget variogram).
 build_classification_grid_aux <- function(pts_proj, grid_p, predictors,
                                           cancel_file = NULL, progress = NULL) {
   df <- sf::st_drop_geometry(pts_proj)
@@ -1770,6 +1790,7 @@ build_classification_grid_aux <- function(pts_proj, grid_p, predictors,
 
   grid_aux <- grid_p
   fallback <- character(0)
+  flat <- character(0)
   if (length(num_preds) > 0) {
     lags <- calc_scientific_lags(pts_proj)
     # One covariate is the smallest interruptible unit (krige() is a black box).
@@ -1780,6 +1801,7 @@ build_classification_grid_aux <- function(pts_proj, grid_p, predictors,
                            })
     grid_aux <- kc$grid_aux
     fallback <- kc$fallback
+    flat <- kc$flat
   }
   if (length(cat_preds) > 0) {
     .classif_check_cancel(cancel_file)
@@ -1794,6 +1816,7 @@ build_classification_grid_aux <- function(pts_proj, grid_p, predictors,
     }
   }
   if (length(fallback)) attr(grid_aux, "cov_fallback") <- fallback
+  if (length(flat)) attr(grid_aux, "cov_flat") <- flat
   grid_aux
 }
 
@@ -2554,8 +2577,9 @@ run_classification_pipeline <- function(df, target, predictors,
     }, error = function(e) NULL)
   }
 
-  # The numeric covariates whose map surface is the IDW fallback.
+  # The numeric covariates whose map surface is the IDW fallback, or flat.
   grid_fallback <- character(0)
+  grid_flat <- character(0)
   if (make_surface) {
     .classif_check_cancel(cancel_file)
     report("grid", 0, "Building the prediction grid...")
@@ -2579,6 +2603,7 @@ run_classification_pipeline <- function(df, target, predictors,
       cancel_file = cancel_file,
       progress = function(f) report("covariates", f))
     grid_fallback <- attr(grid_aux, "cov_fallback") %||% character(0)
+    grid_flat <- attr(grid_aux, "cov_flat") %||% character(0)
 
     report("surface", 0, sprintf("Classifying %s grid cells...", n_cell_lab))
     surf <- predict_classification_surface(
@@ -2601,11 +2626,15 @@ run_classification_pipeline <- function(df, target, predictors,
     # builds the one the UI and exports read (it knows the live threshold).
   }
   # The covariate surfaces that came from the IDW fallback instead of kriging,
-  # in the CV folds and on the prediction grid: the module reports them
-  # (classif_covariate_notes). NULL when every surface was kriged.
+  # and those kriged flat from a pure-nugget variogram, in the CV folds and on
+  # the prediction grid: the module reports them (classif_covariate_notes).
+  # Each record is NULL when no surface needs it.
   if (!is.null(cv$cov_fallback) || length(grid_fallback)) {
     out$covariate_fallback <- list(folds = cv$cov_fallback, grid = grid_fallback,
                                    n_folds = cv$n_folds)
+  }
+  if (!is.null(cv$cov_flat) || length(grid_flat)) {
+    out$covariate_flat <- list(folds = cv$cov_flat, grid = grid_flat, n_folds = cv$n_folds)
   }
   report("surface", 1, "Finishing...")
   # A cancel requested in the last moments still counts: the user was already

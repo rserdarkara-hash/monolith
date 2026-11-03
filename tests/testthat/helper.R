@@ -273,9 +273,10 @@ make_metrics_known <- function() {
   )
 }
 
-#' An empirical variogram + data vector whose candidate fits trigger gstat
-#' non-convergence/singular warnings under robust_vgm_fit's 4-model x 4-range
-#' screen: seed 1 flaws all 16 candidates, seed 12 gives a clean Gau winner.
+#' White noise: `n` points of independent normal values, whose variogram has no
+#' spatial structure, as an empirical variogram, the data vector and the
+#' points. With nine points the auto-fit returns a pure nugget for seeds 1, 5,
+#' 6 and 11; the other seeds fit chance structure.
 make_hostile_vgm_input <- function(n = 9, seed = 1) {
   set.seed(seed)
   df <- data.frame(
@@ -286,15 +287,13 @@ make_hostile_vgm_input <- function(n = 9, seed = 1) {
   pts <- sf::st_as_sf(df, coords = c("x", "y"), crs = 32633)
   lags <- calc_scientific_lags(pts)
   v_emp <- gstat::variogram(v ~ 1, pts, width = lags$width, cutoff = lags$cutoff)
-  list(v_emp = v_emp, v_data = df$v)
+  list(v_emp = v_emp, v_data = df$v, pts = pts)
 }
 
 #' A field carrying a strong linear trend: its empirical variogram keeps rising
-#' to the cutoff, so every converged candidate reaches its sill beyond the lag
-#' window and every in-window candidate is non-converged. Seed 3: 16
-#' candidates, 0 converged and range-resolved, 4 converged and range-unresolved,
-#' 12 non-converged, none of them range-resolved, so a rule admitting only
-#' resolved fits finds nothing eligible.
+#' to the cutoff. Seed 3: every automatic family's optimum sits at the range
+#' ceiling; the best is a Matern at a zero nugget, which the auto-fit refuses,
+#' so the eligible best is the Spherical there.
 make_trend_vgm_input <- function(n = 60, seed = 3) {
   set.seed(seed)
   df <- data.frame(x = runif(n, 0, 1000), y = runif(n, 0, 1000))
@@ -305,11 +304,10 @@ make_trend_vgm_input <- function(n = 60, seed = 3) {
   list(v_emp = v_emp, v_data = df$v, pts = pts)
 }
 
-#' A periodic structure plus a weak trend: the screen yields BOTH a converged
-#' candidate whose range the lags resolve and a converged one whose range they
-#' do not, and the unresolved one fits better (seed 4: best resolved Gau SSErr
-#' 1.064e-4, best unresolved Mat 6.53e-5, ratio 1.63). A hard resolved-first
-#' tier picks the poorer Gau here.
+#' A periodic structure plus a weak trend. Seed 4: the Matern optimum
+#' (practical range 2.24 x max lag, nugget share 1.4%) fits better than the
+#' Spherical and Exponential ones, both at the range ceiling, so no family's
+#' range is resolved.
 make_mixed_vgm_input <- function(n = 60, seed = 4) {
   set.seed(seed)
   df <- data.frame(x = runif(n, 0, 1000), y = runif(n, 0, 1000))
@@ -320,45 +318,92 @@ make_mixed_vgm_input <- function(n = 60, seed = 4) {
   list(v_emp = v_emp, v_data = df$v, pts = pts)
 }
 
-#' Every candidate robust_vgm_fit's screen produces for `h`, classified the way
-#' the screen classifies it, re-derived independently so a selection test does
-#' not read its expectation off the function under test. `admissible` applies
-#' every eligibility rule except the zero-nugget smooth one, which
-#' `smooth_zero_nugget` reports on its own; `valid` combines the two.
-screen_vgm_candidates <- function(h) {
-  max_dist <- max(h$v_emp$dist, na.rm = TRUE)
-  init_sill <- var(h$v_data)
-  n0 <- min(h$v_emp$gamma)
-  if (n0 == 0) n0 <- max(init_sill * 1e-6, 1e-6)
-  if (n0 > init_sill) n0 <- init_sill * 0.9
-  ps0 <- max(init_sill - n0, init_sill * 0.1)
+#' One unconditional simulation of `model` (zero mean, 25 nearest neighbours)
+#' on a 200 m lattice over 4 x 4 km, under `with_seed(seed)`: an sf with the
+#' simulated values in `z`, for tests that refit a known model.
+simulate_vgm_field <- function(model, seed) {
+  with_seed(seed, {
+    g <- expand.grid(x = seq(0, 4000, by = 200), y = seq(0, 4000, by = 200))
+    s <- gstat::krige(z ~ 1, locations = NULL,
+                      newdata = sf::st_as_sf(g, coords = c("x", "y"), crs = 32635),
+                      dummy = TRUE, beta = 0, model = model, nmax = 25,
+                      nsim = 1, debug.level = 0)
+    names(s)[1] <- "z"
+    s
+  })
+}
+
+#' The independent reference for the auto-fit's profile search: each automatic
+#' family's best fit by brute force over `n` log-spaced practical ranges of the
+#' same domain (max lag / 100 to the ceiling x max lag). It shares no code with
+#' .vgm_profile_family() / .vgm_nnls_cols(): the unit-sill shapes are written
+#' out again from their definitions (Sph 1.5x - 0.5x^3, Exp 1 - e^-x, Matern
+#' nu = 1.5 1 - (1 + x) e^-x), and the non-negative least squares at each range
+#' takes the lowest criterion among its KKT candidates on the uncentred normal
+#' equations (the free solution when feasible, the c1 = 0 and c0 = 0 rays).
+#' Per family: `sse`, `c0`, `c1`, the practical range `p`, the nugget `share`,
+#' `admissible` (a positive partial sill), `smooth_zero_nugget` (a Matern at
+#' nugget 0) and `resolved` (p inside max lag / 100 to 2 x max lag).
+brute_vgm_profile <- function(v_emp, n = 5000L, families = VGM_AUTOFIT_FAMILIES) {
+  ok <- is.finite(v_emp$gamma) & is.finite(v_emp$dist) & v_emp$dist > 0 & v_emp$np > 0
+  h <- v_emp$dist[ok]
+  g <- v_emp$gamma[ok]
+  w <- v_emp$np[ok] / h^2
+  max_lag <- max(h)
+  shape <- list(Sph = function(x) ifelse(x < 1, 1.5 * x - 0.5 * x^3, 1),
+                Exp = function(x) 1 - exp(-x),
+                Mat = function(x) 1 - (1 + x) * exp(-x))
+  # 95%-decay distance per unit range, re-derived (not .vgm_practical_range_factor).
+  factor_of <- c(Sph = 1, Exp = 3, Mat = 4.75)
+  p <- exp(seq(log(max_lag / 100), log(VGM_RANGE_CEILING_MULT * max_lag), length.out = n))
+  sse_of <- function(R, c0, c1) colSums(w * (g - rep(c0, each = length(g)) - R * rep(c1, each = length(g)))^2)
+  lapply(stats::setNames(families, families), function(m) {
+    R <- shape[[m]](outer(h, factor_of[[m]] / p))
+    sw <- sum(w); sg <- sum(w * g)
+    sr <- colSums(w * R); srr <- colSums(w * R^2); srg <- colSums(w * R * g)
+    det <- sw * srr - sr^2
+    c0_f <- (srr * sg - sr * srg) / det
+    c1_f <- (sw * srg - sr * sg) / det
+    free <- is.finite(c0_f) & is.finite(c1_f) & det > 1e-10 * sw * srr & c0_f >= 0 & c1_f >= 0
+    c0 <- cbind(ifelse(free, c0_f, 0), sg / sw, 0)
+    c1 <- cbind(ifelse(free, c1_f, 0), 0, pmax(0, srg / srr))
+    s <- cbind(ifelse(free, sse_of(R, c0[, 1], c1[, 1]), Inf), sse_of(R, c0[, 2], c1[, 2]),
+               sse_of(R, c0[, 3], c1[, 3]))
+    k <- max.col(-s, ties.method = "first")
+    best <- cbind(seq_len(n), k)
+    sse <- s[best]
+    i <- which.min(sse)
+    out <- list(family = m, sse = sse[i], c0 = c0[best][i], c1 = c1[best][i], p = p[i])
+    out$share <- out$c0 / (out$c0 + out$c1)
+    out$admissible <- out$c1 > 0
+    out$smooth_zero_nugget <- identical(m, "Mat") && out$c1 > 0 && out$c0 == 0
+    out$resolved <- out$p > max_lag / 100 && out$p < 2 * max_lag
+    out
+  })
+}
+
+#' Every golden locality x canonical variable of `scope` with at least 10
+#' distinct located samples, a non-zero variance and 5 lag bins, prepared as
+#' the app prepares an auto-fit (dedup_valid_points, calc_scientific_lags):
+#' a named list of list(locality, var, pts, v_emp). Cached per scope.
+golden_vgm_pairs <- function(scope = "full") {
+  # Read first: a changed fixture directory empties the cache.
+  vars <- golden_meta()$roles$soil
+  key <- paste0("vgm_pairs_", scope)
+  if (!is.null(.golden_cache[[key]])) return(.golden_cache[[key]])
+  d <- golden_soil(scope)
   out <- list()
-  for (m in c("Sph", "Exp", "Gau", "Mat")) {
-    for (r in max_dist / c(10, 5, 4, 2)) {
-      flawed <- FALSE
-      f <- tryCatch(withCallingHandlers(
-        gstat::fit.variogram(h$v_emp, gstat::vgm(ps0, m, r, n0, kappa = if (m == "Mat") 1.5 else 0.5)),
-        warning = function(w) {
-          if (grepl("No convergence after|singular model|singular covariance", conditionMessage(w))) {
-            flawed <<- TRUE; invokeRestart("muffleWarning")
-          }
-        }), error = function(e) NULL)
-      if (is.null(f)) next
-      sse <- attr(f, "SSErr")
-      prange <- f$range[2] * .vgm_practical_range_factor(f$model[2], f$kappa[2])
-      admissible <- length(sse) == 1L && is.finite(sse) &&
-        is.finite(f$psill[2]) && f$psill[2] > 0 &&
-        is.finite(prange) && prange > 0 &&
-        is.finite(f$psill[1]) && f$psill[1] >= 0
-      smooth_zero_nugget <- isTRUE(vgm_smooth_nugget_share(f) <= 1e-8)
-      out[[length(out) + 1]] <- list(
-        fit = f, sse = sse,
-        flawed = flawed || isTRUE(attr(f, "singular")),
-        admissible = admissible, smooth_zero_nugget = smooth_zero_nugget,
-        valid = admissible && !smooth_zero_nugget,
-        resolved = prange > (max_dist / 100) && prange < max_dist * 2)
-    }
+  for (loc in sort(unique(d$locality))) for (v in vars) {
+    pts <- golden_sf(scope, localities = loc)
+    pts$v <- pts[[v]]
+    pts <- tryCatch(dedup_valid_points(pts, "v"), error = function(e) NULL)
+    if (is.null(pts) || nrow(pts) < 10 || stats::var(pts$v) == 0) next
+    lags <- calc_scientific_lags(pts)
+    v_emp <- gstat::variogram(v ~ 1, pts, width = lags$width, cutoff = lags$cutoff)
+    if (nrow(v_emp) < 5) next
+    out[[paste(loc, v)]] <- list(locality = loc, var = v, pts = pts, v_emp = v_emp)
   }
+  .golden_cache[[key]] <- out
   out
 }
 
@@ -665,13 +710,12 @@ renv_lock_drift <- function(pkgs = NULL) {
 #' The variogram the surface digest is pinned to.
 #'
 #' The digest exists to lock the DRIVER - grid construction, the kriging solve,
-#' the CV loop, raster assembly - so it must not also depend on which of
-#' robust_vgm_fit()'s 16 screened candidates happens to win. On the `tiny` scope
-#' all 16 fail to converge and exactly one clears the sanity window, so the
-#' winner is an artefact of the platform's floating-point path: Windows lands on
-#' Sph(range 312.9), Linux on Sph(range 274.7), and the whole digest moves with
-#' it. robust_vgm_fit() is covered on its own in test-robust-vgm-fit.R; pinning
-#' here removes that ambiguity without losing the coverage.
+#' the CV loop, raster assembly - so it must not also depend on the auto-fit,
+#' which test-robust-vgm-fit.R covers on its own. When the pin was set, the
+#' auto-fit's pick on the `tiny` scope was decided by rounding (Windows
+#' Sph(range 312.9), Linux Sph(range 274.7)) and the whole digest moved with it.
+#' The profile search has made fits reproducible since; the pin stays, so the
+#' lock has one moving part.
 #'
 #' The pinned model is read off the golden data, not invented:
 #'   - total sill 0.0617 = var(ph) on the `tiny` scope, the usual sill anchor
@@ -738,8 +782,8 @@ golden_pin_boundary <- function(pts, res = 300, reach = 600) {
 #' covariate surfaces or forest in its path.
 #'
 #' The variogram is pinned by golden_pin_vgm() rather than fitted, so the digest
-#' measures the driver and not the screening tie-break; the vgm_* entries are
-#' therefore constants that confirm the pin reached the engine.
+#' measures the driver and not the auto-fit; the vgm_* entries are therefore
+#' constants that confirm the pin reached the engine.
 #'
 #' `b_type` / `b_dist` are inert while `boundary` is supplied: the driver takes
 #' its shapefile branch and never reaches the hull switch. Pass `boundary = NULL`

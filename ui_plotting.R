@@ -3,13 +3,22 @@
 # reactivity. Sourced via ui_helpers.R.
 
 
-# The Map Viewer variogram-quality banner, one band per condition: red = the
-# fit failed and a heuristic model was used; amber = a singular/non-converged
-# winner, an unresolved range, a variogram still rising at the cutoff, or a
-# smooth family at a negligible nugget. A converged fit is never reported as
-# failed. NULL when clean. `target`: "act", "pre", or NULL for both (residual
-# maps). `engine` only words the still-rising band: RK/RFK already detrend.
-build_vgm_warning_html <- function(v_fit_list, target = NULL, engine = NULL) {
+# The Map Viewer variogram-quality banner, one band per condition: red = there
+# was nothing to fit and a stand-in model was used; amber = a pure nugget, a
+# nugget the data do not identify, an unresolved range (with a line for a range
+# at the search ceiling), a variogram still rising at the cutoff, or a smooth
+# family at a negligible nugget. NULL when clean. `target`: "act", "pre", or
+# NULL for both (residual maps). `engine` and `of` word the bands whose reading
+# depends on what was fitted: an RK or RFK fit is of trend residuals unless
+# `of` (vgm_params_export_df's, named like `v_fit_list`) marks it as the OK
+# fallback's variogram of the measured values; OK and CK fit the values. No
+# band names an engine to switch to (circular for whichever engine runs), with
+# one exception: a value-scale pure nugget names IDW and TPS, which is not
+# circular under OK.
+build_vgm_warning_html <- function(v_fit_list, target = NULL, engine = NULL, of = NULL) {
+  scale_of <- function(n) {
+    if (isTRUE(engine %in% c("RK", "RFK")) && !identical(unname(of[n]), VGM_OF_FALLBACK)) "res" else "val"
+  }
   # "LocA_act" -> "LocA" when the map's target is known, otherwise
   # "LocA (actual)" so mixed banners stay unambiguous.
   display_key <- function(n) {
@@ -20,37 +29,58 @@ build_vgm_warning_html <- function(v_fit_list, target = NULL, engine = NULL) {
   }
 
   fallback_keys <- character(0)
-  flawed_keys <- character(0)
+  ridge_keys <- character(0)
   smooth_keys <- character(0)
   beyond_keys <- character(0)
   below_keys <- character(0)
-  trend_keys <- character(0)
+  ceiling_keys <- character(0)
+  # Per scale: "res" for a variogram of trend residuals, "val" of the values.
+  flat_keys <- list(res = character(0), val = character(0))
+  refused_keys <- flat_keys
+  trend_keys <- flat_keys
   for (n in names(v_fit_list)) {
     if (!is.null(target) && !grepl(paste0("_", target, "$"), n)) next
     f <- v_fit_list[[n]]
+    d <- attr(f, "vgm_diagnostics")
+    # Locality names come from the uploaded data and are written into HTML.
+    key <- htmltools::htmlEscape(display_key(n))
+    sc <- scale_of(n)
     status <- vgm_fit_status(f)
-    if (status %in% c("fit_failed", "heuristic_fallback")) {
-      fallback_keys <- c(fallback_keys, display_key(n))
-    } else if (identical(status, "singular_selected")) {
-      flawed_keys <- c(flawed_keys, display_key(n))
+    if (identical(status, "fit_failed")) {
+      fallback_keys <- c(fallback_keys, key)
+    } else if (identical(status, "pure_nugget")) {
+      # "No structure detected" is true only when every family's optimum was
+      # flat, not when a structured Matern was refused at a zero nugget.
+      if (identical(d$pure_nugget_cause, "zero_nugget_rule")) {
+        refused_keys[[sc]] <- c(refused_keys[[sc]], key)
+      } else {
+        np <- d$pairs_per_lag
+        flat_keys[[sc]] <- c(flat_keys[[sc]],
+          if (sc == "res" || length(np) != 2L || !all(is.finite(np))) key else
+            paste0(key, " (", if (np[1] == np[2]) format(np[1]) else paste(np[1], "to", np[2]),
+                   " pairs per lag)"))
+      }
     } else if (identical(status, "range_unresolved")) {
       # The window fails at BOTH ends and the two mean opposite things, so the
       # side is recorded at fit time rather than re-derived here.
-      if (identical(attr(f, "vgm_diagnostics")$range_side, "below")) {
-        below_keys <- c(below_keys, display_key(n))
+      if (identical(d$range_side, "below")) {
+        below_keys <- c(below_keys, key)
       } else {
-        beyond_keys <- c(beyond_keys, display_key(n))
+        beyond_keys <- c(beyond_keys, key)
       }
     }
-    if (isTRUE(attr(f, "vgm_diagnostics")$trend_suspected)) {
-      trend_keys <- c(trend_keys, display_key(n))
+    if (isTRUE(d$range_at_ceiling)) ceiling_keys <- c(ceiling_keys, key)
+    if (identical(d$nugget_identified, FALSE)) {
+      ridge_keys <- c(ridge_keys, paste0(key, " (nugget ", vgm_pct_interval(100 * d$nugget_share_interval),
+                                         " of the sill)"))
     }
+    if (isTRUE(d$trend_suspected)) trend_keys[[sc]] <- c(trend_keys[[sc]], key)
     if (isTRUE(vgm_smooth_nugget_share(f) < VGM_SMOOTH_NUGGET_WARN_SHARE)) {
-      smooth_keys <- c(smooth_keys, display_key(n))
+      smooth_keys <- c(smooth_keys, key)
     }
   }
-  if (length(fallback_keys) == 0 && length(flawed_keys) == 0 && length(smooth_keys) == 0 &&
-      length(beyond_keys) == 0 && length(below_keys) == 0 && length(trend_keys) == 0) return(NULL)
+  if (!length(c(fallback_keys, unlist(flat_keys), unlist(refused_keys), ridge_keys, smooth_keys,
+                beyond_keys, below_keys, unlist(trend_keys)))) return(NULL)
 
   red_part <- if (length(fallback_keys) > 0) {
     paste0("<span style='color:var(--mn-danger);'>Variogram fit failed for: ",
@@ -58,19 +88,56 @@ build_vgm_warning_html <- function(v_fit_list, target = NULL, engine = NULL) {
            ".<br>-A default spherical variogram model was used, so the spatial structure was not ",
            "estimated from your data. Interpret with caution.</span>")
   } else ""
-  amber_part <- if (length(flawed_keys) > 0) {
-    paste0("<span style='color:var(--mn-warn);'>-Auto-fit selected a non-converged or singular variogram for: ",
-           paste(flawed_keys, collapse = ", "),
-           ".<br>No candidate converged cleanly, so the lowest-error fit was used. Its parameters ",
-           "may be imprecise; the map remains usable.</span>")
+  # A flat fit is the data's answer, not a failure. Detection power depends on
+  # the pairs per lag, so it is worded as not detected, never as absent.
+  flat_part <- c(
+    if (length(flat_keys$val) > 0) {
+      paste0("<span style='color:var(--mn-warn);'>-No spatial structure detected in the variogram for: ",
+             paste(flat_keys$val, collapse = ", "),
+             ".<br>No structured model fits it better than a flat line, so kriging maps the sample ",
+             "mean. This does not show that no structure exists: what the test can detect depends ",
+             "on the pairs per lag. IDW and TPS, or a model compared in Manual Tuning, are the ",
+             "options.</span>")
+    },
+    if (length(flat_keys$res) > 0) {
+      paste0("<span style='color:var(--mn-warn);'>-No spatial structure remains in the trend residuals for: ",
+             paste(flat_keys$res, collapse = ", "),
+             ".<br>The map is the trend plus the mean residual.</span>")
+    })
+  refused_line <- paste0(".<br>The only structured fit was a Mat&eacute;rn at a zero nugget, which ",
+                         "auto-fit does not select, and no other family fits better than a flat line. ")
+  refused_part <- c(
+    if (length(refused_keys$val) > 0) {
+      paste0("<span style='color:var(--mn-warn);'>-Pure nugget used for: ",
+             paste(refused_keys$val, collapse = ", "), refused_line,
+             "Kriging maps the sample mean; compare models in Manual Tuning.</span>")
+    },
+    if (length(refused_keys$res) > 0) {
+      paste0("<span style='color:var(--mn-warn);'>-Pure nugget used for the trend residuals of: ",
+             paste(refused_keys$res, collapse = ", "), refused_line,
+             "The map is the trend plus the mean residual.</span>")
+    })
+  # An exact ridge: the data fix the fit but not how it splits nugget and
+  # structure, so the middle of the nugget interval is used and reported as such.
+  ridge_part <- if (length(ridge_keys) > 0) {
+    paste0("<span style='color:var(--mn-warn);'>-Nugget not identified for: ",
+           paste(ridge_keys, collapse = ", "),
+           ".<br>Every nugget in that interval, each with its own range, fits the empirical variogram ",
+           "equally well; the middle of the interval is used and Structural Dependency is reported ",
+           "as an interval. More samples at short separations, or replicates, would identify it.</span>")
   } else ""
-  # A converged fit whose practical range lies outside the span the empirical
-  # variogram resolves. The model is used; what it CLAIMS is what is limited.
+  # A fit whose practical range lies outside the span the empirical variogram
+  # resolves. The model is used; what it CLAIMS is what is limited.
   unresolved_part <- if (length(beyond_keys) > 0 || length(below_keys) > 0) {
     beyond_line <- if (length(beyond_keys) > 0) {
       paste0("<br>-Practical range extends beyond sampled lag support for: ",
              paste(beyond_keys, collapse = ", "),
              ". Sill and range are extrapolated.")
+    } else ""
+    ceiling_line <- if (length(ceiling_keys) > 0) {
+      paste0("<br>-Range at the search limit for: ", paste(ceiling_keys, collapse = ", "),
+             ". The fit kept improving up to ", VGM_RANGE_CEILING_MULT, " &times; the longest lag, ",
+             "so the range shown is a bound, not an estimate.")
     } else ""
     below_line <- if (length(below_keys) > 0) {
       paste0("<br>-Practical range is below sampled-distance resolution for: ",
@@ -79,37 +146,37 @@ build_vgm_warning_html <- function(v_fit_list, target = NULL, engine = NULL) {
              "structure at that scale, so the fit behaves as near-pure nugget.")
     } else ""
     paste0("<span style='color:var(--mn-warn);'>-Variogram range not resolved within the empirical lag window.",
-           "<br>The fit converged; what the lags cannot resolve is its range.",
-           beyond_line, below_line, "</span>")
+           "<br>The model is used; what the lags cannot resolve is its range.",
+           beyond_line, ceiling_line, below_line, "</span>")
   } else ""
   # Hedged: a rising variogram suggests a trend but does not prove one, and no
   # engine is recommended (the variogram cannot say which cause acts).
-  trend_part <- if (length(trend_keys) > 0) {
-    if (isTRUE(engine %in% c("RK", "RFK"))) {
+  trend_part <- c(
+    if (length(trend_keys$val) > 0) {
+      paste0("<span style='color:var(--mn-warn);'>-Sill not observed; possible large-scale trend for: ",
+             paste(trend_keys$val, collapse = ", "),
+             ".<br>The variogram is still rising at the cutoff, so range and sill are weakly ",
+             "constrained: long-range dependence or non-stationarity, which it cannot separate. ",
+             "Modelling the trend with covariates and kriging its residuals addresses the trend ",
+             "case; the variogram alone cannot say which case applies.</span>")
+    },
+    if (length(trend_keys$res) > 0) {
       paste0("<span style='color:var(--mn-warn);'>-Residual variogram still rising at the lag cutoff for: ",
-             paste(trend_keys, collapse = ", "),
+             paste(trend_keys$res, collapse = ", "),
              ".<br>The fitted trend has not removed the large-scale structure, so range and sill are ",
              "weakly constrained and the kriging variance with them. Causes it cannot separate: ",
              "covariates missing that variation, too rigid a trend form, or a correlation length ",
              "beyond this locality's extent, which no covariate fixes. Predictions near samples stay ",
              "well supported; see the trend diagnostics and Internal Residual Variogram ",
              "(Scientific Analysis).</span>")
-    } else {
-      paste0("<span style='color:var(--mn-warn);'>-Sill not observed; possible large-scale trend for: ",
-             paste(trend_keys, collapse = ", "),
-             ".<br>The variogram is still rising at the cutoff, so range and sill are weakly ",
-             "constrained: long-range dependence or non-stationarity, which it cannot separate. ",
-             "Modelling the trend with covariates and kriging its residuals addresses the trend ",
-             "case; the variogram alone cannot say which case applies.</span>")
-    }
-  } else ""
+    })
   smooth_part <- if (length(smooth_keys) > 0) {
     paste0("<span style='color:var(--mn-warn);'>-Gaussian or Mat&eacute;rn variogram with a nugget below 5% of the sill for: ",
            paste(smooth_keys, collapse = ", "),
            ".<br>Predictions can land far outside the observed range. Check the map against the ",
            "data, or add a nugget.</span>")
   } else ""
-  parts <- c(red_part, amber_part, unresolved_part, trend_part, smooth_part)
+  parts <- c(red_part, flat_part, refused_part, ridge_part, unresolved_part, trend_part, smooth_part)
 
   paste0("<div class='vgm-fallback-warn' style='font-weight:bold; background:var(--mn-surface); border:1px solid var(--mn-line); padding:5px 25px 5px 5px; border-radius:4px; position:relative;'>",
          "<button onclick='this.parentElement.style.display=\"none\";' style='position:absolute; top:2px; right:2px; background:none; border:none; color:var(--mn-danger); font-size:16px; font-weight:bold; cursor:pointer;'>&times;</button>",
@@ -413,8 +480,8 @@ build_variogram_ggplot <- function(v_emp, v_fit = NULL, title = "", subtitle = N
 # A fitted variogram's plot with the model's parameters as its subtitle
 # (vgm_fit_subtitle), the one form every variogram panel and export uses. A
 # variable with no usable variance draws its points and the note instead: its
-# fitted curve and parameters describe numerical noise. `extra_sub` lines (a
-# manual-tuning overlay's) follow the parameters.
+# curve and parameters would describe a stand-in or numerical noise.
+# `extra_sub` lines (a manual-tuning overlay's) follow the parameters.
 build_fitted_variogram_plot <- function(v_emp, v_fit, title, extra_sub = NULL,
                                         manual_model = NULL) {
   fit_sub <- vgm_fit_subtitle(v_fit)

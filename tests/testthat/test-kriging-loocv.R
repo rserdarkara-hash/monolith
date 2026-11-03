@@ -78,6 +78,38 @@ test_that("an RK or RFK fold whose covariate kriging failed is named in the run 
   rm("krige", envir = globalenv())
 })
 
+test_that("an RK or RFK fold whose covariate was kriged flat is named in the run log", {
+  # A covariate whose fold variogram is a pure nugget keeps its flat kriged
+  # surface (krige_covariates); the fold records it like a fallback, and the
+  # run log counts the folds per covariate.
+  pts <- make_test_points(12)
+  original <- krige_covariates
+  withr::defer(assign("krige_covariates", original, envir = globalenv()))
+  assign("krige_covariates", function(...) {
+    kc <- original(...)
+    kc$flat <- "aux1"
+    kc
+  }, envir = globalenv())
+  for (engine in c("lm", "rf")) {
+    cv <- suppressWarnings(perform_kriging_loocv(pts, "v", "aux1", calc_scientific_lags,
+                                                 robust_vgm_fit, model_type = engine, rf_ntree = 50))
+    meta <- attr(cv, "cv_fold_meta")
+    expect_true(all(vapply(meta, function(m) identical(m$cov_flat, "aux1"), logical(1))))
+    expect_match(safe_run_cv(init_interpolation_res(), cv, "RK")$log_msg,
+                 sprintf(paste("[RK CV] covariate variogram was a pure nugget, so the held-out values were",
+                               "the training mean: aux1 in %d of %d folds."), length(meta), length(meta)),
+                 fixed = TRUE)
+  }
+  # Unmocked, the note appears exactly when a fold recorded a flat covariate
+  # (aux1 is independent noise, so some folds do).
+  assign("krige_covariates", original, envir = globalenv())
+  cv0 <- suppressWarnings(perform_kriging_loocv(pts, "v", "aux1", calc_scientific_lags,
+                                                robust_vgm_fit, model_type = "lm"))
+  flat0 <- unlist(lapply(attr(cv0, "cv_fold_meta"), `[[`, "cov_flat"))
+  expect_identical(grepl("pure nugget", safe_run_cv(init_interpolation_res(), cv0, "RK")$log_msg,
+                         fixed = TRUE), length(flat0) > 0)
+})
+
 test_that("perform_kriging_loocv refuses a fold vector that does not match its rows", {
   pts <- make_test_points(12)
   expect_error(perform_kriging_loocv(pts, "v", "aux1", calc_scientific_lags, robust_vgm_fit,

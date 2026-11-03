@@ -1592,6 +1592,31 @@ test_that("a covariate surface that fell back to IDW is reported, per fold and o
                    "elev: kriging failed on the prediction grid; inverse distance weighting (p = 2, 12 nearest samples) was used instead.")
 })
 
+test_that("a covariate kriged flat from a pure-nugget variogram is reported, per fold and on the grid", {
+  # The module reads the pipeline's record, not the run log: the grid builder
+  # names the covariate, and the note says where it happened.
+  h <- make_hostile_vgm_input(seed = 1)
+  expect_identical(vgm_fit_status(robust_vgm_fit(h$v_emp, h$v_data)), "pure_nugget")   # the premise
+  pts <- h$pts
+  names(pts)[names(pts) == "v"] <- "noise"
+  grid <- make_test_grid_safe(pts, res = 200)
+  aux <- build_classification_grid_aux(pts, grid, "noise")
+  expect_identical(attr(aux, "cov_flat"), "noise")
+  expect_null(attr(aux, "cov_fallback"))
+
+  flat <- list(folds = data.frame(fold = c(1, 3), covariate = "noise"), grid = "noise", n_folds = 4L)
+  expect_identical(
+    classif_covariate_notes(NULL, label_of = toupper, flat = flat),
+    paste("NOISE: its variogram is a pure nugget (no structured fit selected) on the prediction grid",
+          "and in 2 of 4 cross-validation folds, so its kriged surface is its sample mean there and",
+          "the classifier cannot vary with it."))
+  # An IDW fallback and a flat surface are reported side by side, fallbacks first.
+  both <- classif_covariate_notes(list(folds = NULL, grid = "elev", n_folds = 4L), flat = flat)
+  expect_length(both, 2)
+  expect_match(both[1], "^elev: kriging failed")
+  expect_match(both[2], "^noise: its variogram is a pure nugget")
+})
+
 test_that("a covariate name that is not syntactic gives the results of its twin", {
   # krige_covariates builds the held-out and grid covariates through gstat
   # formulas, which read a name through make.names().

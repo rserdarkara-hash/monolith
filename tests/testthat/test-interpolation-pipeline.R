@@ -1754,6 +1754,23 @@ test_that("a repeated location or a solve with no prediction falls back to IDW",
                gstat::idw(elev ~ 1, p, grid, nmax = 12, idp = 2, debug.level = 0)$var1.pred)
 })
 
+test_that("a pure-nugget covariate keeps its flat kriged surface and is named", {
+  # White noise as a covariate: its variogram is a pure nugget, so its best
+  # linear unbiased surface is the sample mean, not an IDW surface of noise.
+  h <- make_hostile_vgm_input(seed = 1)
+  expect_identical(vgm_fit_status(robust_vgm_fit(h$v_emp, h$v_data)), "pure_nugget")   # the premise
+  pts <- h$pts
+  names(pts)[names(pts) == "v"] <- "noise"
+  grid <- make_test_grid_safe(pts, res = 200)
+  kc <- krige_covariates(pts, grid, "noise", calc_scientific_lags(pts), list(idw_p = 2, idw_nmax = 12))
+  expect_identical(kc$flat, "noise")
+  expect_identical(kc$fallback, character(0))
+  expect_equal(kc$grid_aux$noise, rep(mean(pts$noise), nrow(grid)), tolerance = 1e-10)
+  expect_match(kc$log_msg, paste("[NOTE] Covariate noise: its variogram is a pure nugget (no structured",
+                                 "fit selected), so its kriged surface is its sample mean and the trend",
+                                 "cannot vary with it on the map."), fixed = TRUE)
+})
+
 # ── apply_RK ──────────────────────────────────────────────────────────────
 
 test_that("apply_RK fits an lm trend and kriges its residuals", {
@@ -2657,11 +2674,12 @@ test_that("IDW and TPS surfaces carry no phantom variance band", {
 })
 
 test_that("a constant target names itself in the run warnings", {
-  # A locality whose target has no variance produces a flat surface, an
-  # is_fallback variogram and all-NA R2/NSE/CCC/RPD/RPIQ (those metrics are
-  # ratios against the observed variance, so they are UNDEFINED here, not zero).
-  # The run warnings name the cause, not only the symptom the amber "fallback
-  # model" banner shows. Message only: the run must still complete.
+  # A locality whose target has no variance produces a flat surface, a
+  # fit_failed stand-in variogram (a zero empirical variogram has nothing to
+  # fit) and all-NA R2/NSE/CCC/RPD/RPIQ (those metrics are ratios against the
+  # observed variance, so they are UNDEFINED here, not zero). The run warnings
+  # name the cause, not only the symptom the red "Variogram fit failed" banner
+  # shows. Message only: the run must still complete.
   pts <- make_test_points(20)
   coords <- sf::st_coordinates(pts)
   pts_data <- data.frame(x = coords[, 1], y = coords[, 2],
@@ -2703,10 +2721,9 @@ test_that("a constant target names itself in the run warnings", {
 })
 
 test_that("a degenerate target is flagged on its fitted variogram", {
-  # The variogram of a constant target fits a sill 60 orders of magnitude
-  # below the data and reports "Structural Dependence 100%". The fit carries
-  # the cause so the panels can suppress the parameters instead of printing a
-  # strong claim manufactured from numerical noise.
+  # A constant target leaves a zero empirical variogram, so its fit is the
+  # stand-in, whose parameters describe nothing in the data. The fit carries
+  # the cause so the panels suppress the parameters instead of printing them.
   pts <- make_test_points(20)
   lags <- calc_scientific_lags(pts)
   flat <- pts

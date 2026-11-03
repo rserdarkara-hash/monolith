@@ -1067,10 +1067,12 @@ classif_server <- function(id, data_reactive, vars_metadata_reactive, spatial_re
           shiny::showNotification(res$grid_warning, type = "warning", duration = 15)
         }
         # A covariate surface kriging could not provide (an error, or a solve
-        # that returned no prediction) came from inverse distance weighting.
+        # that returned no prediction) came from inverse distance weighting; one
+        # whose variogram was a pure nugget is flat.
         fb_notes <- classif_covariate_notes(
           res$covariate_fallback,
-          label_of = function(v) get_var_label(v, shiny::isolate(vars_metadata_reactive())))
+          label_of = function(v) get_var_label(v, shiny::isolate(vars_metadata_reactive())),
+          flat = res$covariate_flat)
         if (length(fb_notes)) {
           shiny::showNotification(paste(fb_notes, collapse = " "), type = "warning", duration = 15)
         }
@@ -1432,9 +1434,11 @@ classif_server <- function(id, data_reactive, vars_metadata_reactive, spatial_re
           if (length(gone) == 1) "class" else "classes", paste(gone, collapse = ", ")))
       }
       # Covariate surfaces that came from inverse distance weighting instead
-      # of kriging, in the CV folds or on the map.
+      # of kriging, or flat from a pure-nugget variogram, in the CV folds or on
+      # the map.
       fb_notes <- classif_covariate_notes(
-        res$covariate_fallback, label_of = function(v) get_var_label(v, vars_metadata_reactive()))
+        res$covariate_fallback, label_of = function(v) get_var_label(v, vars_metadata_reactive()),
+        flat = res$covariate_flat)
       if (length(fb_notes)) drop_part <- paste(drop_part, paste(fb_notes, collapse = " "))
       # The sample is the sampled location: the scope's count and merge record,
       # and the locations a class tie left out.

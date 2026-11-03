@@ -297,8 +297,10 @@
         vgm_target <- if (lab %in% c("actual", "Actual")) "act"
                       else if (lab %in% c("pred", "pred_ss", "Predicted")) "pre"
                       else NULL  # residual maps derive from both fits
+        # `of`: an RK/RFK locality that fell back to OK holds the measured
+        # values' variogram, and its bands are worded for that.
         vgm_warn_html <- build_vgm_warning_html(rv$disp$v_fits, target = vgm_target,
-                                                engine = rv$disp$method)
+                                                engine = rv$disp$method, of = disp_vgm_of())
         if (!is.null(vgm_warn_html)) {
           # className matters: the default "info legend" class would clip the
           # banner under the legend's 190px overflow rule.

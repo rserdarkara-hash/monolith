@@ -101,7 +101,7 @@ The sidebar configures the **next** run: a completed run keeps the context it wa
 
 * **Kriging numerical safeguards:** Near-constant targets are recognised as having no meaningful spatial variance rather than presented as fitted spatial structure. Non-finite kriging predictions and variances are discarded, and a surface with no valid predictions is skipped with a warning instead of breaking the run.
 
-* **Variogram fitting:** Auto-Fit compares four theoretical models from several starting ranges and selects the eligible converged fit with the lowest weighted least-squares error. A range beyond the sampled lags does not disqualify a fit; the range or sill is flagged as weakly resolved instead. Singular fits, and after them a heuristic model, are used only when no converged fit exists.
+* **Variogram fitting:** Auto-Fit compares three theoretical models (spherical, exponential, Matérn) and selects the eligible fit with the lowest weighted least-squares error. The fit depends on the data alone (no starting values, iteration caps or convergence flags), so the same data give the same variogram on any machine; a nugget the data do not fix is reported as an interval. A range beyond the sampled lags does not disqualify a fit; the range or sill is flagged as weakly resolved instead. When no model fits better than a flat line, the fit is a pure nugget, reported as no spatial structure detected.
 
 * **Multicollinearity gate (shared across modules):** A single VIF plus pairwise-correlation engine guards every covariate-driven method. Before a Regression Kriging, Random Forest Kriging or Co-Kriging run, covariates with VIF above 10 or pairwise |r| above 0.95 within the selected localities are named, and you drop them or keep them all; every cross-validation fold applies the same rule to its own training samples. The Classification Suite flags collinear covariates the same way (VIF > 5 for its Random Forest, VIF > 10 otherwise). Before a PCA, pairs of variables correlated above |r| = 0.95 are named, because a near-duplicate pair weights one direction twice in the components; the PCA runs once you remove one of each pair or confirm the selection.
 
@@ -134,7 +134,7 @@ Any surface can be binned into classes for a zone map: five equal-interval bins,
 
 ### Model Fitting: Automatic and Manual
 
-Variograms are fitted automatically by weighted least squares over four models (spherical, exponential, Gaussian, Matérn), the TPS smoothing parameter by Generalized Cross-Validation (GCV), and the IDW power by cross-validation under the selected strategy, from equal weights through p = 48 to the nearest-neighbour limit. Each selection is repeated inside every cross-validation fold, so the reported metrics include it. Fixed values (an IDW power, a TPS λ or the exact spline, a manual variogram) can be set for all localities or per locality, and a variogram can be tuned interactively over its empirical points.
+Variograms are fitted automatically by weighted least squares over three models (spherical, exponential, Matérn; the Gaussian is a manual model), the TPS smoothing parameter by Generalized Cross-Validation (GCV), and the IDW power by cross-validation under the selected strategy, from equal weights through p = 48 to the nearest-neighbour limit. Each selection is repeated inside every cross-validation fold, so the reported metrics include it. Fixed values (an IDW power, a TPS λ or the exact spline, a manual variogram) can be set for all localities or per locality, and a variogram can be tuned interactively over its empirical points.
 
 ![Each engine's fitting diagnostic on one dataset](assets/fig3.jpg)
 
@@ -236,8 +236,9 @@ A residual is the measured value minus the uploaded ML prediction, so these maps
         sudo apt-get install libgdal-dev libgeos-dev libproj-dev libudunits2-dev \
           libcurl4-openssl-dev libssl-dev libxml2-dev \
           libfontconfig1-dev libfreetype6-dev libharfbuzz-dev libfribidi-dev \
-          libpng-dev libtiff5-dev libjpeg-dev
+          libpng-dev libtiff5-dev libjpeg-dev libnode-dev
         ```
+        `libnode-dev` provides the JavaScript engine the `V8` package links to, which `concaveman` (concave-hull boundaries) runs on.
 
 ### 2. Getting the Code
 
@@ -416,7 +417,7 @@ Detailed guides live in the [docs/](docs/) directory and open inside the app fro
 
 ## Testing and Reproducibility
 
-Monolith ships with a `testthat` suite of 5,884 assertions across 36 test files, covering the interpolation pipeline, cross-validation metrics, variogram fitting, the classification engine, the descriptive, correlation and PCA plot builders, metadata matching and the Governing Factors module. Where a quantity has an external or closed-form reference, the tests assert against that rather than against the app's own output:
+Monolith ships with a `testthat` suite of 8,115 assertions across 36 test files, covering the interpolation pipeline, cross-validation metrics, variogram fitting, the classification engine, the descriptive, correlation and PCA plot builders, metadata matching and the Governing Factors module. Where a quantity has an external or closed-form reference, the tests assert against that rather than against the app's own output:
 
 *   IDW against the hand-written Shepard sum; Ordinary Kriging against its exactness and pure-nugget closed forms; RK and RFK against the trend-plus-kriged-residual decomposition.
 *   VIF against `1/(1 - R²)` from an actual regression; Moran's I against a hand-built weight matrix; Lin's CCC against a value computed independently with `DescTools`.
@@ -471,7 +472,7 @@ Good to know:
 
 *   **Step 3 records nothing if any test fails.** A reference value taken from a failing run would enshrine the failure. Never re-run it just to make a failing test pass; find out why the number moved first.
 *   **Only a few values are recorded**: the fixture's identity (row, locality and class counts) and the quantities with no formula to check against (Jenks breaks, the VIF drop order, the end-to-end surface digest), together with the R and package versions they came from. All other tests recompute their answers from your data.
-*   **Some tests draw hull or buffered boundaries** around the most compact locality, the smallest and largest `core` localities and the `tiny` scope, so those need dense, even sampling. Tests that need a particular method behaviour (TPS, kNNDM, variogram cases) pick a locality and variable automatically and check that the behaviour is really there. If it is not, the test fails; point it at a locality and variable that show it with `test_cases` (see the manifest).
+*   **Some tests draw hull or buffered boundaries** around the most compact locality, the smallest and largest `core` localities and the `tiny` scope, so those need dense, even sampling. Tests that need a particular method behaviour (TPS, kNNDM, variogram cases) pick a locality and variable automatically and check that the behaviour is really there. If it is not, the test fails; point it at a locality and variable that show it with `test_cases` (see the manifest). One variogram test scans every locality and variable instead, so your data must contain the pair it looks for; the manifest names it.
 *   **Running step 3 as a separate `Rscript`** instead: set `MONOLITH_GOLDEN_DIR` in the same shell first, or it records against the bundled sample.
 
 ## Scope and Limitations

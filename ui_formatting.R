@@ -838,13 +838,17 @@ stats_table_vectors <- function(df, meta, loc_col, localities = NULL) {
 # Practical Range (.vgm_practical_range_factor()) is. Kappa only for Matern.
 # A nested model names every structure and reports the ranges of the one that
 # reaches its sill last; a pure nugget has no range. Values are unrounded.
-# `max_lag`/`sill_resolved` come from the fit's diagnostics (a sill reached
-# beyond the longest lag is model-extrapolated); NA for a supplied model,
-# which has none.
+# From the fit's diagnostics, NA for a supplied model, which has none:
+# `max_lag`/`sill_resolved` (a sill reached beyond the longest lag is
+# model-extrapolated), the equally-fitting set's Structural Dependency (%) and
+# practical-range intervals with `nugget_identified`, and `range_at_ceiling`
+# (the range is a bound at the search limit).
 vgm_params_row <- function(f) {
   out <- list(model = NA_character_, kappa = NA_real_, nugget = NA_real_,
               sill = NA_real_, range = NA_real_, practical_range = NA_real_,
               sdep = NA_real_, max_lag = NA_real_, sill_resolved = NA,
+              nugget_identified = NA, sdep_interval = c(NA_real_, NA_real_),
+              range_interval = c(NA_real_, NA_real_), range_at_ceiling = NA,
               target_degenerate = FALSE)
   if (is.null(f) || NROW(f) == 0) return(out)
   mdl <- as.character(f$model)
@@ -872,44 +876,63 @@ vgm_params_row <- function(f) {
   } else {
     out$practical_range <= out$max_lag
   }
+  if (!is.null(d)) {
+    sh <- d$nugget_share_interval
+    if (length(sh) == 2L && all(is.finite(sh))) out$sdep_interval <- 100 * (1 - rev(sh))
+    if (length(d$range_interval) == 2L) out$range_interval <- as.numeric(d$range_interval)
+    if (!is.null(d$nugget_identified)) out$nugget_identified <- as.logical(d$nugget_identified)[1]
+    if (!is.null(d$range_at_ceiling)) out$range_at_ceiling <- as.logical(d$range_at_ceiling)[1]
+  }
   out$target_degenerate <- isTRUE(d$target_degenerate)
   out
 }
 
+# An interval of percentages as text, "70.2 to 100%" (one decimal place).
+vgm_pct_interval <- function(x) {
+  paste0(format(round(x[1], 1)), " to ", format(round(x[2], 1)), "%")
+}
+
 # One-line plot subtitle of a variogram model from vgm_params_row(): what it is
-# (fit, flawed fit, heuristic stand-in, applied manual model), family (with a
-# Matern's kappa), nugget, partial sill, range a and practical range, flagged
-# model-extrapolated beyond the longest lag. NULL for no model.
+# (fit, heuristic stand-in, applied manual model), family (with a Matern's
+# kappa), nugget, partial sill, range a and practical range, flagged at the
+# search limit or model-extrapolated beyond the longest lag, and the nugget
+# interval when the data do not identify it. NULL for no model.
 vgm_fit_subtitle <- function(fit) {
   p <- vgm_params_row(fit)
   if (is.na(p$model)) return(NULL)
   lead <- if (identical(attr(fit, "monolith_source"), "manual")) {
     "Applied manual model: "
+  } else if (identical(vgm_fit_status(fit), "fit_failed")) {
+    "Heuristic fallback, not fitted: "
   } else {
-    switch(vgm_fit_status(fit),
-           fit_failed = , heuristic_fallback = "Heuristic fallback, not fitted: ",
-           singular_selected = "Fitted (singular/non-converged): ",
-           "Fitted: ")
+    "Fitted: "
   }
   if (identical(p$model, "Nug")) return(paste0(lead, "pure nugget (Nugget: ", format_sig(p$nugget), ")"))
   paste0(lead, p$model, if (!is.na(p$kappa)) paste0(", kappa = ", format_sig(p$kappa)),
          " (Nugget: ", format_sig(p$nugget), ", Partial Sill: ", format_sig(p$sill - p$nugget),
          ", Range (a): ", format_sig(p$range), ", Practical Range: ", format_sig(p$practical_range),
+         if (isTRUE(p$range_at_ceiling)) " at the search limit",
          if (identical(p$sill_resolved, FALSE)) {
            paste0(", model-extrapolated beyond the longest lag ", format_sig(p$max_lag))
+         },
+         if (identical(p$nugget_identified, FALSE)) {
+           paste0("; nugget not identified: ", vgm_pct_interval(100 - rev(p$sdep_interval)),
+                  " of the sill fit equally well")
          }, ")")
 }
 
 # The Variogram Parameters cell text when the target carries no usable
-# variance: the fitted sill is then numerical noise, not an estimate.
+# variance: the model is then the stand-in of a constant target, or a fit to
+# numerical noise, not an estimate.
 VGM_DEGENERATE_NOTE <- paste(
   "Target has no usable variance in this locality. No spatial structure can be",
-  "estimated; the fitted parameters below the numerical noise floor are not reported.")
+  "estimated, so no variogram parameters are reported.")
 
 # Screen flavour, all character so one column mixes model names and numbers:
 # "NA" for absent values, kappa beside a Matern name, % on Structural
 # Dependency. An unresolved sill shows "Not reliably identified" with the
-# extrapolated figure in a tooltip. Cells are HTML (escape = FALSE).
+# extrapolated figure in a tooltip, and a nugget the data do not identify adds
+# the equally-fitting interval. Cells are HTML (escape = FALSE).
 .vgm_params_chr <- function(f) {
   p <- vgm_params_row(f)
   if (is.na(p$model)) return(rep("NA", 6))
@@ -920,16 +943,32 @@ VGM_DEGENERATE_NOTE <- paste(
            "' style='cursor: help; text-decoration: underline dotted 1px;'>", txt, "</span>")
   }
   unresolved <- identical(p$sill_resolved, FALSE)
+  unidentified <- identical(p$nugget_identified, FALSE)
+  sdep_txt <- if (is.na(p$sdep)) "NA" else paste0(format_sig(p$sdep), "%")
   qualifier <- paste0("The fitted sill is not reached within the observed lag range (max lag ",
                       chr(p$max_lag), ").")
-  sdep_cell <- if (unresolved) {
-    tip("Not reliably identified",
-        paste0("Model-extrapolated: ",
-               if (is.na(p$sdep)) "NA" else paste0(format_sig(p$sdep), "%"), ". ", qualifier))
-  } else if (is.na(p$sdep)) "NA" else paste0(format_sig(p$sdep), "%")
+  sdep_cell <- if (unresolved || unidentified) {
+    tip(paste0("Not reliably identified",
+               if (unidentified) paste0(" (", vgm_pct_interval(p$sdep_interval), ")")),
+        paste(c(if (unresolved) paste0("Model-extrapolated: ", sdep_txt, ". ", qualifier),
+                if (unidentified) paste0("Every value from ", vgm_pct_interval(p$sdep_interval),
+                                         " fits the empirical variogram equally well; the model uses ",
+                                         sdep_txt, ", the middle of the nugget interval.")),
+              collapse = " "))
+  } else sdep_txt
+  range_notes <- c(if (unresolved) qualifier,
+                   if (isTRUE(p$range_at_ceiling)) {
+                     paste0("At the search limit (", VGM_RANGE_CEILING_MULT,
+                            " x the longest lag): a bound, not an estimate.")
+                   },
+                   if (unidentified) {
+                     paste0("Practical ranges from ", chr(p$range_interval[1]), " to ",
+                            chr(p$range_interval[2]), " fit equally well.")
+                   })
   c(if (is.na(p$kappa)) p$model else paste0(p$model, " (kappa = ", format_sig(p$kappa), ")"),
     chr(p$nugget), chr(p$sill), chr(p$range),
-    if (unresolved) tip(chr(p$practical_range), qualifier) else chr(p$practical_range),
+    if (length(range_notes)) tip(chr(p$practical_range), paste(range_notes, collapse = " ")) else
+      chr(p$practical_range),
     sdep_cell)
 }
 
@@ -954,8 +993,8 @@ vgm_params_table_df <- function(v_fit_list, loc, of = NULL) {
   f_a <- v_fit_list[[paste0(loc, "_act")]]
   f_p <- v_fit_list[[paste0(loc, "_pre")]]
   if (is.null(f_a) && is.null(f_p)) return(NULL)
-  # A constant target yields a noise-level sill and a spurious 100% structural
-  # dependency: report the cause instead.
+  # A target without usable variance yields a stand-in or a noise-level fit:
+  # report the cause instead of its parameters.
   fits <- Filter(Negate(is.null), list(f_a, f_p))
   if (all(vapply(fits, vgm_target_degenerate, logical(1)))) {
     return(data.frame(Status = VGM_DEGENERATE_NOTE, stringsAsFactors = FALSE))
@@ -989,9 +1028,14 @@ vgm_params_export_df <- function(v_fit_list, locs = NULL, of = NULL) {
         Model = p$model, Kappa = p$kappa, Nugget = p$nugget, Sill = p$sill,
         `Range (a)` = p$range, `Practical Range` = p$practical_range,
         # A file cannot carry a tooltip, so the numeric structural dependency
-        # stays and the two columns that qualify it travel beside it.
+        # stays and the columns that qualify it travel beside it: the lag
+        # support, and the equally-fitting set's intervals.
         `Structural Dep. (%)` = p$sdep,
         `Max Lag` = p$max_lag, `Sill Resolved` = p$sill_resolved,
+        `Nugget Identified` = p$nugget_identified,
+        `Structural Dep. Low (%)` = p$sdep_interval[1], `Structural Dep. High (%)` = p$sdep_interval[2],
+        `Practical Range Low` = p$range_interval[1], `Practical Range High` = p$range_interval[2],
+        `Range At Search Limit` = p$range_at_ceiling,
         check.names = FALSE, stringsAsFactors = FALSE)
     }
   }

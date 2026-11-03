@@ -1067,10 +1067,10 @@ perform_kriging_loocv <- function(pts, target_var, aux_vars, lags_func, vgm_fit_
     v_emp <- variogram(residuals ~ 1, train, width = lags$width, cutoff = lags$cutoff)
     v_fit <- vgm_fit_func(v_emp, train$residuals)
     res_krig <- krige(residuals ~ 1, train, newdata, model = v_fit, debug.level = 0)
-    # Per-fold fit state and covariate fallbacks, for the run log.
+    # Per-fold fit state and covariate fallbacks or flat surfaces, for the run log.
     list(pred = as.numeric(pred_trend) + res_krig$var1.pred,
          meta = list(kept = kept, vgm_status = vgm_fit_status(v_fit),
-                     cov_fallback = kc$fallback))
+                     cov_fallback = kc$fallback, cov_flat = kc$flat))
   }
 
   cv <- run_kriging_folds(pts, target_var, row_id, folds, fold_fn, cancel_file, progress)

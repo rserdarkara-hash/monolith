@@ -1462,6 +1462,12 @@ autofit_vgm_item <- function(item, current_crs) {
     sse <- attr(fit, "SSErr")
     if (length(sse) == 1L && is.finite(sse)) signif(sse, 4) else "N/A"
   }
+  # The diagnostics dialog's model name: a pure nugget has no second row, and
+  # the stand-in of a failed fit was not fitted.
+  display_model <- function(fit) {
+    if (isTRUE(attr(fit, "is_fallback"))) return("not fitted (stand-in Sph)")
+    if (NROW(fit) < 2) "Nug" else as.character(fit$model[2])
+  }
   res_a <- list(emp = NULL, fit = NULL, mod = "FAIL", sse = "N/A")
   sub_a_raw <- sf::st_as_sf(item$act, coords = c("x", "y"), crs = current_crs)
   sub_a <- validate_and_project_sf(sub_a_raw)
@@ -1473,7 +1479,7 @@ autofit_vgm_item <- function(item, current_crs) {
     best_f_a <- robust_vgm_fit(v_emp_a, sub_a$v)
     res_a$emp <- v_emp_a
     res_a$fit <- best_f_a
-    res_a$mod <- if (!is.null(best_f_a)) as.character(best_f_a$model[2]) else "FAIL"
+    res_a$mod <- display_model(best_f_a)
     res_a$sse <- display_sse(best_f_a)
   }
 
@@ -1489,7 +1495,7 @@ autofit_vgm_item <- function(item, current_crs) {
       best_f_p <- robust_vgm_fit(v_emp_p, sub_p$v)
       res_p$emp <- v_emp_p
       res_p$fit <- best_f_p
-      res_p$mod <- if (!is.null(best_f_p)) as.character(best_f_p$model[2]) else "FAIL"
+      res_p$mod <- display_model(best_f_p)
       res_p$sse <- display_sse(best_f_p)
     }
   }

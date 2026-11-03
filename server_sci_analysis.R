@@ -238,10 +238,9 @@
     # A named locality transposes to three narrow character columns and needs no
     # scrollX; the pooled listing is wide and numeric, so it keeps both.
     if (identical(loc, "Total (Combined)")) {
-      # "Sill Resolved" is logical: the significant-digit renderer would turn
-      # TRUE into 1.
-      sci_dt(df, signif_cols = if (!is.null(df))
-        setdiff(names(df), c("Locality", "Target", "Variogram Of", "Model", "Sill Resolved")))
+      # Numeric columns only: the significant-digit renderer would turn the
+      # logical flags (Sill Resolved, Nugget Identified, ...) into 1 and 0.
+      sci_dt(df, signif_cols = if (!is.null(df)) names(df)[vapply(df, is.numeric, logical(1))])
     } else {
       # The cells carry the sill qualifier as a tooltip span (.vgm_params_chr).
       sci_dt(df, scroll_x = FALSE, escape = FALSE)
@@ -843,7 +842,7 @@
                ") the fold's covariate screen kept a different set than the map; see the Run Log.")
       }
     }
-    # Folds whose variogram was degraded or range-unresolved scored a different
+    # Folds whose variogram was not a resolved structured fit scored a different
     # model than the map; the run log names them.
     vgm_txt <- {
       bad <- lapply(infos, function(x) {
@@ -856,8 +855,8 @@
         n <- sum(vapply(infos[hit], function(x) sum(x$vgm_status$n), numeric(1)))
         paste0(" In ", k, " of ", n, " folds (",
                paste(unique(names(infos)[hit]), collapse = ", "),
-               ") the fold's variogram was degraded, or its range fell outside the lag",
-               " support; see the Run Log.")
+               ") the fold's variogram was not a resolved structured fit: a failed fit, a pure",
+               " nugget, or a range outside the lag support; see the Run Log.")
       }
     }
     cov_txt <- {

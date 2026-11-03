@@ -254,10 +254,10 @@ Work through this in order:
    drift, not your change.
 2. **Check the platform and libraries.** Baselines are recorded on Windows; CI
    runs Linux and Windows. `ok_surface_digest` runs on a fixed variogram and a
-   fixed boundary because, unpinned, a near-tie in the variogram candidate search
-   and grid cells about a metre from the boundary resolved differently on Linux.
-   A new platform-dependent move means another near-tie: pin that input, do not
-   loosen the tolerance.
+   fixed boundary, so it locks the driver alone: the variogram auto-fit has its
+   own tests, and grid cells about a metre from the boundary resolve differently
+   on Linux. A new platform-dependent move means another near-tie: pin that
+   input, do not loosen the tolerance.
 3. **Reproduce it under `renv::restore()`.** If the value is stable under the
    pinned versions and moves only under current CRAN, it belongs in an issue
    about upstream, not in your pull request.
