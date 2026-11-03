@@ -68,13 +68,13 @@ test_that("manual sliders are scaled to the data, not to fixed decimals", {
 
 # ── The estimator: gstat's shapes and criterion, solved exactly ────────────
 
-test_that("the unit-sill shapes are gstat's, the Matern at any smoothness", {
+test_that("the unit-sill shapes are gstat's, the Matern at nu = 1.5", {
   x <- exp(seq(log(1e-3), log(50), length.out = 400))
-  line <- function(m, kappa = 0.5) {
-    gstat::variogramLine(gstat::vgm(1, m, 1, kappa = kappa), dist_vector = x)$gamma
+  line <- function(m) {
+    gstat::variogramLine(gstat::vgm(1, m, 1, kappa = if (m == "Mat") 1.5 else 0.5),
+                         dist_vector = x)$gamma
   }
-  for (m in c("Sph", "Exp", "Gau")) expect_equal(.vgm_shape(m, x), line(m), tolerance = 1e-12)
-  for (k in c(0.5, 1.5, 2.5)) expect_equal(.vgm_shape("Mat", x, k), line("Mat", k), tolerance = 1e-12)
+  for (m in VGM_AUTOFIT_FAMILIES) expect_equal(.vgm_shape(m, x), line(m), tolerance = 1e-12)
 })
 
 test_that("the auto-fit minimises gstat's own criterion", {
@@ -148,7 +148,6 @@ test_that("each family's fit is the global minimum over its range domain", {
       f <- .vgm_profile_family(v$dist, v$gamma, v$np / v$dist^2, m, max(v$dist) / 100,
                                VGM_RANGE_CEILING_MULT * max(v$dist))
       expect_lte(f$sse, ref[[m]]$sse * (1 + VGM_SSE_TIE_REL), label = paste(k, m))
-      expect_gte(f$n_basins, 1L)
     }
   }
 })
@@ -473,7 +472,6 @@ test_that("white noise gets the flat fit: a pure nugget at the weighted mean sem
   expect_true(is.na(d$practical_range))
   expect_true(is.na(d$sill_resolved))
   expect_true(is.na(d$range_at_ceiling))
-  expect_false(isTRUE(attr(fit, "is_fallback")))
   # Kriged, it predicts the sample mean away from the samples.
   grid <- make_test_grid_safe(h$pts, res = 200)
   kr <- gstat::krige(v ~ 1, h$pts, grid, model = fit, debug.level = 0)
@@ -492,7 +490,6 @@ test_that("a zero empirical variogram is fit_failed with a stand-in that krigs t
   fit <- robust_vgm_fit(v_emp, pts$v)
   d <- attr(fit, "vgm_diagnostics")
   expect_identical(d$status, "fit_failed")
-  expect_true(isTRUE(attr(fit, "is_fallback")))
   expect_gt(sum(fit$psill), 0)
   expect_true(d$target_degenerate)
   grid <- make_test_grid_safe(pts, res = 200)
@@ -513,9 +510,7 @@ test_that("every fit carries the vgm_diagnostics contract", {
     d <- attr(f, "vgm_diagnostics")
     expect_named(d, fields, ignore.order = TRUE)
     expect_identical(vgm_fit_status(f), d$status)
-    # is_fallback, which the CK seed guard reads, marks the stand-in and nothing
-    # else; only the stand-in has no criterion.
-    expect_equal(isTRUE(attr(f, "is_fallback")), identical(d$status, "fit_failed"))
+    # Only the stand-in has no criterion.
     expect_equal(is.null(attr(f, "SSErr")), identical(d$status, "fit_failed"))
   }
 })
@@ -526,10 +521,7 @@ test_that("the four fit states map to the attributes the UI reads", {
   h <- make_hostile_vgm_input(seed = 1)
   expect_identical(vgm_fit_status(robust_vgm_fit(h$v_emp[1:3, ], h$v_data)), "fit_failed")
   expect_identical(vgm_fit_status(robust_vgm_fit(NULL, rnorm(10))), "fit_failed")
-  fb <- make_mock_vgm()
-  attr(fb, "is_fallback") <- TRUE
-  expect_identical(vgm_fit_status(fb), "fit_failed")
-  # A supplied (manual) model carries no diagnostics and is not degraded.
+  # A supplied (manual) model carries no diagnostics and reports ok.
   expect_identical(vgm_fit_status(make_mock_vgm()), "ok")
   expect_identical(vgm_fit_status(NULL), "fit_failed")
 
@@ -548,7 +540,7 @@ test_that("only the stand-in and a fit to rounding withhold their kriging varian
                robust_vgm_fit(m$v_emp, m$v_data),
                robust_vgm_fit(make_hostile_vgm_input(seed = 2)$v_emp, make_hostile_vgm_input(seed = 2)$v_data))
   for (f in fits) {
-    expect_identical(vgm_variance_supported(f), !identical(vgm_fit_status(f), "fit_failed"))
+    expect_identical(is.null(vgm_variance_withheld(f)), !identical(vgm_fit_status(f), "fit_failed"))
   }
   expect_setequal(vapply(fits, vgm_fit_status, character(1)), VGM_FIT_STATUSES)
   expect_identical(vgm_variance_withheld(fits[[1]]), "stand_in")
@@ -557,22 +549,20 @@ test_that("only the stand-in and a fit to rounding withhold their kriging varian
   noise <- robust_vgm_fit(h$v_emp, h$v_data, target_degenerate = TRUE)
   expect_identical(vgm_fit_status(noise), vgm_fit_status(fits[[2]]))
   expect_identical(vgm_variance_withheld(noise), "noise_floor")
-  expect_false(vgm_variance_supported(noise))
-  expect_true(vgm_variance_supported(manual_vgm(1, "Sph", 300, 0.2)))
-  expect_false(vgm_variance_supported(NULL))
+  expect_null(vgm_variance_withheld(manual_vgm(1, "Sph", 300, 0.2)))
+  expect_false(is.null(vgm_variance_withheld(NULL)))
 })
 
 test_that("the rising-at-the-cutoff detector needs a rise, not a wobble", {
-  h <- make_trend_vgm_input()
-  rising <- h$v_emp; rising$gamma <- seq(1, 10, length.out = nrow(rising))
-  flat <- h$v_emp
-  flat$gamma <- c(seq(1, 9, length.out = 5), rep(9, nrow(flat) - 5))
-  expect_true(.vgm_still_rising(rising))
+  n <- nrow(make_trend_vgm_input()$v_emp)
+  flat <- c(seq(1, 9, length.out = 5), rep(9, n - 5))
+  expect_true(.vgm_still_rising(seq(1, 10, length.out = n)))
   expect_false(.vgm_still_rising(flat))
   # A single noisy last bin must not trip it: the detector compares thirds.
-  noisy <- flat; noisy$gamma[nrow(noisy)] <- 9.4
-  expect_false(.vgm_still_rising(noisy))
-  expect_true(is.na(.vgm_still_rising(h$v_emp[1:3, ])))
+  expect_false(.vgm_still_rising(replace(flat, n, 9.4)))
+  # Too few bins, or nothing rises at all.
+  expect_true(is.na(.vgm_still_rising(flat[1:3])))
+  expect_true(is.na(.vgm_still_rising(rep(9, n))))
   expect_true(is.na(.vgm_still_rising(NULL)))
 })
 
@@ -760,14 +750,6 @@ test_that("a dip just past a flat ridge is found whatever the last bits", {
   }
 })
 
-test_that("tiny empirical variogram fallback is tagged is_fallback", {
-  fit_null <- robust_vgm_fit(NULL, rnorm(10))
-  expect_true(isTRUE(attr(fit_null, "is_fallback")))
-  h <- make_hostile_vgm_input(seed = 1)
-  fit_tiny <- robust_vgm_fit(h$v_emp[1:3, ], h$v_data)
-  expect_true(isTRUE(attr(fit_tiny, "is_fallback")))
-})
-
 test_that("the resolution window is judged on the PRACTICAL range, per family", {
   # gstat's `a` means a different ground distance per family, so the window is
   # applied to the practical range: on `a` it would be ~3x tighter at the low
@@ -816,7 +798,7 @@ test_that("build_vgm_warning_html returns NULL when nothing is flagged", {
 })
 
 test_that("build_vgm_warning_html renders the red failure band and the amber pure-nugget band", {
-  f_fb <- make_mock_vgm(); attr(f_fb, "is_fallback") <- TRUE
+  f_fb <- robust_vgm_fit(NULL, c(1, 2, 3))   # the stand-in of a failed fit
   html <- build_vgm_warning_html(list(LocA_act = f_fb, LocB_pre = mock_pure_nugget(),
                                       LocC_act = make_mock_vgm()))
   expect_match(html, "LocA (actual)", fixed = TRUE)
@@ -829,7 +811,7 @@ test_that("build_vgm_warning_html renders the red failure band and the amber pur
 })
 
 test_that("build_vgm_warning_html filters by target and strips the suffix", {
-  f_fb <- make_mock_vgm(); attr(f_fb, "is_fallback") <- TRUE
+  f_fb <- robust_vgm_fit(NULL, c(1, 2, 3))   # the stand-in of a failed fit
   fits <- list(LocA_act = f_fb, LocB_pre = mock_pure_nugget())
 
   html_act <- build_vgm_warning_html(fits, target = "act")
@@ -1051,7 +1033,7 @@ test_that("amber-only banner omits the red section", {
 })
 
 test_that("red-only banner omits the amber section", {
-  f_fb <- make_mock_vgm(); attr(f_fb, "is_fallback") <- TRUE
+  f_fb <- robust_vgm_fit(NULL, c(1, 2, 3))   # the stand-in of a failed fit
   html <- build_vgm_warning_html(list(L1_act = f_fb))
   expect_match(html, "default spherical variogram model", fixed = TRUE)
   expect_no_match(html, "No spatial structure", fixed = TRUE)

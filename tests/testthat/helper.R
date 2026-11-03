@@ -341,9 +341,9 @@ simulate_vgm_field <- function(model, seed) {
 #' nu = 1.5 1 - (1 + x) e^-x), and the non-negative least squares at each range
 #' takes the lowest criterion among its KKT candidates on the uncentred normal
 #' equations (the free solution when feasible, the c1 = 0 and c0 = 0 rays).
-#' Per family: `sse`, `c0`, `c1`, the practical range `p`, the nugget `share`,
-#' `admissible` (a positive partial sill), `smooth_zero_nugget` (a Matern at
-#' nugget 0) and `resolved` (p inside max lag / 100 to 2 x max lag).
+#' Per family: `sse`, `c0`, `c1`, the practical range `p`, `admissible` (a
+#' positive partial sill), `smooth_zero_nugget` (a Matern at nugget 0) and
+#' `resolved` (p inside max lag / 100 to 2 x max lag).
 brute_vgm_profile <- function(v_emp, n = 5000L, families = VGM_AUTOFIT_FAMILIES) {
   ok <- is.finite(v_emp$gamma) & is.finite(v_emp$dist) & v_emp$dist > 0 & v_emp$np > 0
   h <- v_emp$dist[ok]
@@ -373,8 +373,7 @@ brute_vgm_profile <- function(v_emp, n = 5000L, families = VGM_AUTOFIT_FAMILIES)
     best <- cbind(seq_len(n), k)
     sse <- s[best]
     i <- which.min(sse)
-    out <- list(family = m, sse = sse[i], c0 = c0[best][i], c1 = c1[best][i], p = p[i])
-    out$share <- out$c0 / (out$c0 + out$c1)
+    out <- list(sse = sse[i], c0 = c0[best][i], c1 = c1[best][i], p = p[i])
     out$admissible <- out$c1 > 0
     out$smooth_zero_nugget <- identical(m, "Mat") && out$c1 > 0 && out$c0 == 0
     out$resolved <- out$p > max_lag / 100 && out$p < 2 * max_lag
@@ -724,9 +723,8 @@ renv_lock_drift <- function(pkgs = NULL) {
 #'     i.e. gamma extrapolated back to the origin;
 #'   - partial sill 0.0267 = the remainder;
 #'   - range 1200 m: above the 197 m mean nearest-neighbour spacing, so the
-#'     surface interpolates instead of reverting to the mean; inside the
-#'     trustworthy half of the 3233 m cutoff; and consistent with the 1335 m
-#'     the better-sampled `core` scope converges to cleanly.
+#'     surface interpolates instead of reverting to the mean, and inside the
+#'     trustworthy half of the 3233 m cutoff.
 #'
 #' Nugget:sill is 57%, moderate spatial dependence on the Cambardella et al.
 #' (1994) scale, which is what this variable actually shows. It is a fixed test

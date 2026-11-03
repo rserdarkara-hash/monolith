@@ -124,10 +124,10 @@ vgm_smooth_nugget_share <- function(model) {
   sum(model$psill[mdl == "Nug"]) / total
 }
 
-# A supplied (manual) Gaussian or Matern model with a nugget below this share of
-# the total sill is flagged, not changed. Advisory only: on the reference data,
-# 5% bounded the overshoot beyond the observed range to 0.02 of its span in
-# every locality, while 1% allowed up to 0.5.
+# A Gaussian or Matern model (applied, or an auto-fitted Matern) with a nugget
+# below this share of the total sill is flagged, not changed. Advisory only: on
+# the reference data, 5% bounded the overshoot beyond the observed range to
+# 0.02 of its span in every locality, while 1% allowed up to 0.5.
 VGM_SMOOTH_NUGGET_WARN_SHARE <- 0.05
 
 # Two candidates whose weighted least-squares criteria differ by less than
@@ -168,8 +168,7 @@ VGM_CONTENDER_REL <- 1e-3
 VGM_NUGGET_ID_WIDTH <- 0.01
 
 # ── Fit state ────────────────────────────────────────────────────────────────
-# One categorical state per fitted variogram, worst first. `is_fallback` marks
-# the fit_failed stand-in for the CK seed guard.
+# One categorical state per fitted variogram, worst first:
 #
 #   fit_failed        fewer than 5 usable empirical bins, or every semivariance
 #                     zero: a stand-in that is not estimated from the data
@@ -184,9 +183,7 @@ VGM_FIT_STATUSES <- c("fit_failed", "pure_nugget", "range_unresolved", "ok")
 vgm_fit_status <- function(fit) {
   if (is.null(fit) || NROW(fit) == 0) return("fit_failed")
   s <- attr(fit, "vgm_diagnostics")$status
-  if (!is.null(s) && s %in% VGM_FIT_STATUSES) return(s)
-  if (isTRUE(attr(fit, "is_fallback"))) return("fit_failed")
-  "ok"
+  if (!is.null(s) && s %in% VGM_FIT_STATUSES) s else "ok"
 }
 
 #' Plain-language state, for a run-log line or a table cell.
@@ -198,8 +195,10 @@ vgm_status_label <- function(status) {
          "fitted")
 }
 
-#' TRUE when the fitted target has no usable variance (sill and structure are
-#' numerical noise). Unknown reads FALSE, the safe default for a supplied model.
+#' TRUE when the values the fit describes have no usable variance (the target,
+#' or RK/RFK residuals judged at the target's scale), so its sill and structure
+#' are numerical noise. Unknown reads FALSE, the safe default for a supplied
+#' model.
 vgm_target_degenerate <- function(fit) {
   isTRUE(attr(fit, "vgm_diagnostics")$target_degenerate)
 }
@@ -217,23 +216,17 @@ vgm_variance_withheld <- function(fit) {
   else if (vgm_target_degenerate(fit)) "noise_floor"
 }
 
-vgm_variance_supported <- function(fit) is.null(vgm_variance_withheld(fit))
-
-# Is the empirical variogram still climbing at the cutoff? The last third of
-# the bins against the third before it; a rise above 5% of the gamma span. NA
-# with too few bins (the non-stationarity advisory then stays silent).
-.vgm_still_rising <- function(v_emp) {
-  if (is.null(v_emp) || !"gamma" %in% names(v_emp)) return(NA)
-  g <- as.numeric(v_emp$gamma)
+# Is the empirical variogram still climbing at the cutoff? `g` holds the
+# semivariances of its usable bins in lag order: the last third of them against
+# the third before it, a rise above 5% of the gamma span. NA with too few bins
+# or a flat variogram (the non-stationarity advisory then stays silent).
+.vgm_still_rising <- function(g) {
   n <- length(g)
   k <- max(2L, floor(n / 3))
   if (n < 2L * k) return(NA)
-  tail_mean <- mean(utils::tail(g, k), na.rm = TRUE)
-  prev_mean <- mean(g[seq(n - 2L * k + 1L, n - k)], na.rm = TRUE)
-  span <- suppressWarnings(diff(range(g, na.rm = TRUE)))
-  if (!isTRUE(is.finite(span)) || span <= 0 ||
-      !is.finite(tail_mean) || !is.finite(prev_mean)) return(NA)
-  (tail_mean - prev_mean) > 0.05 * span
+  span <- diff(range(g))
+  if (!isTRUE(span > 0)) return(NA)
+  (mean(utils::tail(g, k)) - mean(g[seq(n - 2L * k + 1L, n - k)])) > 0.05 * span
 }
 
 #' Default empirical-variogram lags: cutoff = half the bounding-box diagonal of
@@ -421,15 +414,14 @@ clean_gstat_env <- function(vgm_obj) {
 # form, so only the range is searched (separable least squares; Golub &
 # Pereyra 2003), over a fixed data-based grid refined by Brent's method.
 
-# Unit-sill shape rho(x), x = h / a, as gstat defines it (variogramLine), so
-# the criterion here is gstat's SSErr.
-.vgm_shape <- function(family, x, kappa = 1.5) {
+# Unit-sill shape rho(x), x = h / a, of each VGM_AUTOFIT_FAMILIES member as
+# gstat defines it (variogramLine; Matern at nu = 1.5), so the criterion here
+# is gstat's SSErr.
+.vgm_shape <- function(family, x) {
   switch(family,
          Sph = ifelse(x < 1, 1.5 * x - 0.5 * x^3, 1),
          Exp = 1 - exp(-x),
-         Gau = 1 - exp(-x^2),
-         Mat = if (isTRUE(abs(kappa - 1.5) < 1e-12)) 1 - (1 + x) * exp(-x) else
-           1 - (2^(1 - kappa) / gamma(kappa)) * x^kappa * besselK(x, kappa),
+         Mat = 1 - (1 + x) * exp(-x),
          stop("unknown variogram family ", family))
 }
 
@@ -486,8 +478,8 @@ clean_gstat_env <- function(vgm_obj) {
 #    member in the middle of its nugget interval, or the middle of its
 #    log-range span when the nugget is not monotone across it.
 # Returns the representative's c0, c1, a, practical range p and sse, the
-# set's practical-range and nugget-share intervals, whether it reaches the
-# lower or upper domain bound, and the number of basins refined.
+# set's practical-range and nugget-share intervals, and whether it reaches the
+# lower or upper domain bound.
 .vgm_profile_family <- function(h, g, w, family, p_lo, p_hi) {
   fac <- .vgm_practical_range_factor(family, 1.5)
   la <- seq(log(p_lo / fac), log(p_hi / fac), length.out = VGM_PROFILE_GRID_N)
@@ -579,11 +571,10 @@ clean_gstat_env <- function(vgm_obj) {
   hi_ <- at(x_hi)
   share <- function(z) if (z$c0 + z$c1 > 0) z$c0 / (z$c0 + z$c1) else NA_real_
   shares <- c(share(lo_), share(rep_), share(hi_))
-  list(family = family, c0 = rep_$c0, c1 = rep_$c1, a = exp(x_rep), p = rep_$p, sse = rep_$sse,
+  list(c0 = rep_$c0, c1 = rep_$c1, a = exp(x_rep), p = rep_$p, sse = rep_$sse,
        p_interval = c(lo_$p, hi_$p),
        share_interval = if (all(is.na(shares))) c(NA_real_, NA_real_) else range(shares, na.rm = TRUE),
-       at_low = x_lo <= la[1] + 1e-9, at_high = x_hi >= la[n] - 1e-9,
-       n_basins = length(basins))
+       at_low = x_lo <= la[1] + 1e-9, at_high = x_hi >= la[n] - 1e-9)
 }
 
 #' Automated variogram fit: the profile search above for each family in
@@ -604,7 +595,7 @@ clean_gstat_env <- function(vgm_obj) {
 #' no eligible family the flat fit is returned, a pure nugget at the weighted
 #' mean semivariance. Fewer than 5 usable bins, or a zero empirical variogram
 #' (a constant target), leave nothing to estimate: a Spherical stand-in seeded
-#' from the sample variance is returned, tagged "is_fallback"; no kriging
+#' from the sample variance is returned in state fit_failed; no kriging
 #' variance is reported from it (vgm_variance_withheld()). `target_degenerate`
 #' marks values without usable variance, whose fit describes rounding; RK and
 #' RFK judge their residuals at the target's scale (.residuals_degenerate()).
@@ -622,7 +613,7 @@ robust_vgm_fit <- function(v_emp, v_data, target_degenerate = .is_degenerate_cov
   g <- v_emp$gamma[keep]
   np <- v_emp$np[keep]
   max_lag <- if (length(h)) max(h) else NA_real_
-  still_rising <- .vgm_still_rising(data.frame(gamma = as.numeric(g)))
+  still_rising <- .vgm_still_rising(g)
 
   # What may be claimed about the fit, computed where the empirical variogram
   # is in hand. `sill_resolved` (range <= max lag) is stricter than
@@ -669,7 +660,6 @@ robust_vgm_fit <- function(v_emp, v_data, target_degenerate = .is_degenerate_cov
     if (!isTRUE(sill > 0)) sill <- 1
     fallback <- gstat::vgm(psill = sill * 0.8, "Sph", range = (if (is.na(max_lag)) 1 else max_lag) / 2,
                            nugget = sill * 0.2)
-    attr(fallback, "is_fallback") <- TRUE
     attr(fallback, "vgm_diagnostics") <- vgm_diag("fit_failed")
     return(fallback)
   }

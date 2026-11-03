@@ -9,7 +9,7 @@
 # a PSOCK worker future downgrades the nested plan to sequential and
 # availableCores() reports 1, so cores are counted here and the worker owns an
 # explicit nested cluster, torn down in `finally`. Numerics are
-# plan-independent (furrr's fixed seed; fit.variogram draws nothing).
+# plan-independent (furrr's fixed seed; the auto-fit draws no random numbers).
 optimizer_button_labels <- list(
   auto_fit = "OPTIMIZE ALL VARIOGRAMS"
 )

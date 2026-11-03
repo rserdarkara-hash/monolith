@@ -28,8 +28,8 @@ test_that("lm and rf kriging CV return a complete common schema", {
 })
 
 test_that("every RK and RFK fold reports the state of its residual variogram", {
-  # The residual variogram is refitted per fold by the same screen OK uses, so
-  # a fold can take a degraded fit the map never did; the run log can only name
+  # The residual variogram is refitted per fold by the same auto-fit OK uses, so
+  # a fold can land in a state the map's fit did not; the run log can only name
   # it if the fold reports it.
   pts <- make_test_points(12)
   for (engine in c("lm", "rf")) {

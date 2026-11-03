@@ -387,7 +387,7 @@ test_that("no UI file paints a colour outside the token set", {
 test_that("every variogram banner band is painted with tokens", {
   # The banner is drawn over the map in both variants, so every band is painted
   # with tokens. One fit per band, so no band can be added without a token.
-  fb <- gstat::vgm(0.5, "Sph", 200, 0.1); attr(fb, "is_fallback") <- TRUE
+  fb <- robust_vgm_fit(NULL, c(1, 2, 3))   # the stand-in of a failed fit
   pure <- function(cause) {
     f <- gstat::vgm(0.4, "Nug", 0)
     attr(f, "vgm_diagnostics") <- list(status = "pure_nugget", pure_nugget_cause = cause,

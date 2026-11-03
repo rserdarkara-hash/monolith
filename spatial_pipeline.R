@@ -1484,7 +1484,7 @@ autofit_vgm_item <- function(item, current_crs) {
   # The diagnostics dialog's model name: a pure nugget has no second row, and
   # the stand-in of a failed fit was not fitted.
   display_model <- function(fit) {
-    if (isTRUE(attr(fit, "is_fallback"))) return("not fitted (stand-in Sph)")
+    if (identical(vgm_fit_status(fit), "fit_failed")) return("not fitted (stand-in Sph)")
     if (NROW(fit) < 2) "Nug" else as.character(fit$model[2])
   }
   res_a <- list(emp = NULL, fit = NULL, mod = "FAIL", sse = "N/A")

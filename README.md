@@ -417,7 +417,7 @@ Detailed guides live in the [docs/](docs/) directory and open inside the app fro
 
 ## Testing and Reproducibility
 
-Monolith ships with a `testthat` suite of 8,250 assertions across 36 test files, covering the interpolation pipeline, cross-validation metrics, variogram fitting, the classification engine, the descriptive, correlation and PCA plot builders, metadata matching and the Governing Factors module. Where a quantity has an external or closed-form reference, the tests assert against that rather than against the app's own output:
+Monolith ships with a `testthat` suite of 8,043 assertions across 36 test files, covering the interpolation pipeline, cross-validation metrics, variogram fitting, the classification engine, the descriptive, correlation and PCA plot builders, metadata matching and the Governing Factors module. Where a quantity has an external or closed-form reference, the tests assert against that rather than against the app's own output:
 
 *   IDW against the hand-written Shepard sum; Ordinary Kriging against its exactness and pure-nugget closed forms; RK and RFK against the trend-plus-kriged-residual decomposition.
 *   VIF against `1/(1 - R²)` from an actual regression; Moran's I against a hand-built weight matrix; Lin's CCC against a value computed independently with `DescTools`.

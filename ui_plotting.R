@@ -484,9 +484,10 @@ build_variogram_ggplot <- function(v_emp, v_fit = NULL, title = "", subtitle = N
 }
 
 # A fitted variogram's plot with the model's parameters as its subtitle
-# (vgm_fit_subtitle), the one form every variogram panel and export uses. A
-# variable with no usable variance draws its points and the note instead: its
-# curve and parameters would describe a stand-in or numerical noise.
+# (vgm_fit_subtitle), the one form every variogram panel and export uses.
+# Values with no usable variance (vgm_target_degenerate()) draw their points and
+# the note instead: the curve and parameters would describe a stand-in or
+# numerical noise.
 # `extra_sub` lines (a manual-tuning overlay's) follow the parameters.
 build_fitted_variogram_plot <- function(v_emp, v_fit, title, extra_sub = NULL,
                                         manual_model = NULL) {

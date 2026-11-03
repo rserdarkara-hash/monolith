@@ -711,7 +711,7 @@ rf_infinitesimal_jackknife_var <- function(pred_individual, inbag, chunk = 2000L
       fit_i <- robust_vgm_fit(v_i, vg[[vcol]])
     }
     kr <- krige(form_ok, train, newdata, model = fit_i, debug.level = 0)
-    list(pred = kr$var1.pred, var = if (vgm_variance_supported(fit_i)) kr$var1.var,
+    list(pred = kr$var1.pred, var = if (is.null(vgm_variance_withheld(fit_i))) kr$var1.var,
          meta = list(vgm_status = vgm_fit_status(fit_i)))
   }
 }
@@ -725,8 +725,8 @@ rf_infinitesimal_jackknife_var <- function(pred_individual, inbag, chunk = 2000L
        total = length(meta))
 }
 
-#' The variogram status of every fold that reported one, named by fold label.
-#' A fold whose engine records no status is `ok`: it fitted nothing degraded.
+#' The variogram status of every fold that reported one, named by fold label;
+#' folds whose engine records none (IDW, TPS, CK) are left out.
 .cv_fold_statuses <- function(cv_obj) {
   meta <- attr(cv_obj, "cv_fold_meta")
   meta <- Filter(function(m) !is.null(m$vgm_status), meta)
@@ -1168,8 +1168,9 @@ CK_MIN_COLLOCATED <- 10L
   # The LMC shares ONE range across all variograms, so the seed range IS the
   # final range: the primary variable's fitted range (a geometric heuristic in
   # its place moved a short-range CK surface by up to 18% of the field's SD).
-  # The extent heuristic (cutoff / 2) is used only when the primary fit is
-  # itself a fallback or its range is unusable.
+  # The extent heuristic (cutoff / 2) is used only when the primary fit is the
+  # fit_failed stand-in or has no usable range (a pure nugget has none).
+  init_status <- vgm_fit_status(fit_ok_init)
   lmc_range <- suppressWarnings(as.numeric(fit_ok_init$range[2])[1])
   # Seed Matern with its fitted kappa: vgm() defaults kappa to 0.5, and the
   # same `a` at nu = 0.5 is a shorter practical range (3a) than at 1.5 (4.75a).
@@ -1177,12 +1178,12 @@ CK_MIN_COLLOCATED <- 10L
   lmc_kappa <- suppressWarnings(as.numeric(fit_ok_init$kappa[2])[1])
   if (!isTRUE(is.finite(lmc_kappa))) lmc_kappa <- 0.5
   heuristic_seed <- !isTRUE(is.finite(lmc_range)) || lmc_range <= 0 ||
-    isTRUE(attr(fit_ok_init, "is_fallback"))
+    identical(init_status, "fit_failed")
   if (heuristic_seed) {
     lmc_range <- lags$cutoff / 2
     lmc_kappa <- 0.5
     log_msg <- paste0(log_msg,
-      if (identical(vgm_fit_status(fit_ok_init), "pure_nugget")) {
+      if (identical(init_status, "pure_nugget")) {
         "\n[CK] Primary variogram is a pure nugget, so it has no range"
       } else {
         "\n[CK] Primary variogram gave no usable range"
