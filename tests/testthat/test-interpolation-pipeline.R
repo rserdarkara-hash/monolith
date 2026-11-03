@@ -220,12 +220,12 @@ test_that("parse_map_view splits a view id into surfaces and layer", {
   expect_equal(parse_map_view("nonsense"), list(base = "view_act", layer = "value"))
 })
 
-test_that("map_view_choices offers SE and variance views for variance methods only", {
-  plain <- map_view_choices(has_pred = TRUE, has_resid = TRUE, has_variance = FALSE)
+test_that("map_view_choices offers SE and variance views for the surfaces that have a variance", {
+  plain <- map_view_choices(has_pred = TRUE, has_resid = TRUE)
   expect_false(any(grepl("_se$|_var$", unlist(plain))))
   expect_setequal(unname(plain), c("view_act", "view_pred", "view_comp", "view_resid"))
 
-  krig <- map_view_choices(has_pred = TRUE, has_resid = TRUE, has_variance = TRUE)
+  krig <- map_view_choices(has_pred = TRUE, has_resid = TRUE, variance_surfaces = c("act", "pre"))
   ids <- unlist(krig, use.names = FALSE)
   expect_setequal(ids, c("view_act", "view_pred", "view_comp", "view_resid",
                          "view_act_se", "view_pred_se", "view_comp_se",
@@ -235,8 +235,37 @@ test_that("map_view_choices offers SE and variance views for variance methods on
     pv <- parse_map_view(v)
     expect_equal(if (pv$layer == "value") pv$base else paste0(pv$base, "_", pv$layer), v)
   }
-  actual_only <- unlist(map_view_choices(FALSE, FALSE, TRUE), use.names = FALSE)
+  actual_only <- unlist(map_view_choices(FALSE, FALSE, "act"), use.names = FALSE)
   expect_setequal(actual_only, c("view_act", "view_act_se", "view_act_var"))
+  # A surface whose every locality was kriged with the stand-in has no
+  # variance band: no view of its own, and no comparison view.
+  act_var <- unlist(map_view_choices(TRUE, FALSE, "act"), use.names = FALSE)
+  expect_setequal(act_var, c("view_act", "view_pred", "view_comp", "view_act_se", "view_act_var"))
+  pre_var <- unlist(map_view_choices(TRUE, FALSE, "pre"), use.names = FALSE)
+  expect_setequal(pre_var, c("view_act", "view_pred", "view_comp", "view_pred_se", "view_pred_var"))
+  # A Predicted variance without a Predicted surface offers nothing.
+  expect_false(any(grepl("_se$", unlist(map_view_choices(FALSE, FALSE, "pre")))))
+})
+
+test_that("a constant map layer's legend states its value", {
+  # leaflet's numeric legend labels a zero-width range with nothing, and one
+  # narrower than its precision with one number repeated: a pure nugget's mean
+  # or SE would show a legend without a value.
+  lg_labels <- function(v, digits) {
+    pal <- leaflet::colorNumeric("viridis", v)
+    (leaflet::leaflet() |> leaflet::addLegend(pal = pal, values = v,
+      labFormat = leaflet::labelFormat(digits = digits)))$x$calls[[1]]$args[[1]]$labels
+  }
+  expect_identical(as.character(lg_labels(c(2.5, 2.5), 6)), "")                       # the premise
+  expect_identical(map_legend_scale(c(2.5, 2.5))$constant, "2.5")
+  expect_identical(map_legend_scale(c(17, 17 + 3e-15))$constant, "17")
+  expect_identical(map_legend_scale(c(12345.6, 12345.6))$constant, "12,345.6")
+  ranged <- map_legend_scale(c(2.5, 3.5))
+  expect_null(ranged$constant)
+  expect_identical(ranged$digits, 2)
+  expect_identical(map_legend_scale(c(1, 1.05))$digits, 4)
+  expect_null(map_legend_scale(c(1, 1.005))$constant)
+  expect_identical(map_legend_scale(c(1, 1.005))$digits, 6)
 })
 
 test_that("uncertainty maps never take a diverging palette", {
@@ -2732,6 +2761,304 @@ test_that("a degenerate target is flagged on its fitted variogram", {
   fit <- suppressWarnings(robust_vgm_fit(v_emp, flat$v))
   expect_true(vgm_target_degenerate(fit))
   expect_identical(names(vgm_params_table_df(list(LocA_act = fit), "LocA")), "Status")
+})
+
+# ── Stand-in variogram: predictions kept, variance withheld ────────────────
+# The fit_failed stand-in (fewer than 5 usable lag bins, or a zero empirical
+# variogram) is a seed, not an estimate. Rescaling a covariance leaves the
+# kriging weights unchanged and scales the kriging variance, so the stand-in's
+# predictions stand while its variance is the seed's scale: reported as NA,
+# never zero, on the map, in the CV object, through residual kriging and CK.
+
+# Six samples a metre apart on a line: two usable lag bins, so the map's
+# variogram and every leave-one-out fold's is the stand-in. The covariate
+# follows the target loosely, so a trend leaves non-zero residuals.
+standin_line <- function() {
+  sf::st_as_sf(data.frame(x = 450000 + 0:5, y = 5800000, v = c(3, 5, 4, 8, 6, 7),
+                          aux1 = c(1.2, 2.9, 2.2, 5.5, 4.4, 4.8)),
+               coords = c("x", "y"), crs = 32633)
+}
+standin_grid <- function() {
+  sf::st_as_sf(data.frame(x = 450000 + c(0.5, 2.5, 4.5, 2.5), y = 5800000 + c(0, 0, 0, 1)),
+               coords = c("x", "y"), crs = 32633)
+}
+
+test_that("an OK stand-in keeps its predictions and reports no variance", {
+  pts <- standin_line()
+  grid <- standin_grid()
+  lags <- calc_scientific_lags(pts)
+  res <- suppressWarnings(apply_OK(pts, "v", grid, lags, list(cv_strategy = "loocv")))
+  expect_identical(vgm_fit_status(res$fit), "fit_failed")   # the premise
+
+  # Why the variance is withheld: the stand-in at 100 x its sill predicts the
+  # same values with a variance 100 times larger.
+  big <- res$fit
+  big$psill <- 100 * big$psill
+  ref <- gstat::krige(v ~ 1, pts, grid, model = res$fit, debug.level = 0)
+  ref_big <- gstat::krige(v ~ 1, pts, grid, model = big, debug.level = 0)
+  expect_equal(ref_big$var1.pred, ref$var1.pred, tolerance = 1e-10)
+  expect_equal(ref_big$var1.var, 100 * ref$var1.var, tolerance = 1e-8)
+
+  expect_equal(res$res_sf$var1.pred, ref$var1.pred, tolerance = 1e-10)
+  expect_true(all(is.na(res$res_sf$var1.var)))
+  expect_match(res$log_msg, "[Uncertainty] region (Actual): no kriging variance", fixed = TRUE)
+  # Every fold refits the stand-in from its training rows: its predictions
+  # score, its variance is withheld.
+  expect_true(all(.cv_fold_statuses(res$cv_obj) == "fit_failed"))
+  expect_true(all(is.finite(res$cv_obj$var1.pred)))
+  expect_true(all(is.na(res$cv_obj$var1.var)))
+  expect_false(is.na(res$cv_metrics$rmse))
+})
+
+test_that("a constant target krigs the constant and reports no variance, not zero", {
+  pts <- make_test_points(20)
+  pts$v <- 7.5
+  grid <- make_test_grid_safe(pts, res = 200)
+  lags <- calc_scientific_lags(pts)
+  res <- suppressWarnings(apply_OK(pts, "v", grid, lags, list(cv_strategy = "loocv")))
+  expect_identical(vgm_fit_status(res$fit), "fit_failed")
+  expect_equal(res$res_sf$var1.pred, rep(7.5, nrow(grid)))
+  # Constant samples do not establish certainty between them.
+  expect_true(all(is.na(res$res_sf$var1.var)))
+  expect_equal(res$cv_obj$var1.pred, rep(7.5, 20))
+  expect_true(all(is.na(res$cv_obj$var1.var)))
+
+  # The Predicted surface kriged with that stand-in (Fit Actual/Predicted
+  # Separately unticked) withholds it too, though its own values vary.
+  pre <- suppressWarnings(apply_OK(pts, "pv", grid, lags,
+                                   list(cv_strategy = "loocv", shared_fit = res$fit, vgm_col = "v"),
+                                   prefix = "pre"))
+  expect_true(all(is.finite(pre$res_sf$var1.pred)))
+  expect_true(all(is.na(pre$res_sf$var1.var)))
+  expect_true(all(is.na(pre$cv_obj$var1.var)))
+  expect_match(pre$log_msg, "[Uncertainty] region (Predicted)", fixed = TRUE)
+})
+
+test_that("an applied manual model keeps its kriging variance on the same data", {
+  # The user's model is conditional (labelled so), not an unfitted stand-in.
+  pts <- standin_line()
+  grid <- standin_grid()
+  lags <- calc_scientific_lags(pts)
+  manual <- manual_vgm(2, "Sph", 3, 0.5)
+  res <- suppressWarnings(apply_OK(pts, "v", grid, lags, list(cv_strategy = "loocv", pre_fit = manual)))
+  ref <- gstat::krige(v ~ 1, pts, grid, model = manual, debug.level = 0)
+  expect_equal(res$res_sf$var1.var, ref$var1.var, tolerance = 1e-10)
+  expect_true(all(is.finite(res$cv_obj$var1.var)))
+  expect_identical(res$cv_conditional, "applied variogram")
+  expect_no_match(res$log_msg, "[Uncertainty]", fixed = TRUE)
+})
+
+test_that("RK and RFK report no trend-only total when the residual variogram is the stand-in", {
+  pts <- standin_line()
+  grid <- standin_grid()
+  lags <- calc_scientific_lags(pts)
+  ga <- grid
+  ga$aux1 <- c(1.5, 3.4, 4.6, 3.6)
+
+  rk <- suppressWarnings(apply_RK(pts, "v", grid, lags, list(grid_aux = ga, cv_strategy = "loocv"), "aux1"))
+  expect_false(grepl("Falling back to OK", rk$log_msg, fixed = TRUE))
+  expect_identical(vgm_fit_status(rk$fit), "fit_failed")
+  lm_mod <- lm(v ~ aux1, data = sf::st_drop_geometry(pts))
+  tr <- predict(lm_mod, newdata = sf::st_drop_geometry(ga), se.fit = TRUE)
+  dat <- pts
+  dat$residuals <- residuals(lm_mod)
+  kr <- gstat::krige(residuals ~ 1, dat, grid, model = rk$fit, debug.level = 0)
+  expect_equal(rk$res_sf$var1.pred, as.vector(tr$fit + kr$var1.pred), tolerance = 1e-8)
+  # The trend variance exists, but alone it is not the prediction variance.
+  expect_true(all(tr$se.fit^2 > 0))
+  expect_true(all(is.na(rk$res_sf$var1.var)))
+  expect_match(rk$log_msg, "the trend variance alone is not the prediction variance", fixed = TRUE)
+
+  rfk <- suppressWarnings(apply_RFK(pts, "v", grid, lags,
+                                    list(grid_aux = ga, cv_strategy = "loocv", rf_ntree = 50), "aux1"))
+  expect_false(grepl("Falling back to OK", rfk$log_msg, fixed = TRUE))
+  expect_identical(vgm_fit_status(rfk$fit), "fit_failed")
+  dat$residuals <- pts$v - rfk$rf_model$predicted
+  kr <- gstat::krige(residuals ~ 1, dat, grid, model = rfk$fit, debug.level = 0)
+  trend <- predict(rfk$rf_model, sf::st_drop_geometry(ga)["aux1"])
+  expect_equal(rfk$res_sf$var1.pred, as.vector(trend + kr$var1.pred), tolerance = 1e-8)
+  expect_true(all(is.na(rfk$res_sf$var1.var)))
+})
+
+test_that("the OK fallback of a failed RK withholds a stand-in variance", {
+  pts <- standin_line()
+  pts$covA <- 1
+  pts$covB <- 2   # both constant: the screen empties the set and RK falls back
+  grid <- standin_grid()
+  lags <- calc_scientific_lags(pts)
+  res <- suppressWarnings(apply_RK(pts, "v", grid, lags, list(cv_strategy = "loocv"), c("covA", "covB")))
+  expect_match(res$log_msg, "Falling back to OK", fixed = TRUE)
+  expect_identical(vgm_fit_status(res$fit), "fit_failed")
+  expect_true(all(is.finite(res$res_sf$var1.pred)))
+  expect_true(all(is.na(res$res_sf$var1.var)))
+  expect_true(all(is.na(res$cv_obj$var1.var)))
+})
+
+test_that("CK withholds the variance when the target's variogram is the stand-in", {
+  pts <- make_test_points(20)
+  pts$v <- 7.5
+  grid <- make_test_grid_safe(pts, res = 200)
+  lags <- calc_scientific_lags(pts)
+  res <- suppressWarnings(apply_CK(pts, "v", grid, lags, list(cv_strategy = "loocv"), "aux1"))
+  expect_identical(unique(res$res_sf$model_type), "Co-Kriging")   # no OK fallback
+  expect_equal(res$res_sf$var1.pred, rep(7.5, nrow(grid)), tolerance = 1e-8)
+  # The LMC's target sill is fitted to a zero variogram, so gstat's co-kriging
+  # variance is ~0: certainty that constant samples do not establish.
+  expect_true(all(is.na(res$res_sf$var1.var)))
+  expect_true(all(is.na(res$cv_obj$var1.var)))
+  expect_match(res$log_msg, "the target's variogram fit failed", fixed = TRUE)
+
+  # A fitted primary keeps its co-kriging variance.
+  tiny <- golden_sf("tiny")
+  grid_t <- make_test_grid_safe(tiny, res = 800)
+  ga <- grid_t
+  ga$v82 <- seq(min(tiny$v82), max(tiny$v82), length.out = nrow(grid_t))
+  fitted <- suppressWarnings(apply_CK(tiny, "ph", grid_t, calc_scientific_lags(tiny),
+                                      list(grid_aux = ga), "v82"))
+  skip_if(grepl("OK fallback", fitted$log_msg, fixed = TRUE), "CK fell back to OK on this fixture")
+  expect_true(all(is.finite(fitted$res_sf$var1.var)))
+  expect_no_match(fitted$log_msg, "[Uncertainty]", fixed = TRUE)
+})
+
+test_that("a merged surface takes prediction and variance from the same locality", {
+  band <- function(xmin, xmax, pred, var) {
+    r <- terra::rast(terra::ext(xmin, xmax, 0, 100), resolution = 10, crs = "EPSG:32633", nlyrs = 2)
+    names(r) <- c("var1.pred", "var1.var")
+    terra::values(r) <- cbind(rep(pred, terra::ncell(r)), rep(var, terra::ncell(r)))
+    r
+  }
+  withheld <- band(0, 60, 1, NA_real_)   # a stand-in locality
+  fitted <- band(40, 100, 2, 5)
+  at <- function(r, x) unlist(terra::extract(r, cbind(x, 50))[c("var1.pred", "var1.var")])
+
+  m <- merge_wrapped_rasters(list(terra::wrap(withheld), terra::wrap(fitted)))
+  # Overlap: the first locality's prediction, and its (absent) variance, never
+  # the other locality's 5.
+  expect_equal(at(m, 45), c(var1.pred = 1, var1.var = NA))
+  expect_equal(at(m, 75), c(var1.pred = 2, var1.var = 5))
+  expect_equal(at(m, 15), c(var1.pred = 1, var1.var = NA))
+  m2 <- merge_wrapped_rasters(list(fitted, withheld))
+  expect_equal(at(m2, 45), c(var1.pred = 2, var1.var = 5))
+  # The caller's rasters are not altered by the merge.
+  expect_true(all(is.na(terra::values(withheld[["var1.var"]]))))
+
+  # A partly withheld surface keeps its band; an entirely withheld one has
+  # no uncertainty product, not an empty one.
+  expect_identical(names(drop_empty_variance(m)), c("var1.pred", "var1.var"))
+  empty <- drop_empty_variance(merge_wrapped_rasters(list(withheld, band(40, 100, 2, NA_real_))))
+  expect_identical(names(empty), "var1.pred")
+  expect_equal(terra::extract(empty, cbind(75, 50))$var1.pred, 2)
+  expect_identical(names(drop_empty_variance(withheld[["var1.pred"]])), "var1.pred")
+  expect_null(drop_empty_variance(NULL))
+})
+
+test_that("mixed localities: a stand-in locality is blank on the uncertainty surface only", {
+  set.seed(8)
+  item_at <- function(l, x0, y0, constant) {
+    d <- data.frame(x = x0 + runif(30, 0, 900), y = y0 + runif(30, 0, 900))
+    d$v <- if (constant) 7.5 else 5 + d$x / 1e4 + rnorm(30, 0, 0.2)
+    d$pv <- NA_real_
+    list(l = l, pts_data = d,
+         m_params = list(idw_p_act = 2, idw_p_pre = 2, idw_nmax = 12,
+                         tps_lambda_act = -1, tps_lambda_pre = -1,
+                         pre_fit_act = NULL, pre_fit_pre = NULL,
+                         cv_strategy = "auto", vif_threshold = 10))
+  }
+  run <- function(item) {
+    suppressWarnings(run_regional_interpolation(
+      item, "OK", 32635, character(0), NULL, "convex", "fixed", 200,
+      "fixed", 60, "EPSG:32635", FALSE, "actual"))
+  }
+  res_a <- run(item_at("A", 500013.7, 4400021.3, constant = TRUE))
+  res_b <- run(item_at("B", 503517.1, 4402533.9, constant = FALSE))
+  a <- terra::unwrap(res_a$r_a)
+  b <- terra::unwrap(res_b$r_a)
+  expect_match(res_a$log_msg, "[Uncertainty] A (Actual)", fixed = TRUE)
+  expect_identical(names(a), c("var1.pred", "var1.var"))
+  expect_equal(range(terra::values(a[["var1.pred"]], na.rm = TRUE)), c(7.5, 7.5), tolerance = 1e-10)
+  expect_true(all(is.na(terra::values(a[["var1.var"]]))))
+  expect_gt(terra::global(b[["var1.var"]], "notNA")[[1]], 0)
+
+  m <- drop_empty_variance(merge_wrapped_rasters(list(res_a$r_a, res_b$r_a)))
+  expect_identical(names(m), c("var1.pred", "var1.var"))
+  in_a <- terra::crds(a[["var1.pred"]], na.rm = TRUE)
+  in_b <- terra::crds(b[["var1.pred"]], na.rm = TRUE)
+  expect_equal(terra::extract(m, in_a)$var1.pred, rep(7.5, nrow(in_a)), tolerance = 1e-10)
+  expect_true(all(is.na(terra::extract(m, in_a)$var1.var)))
+  expect_equal(terra::extract(m, in_b)$var1.var,
+               as.numeric(terra::values(b[["var1.var"]], na.rm = TRUE)))
+  # Every locality a stand-in: the surface has no variance band at all.
+  expect_identical(names(drop_empty_variance(merge_wrapped_rasters(list(res_a$r_a)))), "var1.pred")
+})
+
+test_that("values constant up to rounding report no variance in any engine", {
+  # A target differing only in noise digits is fitted, but to rounding: its
+  # parameters are not reported (VGM_DEGENERATE_NOTE), and neither is the
+  # kriging variance they give, an SE that reads as zero.
+  pts <- make_test_points(20)
+  pts$v <- 7.5 + seq_len(20) * 1e-10
+  grid <- make_test_grid_safe(pts, res = 200)
+  lags <- calc_scientific_lags(pts)
+  ok <- suppressWarnings(apply_OK(pts, "v", grid, lags, list(cv_strategy = "loocv")))
+  expect_false(identical(vgm_fit_status(ok$fit), "fit_failed"))                  # the premises
+  expect_true(vgm_target_degenerate(ok$fit))
+  ref <- gstat::krige(v ~ 1, pts, grid, model = ok$fit, debug.level = 0)
+  expect_lt(max(ref$var1.var), 1e-15)
+  expect_equal(ok$res_sf$var1.pred, ref$var1.pred, tolerance = 1e-12)
+  expect_true(all(is.na(ok$res_sf$var1.var)))
+  expect_true(all(is.na(ok$cv_obj$var1.var)))
+  expect_match(ok$log_msg, "constant up to rounding", fixed = TRUE)
+
+  # Shared onto a Predicted surface whose own values vary (sd ~10), that fit
+  # gave an SE of ~5e-10.
+  pre <- suppressWarnings(apply_OK(pts, "pv", grid, lags,
+                                   list(cv_strategy = "loocv", shared_fit = ok$fit, vgm_col = "v"),
+                                   prefix = "pre"))
+  expect_true(all(is.finite(pre$res_sf$var1.pred)))
+  expect_true(all(is.na(pre$res_sf$var1.var)))
+  expect_true(all(is.na(pre$cv_obj$var1.var)))
+
+  ck <- suppressWarnings(apply_CK(pts, "v", grid, lags, list(cv_strategy = "loocv"), "aux1"))
+  expect_identical(unique(ck$res_sf$model_type), "Co-Kriging")
+  expect_true(all(is.na(ck$res_sf$var1.var)))
+  expect_true(all(is.na(ck$cv_obj$var1.var)))
+})
+
+test_that("RK and RFK judge their residuals at the target's scale", {
+  # Judged on themselves, rounding residuals pass the degeneracy rule (sd and
+  # max|r| are both ~1e-15).
+  rounding <- c(1e-15, -2e-15, 3e-15, -1e-15)
+  expect_false(.is_degenerate_covariate(rounding))
+  expect_true(.residuals_degenerate(rounding, c(1, 5, 9, 3)))
+  expect_true(.residuals_degenerate(c(0.5, -0.2, 0.1, -0.4), rep(7.5, 4)))       # a constant target
+  expect_false(.residuals_degenerate(c(0.5, -0.2, 0.1, -0.4), c(1, 5, 9, 3)))
+
+  # A constant target, and one a linear trend reproduces: lm leaves rounding
+  # residuals or exact zeros, as the arithmetic falls, and neither may report
+  # the ~1e-30 variance a fit to rounding gives.
+  pts <- make_test_points(20)
+  grid <- make_test_grid_safe(pts, res = 200)
+  lags <- calc_scientific_lags(pts)
+  ga <- grid
+  ga$aux1 <- seq(0, 100, length.out = nrow(grid))
+  for (case in list(list(v = rep(7.5, 20), map = rep(7.5, nrow(grid))),
+                    list(v = 2 + 3 * pts$aux1, map = 2 + 3 * ga$aux1))) {
+    d <- pts
+    d$v <- case$v
+    rk <- suppressWarnings(apply_RK(d, "v", grid, lags, list(grid_aux = ga, cv_strategy = "loocv"), "aux1"))
+    expect_false(grepl("Falling back to OK", rk$log_msg, fixed = TRUE))
+    expect_true(vgm_target_degenerate(rk$fit))
+    expect_equal(rk$res_sf$var1.pred, case$map, tolerance = 1e-8)
+    expect_true(all(is.na(rk$res_sf$var1.var)))
+  }
+
+  d <- pts
+  d$v <- 7.5
+  rfk <- suppressWarnings(apply_RFK(d, "v", grid, lags,
+                                    list(grid_aux = ga, cv_strategy = "loocv", rf_ntree = 50), "aux1"))
+  expect_false(grepl("Falling back to OK", rfk$log_msg, fixed = TRUE))
+  expect_true(vgm_target_degenerate(rfk$fit))
+  expect_true(all(is.na(rfk$res_sf$var1.var)))
 })
 
 test_that("an Actual-only run carries no ML-prediction products", {

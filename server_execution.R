@@ -1135,17 +1135,18 @@
     valid_pr <- Filter(Negate(is.null), rv$rast_list_point_res)
     
     if(length(valid_a) > 0) {
-      rv$rast <- merge_wrapped_rasters(valid_a)
+      rv$rast <- drop_empty_variance(merge_wrapped_rasters(valid_a))
       register_export_item("map_actual", paste(meta$label, "- Actual Map -", m_lab), "map", rv$rast, meta$category,
                            legend = map_legend_title(meta$label, meta$unit), surface = "act")
       
       # Uncertainty products for the kriging engines only (IDW's var1.var is
-      # all NA, TPS has none), as in the Map Viewer.
+      # all NA, TPS has none), and only for a surface where some locality
+      # reported a variance (vgm_variance_withheld()), as in the Map Viewer.
       temp_rast_a <- terra::unwrap(rv$rast)
       if (method_has_variance(current_method) && "var1.var" %in% names(temp_rast_a)) {
-        # The Map Viewer's SE/variance views key on this flag, so menu and
-        # registry agree.
-        rv$disp$has_variance <- TRUE
+        # The Map Viewer's SE/variance views key on this, so menu and registry
+        # agree.
+        rv$disp$variance_surfaces <- c(rv$disp$variance_surfaces, "act")
         # Registered as derivations of the surface (export_item_obj()), not
         # copies. `name` is the GeoTIFF band description, so the SE is named
         # var1.se.
@@ -1158,14 +1159,14 @@
       }
     }
     if(length(valid_p) > 0) {
-      rv$rast_pred <- merge_wrapped_rasters(valid_p)
+      rv$rast_pred <- drop_empty_variance(merge_wrapped_rasters(valid_p))
       rv$has_predictions <- TRUE
       register_export_item("map_predicted", paste(meta$label, "- Predicted Map -", m_lab), "map", rv$rast_pred, meta$category,
                            legend = map_legend_title(meta$label, meta$unit), surface = "pre")
       
       temp_rast_p <- terra::unwrap(rv$rast_pred)
       if (method_has_variance(current_method) && "var1.var" %in% names(temp_rast_p)) {
-        rv$disp$has_variance <- TRUE
+        rv$disp$variance_surfaces <- c(rv$disp$variance_surfaces, "pre")
         register_export_item("map_uncert_var_pre", paste(meta$label, "- Uncertainty Map (Variance - Predicted) -", m_lab), "map", NULL, meta$category, kind = "uncertainty",
                              legend = map_legend_title(meta$label, meta$unit, "var"),
                              derived = list(src = temp_rast_p, layer = "var1.var", name = "var1.var"))

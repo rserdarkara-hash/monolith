@@ -289,7 +289,7 @@ ui_sidebar_panel <- sidebarPanel(width = 3,
             # Keyed to the DISPLAYED run's method (disp_method), not the next
             # run's.
             conditionalPanel(condition = "['OK', 'RK', 'RFK', 'CK'].includes(output.disp_method)",
-              p(style="font-size: 0.8em; opacity: 0.8; margin-bottom: 0;", "Standard-error and variance maps of the displayed run are in the Map Viewer's view menu. SE shares the variable's unit; variance is in its squared units. Both always use a continuous sequential palette (a diverging palette choice is replaced by Viridis); Agronomical/Binned classes apply to concentration maps only.")
+              p(style="font-size: 0.8em; opacity: 0.8; margin-bottom: 0;", "Standard-error and variance maps of the displayed run are in the Map Viewer's view menu. SE shares the variable's unit; variance is in its squared units. A locality whose variogram could not be estimated from the data (a failed fit, or values that are constant up to rounding) has neither. Both always use a continuous sequential palette (a diverging palette choice is replaced by Viridis); Agronomical/Binned classes apply to concentration maps only.")
             ),
             conditionalPanel(condition = "!['OK', 'RK', 'RFK', 'CK'].includes(output.disp_method)",
               p(style="font-size: 0.8em; opacity: 0.8;", "Uncertainty mapping becomes available once a Kriging-based map has been generated.")

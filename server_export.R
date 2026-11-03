@@ -375,9 +375,9 @@
     # the currently selected view.
     meta <- get_display_meta(); req(meta)
     view <- map_view_base()
-    # The run's own has_variance decides, so a stale menu value cannot export
-    # an uncertainty layer from a concentration map.
-    layer <- if (isTRUE(meta$has_variance)) map_view_layer() else "value"
+    # The run's own variance surfaces decide, so a stale menu value cannot
+    # export an uncertainty layer from a concentration map.
+    layer <- if (length(meta$variance_surfaces)) map_view_layer() else "value"
     # An SE or variance view exports that layer as its own single-band raster,
     # the same product the run registered as "Uncertainty Map".
     uncert_layer <- function(r) {
@@ -473,7 +473,7 @@
                               condition = "input.styler_format == 'gtiff'",
                               tags$p(style = "font-size: 0.8em; color: var(--mn-text-2); background: var(--mn-surface-2); border: 1px solid var(--mn-line); border-left: 2px solid var(--mn-accent); padding: 8px; border-radius: 3px;",
                                      icon("info-circle"),
-                                     " GeoTIFF writes the raster values, coordinate reference system and extent of the displayed surface, in the run's Target Mapping CRS, for use in QGIS or ArcGIS. Typography, palette, DPI and layout settings do not apply to it. Kriging surfaces are written as multi-band files (prediction, then variance).")
+                                     " GeoTIFF writes the raster values, coordinate reference system and extent of the displayed surface, in the run's Target Mapping CRS, for use in QGIS or ArcGIS. Typography, palette, DPI and layout settings do not apply to it. Kriging surfaces are written as multi-band files (prediction, then variance; the variance is empty over a locality whose variogram could not be estimated, and absent when no locality's could).")
                             ),
                             if (image_only_map) {
                               tags$p(style = "font-size: 0.8em; color: var(--mn-text-2); background: var(--mn-surface-2); border: 1px solid var(--mn-line); border-left: 2px solid var(--mn-warn); padding: 8px; border-radius: 3px;",

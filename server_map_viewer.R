@@ -101,8 +101,8 @@
   # retires the surplus (remove_surplus_raster_images()).
   map_raster_count <- new.env(parent = emptyenv())
 
-  # The surface a map widget's label shows, whose own class breaks style it;
-  # NULL for the residual maps, which are never classified.
+  # The surface a map widget's label shows, whose own class breaks and variance
+  # band style it; NULL for the residual maps, which have neither.
   class_surface_of <- function(lab) {
     if (lab %in% c("actual", "Actual")) "act"
     else if (lab %in% c("pred", "pred_ss", "Predicted")) "pre"
@@ -152,10 +152,11 @@
                            layerId = raster_img_layer_id(n_img))
     }
     legend_id <- "rast_legend"
-    # The variance-band test guards against a stale view-menu value from the
-    # previous run.
+    # The surface's own variance band decides, so a stale view-menu value (the
+    # previous run's) cannot style a surface that has none.
     uncert_layer <- map_view_layer()
-    is_uncert_view <- uncert_layer %in% c("se", "var") && isTRUE(meta$has_variance)
+    is_uncert_view <- uncert_layer %in% c("se", "var") &&
+      isTRUE(class_surface_of(lab) %in% meta$variance_surfaces)
     # NULL for an uncertainty view on a raster without a variance band: that
     # locality is left undrawn.
     select_active_layer <- function(r_w) {
@@ -233,9 +234,12 @@
             m <- add_img(m, al, pal)
           }
 
-          v_range <- diff(range(vv_scale, na.rm=TRUE))
-          d_format <- if(is.na(v_range)) 2 else if(v_range < 0.01) 6 else if(v_range < 0.1) 4 else 2
-          m <- m %>% leaflet::addLegend(pal = pal, values = vv_scale, title = legend_var_title(legend_title), labFormat = labelFormat(digits = d_format), layerId = legend_id)
+          lg <- map_legend_scale(vv_scale)
+          m <- if (!is.null(lg$constant)) {
+            m %>% leaflet::addLegend(colors = pal(mean(vv_scale)), labels = lg$constant, opacity = 0.8, title = legend_var_title(legend_title), layerId = legend_id)
+          } else {
+            m %>% leaflet::addLegend(pal = pal, values = vv_scale, title = legend_var_title(legend_title), labFormat = labelFormat(digits = lg$digits), layerId = legend_id)
+          }
         } else {
           m <- m %>% leaflet::removeControl(legend_id)
         }
@@ -550,15 +554,15 @@
 
   # View switcher: only the surfaces the committed run computed, so switching
   # is instant and a sidebar change cannot blank the map. SE/variance views
-  # are offered when the displayed run PRODUCED a variance band
-  # (rv$disp$has_variance). Re-renders only on run dispatch/completion,
+  # are offered for each surface the displayed run produced a variance band
+  # for (rv$disp$variance_surfaces). Re-renders only on run dispatch/completion,
   # defaulting to the run's configured view.
   output$map_view_ui <- renderUI({
     req(rv$disp)
     d <- isolate(rv$disp)
     choices <- map_view_choices(has_pred = length(rv$rast_list_pre) > 0,
                                 has_resid = length(rv$rast_list_res) > 0,
-                                has_variance = isTRUE(d$has_variance))
+                                variance_surfaces = d$variance_surfaces)
     all_ids <- unlist(choices, use.names = FALSE)
 
     default_view <- if (identical(d$value_type, "resid")) "view_resid"
@@ -584,8 +588,8 @@
     map_view_layer(pv$layer)
   }, priority = 100)
 
-  map_layer_title <- function() {
-    if (!isTRUE(rv$disp$has_variance)) return("")
+  map_layer_title <- function(surface) {
+    if (!surface %in% rv$disp$variance_surfaces) return("")
     switch(map_view_layer(), se = ": Standard Error", var = ": Variance", "")
   }
 
@@ -602,20 +606,21 @@
 
   output$main_map_title <- renderText({
     d <- rv$disp; req(d)
-    type_lab <- if (identical(map_view_base(), "view_pred")) disp_pred_label(d, long = TRUE) else "Actual Data View"
-    paste0(d$label, " - ", type_lab, map_layer_title(), disp_method_label(d))
+    pred_view <- identical(map_view_base(), "view_pred")
+    type_lab <- if (pred_view) disp_pred_label(d, long = TRUE) else "Actual Data View"
+    paste0(d$label, " - ", type_lab, map_layer_title(if (pred_view) "pre" else "act"), disp_method_label(d))
   })
 
   output$comp_left_title <- renderText({
     d <- rv$disp; req(d)
     if (identical(map_view_base(), "view_resid")) return(paste0(d$label, " - Interpolated Residuals", disp_method_label(d)))
-    paste0(d$label, " - Actual Data", map_layer_title(), disp_method_label(d))
+    paste0(d$label, " - Actual Data", map_layer_title("act"), disp_method_label(d))
   })
 
   output$comp_right_title <- renderText({
     d <- rv$disp; req(d)
     if (identical(map_view_base(), "view_resid")) return(paste0(d$label, " - Point Residuals", disp_method_label(d)))
-    paste0(d$label, " - ", disp_pred_label(d), map_layer_title(), disp_method_label(d))
+    paste0(d$label, " - ", disp_pred_label(d), map_layer_title("pre"), disp_method_label(d))
   })
 
   observeEvent(list(input$base_map_layer, carto_api_key()), {

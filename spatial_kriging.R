@@ -6,7 +6,8 @@
 #' Engines with a genuine prediction variance: the kriging family. gstat::idw()
 #' (and the TPS IDW fallback) return an all-NA `var1.var`, so the column's
 #' presence is not enough. Used by rasterization, the export registry and the
-#' Map Viewer's SE/variance views.
+#' Map Viewer's SE/variance views. A kriging surface still has none where its
+#' variogram supports none (vgm_variance_withheld()).
 METHODS_WITH_VARIANCE <- c("OK", "RK", "RFK", "CK")
 
 # RFK grid trend prediction in blocks of this many matrix cells (predict.all
@@ -158,14 +159,26 @@ select_idw_power <- function(xy, v, strategy, nmax, seed = CV_FOLD_SEED, powers 
 # floor would drop legitimately small-unit covariates (a 0-1 fraction with sd
 # 5e-4 has var 2.5e-7) even under Keep All. Below ~1e-8 relative spread the
 # values differ only in noise digits, which cor()/solve() cannot handle.
-.is_degenerate_covariate <- function(col) {
+# `scale` replaces that magnitude for values centred on zero.
+.is_degenerate_covariate <- function(col, scale = NULL) {
   col <- col[is.finite(col)]
   if (length(col) < 2L) return(TRUE)
   if (length(unique(col)) < 2L) return(TRUE)
-  scale_ref <- max(abs(col))
+  scale_ref <- scale %||% max(abs(col))
   if (!is.finite(scale_ref) || scale_ref == 0) return(TRUE)
   s <- stats::sd(col)
   !is.finite(s) || s <= 1e-8 * scale_ref
+}
+
+#' TRUE when trend residuals carry no usable variance, so that their variogram
+#' describes rounding: the residuals of a target without usable variance, or
+#' residuals within the same floor of the target's magnitude (a trend that
+#' reproduces the target). Judged on the residuals alone, a constant target's
+#' rounding residuals would pass (sd and max|r| are both about 1e-15).
+.residuals_degenerate <- function(residuals, target) {
+  target <- target[is.finite(target)]
+  .is_degenerate_covariate(target) ||
+    .is_degenerate_covariate(residuals, scale = max(abs(target)))
 }
 
 #' Covariate screen for RK/RFK/CK and the classification suite. Reports pairs
@@ -679,7 +692,8 @@ rf_infinitesimal_jackknife_var <- function(pred_individual, inbag, chunk = 2000L
 #' kriged. `fixed_fit` (an applied manual model) is reused in every fold and
 #' the CV is labelled conditional. `vgm_col` fits the variogram on the
 #' MEASURED values of the training rows that carry one (the Predicted surface
-#' kriged with the measured variogram).
+#' kriged with the measured variogram). A fold whose fit supports no variance
+#' (vgm_variance_withheld()) keeps its predictions and returns none.
 .ok_fold_fun <- function(form_ok, target_var, fixed_fit = NULL, vgm_col = NULL) {
   function(train, newdata, i) {
     if (!is.null(fixed_fit)) {
@@ -697,7 +711,7 @@ rf_infinitesimal_jackknife_var <- function(pred_individual, inbag, chunk = 2000L
       fit_i <- robust_vgm_fit(v_i, vg[[vcol]])
     }
     kr <- krige(form_ok, train, newdata, model = fit_i, debug.level = 0)
-    list(pred = kr$var1.pred, var = kr$var1.var,
+    list(pred = kr$var1.pred, var = if (vgm_variance_supported(fit_i)) kr$var1.var,
          meta = list(vgm_status = vgm_fit_status(fit_i)))
   }
 }
@@ -736,6 +750,40 @@ rf_infinitesimal_jackknife_var <- function(pred_individual, inbag, chunk = 2000L
   do.call(rbind, rows)
 }
 
+#' Withhold a surface's kriging variance (NA, never zero) when `why`
+#' (.variance_withheld_why()) gives a reason, and say so in the run log. The
+#' predictions are kept: the weights do not depend on the covariance scale.
+.withhold_variance <- function(res, l, prefix, why) {
+  if (is.null(why)) return(res)
+  res$res_sf$var1.var <- rep(NA_real_, nrow(res$res_sf))
+  res$log_msg <- paste0(res$log_msg, "\n[Uncertainty] ", l, " (",
+                        if (identical(prefix, "pre")) "Predicted" else "Actual",
+                        "): no kriging variance or standard error is reported, because ", why,
+                        "; the predictions are kept.")
+  res
+}
+
+#' The run-log reason no kriging variance comes from a surface kriged with
+#' `fit` (vgm_variance_withheld()), NULL when one does. `what` names the
+#' variogram; `ck` words it for a co-kriging target, whose own fit seeds the
+#' LMC rather than kriging the map.
+.variance_withheld_why <- function(fit, what = "variogram", ck = FALSE) {
+  cause <- vgm_variance_withheld(fit)
+  if (is.null(cause)) return(NULL)
+  if (ck) {
+    return(switch(cause,
+      stand_in = paste("the target's variogram fit failed, so the co-kriging range is a seed and the",
+                       "target's sills rest on an empirical variogram with nothing to estimate"),
+      noise_floor = paste("the target's values are constant up to rounding, so its sills in the",
+                          "coregionalization describe rounding, not the field")))
+  }
+  switch(cause,
+    stand_in = paste("the", what, "fit failed and the stand-in model's sill and range are not",
+                     "estimated from the data"),
+    noise_floor = paste("the", what, "was fitted to values that are constant up to rounding, so",
+                        "its sill describes rounding, not the field"))
+}
+
 # Shared "covariate engine failed, fall back to Ordinary Kriging" tail of
 # apply_kriging_pipeline() (RK/RFK) and apply_CK(): refits the variogram of the
 # measured values and runs the same CV as every other path.
@@ -753,6 +801,7 @@ rf_infinitesimal_jackknife_var <- function(pred_individual, inbag, chunk = 2000L
   res$fit <- robust_vgm_fit(res$v_emp, data[[target_var]])
   res$res_sf <- krige(form_ok, data, grid_p, model = res$fit, debug.level = 0)
   if (tag_model_type) res$res_sf$model_type <- "Ordinary Kriging (Fallback)"
+  res <- .withhold_variance(res, l, prefix, .variance_withheld_why(res$fit))
   # Same plan, fold runner and schema as every kriging engine; the fallback
   # never reuses a supplied model (nothing was applied to this surface).
   fold_okfb <- .ok_fold_fun(form_ok, target_var)
@@ -784,7 +833,8 @@ rf_infinitesimal_jackknife_var <- function(pred_individual, inbag, chunk = 2000L
 #' RFK (randomForest) fit a trend on the screened covariates and krige its
 #' residuals, adding the trend variance to the kriging variance. A failed RK/RFK
 #' falls back to OK with a named warning. Returns the init_interpolation_res()
-#' list with grid predictions in `res_sf` (`var1.pred`, `var1.var`).
+#' list with grid predictions in `res_sf` (`var1.pred`, `var1.var`; the variance
+#' is NA where the kriged variogram supports none, .withhold_variance()).
 apply_kriging_pipeline <- function(engine = c("OK", "RK", "RFK"), data, target_var, grid_p, lags, method_params, aux_vars = NULL, l = "region", prefix = "act", vif_threshold = 10) {
   engine <- match.arg(engine)
   res <- init_interpolation_res()
@@ -815,6 +865,9 @@ apply_kriging_pipeline <- function(engine = c("OK", "RK", "RFK"), data, target_v
     res <- .run_kriging_cv(res, cv_one, method_params, data, "OK", l, prefix)
     res <- .log_vgm_fold_status(res, "OK", l)
     res$res_sf <- krige(form_ok, data, grid_p, model = res$fit, debug.level = 0)
+    # No variance from a fit that supports none, a measured fit shared onto
+    # the Predicted surface included (whose own values vary).
+    res <- .withhold_variance(res, l, prefix, .variance_withheld_why(res$fit))
 
     # gstat silently returns an all-NA surface when the system is singular
     # (e.g. a zero-nugget Gaussian over samples a centimetre apart). The model
@@ -879,11 +932,12 @@ apply_kriging_pipeline <- function(engine = c("OK", "RK", "RFK"), data, target_v
         res$model_summary <- summary(lm_mod)
         
         data$residuals <- residuals(lm_mod)
-        
+
         res$v_emp <- variogram(residuals ~ 1, data, width = lags$width, cutoff = lags$cutoff)
-        res$fit <- robust_vgm_fit(res$v_emp, data$residuals)
+        res$fit <- robust_vgm_fit(res$v_emp, data$residuals,
+                                  .residuals_degenerate(data$residuals, data[[target_var]]))
         res_krig <- krige(residuals ~ 1, data, grid_p, model = res$fit, debug.level = 0)
-        
+
         pred_trend <- predict(lm_mod, newdata = grid_aux, se.fit = TRUE)
         trend_var <- (pred_trend$se.fit)^2
         
@@ -915,9 +969,10 @@ apply_kriging_pipeline <- function(engine = c("OK", "RK", "RFK"), data, target_v
         res$rf_model <- rf_mod
         
         data$residuals <- data[[target_var]] - rf_mod$predicted
-        
+
         res$v_emp <- variogram(residuals ~ 1, data, width = lags$width, cutoff = lags$cutoff)
-        res$fit <- robust_vgm_fit(res$v_emp, data$residuals)
+        res$fit <- robust_vgm_fit(res$v_emp, data$residuals,
+                                  .residuals_degenerate(data$residuals, data[[target_var]]))
         res_krig <- krige(residuals ~ 1, data, grid_p, model = res$fit, debug.level = 0)
         
         rfk_unc <- if (!is.null(method_params$rfk_uncertainty)) method_params$rfk_uncertainty else "jackknife"
@@ -975,7 +1030,11 @@ apply_kriging_pipeline <- function(engine = c("OK", "RK", "RFK"), data, target_v
         res <- .run_kriging_cv(res, cv_rfk, method_params, data, "RFK", l, prefix)
         res <- .log_vgm_fold_status(res, "RFK", l)
       }
-      res
+      # The total needs the residual kriging variance; the trend variance alone
+      # is not the prediction variance, so nothing is reported in its place.
+      why <- .variance_withheld_why(res$fit, "residual variogram")
+      if (!is.null(why)) why <- paste(why, "(the trend variance alone is not the prediction variance)")
+      .withhold_variance(res, l, prefix, why)
     }, error = function(e) {
       res$log_msg <- paste0(res$log_msg, "\n", engine, " failed: ", e$message, ". Falling back to OK.")
       res$res_sf <- NULL
@@ -1057,9 +1116,10 @@ CK_MIN_COLLOCATED <- 10L
 #'
 #' Returns `g` (fitted gstat object, NULL on failure) with `monolith_ids` (id ->
 #' column) and `monolith_vm` (the empirical variogram fitted), `error_msg`, the
-#' run-log text, whether the range seed was the extent heuristic, the target's
-#' id, `counts` (per covariate: rows measuring it, and how many carry the
-#' target) and `design` ("isotopic" or "heterotopic").
+#' run-log text, whether the range seed was the extent heuristic, `variance_why`
+#' (why no co-kriging variance is reported, NULL when it is), the target's id,
+#' `counts` (per covariate: rows measuring it, and how many carry the target)
+#' and `design` ("isotopic" or "heterotopic").
 .ck_fit_lmc <- function(target_rows, extra_rows, target_var, aux_vars, lags, ck_nmax) {
   log_msg <- ""
   # sp's make.names() breaks non-syntactic columns, so the LMC is fitted on
@@ -1183,17 +1243,22 @@ CK_MIN_COLLOCATED <- 10L
     fit
   }, error = function(e) structure(paste0("LMC Fit Failed: ", e$message, ". Falling back to OK."),
                                    class = "ck_lmc_error"))
+  # Where the target's own variogram supports no variance, neither do the LMC's
+  # target sills: with the stand-in they rest on an empty or zero variogram
+  # under a seeded range, on a target constant up to rounding they describe
+  # rounding (a constant target reported a co-kriging variance of ~1e-62).
+  variance_why <- .variance_withheld_why(fit_ok_init, ck = TRUE)
   if (inherits(fit_obj, "ck_lmc_error")) {
     return(list(g = NULL, error_msg = as.character(fit_obj),
                 log_msg = paste0(log_msg, as.character(fit_obj)),
-                heuristic_seed = heuristic_seed, target_id = ids[1],
-                counts = counts, design = design))
+                heuristic_seed = heuristic_seed, variance_why = variance_why,
+                target_id = ids[1], counts = counts, design = design))
   }
   attr(fit_obj, "monolith_ids") <- stats::setNames(vars, ids)
   list(g = fit_obj, error_msg = NULL,
        log_msg = paste0(log_msg, "\nLMC fitted with correct.diagonal = 1.01 (standard stabilization applied to every CK fit to keep the coregionalization matrices positive definite)."),
-       heuristic_seed = heuristic_seed, target_id = ids[1],
-       counts = counts, design = design)
+       heuristic_seed = heuristic_seed, variance_why = variance_why,
+       target_id = ids[1], counts = counts, design = design)
 }
 
 #' The run-log line naming a co-kriging surface's design: per covariate, the
@@ -1332,7 +1397,8 @@ apply_CK <- function(data, target_var, grid_p, lags, method_params, aux_vars, l 
           fit_i <- .ck_fit_lmc(train, extra, target_var, kept_i, calc_scientific_lags(train), ck_nmax)
           if (is.null(fit_i$g)) stop(fit_i$error_msg)
           p <- predict(fit_i$g, newdata, debug.level = 0)
-          list(pred = p[[paste0(fit_i$target_id, ".pred")]], var = p[[paste0(fit_i$target_id, ".var")]],
+          list(pred = p[[paste0(fit_i$target_id, ".pred")]],
+               var = if (is.null(fit_i$variance_why)) p[[paste0(fit_i$target_id, ".var")]],
                meta = list(kept = kept_i, heuristic_seed = fit_i$heuristic_seed))
         }
         cv <- run_kriging_folds(pop, target_var, row_id, folds, fold_ck,
@@ -1361,6 +1427,7 @@ apply_CK <- function(data, target_var, grid_p, lags, method_params, aux_vars, l 
         res$res_sf <- NULL
       } else {
         res$res_sf <- res_sf_or_err
+        res <- .withhold_variance(res, l, prefix, lmc$variance_why)
       }
     }
     res
@@ -1677,7 +1744,7 @@ apply_TPS <- function(data, target_var, grid_p, method_params, l = "region", pre
         # The smoothest end of the family: nothing lies beyond it to search.
         sprintf(paste0("%s chose the smoothest end of the spline family, the least-squares plane ",
                        "(effective df %.2f; a plane has df 3), and nothing lies beyond it to search: at ",
-                       "this sampling the data show no spatial structure beyond a linear trend, and the ",
+                       "this sampling GCV selects no spatial structure beyond a linear trend, and the ",
                        "map is that trend."), mode, res$tps_fit$eff_df)
       } else {
         sprintf("%s produced a near-planar TPS surface (effective df %.2f; a plane has df 3). The map is dominated by a linear trend.",

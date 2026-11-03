@@ -141,7 +141,8 @@ VGM_SSE_TIE_REL <- 1e-8
 # Gaussian is left to manual models: it implies an analytic, infinitely smooth
 # field (Stein 1999), and on the reference data the best other family
 # cross-validated better in 36 of the 50 pairs the Gaussian won on the fitting
-# criterion. Matern is nu = 1.5, as in manual_vgm().
+# criterion (each model held fixed across the folds: exploratory evidence, not
+# a general verdict on the Gaussian). Matern is nu = 1.5, as in manual_vgm().
 VGM_AUTOFIT_FAMILIES <- c("Sph", "Exp", "Mat")
 
 # The range profile spans practical ranges from max lag / 100 (the lower edge
@@ -161,7 +162,9 @@ VGM_RANGE_CEILING_MULT <- 10
 VGM_CONTENDER_REL <- 1e-3
 
 # A fit whose equally-fitting nugget shares span more than one percentage point
-# has a nugget the data do not identify.
+# has a nugget the binned empirical variogram does not fix under the criterion.
+# The set holds numerically equivalent fits, not a confidence interval: a
+# narrow one does not show that the data estimate the nugget precisely.
 VGM_NUGGET_ID_WIDTH <- 0.01
 
 # ── Fit state ────────────────────────────────────────────────────────────────
@@ -170,7 +173,8 @@ VGM_NUGGET_ID_WIDTH <- 0.01
 #
 #   fit_failed        fewer than 5 usable empirical bins, or every semivariance
 #                     zero: a stand-in that is not estimated from the data
-#   pure_nugget       no eligible structured model fits better than a flat line
+#   pure_nugget       no eligible structured model: every family's optimum is
+#                     flat, or a structured Matern was refused (pure_nugget_cause)
 #   range_unresolved  practical range outside the lag support
 #   ok                range inside that span
 VGM_FIT_STATUSES <- c("fit_failed", "pure_nugget", "range_unresolved", "ok")
@@ -199,6 +203,21 @@ vgm_status_label <- function(status) {
 vgm_target_degenerate <- function(fit) {
   isTRUE(attr(fit, "vgm_diagnostics")$target_degenerate)
 }
+
+#' Why no kriging variance may be reported from `fit`, NULL when it may:
+#' "stand_in" for the `fit_failed` stand-in, whose nugget share, sill and range
+#' are seeds, not estimates; "noise_floor" for a fit to values without usable
+#' variance (`target_degenerate`), which describes rounding, as its unreported
+#' parameters do. Kriging weights do not change when a covariance is rescaled,
+#' so the predictions stand; the variance follows the seeded or noise-level
+#' sill (x100 sill, x100 variance) and is withheld as NA, never zero. Fitted
+#' models and applied manual ones (conditional, but the user's) keep it.
+vgm_variance_withheld <- function(fit) {
+  if (identical(vgm_fit_status(fit), "fit_failed")) "stand_in"
+  else if (vgm_target_degenerate(fit)) "noise_floor"
+}
+
+vgm_variance_supported <- function(fit) is.null(vgm_variance_withheld(fit))
 
 # Is the empirical variogram still climbing at the cutoff? The last third of
 # the bins against the third before it; a rise above 5% of the gamma span. NA
@@ -582,15 +601,17 @@ clean_gstat_env <- function(vgm_obj) {
 #'
 #' Selection: the eligible family with the lowest SSErr, range resolution and
 #' then the family order settling numerical ties only (.vgm_pick_best()). With
-#' no eligible family the data's own flat fit is returned, a pure nugget at the
-#' weighted mean semivariance. Fewer than 5 usable bins, or a zero empirical
-#' variogram (a constant target), leave nothing to estimate: a Spherical
-#' stand-in seeded from the sample variance is returned, tagged "is_fallback".
+#' no eligible family the flat fit is returned, a pure nugget at the weighted
+#' mean semivariance. Fewer than 5 usable bins, or a zero empirical variogram
+#' (a constant target), leave nothing to estimate: a Spherical stand-in seeded
+#' from the sample variance is returned, tagged "is_fallback"; no kriging
+#' variance is reported from it (vgm_variance_withheld()). `target_degenerate`
+#' marks values without usable variance, whose fit describes rounding; RK and
+#' RFK judge their residuals at the target's scale (.residuals_degenerate()).
 #'
 #' Returns a vgm with attr "vgm_diagnostics", and "SSErr" unless it is the
 #' stand-in.
-robust_vgm_fit <- function(v_emp, v_data) {
-  target_degenerate <- .is_degenerate_covariate(v_data)
+robust_vgm_fit <- function(v_emp, v_data, target_degenerate = .is_degenerate_covariate(v_data)) {
   # Usable bins only: an NA, non-finite, zero-distance or empty bin carries no
   # information. Their largest distance is the one max lag that sets the search
   # domain, the resolution window, sill_resolved and max_lag alike.
@@ -641,8 +662,9 @@ robust_vgm_fit <- function(v_emp, v_data) {
   }
 
   if (length(g) < 5 || all(g == 0)) {
-    # Nothing to estimate. The stand-in krigs a constant exactly, and the
-    # diagnostics claim no range or sill for it.
+    # Nothing to estimate. The stand-in krigs a constant exactly; the
+    # diagnostics claim no range or sill for it, and its kriging variance is
+    # withheld (vgm_variance_withheld()).
     sill <- stats::var(v_data, na.rm = TRUE)
     if (!isTRUE(sill > 0)) sill <- 1
     fallback <- gstat::vgm(psill = sill * 0.8, "Sph", range = (if (is.na(max_lag)) 1 else max_lag) / 2,
@@ -665,8 +687,9 @@ robust_vgm_fit <- function(v_emp, v_data) {
   })
   pool <- Filter(function(x) x$eligible, cands)
   if (!length(pool)) {
-    # No eligible structured model fits better than a flat line, so the flat
-    # fit (c1 = 0, c0 the weighted mean semivariance) is the data's answer.
+    # No eligible structured model: the flat fit (c1 = 0, c0 the weighted mean
+    # semivariance). Its cause says whether every optimum was flat or a
+    # structured optimum was refused by the zero-nugget rule.
     c0 <- sum(w * g) / sum(w)
     fit <- gstat::vgm(psill = c0, model = "Nug", range = 0)
     attr(fit, "SSErr") <- sum(w * (g - c0)^2)

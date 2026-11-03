@@ -86,23 +86,27 @@ build_vgm_warning_html <- function(v_fit_list, target = NULL, engine = NULL, of 
     paste0("<span style='color:var(--mn-danger);'>Variogram fit failed for: ",
            paste(fallback_keys, collapse = ", "),
            ".<br>-A default spherical variogram model was used, so the spatial structure was not ",
-           "estimated from your data. Interpret with caution.</span>")
+           "estimated from your data. The map keeps its predictions, but no standard error or ",
+           "variance is reported where this model was used. Interpret with caution.</span>")
   } else ""
-  # A flat fit is the data's answer, not a failure. Detection power depends on
-  # the pairs per lag, so it is worded as not detected, never as absent.
+  # A flat fit is a model selection, not a significance test: what it can miss
+  # depends on the pairs per lag, so it is worded as not detected, never absent.
   flat_part <- c(
     if (length(flat_keys$val) > 0) {
       paste0("<span style='color:var(--mn-warn);'>-No spatial structure detected in the variogram for: ",
              paste(flat_keys$val, collapse = ", "),
              ".<br>No structured model fits it better than a flat line, so kriging maps the sample ",
-             "mean. This does not show that no structure exists: what the test can detect depends ",
-             "on the pairs per lag. IDW and TPS, or a model compared in Manual Tuning, are the ",
+             "mean. This does not show that no structure exists: the comparison is not a significance ",
+             "test, and it misses structure more easily with few pairs per lag (pairs sharing a sample ",
+             "are not independent). IDW and TPS, or a model compared in Manual Tuning, are the ",
              "options.</span>")
     },
     if (length(flat_keys$res) > 0) {
-      paste0("<span style='color:var(--mn-warn);'>-No spatial structure remains in the trend residuals for: ",
+      paste0("<span style='color:var(--mn-warn);'>-No residual spatial structure detected by the variogram fit for: ",
              paste(flat_keys$res, collapse = ", "),
-             ".<br>The map is the trend plus the mean residual.</span>")
+             ".<br>No structured model fits the residual variogram better than a flat line, so the ",
+             "map is the trend plus the mean residual. This does not show that the residuals carry ",
+             "no structure.</span>")
     })
   refused_line <- paste0(".<br>The only structured fit was a Mat&eacute;rn at a zero nugget, which ",
                          "auto-fit does not select, and no other family fits better than a flat line. ")
@@ -117,14 +121,16 @@ build_vgm_warning_html <- function(v_fit_list, target = NULL, engine = NULL, of 
              paste(refused_keys$res, collapse = ", "), refused_line,
              "The map is the trend plus the mean residual.</span>")
     })
-  # An exact ridge: the data fix the fit but not how it splits nugget and
-  # structure, so the middle of the nugget interval is used and reported as such.
+  # An exact ridge: the binned variogram fixes the fit but not how it splits
+  # nugget and structure, so the middle of the nugget interval is used and
+  # reported as such.
   ridge_part <- if (length(ridge_keys) > 0) {
     paste0("<span style='color:var(--mn-warn);'>-Nugget not identified for: ",
            paste(ridge_keys, collapse = ", "),
-           ".<br>Every nugget in that interval, each with its own range, fits the empirical variogram ",
-           "equally well; the middle of the interval is used and Structural Dependency is reported ",
-           "as an interval. More samples at short separations, or replicates, would identify it.</span>")
+           ".<br>Every nugget in that interval, each with its own range, fits the binned empirical ",
+           "variogram equally well (numerically equivalent fits, not a confidence interval); the ",
+           "middle of the interval is used and Structural Dependency is reported as an interval. ",
+           "More samples at short separations, or replicates, would identify it.</span>")
   } else ""
   # A fit whose practical range lies outside the span the empirical variogram
   # resolves. The model is used; what it CLAIMS is what is limited.

@@ -288,22 +288,41 @@ compute_governing_factors <- function(df, target_col, predictors, rf_ntree = 100
 }
 
 #' Merge per-locality rasters (live or Packed) into one SpatRaster; NULL when
-#' the list holds none.
+#' the list holds none. Where localities overlap, each cell's prediction and
+#' variance come from the same locality.
 merge_wrapped_rasters <- function(raster_list) {
   if (is.null(raster_list) || length(raster_list) == 0) return(NULL)
   valid_list <- Filter(Negate(is.null), raster_list)
   if (length(valid_list) == 0) return(NULL)
-  
+
   unwrap_if_needed <- function(r) {
     if (inherits(r, "PackedSpatRaster")) terra::unwrap(r) else r
   }
-  
-  merged <- if (length(valid_list) > 1) {
-    do.call(terra::merge, lapply(unname(valid_list), unwrap_if_needed))
-  } else {
-    unwrap_if_needed(valid_list[[1]])
-  }
+
+  rasters <- lapply(unname(valid_list), unwrap_if_needed)
+  if (length(rasters) == 1) return(rasters[[1]])
+  # terra::merge takes each LAYER from the first raster holding a value, so a
+  # withheld variance (NA beside a prediction, .withhold_variance()) would be
+  # filled from an overlapping locality's. Marked -Inf for the merge, it keeps
+  # its place and is cleared after.
+  banded <- vapply(rasters, function(r) all(c("var1.pred", "var1.var") %in% names(r)), logical(1))
+  rasters[banded] <- lapply(rasters[banded], function(r) {
+    r[["var1.var"]] <- terra::ifel(is.na(r[["var1.var"]]) & !is.na(r[["var1.pred"]]), -Inf, r[["var1.var"]])
+    r
+  })
+  merged <- do.call(terra::merge, rasters)
+  if (any(banded)) merged[["var1.var"]] <- terra::classify(merged[["var1.var"]], cbind(-Inf, NA))
   merged
+}
+
+#' A merged kriging surface without its variance band when no cell of it holds
+#' a value: no locality's variogram supported one (vgm_variance_withheld()), so
+#' the surface has no uncertainty product (as under IDW and TPS) rather than an
+#' empty one.
+drop_empty_variance <- function(r) {
+  if (is.null(r) || !"var1.var" %in% names(r)) return(r)
+  if (terra::global(r[["var1.var"]], "notNA")[[1]] > 0) return(r)
+  r[["var1.pred"]]
 }
 
 # Metres per projected axis unit; shared by worker projections and UI gates.

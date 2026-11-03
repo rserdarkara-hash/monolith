@@ -418,7 +418,7 @@ test_that("every variogram banner band is painted with tokens", {
   # The residual-scale bands an RK or RFK run words separately.
   res_html <- build_vgm_warning_html(list(B_act = pure("no_structure"), C_act = pure("zero_nugget_rule"),
                                           E_act = ru), engine = "RK")
-  expect_match(res_html, "No spatial structure remains in the trend residuals", fixed = TRUE)
+  expect_match(res_html, "No residual spatial structure detected by the variogram fit", fixed = TRUE)
   expect_match(res_html, "Pure nugget used for the trend residuals", fixed = TRUE)
   expect_match(res_html, "Residual variogram still rising", fixed = TRUE)
   html <- paste(html, res_html)

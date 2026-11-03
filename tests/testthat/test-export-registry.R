@@ -16,7 +16,7 @@ test_that("registry keys never merge two items, and Quick Export selects its own
     # Server-setup and map-viewer names this chunk reads.
     get_display_meta <- function() {
       list(actual = "Total N (%)", label = "Total N", unit = "%", category = "Soil",
-           method = "OK", has_variance = FALSE)
+           method = "OK", variance_surfaces = character(0))
     }
     map_view_base <- function() "view_act"
     map_view_layer <- function() "value"

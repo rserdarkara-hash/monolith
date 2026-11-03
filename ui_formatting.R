@@ -206,18 +206,21 @@ parse_map_view <- function(view) {
 }
 
 # Choices of the Map Viewer view menu: the surfaces the displayed run computed
-# and, for a method with a prediction variance, the standard-error and
-# variance views of those surfaces. Groups become <optgroup>s.
-map_view_choices <- function(has_pred, has_resid, has_variance) {
+# and the standard-error and variance views of those whose merged surface
+# carries a variance band (`variance_surfaces`: "act", "pre"); the comparison
+# view needs both. Groups become <optgroup>s.
+map_view_choices <- function(has_pred, has_resid, variance_surfaces = character(0)) {
   surf <- c("View: Actual" = "view_act")
   if (has_pred) surf <- c(surf, "View: ML Predicted" = "view_pred",
                           "View: Actual vs Predicted" = "view_comp")
   if (has_resid) surf <- c(surf, "View: ML Residuals" = "view_resid")
-  if (!isTRUE(has_variance)) return(surf)
+  var_act <- "act" %in% variance_surfaces
+  var_pre <- has_pred && "pre" %in% variance_surfaces
+  if (!var_act && !var_pre) return(surf)
   uncert <- function(prefix, suffix) {
-    u <- c("Actual" = paste0("view_act", suffix))
-    if (has_pred) u <- c(u, "ML Predicted" = paste0("view_pred", suffix),
-                         "Actual vs Predicted" = paste0("view_comp", suffix))
+    u <- c(if (var_act) c("Actual" = paste0("view_act", suffix)),
+           if (var_pre) c("ML Predicted" = paste0("view_pred", suffix)),
+           if (var_act && var_pre) c("Actual vs Predicted" = paste0("view_comp", suffix)))
     stats::setNames(as.list(u), paste0(prefix, names(u)))
   }
   list("Surfaces" = as.list(surf),
@@ -770,6 +773,19 @@ map_legend_title <- function(label, unit = "", layer = "value") {
     trimws(paste(label, shown)))
 }
 
+# Labels of a continuous map legend over the layer's values `vv`: the decimals
+# leaflet's numeric legend is given (more for a narrow range) and, for a layer
+# constant at that precision (a pure nugget's mean or SE), its one value as
+# text: leaflet labels a zero-width range with nothing and a narrower one than
+# its precision with one number repeated.
+map_legend_scale <- function(vv) {
+  rng <- range(vv)
+  digits <- if (diff(rng) < 0.01) 6 else if (diff(rng) < 0.1) 4 else 2
+  r <- round(rng, digits)
+  list(digits = digits,
+       constant = if (r[1] == r[2]) format(r[1], trim = TRUE, scientific = FALSE, big.mark = ","))
+}
+
 # What a cancelled run's record says wherever its results would be.
 RUN_CANCELLED_NOTE <- paste(
   "This run was cancelled before it produced results. The configuration shown",
@@ -921,12 +937,14 @@ vgm_fit_subtitle <- function(fit) {
          }, ")")
 }
 
-# The Variogram Parameters cell text when the target carries no usable
-# variance: the model is then the stand-in of a constant target, or a fit to
-# numerical noise, not an estimate.
+# The Variogram Parameters cell text when the values a variogram describes
+# carry no usable variance (the target, or RK/RFK residuals judged at the
+# target's scale): the model is then the stand-in of a constant target, or a
+# fit to rounding, not an estimate.
 VGM_DEGENERATE_NOTE <- paste(
-  "Target has no usable variance in this locality. No spatial structure can be",
-  "estimated, so no variogram parameters are reported.")
+  "The values this variogram describes have no usable variance in this locality",
+  "(constant up to rounding). No spatial structure can be estimated, so no",
+  "variogram parameters are reported.")
 
 # Screen flavour, all character so one column mixes model names and numbers:
 # "NA" for absent values, kappa beside a Matern name, % on Structural
@@ -952,8 +970,9 @@ VGM_DEGENERATE_NOTE <- paste(
                if (unidentified) paste0(" (", vgm_pct_interval(p$sdep_interval), ")")),
         paste(c(if (unresolved) paste0("Model-extrapolated: ", sdep_txt, ". ", qualifier),
                 if (unidentified) paste0("Every value from ", vgm_pct_interval(p$sdep_interval),
-                                         " fits the empirical variogram equally well; the model uses ",
-                                         sdep_txt, ", the middle of the nugget interval.")),
+                                         " fits the binned empirical variogram equally well ",
+                                         "(numerically equivalent fits, not a confidence interval); ",
+                                         "the model uses ", sdep_txt, ", the middle of the nugget interval.")),
               collapse = " "))
   } else sdep_txt
   range_notes <- c(if (unresolved) qualifier,
@@ -963,7 +982,8 @@ VGM_DEGENERATE_NOTE <- paste(
                    },
                    if (unidentified) {
                      paste0("Practical ranges from ", chr(p$range_interval[1]), " to ",
-                            chr(p$range_interval[2]), " fit equally well.")
+                            chr(p$range_interval[2]), " fit equally well (numerically ",
+                            "equivalent fits, not a confidence interval).")
                    })
   c(if (is.na(p$kappa)) p$model else paste0(p$model, " (kappa = ", format_sig(p$kappa), ")"),
     chr(p$nugget), chr(p$sill), chr(p$range),
@@ -993,7 +1013,7 @@ vgm_params_table_df <- function(v_fit_list, loc, of = NULL) {
   f_a <- v_fit_list[[paste0(loc, "_act")]]
   f_p <- v_fit_list[[paste0(loc, "_pre")]]
   if (is.null(f_a) && is.null(f_p)) return(NULL)
-  # A target without usable variance yields a stand-in or a noise-level fit:
+  # Values without usable variance yield a stand-in or a noise-level fit:
   # report the cause instead of its parameters.
   fits <- Filter(Negate(is.null), list(f_a, f_p))
   if (all(vapply(fits, vgm_target_degenerate, logical(1)))) {
@@ -1008,9 +1028,20 @@ vgm_params_table_df <- function(v_fit_list, loc, of = NULL) {
   res
 }
 
-# Export flavour: tidy, one row per fitted locality/target, numeric columns.
-# `of`, named like `v_fit_list`, adds a "Variogram Of" column saying what each
-# fit describes (a residual-kriging run's VGM_OF_RESIDUALS / VGM_OF_FALLBACK).
+# What an exported variogram row is: an applied manual model, a fit to values
+# without usable variance (nothing estimated), or the fit's state, so the
+# stand-in of a failed fit cannot pass for a fitted model.
+vgm_export_status <- function(f) {
+  if (identical(attr(f, "monolith_source"), "manual")) "applied manual model"
+  else if (vgm_target_degenerate(f)) "no usable variance, not estimated"
+  else vgm_status_label(vgm_fit_status(f))
+}
+
+# Export flavour: tidy, one row per fitted locality/target, numeric columns,
+# and its `Fit Status` (vgm_export_status()). As on the card, values without
+# usable variance report no parameters. `of`, named like `v_fit_list`, adds a
+# "Variogram Of" column saying what each fit describes (a residual-kriging
+# run's VGM_OF_RESIDUALS / VGM_OF_FALLBACK).
 vgm_params_export_df <- function(v_fit_list, locs = NULL, of = NULL) {
   if (is.null(v_fit_list) || length(v_fit_list) == 0) return(NULL)
   if (is.null(locs)) locs <- unique(sub("_(act|pre)$", "", names(v_fit_list)))
@@ -1021,6 +1052,7 @@ vgm_params_export_df <- function(v_fit_list, locs = NULL, of = NULL) {
       f <- v_fit_list[[key]]
       if (is.null(f)) next
       p <- vgm_params_row(f)
+      if (p$target_degenerate) p <- utils::modifyList(vgm_params_row(NULL), list(max_lag = p$max_lag))
       rows[[length(rows) + 1]] <- data.frame(
         Locality = l,
         Target = if (tgt == "act") "Actual" else "Predicted",
@@ -1036,6 +1068,7 @@ vgm_params_export_df <- function(v_fit_list, locs = NULL, of = NULL) {
         `Structural Dep. Low (%)` = p$sdep_interval[1], `Structural Dep. High (%)` = p$sdep_interval[2],
         `Practical Range Low` = p$range_interval[1], `Practical Range High` = p$range_interval[2],
         `Range At Search Limit` = p$range_at_ceiling,
+        `Fit Status` = vgm_export_status(f),
         check.names = FALSE, stringsAsFactors = FALSE)
     }
   }

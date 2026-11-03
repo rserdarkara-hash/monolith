@@ -538,6 +538,30 @@ test_that("the four fit states map to the attributes the UI reads", {
   expect_no_match(vgm_status_label("ok"), "converged")
 })
 
+test_that("only the stand-in and a fit to rounding withhold their kriging variance", {
+  # Every fitted state, a pure nugget included, estimates its covariance from
+  # the data; an applied manual model is the user's. The stand-in is a seed,
+  # and a fit to values constant up to rounding describes rounding.
+  h <- make_hostile_vgm_input(seed = 1)
+  m <- make_mixed_vgm_input()
+  fits <- list(robust_vgm_fit(NULL, rnorm(10)), robust_vgm_fit(h$v_emp, h$v_data),
+               robust_vgm_fit(m$v_emp, m$v_data),
+               robust_vgm_fit(make_hostile_vgm_input(seed = 2)$v_emp, make_hostile_vgm_input(seed = 2)$v_data))
+  for (f in fits) {
+    expect_identical(vgm_variance_supported(f), !identical(vgm_fit_status(f), "fit_failed"))
+  }
+  expect_setequal(vapply(fits, vgm_fit_status, character(1)), VGM_FIT_STATUSES)
+  expect_identical(vgm_variance_withheld(fits[[1]]), "stand_in")
+  expect_null(vgm_variance_withheld(fits[[2]]))
+  # The same variogram fitted, but to values without usable variance.
+  noise <- robust_vgm_fit(h$v_emp, h$v_data, target_degenerate = TRUE)
+  expect_identical(vgm_fit_status(noise), vgm_fit_status(fits[[2]]))
+  expect_identical(vgm_variance_withheld(noise), "noise_floor")
+  expect_false(vgm_variance_supported(noise))
+  expect_true(vgm_variance_supported(manual_vgm(1, "Sph", 300, 0.2)))
+  expect_false(vgm_variance_supported(NULL))
+})
+
 test_that("the rising-at-the-cutoff detector needs a rise, not a wobble", {
   h <- make_trend_vgm_input()
   rising <- h$v_emp; rising$gamma <- seq(1, 10, length.out = nrow(rising))
@@ -688,7 +712,7 @@ test_that("an exact ridge is represented by the middle of its nugget interval", 
   expect_equal(fit$range[2], a_mid, tolerance = 1e-4)
 })
 
-test_that("a ridge holding one profile point is represented by its nugget midpoint, on any machine", {
+test_that("a ridge holding one profile point is represented by its nugget midpoint, whatever the last bits", {
   # White noise, 100 points, seed 7: a Spherical exact ridge (nugget 0 to 4.7%
   # of the sill) that holds exactly one point of the range profile. Whether
   # that grid point or Brent's point beside it seeds the search is decided by
@@ -713,7 +737,7 @@ test_that("a ridge holding one profile point is represented by its nugget midpoi
   }
 })
 
-test_that("a dip just past a flat ridge is found on any machine", {
+test_that("a dip just past a flat ridge is found whatever the last bits", {
   # White noise, 100 points, seed 29: the Spherical profile is flat up to the
   # second lag distance h2 (a ridge, nugget 0 to 47%) and dips about 3e-6
   # lower just past it, where a second lag enters the range. Brent's method
@@ -798,6 +822,8 @@ test_that("build_vgm_warning_html renders the red failure band and the amber pur
   expect_match(html, "LocA (actual)", fixed = TRUE)
   expect_match(html, "LocB (predicted)", fixed = TRUE)
   expect_match(html, "default spherical variogram model", fixed = TRUE)
+  # The stand-in's variance is withheld, and the band says so.
+  expect_match(html, "no standard error or variance is reported", fixed = TRUE)
   expect_match(html, "No spatial structure detected in the variogram", fixed = TRUE)
   expect_no_match(html, "LocC", fixed = TRUE)
 })
@@ -908,15 +934,21 @@ test_that("a pure-nugget band follows the engine and names no engine on the resi
     html <- build_vgm_warning_html(list(LocA_act = pn), engine = eng)
     expect_match(html, "No spatial structure detected in the variogram for: LocA (actual) (3 to 8 pairs per lag)",
                  fixed = TRUE)
-    # Not detected is not absent: the test has little power with few pairs.
+    # Not detected is not absent, and the flat fit is a model selection, not a
+    # calibrated test.
     expect_match(html, "does not show that no structure exists", fixed = TRUE)
+    expect_match(html, "not a significance test", fixed = TRUE)
     # Naming IDW and TPS is not circular under a value-scale engine.
     expect_match(html, "IDW and TPS", fixed = TRUE)
     expect_match(html, "Manual Tuning", fixed = TRUE)
   }
   for (eng in c("RK", "RFK")) {
     html <- build_vgm_warning_html(list(LocA_act = pn), engine = eng)
-    expect_match(html, "No spatial structure remains in the trend residuals for: LocA (actual)", fixed = TRUE)
+    # A flat residual fit does not establish that no residual structure exists.
+    expect_match(html, "No residual spatial structure detected by the variogram fit for: LocA (actual)",
+                 fixed = TRUE)
+    expect_match(html, "does not show that the residuals carry no structure", fixed = TRUE)
+    expect_no_match(html, "remains", fixed = TRUE)
     expect_match(html, "the trend plus the mean residual", fixed = TRUE)
     expect_no_match(html, "IDW", fixed = TRUE)
     expect_no_match(html, "Regression Kriging", fixed = TRUE)
@@ -944,7 +976,7 @@ test_that("a pure-nugget band follows the engine and names no engine on the resi
   # bands take the value-scale wording beside the residual ones.
   of <- c(A_act = VGM_OF_RESIDUALS, B_act = VGM_OF_FALLBACK)
   html <- build_vgm_warning_html(list(A_act = rising, B_act = rising), engine = "RFK", of = of)
-  expect_match(html, "No spatial structure remains in the trend residuals for: A (actual).", fixed = TRUE)
+  expect_match(html, "No residual spatial structure detected by the variogram fit for: A (actual).", fixed = TRUE)
   expect_match(html, "No spatial structure detected in the variogram for: B (actual) (3 to 8 pairs per lag)",
                fixed = TRUE)
   expect_match(html, "Residual variogram still rising at the lag cutoff for: A (actual).", fixed = TRUE)
@@ -982,10 +1014,15 @@ test_that("a nugget the data do not identify is reported as an interval, naming 
     html <- build_vgm_warning_html(list(Kale_act = f), engine = eng)
     expect_match(html, "Nugget not identified for: Kale (actual) (nugget 0 to 29.8% of the sill)",
                  fixed = TRUE)
+    # Equal criteria on the chosen bins, not a statement of statistical precision.
+    expect_match(html, "binned empirical variogram equally well (numerically equivalent fits, not a confidence interval)",
+                 fixed = TRUE)
   }
   chr <- .vgm_params_chr(f)
   expect_match(chr[6], "Not reliably identified (70.2 to 100%)", fixed = TRUE)
-  expect_match(chr[5], "Practical ranges from 271 to 335 fit equally well.", fixed = TRUE)
+  expect_match(chr[6], "numerically equivalent fits, not a confidence interval", fixed = TRUE)
+  expect_match(chr[5], "Practical ranges from 271 to 335 fit equally well (numerically equivalent fits, not a confidence interval).",
+               fixed = TRUE)
   expect_match(vgm_fit_subtitle(f), "nugget not identified: 0 to 29.8% of the sill fit equally well",
                fixed = TRUE)
   ex <- vgm_params_export_df(list(Kale_act = f))
@@ -1546,8 +1583,9 @@ test_that("vgm_params_export_df is one tidy numeric row per fitted target", {
                              "Max Lag", "Sill Resolved", "Nugget Identified",
                              "Structural Dep. Low (%)", "Structural Dep. High (%)",
                              "Practical Range Low", "Practical Range High",
-                             "Range At Search Limit"))
+                             "Range At Search Limit", "Fit Status"))
   expect_equal(nrow(out), 3)
+  expect_identical(out$`Fit Status`, rep("fitted", 3))
   expect_equal(out$Locality, c("A", "A", "B"))
   expect_equal(out$Target, c("Actual", "Predicted", "Actual"))
   expect_true(all(vapply(out[c(4:10, 13:16)], is.numeric, logical(1))))
@@ -1567,6 +1605,28 @@ test_that("vgm_params_export_df is one tidy numeric row per fitted target", {
   # one locality only
   expect_equal(nrow(vgm_params_export_df(fits, locs = "B")), 1)
   expect_null(vgm_params_export_df(list()))
+})
+
+test_that("an exported variogram row says what it is", {
+  # Without the status a stand-in's seeds (80% structural dependency) read as
+  # a fit; a fit to rounding reports no parameters, as on the card.
+  stand_in <- robust_vgm_fit(NULL, rnorm(10))
+  noise <- gstat::vgm(psill = 1e-20, model = "Exp", range = 70, nugget = 0)
+  attr(noise, "vgm_diagnostics") <- list(status = "ok", max_lag = 700,
+                                         sill_resolved = TRUE, target_degenerate = TRUE)
+  manual <- stamp_vgm(manual_vgm(2, "Exp", 300, 0.5), "v", "manual")
+  h <- make_hostile_vgm_input(seed = 1)
+  fitted <- robust_vgm_fit(h$v_emp, h$v_data)
+  out <- vgm_params_export_df(list(A_act = stand_in, B_act = noise, C_act = manual, D_act = fitted))
+  expect_identical(out$`Fit Status`,
+                   c("variogram fit failed", "no usable variance, not estimated",
+                     "applied manual model", vgm_status_label(vgm_fit_status(fitted))))
+  expect_identical(out$Model[c(1, 3)], c("Sph", "Exp"))
+  expect_equal(out$`Structural Dep. (%)`[1], 80)
+  expect_true(all(is.na(unlist(out[2, c("Model", "Kappa", "Nugget", "Sill", "Range (a)",
+                                        "Practical Range", "Structural Dep. (%)",
+                                        "Sill Resolved", "Range At Search Limit")]))))
+  expect_equal(out$`Max Lag`[2], 700)
 })
 
 test_that("vgm_params_table_df transposes a named locality and pools the total", {

@@ -1294,7 +1294,7 @@
       return("Agronomical classes are not applied to this variable yet. Press Apply to maps and statistics under Map Styling in the sidebar.")
     if (identical(map_view_base(), "view_resid"))
       return("The residual view is not classified. Switch the Map Viewer to Actual, Predicted or Comparison to export its class zones.")
-    if (map_view_layer() %in% c("se", "var") && isTRUE(rv$disp$has_variance))
+    if (map_view_layer() %in% c("se", "var") && length(rv$disp$variance_surfaces))
       return("Standard-error and variance maps are not classified. Switch the Map Viewer to Actual, Predicted or Comparison to export their class zones.")
     NULL
   })
