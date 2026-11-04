@@ -1,8 +1,8 @@
 ![Monolith: Spatial Analysis Dashboard](assets/banner.png)
 
-# Monolith Spatial Analysis Dashboard (v1.1.4)
+# Monolith Spatial Analysis Dashboard
 
-[![Version](https://img.shields.io/badge/version-1.1.4-6f42c1)](#)
+[![Version](https://img.shields.io/badge/version-1.1.4%20%2B%20unreleased-orange)](CHANGELOG.md)
 [![R](https://img.shields.io/badge/R-%E2%89%A5%204.5.0-276DC3?logo=r&logoColor=white)](https://cran.r-project.org/)
 [![Shiny](https://img.shields.io/badge/built%20with-Shiny-1f77b4)](https://shiny.posit.co/)
 [![Tests](https://github.com/rserdarkara-hash/monolith/actions/workflows/tests.yaml/badge.svg)](https://github.com/rserdarkara-hash/monolith/actions/workflows/tests.yaml)
@@ -513,7 +513,7 @@ Human oversight remained central throughout: all methodological choices, model f
 }
 ```
 
-The same reference is available from GitHub's **Cite this repository** button, which reads the [CITATION.cff](CITATION.cff) file in the repository root. The DOI above is the **concept DOI** and always resolves to the latest release; Zenodo also mints a version-specific DOI for each release, which is the one to cite when the exact version matters for reproducing a result.
+The same reference is available from GitHub's **Cite this repository** button, which reads the [CITATION.cff](CITATION.cff) file in the repository root. The DOI above is the **concept DOI** and always resolves to the latest release; Zenodo also mints a version-specific DOI for each release, which is the one to cite when the exact version matters for reproducing a result. The `main` branch can include changes not yet in a Zenodo release (see the Unreleased section of the [CHANGELOG](CHANGELOG.md)); when citing results from it, add the commit hash.
 
 ## Contributing and Support
 
