@@ -831,7 +831,11 @@ test_that("the rising-variogram advisory never tells a detrending engine to detr
     expect_no_match(html, "Regression Kriging", fixed = TRUE)
     expect_no_match(html, "Sill not observed", fixed = TRUE)
     # The extent cause has no in-app remedy and must stay on the list.
-    expect_match(html, "beyond this locality's extent", fixed = TRUE)
+    expect_match(html, "spatial correlation extending beyond the sampled area", fixed = TRUE)
+    # The variogram cannot separate the causes, though other diagnostics may;
+    # near samples the band claims less sensitivity, not accuracy.
+    expect_match(html, "The variogram alone cannot tell these apart", fixed = TRUE)
+    expect_no_match(html, "well supported", fixed = TRUE)
   }
 
   # CK does not detrend (its variogram is seeded from the measured values), so

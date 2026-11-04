@@ -152,7 +152,8 @@ build_vgm_warning_html <- function(v_fit_list, target = NULL, engine = NULL, of 
              "structure at that scale, so the fit behaves as near-pure nugget.")
     } else ""
     paste0("<span style='color:var(--mn-warn);'>-Variogram range not resolved within the empirical lag window.",
-           "<br>The model is used; what the lags cannot resolve is its range.",
+           "<br>The model is still used, but its range cannot be reliably determined from the ",
+           "available lag distances.",
            beyond_line, ceiling_line, below_line, "</span>")
   } else ""
   # Hedged: a rising variogram suggests a trend but does not prove one, and no
@@ -169,12 +170,12 @@ build_vgm_warning_html <- function(v_fit_list, target = NULL, engine = NULL, of 
     if (length(trend_keys$res) > 0) {
       paste0("<span style='color:var(--mn-warn);'>-Residual variogram still rising at the lag cutoff for: ",
              paste(trend_keys$res, collapse = ", "),
-             ".<br>The fitted trend has not removed the large-scale structure, so range and sill are ",
-             "weakly constrained and the kriging variance with them. Causes it cannot separate: ",
-             "covariates missing that variation, too rigid a trend form, or a correlation length ",
-             "beyond this locality's extent, which no covariate fixes. Predictions near samples stay ",
-             "well supported; see the trend diagnostics and Internal Residual Variogram ",
-             "(Scientific Analysis).</span>")
+             ".<br>Broad spatial patterns remain after fitting the trend. This makes the variogram ",
+             "range and sill hard to estimate, so the kriging variance is unreliable far from ",
+             "samples. Possible reasons include missing covariates, a trend that is too simple, or ",
+             "spatial correlation extending beyond the sampled area. The variogram alone cannot ",
+             "tell these apart. Predictions near samples are less affected. For details, see the ",
+             "trend diagnostics and Internal Residual Variogram under Scientific Analysis.</span>")
     })
   smooth_part <- if (length(smooth_keys) > 0) {
     paste0("<span style='color:var(--mn-warn);'>-Gaussian or Mat&eacute;rn variogram with a nugget below 5% of the sill for: ",
