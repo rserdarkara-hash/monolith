@@ -228,6 +228,24 @@ test_that("res_mode_label names the resolution logic the sidebar offers", {
   expect_equal(res_mode_label("other"), "other")
 })
 
+test_that("the run log says what a multi-locality GeoTIFF export holds", {
+  shared <- grid_export_note(TRUE, TRUE, "30 m")
+  expect_match(shared, "^\\[Grid\\] Every locality is on one lattice \\(cell size 30 m\\)")
+  expect_match(shared, "holds them in one raster, cell for cell", fixed = TRUE)
+  # One lattice, but two localities cover the same ground: one raster per locality.
+  overlap <- grid_export_note(TRUE, FALSE, "30 m")
+  expect_match(overlap, "share one lattice (cell size 30 m) but their boundaries overlap", fixed = TRUE)
+  expect_match(overlap, "one raster per locality, each holding all of its own cells", fixed = TRUE)
+  own <- grid_export_note(FALSE, TRUE, "14.6-92.1 m across 7 localities")
+  expect_match(own, "gridded separately (cell size 14.6-92.1 m across 7 localities)", fixed = TRUE)
+  expect_match(own, "a zip with one raster per locality on its own grid", fixed = TRUE)
+  expect_match(own, "weight each cell by its area", fixed = TRUE)
+  expect_match(own, "No locality is resampled onto another's grid.", fixed = TRUE)
+  expect_identical(grid_export_note(FALSE, FALSE, "x"), grid_export_note(FALSE, TRUE, "x"))
+  # An unrecorded cell size is left out.
+  expect_match(grid_export_note(FALSE, TRUE, NULL), "gridded separately: a GeoTIFF", fixed = TRUE)
+})
+
 # ── get_buffer_multiplier ─────────────────────────────────────────────────
 
 test_that("get_buffer_multiplier returns correct values per method", {
@@ -433,6 +451,26 @@ test_that("reference limits prefill only a three-class split; otherwise data qua
   expect_identical(d_ph$source, "quantile")
   expect_identical(d_ph$limits, unname(stats::quantile(vals, c(1, 2) / 3, type = 7)))
   expect_identical(class_limit_note(d_ph), "Data quantiles (not agronomic limits).")
+
+  # Values that stand for unequal areas (cells of localities gridded at
+  # different sizes): the quantiles are of the area, not of the cell count.
+  # Six cells of 1 unit and two of 6 units: 18 units of area in all, so a
+  # third of the area is reached at the sixth value and two thirds at the
+  # seventh, where a third of the CELLS is reached at the third value.
+  w <- c(1, 1, 1, 1, 1, 1, 6, 6)
+  expect_identical(weighted_quantile(vals, w, c(1, 2) / 3), vals[c(6, 7)])
+  expect_identical(class_limit_defaults("ph", "", 3, vals, w)$limits, vals[c(6, 7)])
+  # Integer weights are repetition, and the order of the values is irrelevant.
+  o <- c(5, 2, 8, 1, 7, 3, 6, 4)
+  for (p in c(0.1, 0.25, 0.5, 0.8)) {
+    expect_identical(weighted_quantile(vals[o], w[o], p),
+                     unname(stats::quantile(rep(vals, w), p, type = 1)), info = p)
+  }
+  # A non-finite value leaves with its weight.
+  expect_identical(class_limit_defaults("ph", "", 3, c(vals, NA), c(w, 100))$limits, vals[c(6, 7)])
+  # The reference limits do not depend on the surface at all.
+  expect_identical(class_limit_defaults("P", "mg/kg", 3, vals, w)$limits,
+                   class_limit_defaults("P", "mg/kg", 3, vals)$limits)
   expect_match(class_limit_note(class_limit_defaults("P", "mg/kg", 3, vals))[1],
                "Reference limits: Olsen P, mg kg⁻¹, Yüksel & Ekinci (2019). Low < 8 ≤ Moderate < 25 ≤ High.",
                fixed = TRUE)

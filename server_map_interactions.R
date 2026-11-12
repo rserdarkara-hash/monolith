@@ -74,8 +74,6 @@
       
       current_loc <- input$map_loc
       updateSelectInput(session, "map_loc", choices = colnames(rv$user_data), selected = current_loc)
-      
-      rv$user_data <- rv$user_data 
     } else {
       showNotification("No points found within the selected area.", type = "warning")
     }
@@ -140,49 +138,19 @@
     )
   })
 
-  # Resolve each popup variable to its column once per point set; returns a
-  # popup_fn(data_row) closure doing plain lookups.
+  # A popup_fn(data_row) closure for a point set with columns `cnames`. A
+  # variable is read from the column of its own name only: a point set that
+  # lacks it (a run made before another table was loaded) shows no value for
+  # it, never a column whose name merely resembles it.
   make_popup_fn <- function(cnames) {
-    resolve_col <- function(key) {
-      key <- as.character(key)
-      if (key %in% cnames) return(key)
-      idx <- grep(paste0("^", key, "$"), cnames, ignore.case = TRUE)
-      if (length(idx) > 0) return(cnames[idx[1]])
-      idx <- grep(paste0(key, "$"), cnames, ignore.case = TRUE)
-      if (length(idx) > 0) return(cnames[idx[1]])
-      idx <- grep(key, cnames, ignore.case = TRUE)
-      if (length(idx) > 0) return(cnames[idx[1]])
-      NA_character_
-    }
-    cache <- popup_metadata_cache()
-    keys <- unique(c(
-      unlist(lapply(cache$grouped_vars, function(cvs) vapply(cvs, function(v) as.character(v$actual), character(1)))),
-      as.character(setdiff(cache$vars_to_show, cache$meta_actuals))
-    ))
-    col_map <- vapply(keys, resolve_col, character(1))
-    function(data_row) generate_popup(data_row, col_map = col_map)
+    function(data_row) generate_popup(data_row, cnames)
   }
 
-  generate_popup <- function(data_row, col_map = NULL) {
+  generate_popup <- function(data_row, cnames) {
     data_row <- as.list(data_row)
     names_in_row <- names(data_row)
 
-    find_val <- function(key) {
-      key <- as.character(key)
-      if (!is.null(col_map) && key %in% names(col_map)) {
-        col <- col_map[[key]]
-        if (is.na(col)) return(NULL)
-        return(data_row[[col]])
-      }
-      if (key %in% names_in_row) return(data_row[[key]])
-      idx <- grep(paste0("^", key, "$"), names_in_row, ignore.case = TRUE)
-      if (length(idx) > 0) return(data_row[[idx[1]]])
-      idx <- grep(paste0(key, "$"), names_in_row, ignore.case = TRUE)
-      if (length(idx) > 0) return(data_row[[idx[1]]])
-      idx <- grep(key, names_in_row, ignore.case = TRUE)
-      if (length(idx) > 0) return(data_row[[idx[1]]])
-      return(NULL)
-    }
+    find_val <- function(key) if (key %in% cnames) data_row[[key]]
 
     cache <- popup_metadata_cache()
     vars_to_show <- cache$vars_to_show
@@ -326,7 +294,7 @@
       g <- groups[i]
       col_hex <- rv$pt_style_colors[g]
       div(style = "display: flex; align-items: center; gap: 10px; margin-bottom: 8px;",
-        div(style = paste0("width: 16px; height: 16px; border-radius: 3px; background-color: ", col_hex, "; border: 1px solid #ccc; flex-shrink: 0;")),
+        div(style = paste0("width: 16px; height: 16px; border-radius: 3px; background-color: ", col_hex, "; border: 1px solid var(--mn-line-2); flex-shrink: 0;")),
         tags$span(g, style = "width: 120px; font-size: 13px; font-weight: 500; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; flex-shrink: 0;"),
         div(class = "custom-color-row-input", style = "width: 90px; flex-shrink: 0;",
           textInput(paste0("pt_grp_col_", i), NULL, value = col_hex, width = "90px")
@@ -368,7 +336,7 @@
   output$file_uploaded <- reactive({ !is.null(input$user_file) })
   outputOptions(output, "file_uploaded", suspendWhenHidden = FALSE)
   
-  output$model_ready <- reactive({ if(!is.null(rv$rast) || length(rv$v_emp_list) > 0) "yes" else "no" })
+  output$model_ready <- reactive({ if(length(rv$rast_list_act) > 0 || length(rv$v_emp_list) > 0) "yes" else "no" })
   outputOptions(output, "model_ready", suspendWhenHidden = FALSE)
 
   # Compact run-status chip in the header, visible from any tab: amber while a
@@ -383,7 +351,7 @@
     } else if (identical(rv$run_config_summary$status, "cancelled")) {
       span(class = "run-status-chip", span(class = "dot idle"),
            paste0("Cancelled · Run #", rv$run_config_summary$run_id))
-    } else if (!is.null(rv$rast) || length(rv$v_emp_list) > 0) {
+    } else if (length(rv$rast_list_act) > 0 || length(rv$v_emp_list) > 0) {
       span(class = "run-status-chip", span(class = "dot done"),
            paste0("Run ready · ", rv$disp$method %||% ""))
     } else {

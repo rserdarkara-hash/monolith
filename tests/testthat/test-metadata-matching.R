@@ -27,14 +27,23 @@ test_that("get_var_label handles NA and empty input", {
   expect_equal(get_var_label("", metadata), "")
 })
 
-test_that("get_var_label fuzzy-matches when exact match fails", {
-  # The label must differ from the query, or the fuzzy branch and the miss
-  # branch (which returns the query itself) return the same string and the
-  # assertion cannot tell them apart.
+test_that("a column outside the variable list keeps its own name", {
+  # Every `actual` is a column of the table, so a column that merely resembles
+  # one is another column: it must not be shown under that variable's label.
   metadata <- list(
+    list(actual = "Zn_DTPA", label = "Zinc (DTPA)", category = "Soil"),
+    list(actual = "ndvi_2021", label = "NDVI 2021", category = "Satellite"),
+    list(actual = "clay_30", label = "Clay 0-30 cm", category = "Soil"),
     list(actual = "Organic_Carbon", label = "Soil Organic Carbon", category = "Soil")
   )
-  expect_equal(get_var_label("Organic Carbon", metadata), "Soil Organic Carbon")
+  for (col in c("Mn_DTPA", "ndvi_2020", "clay_60", "zn_dtpa", "Organic Carbon", "Zn-DTPA")) {
+    expect_identical(get_var_label(col, metadata), col)
+  }
+  expect_identical(get_var_label("Zn_DTPA", metadata), "Zinc (DTPA)")
+  # An entry without a usable label falls back to the column name too.
+  expect_identical(get_var_label("a", list(list(actual = "a", label = NA))), "a")
+  expect_identical(get_var_label("a", list(list(actual = "a", label = ""))), "a")
+  expect_identical(get_var_label("a", list(list(actual = "a"))), "a")
 })
 
 test_that("get_var_labels vectorizes correctly", {
@@ -68,7 +77,7 @@ test_that("match_metadata_columns returns list of mapped variables", {
     stringsAsFactors = FALSE
   )
   user_cols <- c("pH", "Clay", "Sand", "x", "y")
-  result <- match_metadata_columns(m_df, user_cols)
+  result <- match_metadata_columns(m_df, user_cols)$vars
   expect_type(result, "list")
   # Which column was mapped and to what, not just that something was.
   expect_length(result, 2L)
@@ -85,7 +94,7 @@ test_that("match_metadata_columns assigns palettes", {
     stringsAsFactors = FALSE
   )
   user_cols <- c("TN", "x", "y")
-  result <- match_metadata_columns(m_df, user_cols)
+  result <- match_metadata_columns(m_df, user_cols)$vars
   # No `if` guard: an empty mapping must fail here, not silently pass with no
   # expectation at all.
   expect_length(result, 1L)
@@ -96,11 +105,11 @@ test_that("match_metadata_columns assigns palettes", {
 test_that("match_metadata_columns reads a Unit column into each variable", {
   m_df <- data.frame(actual = c("pH", "K", "TN"), label = c("Soil pH", "Potassium", "Total N"),
                      cat = "Soil", Unit = c(NA, "mg/kg", " % "), stringsAsFactors = FALSE)
-  res <- match_metadata_columns(m_df, c("pH", "K", "TN", "x", "y"))
+  res <- match_metadata_columns(m_df, c("pH", "K", "TN", "x", "y"))$vars
   expect_equal(vapply(res, `[[`, character(1), "unit"), c("", "mg/kg", "%"))
   # "Units" and a header naming the unit in words are unit columns too.
   names(m_df)[4] <- "Measurement units"
-  expect_equal(match_metadata_columns(m_df, c("pH", "K", "TN"))[[2]]$unit, "mg/kg")
+  expect_equal(match_metadata_columns(m_df, c("pH", "K", "TN"))$vars[[2]]$unit, "mg/kg")
 })
 
 test_that("a variable list without a Unit column gives every variable an empty unit", {
@@ -110,7 +119,7 @@ test_that("a variable list without a Unit column gives every variable an empty u
                      `Variable ID (VID)` = c("Soil pH", "K (mg/kg)"),
                      `Variable Category` = "Soil", Community = c("a", "b"),
                      check.names = FALSE, stringsAsFactors = FALSE)
-  res <- match_metadata_columns(m_df, c("pH", "K"))
+  res <- match_metadata_columns(m_df, c("pH", "K"))$vars
   expect_length(res, 2L)
   expect_equal(vapply(res, `[[`, character(1), "label"), c("Soil pH", "K (mg/kg)"))
   expect_equal(vapply(res, `[[`, character(1), "unit"), c("", ""))

@@ -696,7 +696,7 @@
     div(class = paste0("alert alert-", tone),
         style = "margin-top: 12px; margin-bottom: 0; padding: 10px 12px;",
         div(style = "font-weight: 600;", title,
-            if (!is.null(why)) info_tooltip("crs_target_note", why)),
+            if (!is.null(why)) info_tooltip("crs_target_note", tip_html(why))),
         div(style = "margin-top: 4px;", body),
         if (!is.null(rec))
           div(style = "margin-top: 8px;",
@@ -803,9 +803,9 @@
     set_target_crs(paste0("EPSG:", code))
   })
 
-  # The dataset-wide cell-size suggestion that prefills the Fixed slider
-  # (Scientific Guide 2.1), written in the Auto modes only: in Fixed mode the
-  # slider holds the user's own value.
+  # The cell-size suggestion that prefills the Fixed slider (Scientific Guide
+  # 2.3), measured on the selected localities' points together and written in
+  # the Auto modes only: in Fixed mode the slider holds the user's own value.
   observeEvent(list(rv$user_data, input$map_x, input$map_y, input$map_crs, input$crs_selection, input$locality, input$res_mode), {
     req(rv$user_data, input$map_x, input$map_y, input$map_crs, input$crs_selection, input$res_mode)
     if (input$res_mode == "fixed") return()
@@ -813,10 +813,9 @@
 
     df_raw <- rv$user_data %>% select(x = !!sym(input$map_x), y = !!sym(input$map_y), loc = !!sym(input$map_loc)) %>% na.omit()
 
-    locs_scope <- resolve_selected_localities(input$locality, df_raw, "loc")
+    # The points of the localities the next run would map, in both Auto modes.
+    df <- df_raw %>% filter(loc %in% resolve_selected_localities(input$locality, df_raw, "loc"))
 
-    df <- if (input$res_mode == "global") df_raw else df_raw %>% filter(loc %in% locs_scope)
-    
     if (nrow(df) < 2) return()
     
     crs_obj <- validate_crs(input$crs_selection, "Invalid CRS provided:")
@@ -828,7 +827,7 @@
     req(pts)
 
     # The slider is metric and runs are projected, so the suggestion is in
-    # metres even for a geographic analysis CRS (calc_metric_spacing()).
+    # metres even for a geographic Target Mapping CRS (calc_metric_spacing()).
     spacing <- calc_metric_spacing(pts)
     req(is.finite(spacing$mean_nn))
 
@@ -863,11 +862,9 @@
     eff_subset <- effective_subset(input$value_type, input$subset, names(ud))
     method <- input$method %||% "OK"
     rv$loc_buffer_res <- stats::setNames(lapply(locs, function(l) {
-      pts_data <- run_locality_rows(ud, m$loc, l, eff_subset)
-      pts_data$x <- pts_data[[m$x]]
-      pts_data$y <- pts_data[[m$y]]
       # The display set does not depend on the CV population, so no m_params.
-      pp <- tryCatch(.locality_points(l, pts_data, m$crs, method, input$aux_vars, list()),
+      pp <- tryCatch(.locality_points(l, locality_run_frame(ud, m, l, eff_subset), m$crs, method,
+                                      input$aux_vars, list()),
                      error = function(e) NULL)
       if (!isTRUE(pp$ok)) return(NA_real_)
       locality_buffer_res(pp$pts, "local", NA_real_)
@@ -904,70 +901,86 @@
     })
 
     req(m_df)
-    user_cols <- colnames(rv$user_data)
-    new_vars <- match_metadata_columns(m_df, user_cols)
-    
-    if (length(new_vars) > 0) {
-      rv$mapping$vars <- new_vars
-      showNotification(paste("Auto-mapped", length(new_vars), "variables with dual predictions."), type = "message")
+    matched <- match_metadata_columns(m_df, colnames(rv$user_data))
+    n_var <- length(matched$vars)
+    if (n_var == 0) {
+      showNotification("No row of the variable list names a column of this table, so the list was not applied. A row matches a column of the same name; case, spaces and punctuation may differ.",
+                       type = "warning", duration = 15)
+      return()
+    }
+    rv$mapping$vars <- matched$vars
+    showNotification(sprintf("Variable list applied: %d variable%s matched to columns.", n_var,
+                             if (n_var == 1) "" else "s"), type = "message")
+    # Rows left without a column are named, so a mistyped name is seen and not
+    # taken for a variable the table lacks.
+    miss <- matched$unmatched
+    if (length(miss)) {
+      shown <- utils::head(miss, 12)
+      showNotification(sprintf("%d variable-list row%s no column in this table: %s%s.", length(miss),
+                               if (length(miss) == 1) " has" else "s have", paste(shown, collapse = ", "),
+                               if (length(miss) > length(shown)) sprintf(" and %d more", length(miss) - length(shown)) else ""),
+                       type = "warning", duration = 20)
     }
   })
+
+  # The variables the mapping editor lists, one row each: the variable list an
+  # upload fills with every numeric column that is not a coordinate, or the
+  # rows of an uploaded variable list or loaded configuration.
+  mapping_targets <- function() {
+    vapply(rv$mapping$vars, function(x) as.character(x$actual), character(1))
+  }
 
   output$var_mapping_ui <- renderUI({
     req(rv$user_data)
     cols <- colnames(rv$user_data)
     num_cols <- cols[sapply(rv$user_data, is.numeric)]
-    
-    if (!is.null(rv$mapping$vars) && length(rv$mapping$vars) > 0) {
-      targets <- sapply(rv$mapping$vars, function(x) x$actual)
-    } else {
-      targets <- num_cols[!is_coord_col(num_cols)]
-      if (length(targets) > 30) {
-        targets <- head(targets, 30)
-        showNotification("Too many columns. Showing first 30 for mapping. Please use an Excel metadata file for bulk mapping.", type = "warning")
-      }
+    targets <- mapping_targets()
+    if (!length(targets)) {
+      return(tags$p(class = "mn-empty-line", "This table has no numeric column besides its coordinates, so there is no variable to map."))
     }
-    
+
+    # The stored value of a field, NULL where there is none.
     get_map_val <- function(target, field) {
-      match <- Filter(function(x) x$actual == target, rv$mapping$vars)
-      if (length(match) > 0) {
-         val <- match[[1]][[field]]
-         if(is.null(val) || length(val) == 0) return(NULL)
-         if(is.na(val)) return(NULL) else return(val)
-      } else {
-         return(NULL)
-      }
+      val <- Find(function(x) identical(as.character(x$actual), target), rv$mapping$vars)[[field]]
+      if (length(val) == 1 && !is.na(val)) val
     }
 
     tryCatch({
       tagList(
-        lapply(seq_along(targets), function(i) {
-          t <- targets[i]
-          def_p_cve <- get_map_val(t, "pred")    %||% detect_pred_column(t, num_cols, "cve") %||% "None"
-          def_p_ss  <- get_map_val(t, "pred_ss") %||% detect_pred_column(t, num_cols, "ss")  %||% "None"
-          def_l     <- get_map_val(t, "label")    %||% t
-          def_c     <- get_map_val(t, "category") %||% "Uploaded Data"
-          def_u     <- get_map_val(t, "unit")     %||% ""
-
-          if(is.na(def_p_cve)) def_p_cve <- "None"
-          if(is.na(def_p_ss)) def_p_ss <- "None"
-          if(is.na(def_l)) def_l <- t
-          if(is.na(def_c)) def_c <- "Uploaded Data"
-
-          div(style="border-bottom: 1px solid var(--mn-line); padding: 10px 0; margin-bottom: 10px;",
-            fluidRow(
-              column(2, tags$b(t)),
-              column(2, selectInput(paste0("pair_pred_cve_", i), "Best Pred (_cve)", choices = c("None", num_cols), selected = def_p_cve)),
-              column(2, selectInput(paste0("pair_pred_ss_", i),  "Split Pred (_ss)", choices = c("None", num_cols), selected = def_p_ss)),
-              column(2, textInput(paste0("pair_label_", i), "Label", value = def_l)),
-              column(2, textInput(paste0("pair_cat_", i), "Category", value = def_c)),
-              # The unit the values are recorded in: map legends, the GeoTIFF
-              # MONOLITH_UNIT tag and the supervised class limits read it.
-              column(2, textInput(paste0("pair_unit_", i), "Unit", value = def_u,
-                                  placeholder = "e.g. mg/kg"))
+        # Filtering hides rows in the browser; their inputs keep their values,
+        # so Confirm saves every row whatever the filter shows.
+        div(class = "mn-mapping-filter",
+            tags$input(type = "search", class = "form-control", `aria-label` = "Filter the variables listed below",
+                       placeholder = "Filter by column, label or category",
+                       oninput = paste0(
+                         "var q = this.value.toLowerCase().trim(), n = 0;",
+                         "document.querySelectorAll('#var_mapping_rows .mn-mapping-row').forEach(function(r) {",
+                         "  var show = !q || r.getAttribute('data-key').indexOf(q) >= 0;",
+                         "  r.style.display = show ? '' : 'none'; if (show) n++; });",
+                         "document.getElementById('var_mapping_count').textContent = n + ' of ", length(targets), " shown';")),
+            span(id = "var_mapping_count", class = "mn-mapping-count",
+                 sprintf("%d of %d shown", length(targets), length(targets)))),
+        div(id = "var_mapping_rows", class = "mn-mapping-rows",
+          lapply(seq_along(targets), function(i) {
+            t <- targets[i]
+            def_l <- get_map_val(t, "label") %||% t
+            def_c <- get_map_val(t, "category") %||% "Uploaded Data"
+            div(class = "mn-mapping-row", `data-key` = tolower(paste(t, def_l, def_c)),
+              fluidRow(
+                column(2, tags$b(t)),
+                column(2, selectInput(paste0("pair_pred_cve_", i), "Best Pred (_cve)", choices = c("None", num_cols),
+                                      selected = get_map_val(t, "pred") %||% "None")),
+                column(2, selectInput(paste0("pair_pred_ss_", i),  "Split Pred (_ss)", choices = c("None", num_cols),
+                                      selected = get_map_val(t, "pred_ss") %||% "None")),
+                column(2, textInput(paste0("pair_label_", i), "Label", value = def_l)),
+                column(2, textInput(paste0("pair_cat_", i), "Category", value = def_c)),
+                # The unit the values are recorded in: map legends, the GeoTIFF
+                # MONOLITH_UNIT tag and the supervised class limits read it.
+                column(2, textInput(paste0("pair_unit_", i), "Unit", value = get_map_val(t, "unit") %||% "",
+                                    placeholder = "e.g. mg/kg"))
+              )
             )
-          )
-        }),
+          })),
         actionButton("confirm_mapping", "Confirm Variable Mapping", icon = icon("check-circle"), class = "btn-primary btn-block btn-pill")
       )
     }, error = function(e) {
@@ -978,16 +991,8 @@
 
   observeEvent(input$confirm_mapping, {
     req(rv$user_data)
-    cols <- colnames(rv$user_data)
-    num_cols <- cols[sapply(rv$user_data, is.numeric)]
-    
-    if (!is.null(rv$mapping$vars) && length(rv$mapping$vars) > 0) {
-      targets <- sapply(rv$mapping$vars, function(x) x$actual)
-    } else {
-      targets <- num_cols[!is_coord_col(num_cols)]
-      if (length(targets) > 30) targets <- head(targets, 30)
-    }
-    
+    targets <- mapping_targets()
+
     new_vars <- list()
     for (i in seq_along(targets)) {
       p_cve <- input[[paste0("pair_pred_cve_", i)]]
@@ -1118,8 +1123,7 @@
     m <- m %>%
       leaflet::addScaleBar(position = "bottomleft",
                            options = leaflet::scaleBarOptions(metric = TRUE, imperial = FALSE)) %>%
-      leaflet::addControl(html = map_north_arrow_html(), position = "topleft",
-                          layerId = "north_ctrl")
+      add_north_arrow()
 
     session_state$minimap_rendered <- TRUE
     # Sample bounds (WGS84) for chunk H's reveal handler to re-frame the map,

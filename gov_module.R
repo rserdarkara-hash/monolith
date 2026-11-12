@@ -40,13 +40,13 @@ gov_factors_ui <- function(id) {
       shiny::fluidRow(
         shiny::column(3,
           shiny::div(style = "display: flex; align-items: center; margin-bottom: 10px;",
-            shiny::h4("Analysis Configuration", style = "margin: 0; margin-right: 8px;"),
-            shiny::tags$i(class = "fa fa-info-circle", style = "color: var(--mn-text-3); cursor: help;", title = "At least 50 complete rows (the target and every selected factor present) are required to fit the random forest reliably.")
+            shiny::h4("Analysis Configuration", style = "margin: 0;"),
+            info_tooltip(ns("gov_config_info"), "The forest is fitted on the rows of the active groups. At least 50 of them must be complete (the target and every selected factor present) to fit it reliably.")
           ),
           shiny::uiOutput(ns("gov_target_ui")),
           shiny::uiOutput(ns("gov_predictors_ui")),
-          shiny::sliderInput(ns("gov_ntree"), shiny::tags$span("Number of Trees (ntree)", shiny::tags$i(class = "fa fa-info-circle", title = "Importance is each predictor's permutation importance on the out-of-bag rows, averaged over the trees; more trees give a more stable estimate.", style = "color: var(--mn-text-3); cursor: help; margin-left: 5px;")), min = 50, max = 500, value = 100, step = 50, ticks = FALSE),
-          shiny::sliderInput(ns("gov_shap_size"), shiny::tags$span("SHAP Sample Size (Max)", shiny::tags$i(class = "fa fa-info-circle", title = "Lower values calculate faster but are less stable; higher values take longer but represent the dataset better.", style = "color: var(--mn-text-3); cursor: help; margin-left: 5px;")), min = 50, max = 1000, value = 100, step = 50, ticks = FALSE),
+          shiny::sliderInput(ns("gov_ntree"), shiny::tags$span("Number of Trees (ntree)", info_tooltip(ns("gov_ntree_info"), "Importance is each predictor's permutation importance on the out-of-bag rows, averaged over the trees; more trees give a more stable estimate.")), min = 50, max = 500, value = 100, step = 50, ticks = FALSE),
+          shiny::sliderInput(ns("gov_shap_size"), shiny::tags$span("SHAP Sample Size (Max)", info_tooltip(ns("gov_shap_info"), "Lower values calculate faster but are less stable; higher values take longer but represent the dataset better.")), min = 50, max = 1000, value = 100, step = 50, ticks = FALSE),
           shiny::actionButton(ns("gov_run_btn"), "Run Analysis", class = "btn-primary btn-block"),
           shiny::hr(),
           shiny::h4("Plot Settings"),
@@ -127,7 +127,10 @@ gov_factors_ui <- function(id) {
   )
 }
 
-gov_factors_server <- function(id, data_reactive, vars_metadata_reactive) {
+# `data_reactive` gives the columns offered as target and factors;
+# `rows_reactive` the rows a run is fitted on (the Analytics Engine's active
+# groups), read when Run Analysis is pressed.
+gov_factors_server <- function(id, data_reactive, rows_reactive, vars_metadata_reactive) {
   shiny::moduleServer(id, function(input, output, session) {
     ns <- session$ns
 
@@ -135,6 +138,12 @@ gov_factors_server <- function(id, data_reactive, vars_metadata_reactive) {
     # shared by two columns carry their column name, as on the other tabs.
     display_labels <- shiny::reactive(desc_var_labels(colnames(data_reactive()), vars_metadata_reactive()))
     lab <- function(v) display_var_labels(v, display_labels())
+    numeric_choices <- shiny::reactive({
+      df <- data_reactive()
+      shiny::req(df)
+      cols <- colnames(df)[vapply(df, is.numeric, logical(1))]
+      stats::setNames(cols, lab(cols))
+    })
 
     gov_rv <- shiny::reactiveValues(res = NULL, ready = "no", cancelling = FALSE)
 
@@ -164,26 +173,21 @@ gov_factors_server <- function(id, data_reactive, vars_metadata_reactive) {
     })
 
 
+    # isolate: a new upload or a Variable naming switch rebuilds the selectors,
+    # which keep the picks whose columns are still there.
     output$gov_target_ui <- shiny::renderUI({
-      df <- data_reactive()
-      shiny::req(df)
-      cols <- colnames(df)
-      num_cols <- cols[sapply(df, is.numeric)]
-      names(num_cols) <- lab(num_cols)
-
-      shiny::selectInput(ns("gov_target"), "Target Parameter", choices = num_cols)
+      choices <- numeric_choices()
+      keep <- intersect(shiny::isolate(input$gov_target), choices)
+      shiny::selectInput(ns("gov_target"), "Target Parameter", choices = choices,
+                         selected = if (length(keep)) keep)
     })
-    
-    output$gov_predictors_ui <- shiny::renderUI({
-      df <- data_reactive()
-      shiny::req(df)
-      cols <- colnames(df)
-      num_cols <- cols[sapply(df, is.numeric)]
-      names(num_cols) <- lab(num_cols)
 
+    output$gov_predictors_ui <- shiny::renderUI({
+      choices <- numeric_choices()
       shinyWidgets::pickerInput(
         ns("gov_predictors"), "Governing Factors",
-        choices = num_cols, multiple = TRUE,
+        choices = choices, multiple = TRUE,
+        selected = intersect(shiny::isolate(input$gov_predictors), choices),
         options = list(`actions-box` = TRUE, `live-search` = TRUE)
       )
     })
@@ -193,9 +197,9 @@ gov_factors_server <- function(id, data_reactive, vars_metadata_reactive) {
         return(NULL)
       }
       
-      df <- data_reactive()
+      df <- rows_reactive()
       shiny::req(df, input$gov_target, input$gov_predictors)
-      
+
       preds <- setdiff(input$gov_predictors, input$gov_target)
       if (length(preds) < 1) {
         shiny::showNotification("Select at least one governing factor other than the target.", type = "error")
@@ -206,7 +210,7 @@ gov_factors_server <- function(id, data_reactive, vars_metadata_reactive) {
       n_complete <- sum(stats::complete.cases(df[, unique(c(input$gov_target, preds)), drop = FALSE]))
       if (n_complete < 50) {
         shiny::showNotification(sprintf(
-          "%d of %d rows have the target and every selected factor; at least 50 such rows are required.",
+          "%d of the %d rows in the active groups have the target and every selected factor; at least 50 such rows are required.",
           n_complete, nrow(df)), type = "error")
         return()
       }
@@ -320,35 +324,7 @@ gov_factors_server <- function(id, data_reactive, vars_metadata_reactive) {
       base_size <- if (expanded) 16 else 11
       
       if (plot_type == "importance") {
-        vip_df <- gov_rv$res$importance
-        vip_df <- vip_df[order(vip_df$mse_increase, decreasing = FALSE), ]
-        # make.unique: a run outlives the data it was fitted on, and labels of
-        # columns the current data no longer carries fall back to their names.
-        vip_df$variable_label <- make.unique(lab(as.character(vip_df$variable)))
-        vip_df$variable_label <- factor(vip_df$variable_label, levels = vip_df$variable_label)
-        # Both forms of the out-of-bag permutation importance, one panel each:
-        # the increase in MSE, which orders the factors, and the same divided
-        # by its standard error across trees (randomForest's %IncMSE).
-        long <- data.frame(variable_label = vip_df$variable_label, value = vip_df$mse_increase,
-                           measure = RF_IMPORTANCE_LABELS[["increase"]])
-        if (!is.null(vip_df$mse_increase_scaled)) {
-          long <- rbind(long, data.frame(variable_label = vip_df$variable_label,
-                                         value = vip_df$mse_increase_scaled,
-                                         measure = RF_IMPORTANCE_LABELS[["scaled"]]))
-        }
-        long$measure <- factor(long$measure, levels = unique(long$measure))
-
-        ggplot2::ggplot(long, ggplot2::aes(x = value, y = variable_label)) +
-          ggplot2::geom_col(fill = "steelblue") +
-          ggplot2::facet_wrap(~measure, scales = "free_x",
-                              labeller = ggplot2::label_wrap_gen(width = 20)) +
-          ggplot2::labs(title = "Global Variable Importance",
-                        subtitle = if (!is.null(gov_rv$res$n_used)) {
-                          complete_case_note(gov_rv$res$n_used, gov_rv$res$n_total)
-                        },
-                        caption = "Scaled values grow with the number of trees: compare them only between runs with the same ntree.",
-                        x = NULL, y = "Variable") +
-          ggplot2::theme_minimal(base_size = base_size)
+        build_gov_importance_plot(gov_rv$res, display_labels(), base_size = base_size)
       } else if (plot_type == "interaction_a") {
         shap_df <- gov_rv$res$shap
         top_var_label <- lab(gov_rv$res$top_var)

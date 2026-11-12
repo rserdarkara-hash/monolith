@@ -51,10 +51,14 @@ mn_popover <- function(label, ..., icon_tag = NULL, align = c("left", "right"),
   )
 }
 
-# North-arrow markup for leaflet addControl(), shared by the Map Viewer overlay
-# and the Data Setup mini-map.
-map_north_arrow_html <- function() {
-  "<div style='text-align: center; color: white; font-family: Arial, sans-serif; pointer-events: none;'><div style='font-size: 16px; font-weight: bold; line-height: 1; margin-bottom: 4px; text-shadow: 1px 1px 2px black;'>N</div><svg width='30' height='30' viewBox='0 0 24 24' style='filter: drop-shadow(1px 1px 2px black);'><polygon points='12,2 7,22 12,17 17,22' fill='#e74c3c' stroke='white' stroke-width='1.5'/><polygon points='12,2 7,22 12,17' fill='#c0392b' stroke='white' stroke-width='1.5'/></svg></div>"
+# The north arrow of the Map Viewer overlay and the Data Setup mini-map, as a
+# leaflet control (layer id "north_ctrl") on a widget or a proxy. It is drawn
+# on the basemap itself, white over a shadow in both variants, so the control
+# takes a class of its own: addControl()'s default, 'info legend', would put
+# the white "N" on the legend's surface.
+add_north_arrow <- function(map) {
+  leaflet::addControl(map, position = "topleft", layerId = "north_ctrl", className = "mn-north-arrow",
+    html = "<div style='text-align: center; color: white; font-family: Arial, sans-serif; pointer-events: none;'><div style='font-size: 16px; font-weight: bold; line-height: 1; margin-bottom: 4px; text-shadow: 1px 1px 2px black;'>N</div><svg width='30' height='30' viewBox='0 0 24 24' style='filter: drop-shadow(1px 1px 2px black);'><polygon points='12,2 7,22 12,17 17,22' fill='#e74c3c' stroke='white' stroke-width='1.5'/><polygon points='12,2 7,22 12,17' fill='#c0392b' stroke='white' stroke-width='1.5'/></svg></div>")
 }
 
 # Wraps a leaflet legend title so CSS can hide it: the Overlays "Variable Label
@@ -116,9 +120,9 @@ map_ruler_popup_html <- function(res) {
     lines <- paste0(lines, row(paste0(len_lab, ", ", proj_lab),
                                format_measure_length(res$length_projected)))
   }
-  # Area on both bases, as for lengths: ellipsoidal (terra, as the class-zone
-  # export) and planimetric in the analysis CRS differ by the projection's
-  # area distortion.
+  # Area on both bases, as for lengths: ground area on the ellipsoid (terra;
+  # the class areas use the same convention) and planimetric in the Target
+  # Mapping CRS differ by the projection's area distortion.
   if (!is.null(res$area_geodesic) && is.finite(res$area_geodesic)) {
     lines <- paste0(lines, row("Area, ground (WGS84)", format_measure_area(res$area_geodesic)))
     if (!is.null(res$area_projected) && is.finite(res$area_projected)) {
@@ -409,13 +413,15 @@ sci_card <- function(title, subtitle, ...) {
 }
 
 # Plain-language definitions shown as hover tooltips on metric table headers
-# (matched by column name; columns without an entry render normally).
+# (matched by column name; columns without an entry render normally). The
+# browser draws a hover title as plain text, so a blank line ("\n\n")
+# separates the points of a long one.
 sci_metric_tooltips <- function() {
   c(
     "Source" = "Model and cross-validation design that produced this row's metrics.",
     "RMSE" = "Root Mean Square Error of the cross-validation residuals, in the variable's units. Lower is better.",
     "NRMSE (mean, %)" = "RMSE as a percentage of the absolute observed mean, i.e. CV(RMSE). Needs a ratio scale: n/a¹ when the observed values span zero, NA when the observed mean is exactly zero.",
-    "NRMSE (SD)" = "RMSE divided by the standard deviation of the observed values: the prediction error as a multiple of the target's spread. Unchanged by shifting the variable's origin, so it stays defined for signed or centred targets. It equals 1/RPD and sqrt((1 - NSE)(n - 1)/n), so it restates, rather than adds to, the evidence in those columns.",
+    "NRMSE (SD)" = "RMSE divided by the standard deviation of the observed values: the prediction error as a multiple of the target's spread.\n\nUnchanged by shifting the variable's origin, so it stays defined for signed or centred targets.\n\nIt equals 1/RPD and sqrt((1 - NSE)(n - 1)/n), so it restates, rather than adds to, the evidence in those columns.",
     "MAE" = "Mean Absolute Error of the cross-validation residuals, in the variable's units. Less sensitive to single large errors than RMSE.",
     "R² (Corr)" = "Squared Pearson correlation between observed and CV-predicted values. Measures association only; insensitive to systematic bias.",
     "R² (NSE/Trad)" = "Nash-Sutcliffe efficiency (traditional R²): 1 - SSE/SStot against the observed mean. 1 = perfect, 0 = no better than predicting the mean, negative = worse than the mean.",
@@ -423,11 +429,11 @@ sci_metric_tooltips <- function() {
     "Lin's CCC (Agree)" = "Lin's Concordance Correlation Coefficient: agreement with the 1:1 line, combining precision (correlation) and accuracy (bias/scale shift). 1 = perfect agreement. NA when either vector is constant.",
     "RPD (Prec)" = "Ratio of Performance to Deviation: SD(observed) / RMSE. Chemometrics convention: > 2 good, 1.4-2 fair, < 1.4 poor.",
     "RPIQ" = "Ratio of Performance to Interquartile distance: IQR(observed) / RMSE. The RPD analogue for skewed distributions, where the SD is a poor spread measure. Higher is better.",
-    "SMAPE (%)" = "Symmetric Mean Absolute Percentage Error: scale-free accuracy; 0% is perfect. n/a¹ when the observed values span zero, where a single sign disagreement contributes the maximum term however small both values are.",
-    "Moran's I" = "Spatial autocorrelation of the CV residuals (symmetric 8-nearest-neighbour weights). Read it against its null expectation E[I] = -1/(n-1) (shown per row on hover), not against 0. A clearly higher value is consistent with spatial structure the prediction procedure did not capture; it is not by itself an instruction to change engine. A value near E[I] is not proof of a clean model either: random folds leave each held-out point's neighbours in training, which can mask residual structure. Rows scored under Spatial Block CV or kNNDM spatial folds are marked † and read differently (see the note under the table). NA* = the statistic could not be computed for this point set.",
-    "Block-CV residual clustering" = "Moran's I of the pooled out-of-fold residuals under Spatial Block CV. Those residuals inherit the fold geometry and a shared extrapolation condition within each withheld block, so this statistic measures clustering of block-CV errors; fold geometry and shared extrapolation error confound it, and it cannot on its own diagnose a missing spatial trend. Its p-value is not reported.",
-    "Spatial-fold residual clustering" = "Moran's I of the pooled out-of-fold residuals under kNNDM spatial folds. Each fold withholds whole groups of neighbouring samples, so those residuals inherit the fold geometry and a shared prediction condition within each group: this statistic measures clustering of the spatial-fold errors, fold geometry confounds it, and it cannot on its own diagnose a missing spatial trend. Its p-value is not reported.",
-    "Moran p" = "Two-sided permutation p-value of Moran's I (999 seeded permutations; the smallest attainable value is 0.002). Small p = residual autocorrelation unlikely under spatial randomness. NA† under Spatial Block CV and kNNDM spatial folds, where residuals held out in whole groups are not exchangeable, so the permutation null does not describe them. NA* where Moran's I itself could not be computed."
+    "SMAPE (%)" = "Symmetric Mean Absolute Percentage Error: scale-free accuracy; 0% is perfect.\n\nn/a¹ when the observed values span zero, where a single sign disagreement contributes the maximum term however small both values are.",
+    "Moran's I" = "Spatial autocorrelation of the CV residuals (symmetric 8-nearest-neighbour weights). Read it against its null expectation E[I] = -1/(n-1) (shown per row on hover), not against 0.\n\nA clearly higher value is consistent with spatial structure the prediction procedure did not capture; it is not by itself an instruction to change engine. A value near E[I] is not proof of a clean model either: random folds leave each held-out point's neighbours in training, which can mask residual structure.\n\nRows scored under Spatial Block CV or kNNDM spatial folds are marked † and read differently (see the note under the table). NA* = the statistic could not be computed for this point set.",
+    "Block-CV residual clustering" = "Moran's I of the pooled out-of-fold residuals under Spatial Block CV.\n\nThose residuals inherit the fold geometry and a shared extrapolation condition within each withheld block, so this statistic measures clustering of block-CV errors; fold geometry and shared extrapolation error confound it, and it cannot on its own diagnose a missing spatial trend. Its p-value is not reported.",
+    "Spatial-fold residual clustering" = "Moran's I of the pooled out-of-fold residuals under kNNDM spatial folds.\n\nEach fold withholds whole groups of neighbouring samples, so those residuals inherit the fold geometry and a shared prediction condition within each group: this statistic measures clustering of the spatial-fold errors, fold geometry confounds it, and it cannot on its own diagnose a missing spatial trend. Its p-value is not reported.",
+    "Moran p" = "Two-sided permutation p-value of Moran's I (999 seeded permutations; the smallest attainable value is 0.002). Small p = residual autocorrelation unlikely under spatial randomness.\n\nNA† under Spatial Block CV and kNNDM spatial folds, where residuals held out in whole groups are not exchangeable, so the permutation null does not describe them. NA* where Moran's I itself could not be computed."
   )
 }
 build_rk_trend_ui <- function(lm_sum, dt_id, raw_id) {
@@ -566,7 +572,7 @@ render_docs_drawer <- function() {
     div(
       id = "docs_drawer_body",
       class = "docs-drawer-body",
-      div(style = "display: flex; justify-content: space-between; align-items: center; border-bottom: 1px solid #eee; padding-bottom: 10px; margin-bottom: 15px;",
+      div(style = "display: flex; justify-content: space-between; align-items: center; border-bottom: 1px solid var(--mn-line); padding-bottom: 10px; margin-bottom: 15px;",
           h3("Documentation", style = "margin: 0;"),
           actionButton("close_docs_btn", icon("times"), class = "btn-light btn-sm",
                        "aria-label" = "Close documentation",
@@ -650,9 +656,22 @@ render_docs_drawer <- function() {
   )
 }
 
+# The text of an info popover, one paragraph per argument, so every choice
+# and every separate point starts a line of its own. A named argument gets
+# its name as a bold lead-in: a choice as the control labels it, or a point
+# such as "Cost". The spacing comes from the theme (.popover-content p).
+tip_html <- function(...) {
+  x <- c(...)
+  lead <- names(x) %||% character(length(x))
+  paste0("<p>", ifelse(nzchar(lead), paste0("<b>", lead, ":</b> "), ""), x, "</p>",
+         collapse = "")
+}
+
+# An info icon whose popover shows `text` (HTML) and closes when it loses
+# focus. Bootstrap's popover sanitiser removes buttons, tables and style
+# attributes, so the text uses plain tags (p, b, code, hr, links); a text of
+# more than one point is built with tip_html().
 info_tooltip <- function(id, text) {
-  content_html <- paste0(text, "<br><br><div style='text-align: right;'><button type='button' class='btn btn-xs btn-outline-secondary' onclick='$(this).closest(\".popover\").popover(\"hide\");'>Close &times;</button></div>")
-  
   tags$span(
     id = paste0(id, "_info_icon"),
     class = "info-icon",
@@ -663,31 +682,29 @@ info_tooltip <- function(id, text) {
     `data-trigger` = "focus",
     # Attached to <body>, so sidebar and card containers cannot clip the panel.
     `data-container` = "body",
-    `data-content` = content_html,
+    `data-content` = text,
     `data-html` = "true",
     `data-bs-toggle` = "popover",
     `data-bs-placement` = "auto",
     `data-bs-trigger` = "focus",
     `data-bs-container` = "body",
-    `data-bs-content` = content_html,
+    `data-bs-content` = text,
     `data-bs-html` = "true",
     onclick = "event.stopPropagation(); event.preventDefault(); if (typeof bootstrap !== 'undefined' && bootstrap.Popover) { new bootstrap.Popover(this, {container: 'body'}).show(); }",
     icon("info-circle")
   )
 }
 
-# What the Total (Combined) view of a variogram card draws and why its lag axis
-# ends where it does. Built at call time: POOLED_VGM_MIN_N (spatial_vgm.R) is
-# sourced after the UI helpers.
-pooled_vgm_note <- function() {
-  paste0("Total (Combined) pools the point pairs inside each locality; no pair joins two localities. ",
-         "The lag axis stops at the half-diagonal of the smallest locality with at least ", POOLED_VGM_MIN_N,
-         " located values, so every locality contributes over the whole axis. One small locality therefore ",
-         "shortens the curve for all; select a locality to see its own lag range.")
+# The info icon of a variogram card that also draws the Total (Combined) view:
+# what that view draws and why its lag axis ends where it does. Built at call
+# time: POOLED_VGM_MIN_N (spatial_vgm.R) is sourced after the UI helpers.
+pooled_vgm_info <- function(id) {
+  info_tooltip(id, tip_html(
+    "Total (Combined) pools the point pairs inside each locality; no pair joins two localities.",
+    paste0("The lag axis stops at the half-diagonal of the smallest locality with at least ", POOLED_VGM_MIN_N,
+           " located values, so every locality contributes over the whole axis. One small locality therefore ",
+           "shortens the curve for all; select a locality to see its own lag range.")))
 }
-
-# The info icon of a variogram card that also draws the Total (Combined) view.
-pooled_vgm_info <- function(id) info_tooltip(id, pooled_vgm_note())
 
 
 # One-line statement of the sample a matrix-valued panel used: rows complete

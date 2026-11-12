@@ -586,11 +586,11 @@ desc_exploratory_server <- function(id, data_reactive, vars_metadata_reactive,
       if (nrow(df) == 0) return(desc_empty_dt("No data selected."))
 
       if (p_type %in% c("parallel", "radar")) {
-          return(data.frame(Message="Summary statistics table is not available for multi-variable plots."))
+          return(desc_empty_dt("Summary statistics table is not available for multi-variable plots."))
       }
-      
+
       var <- input$desc_var_x
-      if(!is.numeric(df[[var]])) return(data.frame(Message="Selected primary variable is not numeric."))
+      if(!is.numeric(df[[var]])) return(desc_empty_dt("Selected primary variable is not numeric."))
       
       # Arithmetic (the per-group statistics, the TOTAL row and the trend fits)
       # lives in ui_formatting.R; this block selects the data and formats.
@@ -807,70 +807,58 @@ desc_exploratory_server <- function(id, data_reactive, vars_metadata_reactive,
 
         if(nrow(df_clean) < 3) return(desc_empty_dt("Insufficient complete observations (fewer than 3 rows without missing values)."))
 
-        if (p_type %in% c("heatmap", "network", "correlogram", "partial")) {
-           pair_vars <- if (!is.null(pcor)) vars else colnames(df_clean)
-           n_v <- length(pair_vars)
-           res_list <- list()
-           for(i in 1:(n_v-1)) {
-              for(j in (i+1):n_v) {
-                 ct <- if (!is.null(pcor)) {
-                   list(estimate = pcor$cormat[pair_vars[i], pair_vars[j]], p.value = NA_real_)
+        # One row per pair of the selected variables, for every plot type.
+        pair_vars <- if (!is.null(pcor)) vars else colnames(df_clean)
+        n_v <- length(pair_vars)
+        res_list <- list()
+        for(i in 1:(n_v-1)) {
+           for(j in (i+1):n_v) {
+              ct <- if (!is.null(pcor)) {
+                list(estimate = pcor$cormat[pair_vars[i], pair_vars[j]], p.value = NA_real_)
+              } else {
+                # A pair that cannot be tested stays in the table, without an
+                # estimate.
+                tryCatch(cor.test(df_clean[[i]], df_clean[[j]], method = method),
+                         error = function(e) list(estimate = NA_real_, p.value = NA_real_))
+              }
+              p_val <- ct$p.value
+              if (!is.null(pcor)) {
+                 # A residual cor.test would use df = n - 2, ignoring the
+                 # k controls; the partial df is n - 2 - k (as in
+                 # ppcor::pcor.test).
+                 r_est <- unname(ct$estimate)
+                 n_obs <- pcor$n
+                 if (method == "kendall") {
+                    n_eff <- n_obs - n_controls
+                    if (n_eff > 2) {
+                       z_stat <- 3 * r_est * sqrt(n_eff * (n_eff - 1)) / sqrt(2 * (2 * n_eff + 5))
+                       p_val <- 2 * pnorm(-abs(z_stat))
+                    } else p_val <- NA_real_
                  } else {
-                   tryCatch(cor.test(df_clean[[i]], df_clean[[j]], method = method), error=function(e) NULL)
-                 }
-                 if(!is.null(ct)) {
-                    p_val <- ct$p.value
-                    if (!is.null(pcor)) {
-                       # A residual cor.test would use df = n - 2, ignoring the
-                       # k controls; the partial df is n - 2 - k (as in
-                       # ppcor::pcor.test).
-                       r_est <- unname(ct$estimate)
-                       n_obs <- pcor$n
-                       if (method == "kendall") {
-                          n_eff <- n_obs - n_controls
-                          if (n_eff > 2) {
-                             z_stat <- 3 * r_est * sqrt(n_eff * (n_eff - 1)) / sqrt(2 * (2 * n_eff + 5))
-                             p_val <- 2 * pnorm(-abs(z_stat))
-                          } else p_val <- NA_real_
-                       } else {
-                          df_t <- pcor$df
-                          if (df_t > 0) {
-                             p_val <- if (abs(r_est) >= 1) 0 else 2 * pt(-abs(r_est * sqrt(df_t / (1 - r_est^2))), df_t)
-                          } else p_val <- NA_real_
-                       }
-                    }
-                    res_list[[length(res_list)+1]] <- data.frame(
-                        Variable_1 = lab(pair_vars[i]),
-                        Variable_2 = lab(pair_vars[j]),
-                        Correlation = unname(ct$estimate),
-                        p_raw = p_val,
-                        stringsAsFactors = FALSE
-                    )
+                    df_t <- pcor$df
+                    if (df_t > 0) {
+                       p_val <- if (abs(r_est) >= 1) 0 else 2 * pt(-abs(r_est * sqrt(df_t / (1 - r_est^2))), df_t)
+                    } else p_val <- NA_real_
                  }
               }
-           }
-           if(length(res_list) > 0) {
-              res_df <- do.call(rbind, res_list)
-              # Benjamini-Hochberg adjustment across all tested pairs: raw
-              # p-values stay visible, the BH column controls the FDR.
-              res_df$P_Value <- format.pval(res_df$p_raw, digits = 3, eps = 0.001)
-              res_df$P_Adj <- format.pval(p.adjust(res_df$p_raw, method = "BH"), digits = 3, eps = 0.001)
-              res_df$p_raw <- NULL
-              colnames(res_df) <- c("Variable 1", "Variable 2", "Correlation", "P Value", "P Value (BH-adj.)")
-              return(DT::datatable(res_df, options = list(pageLength = 10, dom = 'tip', scrollX = TRUE,
-                                                          columnDefs = sig_render_defs(res_df, "Correlation")),
-                                   caption = complete_case_note(nrow(df_clean), nrow(df))))
+              res_list[[length(res_list)+1]] <- data.frame(
+                  Variable_1 = lab(pair_vars[i]),
+                  Variable_2 = lab(pair_vars[j]),
+                  Correlation = unname(ct$estimate),
+                  p_raw = p_val,
+                  stringsAsFactors = FALSE
+              )
            }
         }
-
-        cormat <- corr_matrix_reactive()
-        req(cormat)
-        dimnames(cormat) <- lapply(dimnames(cormat), lab)
-        cormat_df <- as.data.frame(cormat)
-
-        # paging off: dom = 't' shows no paging controls.
-        return(DT::datatable(cormat_df, options = list(dom = 't', paging = FALSE, scrollX = TRUE,
-                                                       columnDefs = sig_render_defs(cormat_df, names(cormat_df), rownames = TRUE)),
+        res_df <- do.call(rbind, res_list)
+        # Benjamini-Hochberg adjustment across all tested pairs: raw
+        # p-values stay visible, the BH column controls the FDR.
+        res_df$P_Value <- format.pval(res_df$p_raw, digits = 3, eps = 0.001)
+        res_df$P_Adj <- format.pval(p.adjust(res_df$p_raw, method = "BH"), digits = 3, eps = 0.001)
+        res_df$p_raw <- NULL
+        colnames(res_df) <- c("Variable 1", "Variable 2", "Correlation", "P Value", "P Value (BH-adj.)")
+        return(DT::datatable(res_df, options = list(pageLength = 10, dom = 'tip', scrollX = TRUE,
+                                                    columnDefs = sig_render_defs(res_df, "Correlation")),
                              caption = complete_case_note(nrow(df_clean), nrow(df))))
       }
       # server = FALSE: the paged cross-correlogram and pairwise tables keep
@@ -1149,10 +1137,10 @@ desc_exploratory_server <- function(id, data_reactive, vars_metadata_reactive,
       pca_3d_special = shiny::reactive({ inherits(pca_plot_obj(), "plotly") })
     )
     
-    gov_factors_server("gov", data_reactive = shiny::reactive(rv_analytics_data()), vars_metadata_reactive = vmeta)
-    
-    return(list(
-      analytics_data = rv_analytics_data
-    ))
+    # Governing Factors offers the suite's numeric columns and, like PCA, fits
+    # each run on the rows of the groups active when it is run.
+    gov_factors_server("gov", data_reactive = data_reactive,
+                       rows_reactive = rv_filtered_analytics_data,
+                       vars_metadata_reactive = vmeta)
   })
 }

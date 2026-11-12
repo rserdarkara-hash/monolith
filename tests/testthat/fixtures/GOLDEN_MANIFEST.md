@@ -22,10 +22,11 @@ provides no evidence for the property it covers.
   kriged residual, and their reported variance is the trend variance plus the
   residual kriging variance. When automatic fitting fails or finds variation
   indistinguishable from rounding, predictions are kept but variance is
-  withheld, including through folds, Co-Kriging and merged surfaces; an applied
-  manual model keeps its variance. TPS converges on the least-squares plane as
-  lambda grows, and its roughness falls monotonically with lambda. Co-Kriging
-  is exact at the samples and unmoved by a change of covariate units.
+  withheld, including through folds, Co-Kriging and a GeoTIFF holding several
+  localities; an applied manual model keeps its variance. TPS converges on the
+  least-squares plane as lambda grows, and its roughness falls monotonically
+  with lambda. Co-Kriging is exact at the samples and unmoved by a change of
+  covariate units.
 - **Variograms.** The empirical variogram is Matheron's estimator, bin for bin.
   The four directional cones partition every pair, so their count-weighted mean
   returns the omnidirectional value. Profile weighted least squares is checked
@@ -55,9 +56,15 @@ provides no evidence for the property it covers.
   and TOTAL statistics, the per-group trend R2 and the PCA spectrum match
   independent base-R routes.
 - **Explanations, breaks and areas.** Partial dependence is the mean prediction
-  with the feature held fixed; class breaks fall on the sample quantiles or on
-  equal intervals; reported hectares are ground area, not projected area;
-  post-hoc letters agree with `agricolae`.
+  with the feature held fixed; classification target breaks fall on the sample
+  quantiles or on equal intervals; Jenks breaks are the exact minimum-variance
+  partition and K-Means breaks Lloyd's iterations from seeded k-means++ starts,
+  with area weights acting as repetition in both; post-hoc letters agree with
+  `agricolae`. Reported hectares are ground area, not projected area: on
+  constructed projected grids, class hectares and pooling weights match
+  independent ellipsoidal cell-polygon sums, masked cells included. A combined
+  GeoTIFF is refused where two localities share a populated cell, and worker
+  area caches survive serialisation but not a change of raster geometry.
 - **The pipeline as a whole** still assembles the same surface from those parts
   (`ok_surface_digest`). Its variogram and its boundary are pinned by
   `golden_pin_vgm()` and `golden_pin_boundary()` rather than fitted and derived,
@@ -79,8 +86,9 @@ Four concrete limits:
 1. Reactive coverage is selective. The arithmetic behind the Agreement
    (kappa) table and the descriptive / PCA panels is tested through
    `compute_agreement_metrics`, `desc_summary_table`, `desc_group_fit_stats`
-   and `desc_pca_fit`, with module tests for naming invariance, partial-correlation tables and PCA
-   availability. These do not exercise every locality, binning and export path.
+   and `desc_pca_fit`, with module tests for naming invariance,
+   partial-correlation tables and PCA availability. These do not exercise
+   every locality, binning and export path.
 2. The end-to-end lock runs sequentially, so it does not cover the
    `future` / PSOCK dispatch layer.
 3. Where a statistical quantity has no exact answer (variogram parameter
@@ -222,17 +230,14 @@ auto-fit's model stays within that margin; for a non-negative variable the
 refused model must also predict below zero and the selected one must stay
 non-negative. `knndm_random` names a locality whose buffered hull makes the
 seeded random partition better than every spatial candidate; it needs only
-`locality`. Defaults use the smallest
-population with at least 8 rows (plane: ph; exact-better: mn), the smallest
-with at least 80 rows (smoothed-better: caco3; interior: ph), and the compact
-population with at least 30 rows (kNNDM; zero-nugget variogram: caco3). One
-variogram test scans the full scope's localities and soil variables and needs
-at least one locality-variable combination with 30 or more samples whose best
-fit is a Matérn at nugget 0. Each
-test independently verifies its case property. A missing property is a test
-failure: supply a suitable case or a fixture that covers it. These case
-requirements are not skipped, and the recorder's full-suite gate remains
-mandatory.
+`locality`. Defaults use the smallest population with at least 8 rows (plane:
+ph; exact-better: mn), the smallest with at least 80 rows (smoothed-better:
+caco3; interior: ph), and the compact population with at least 30 rows (kNNDM;
+zero-nugget variogram: caco3). One variogram test scans the full scope's
+localities and soil variables and needs at least one locality-variable
+combination with 30 or more samples whose best fit is a Matérn at nugget 0.
+Each test verifies its case property itself, and a missing property is a
+failure, not a skip: supply a suitable case or a fixture that covers it.
 
 ### The role table
 

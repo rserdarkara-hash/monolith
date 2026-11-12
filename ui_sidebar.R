@@ -14,11 +14,19 @@ ui_sidebar_panel <- sidebarPanel(width = 3,
           selectInput("var_category", "Variable Category", choices = NULL),
           shinyWidgets::pickerInput("var_id", "Variable", choices = NULL,
                                     options = shinyWidgets::pickerOptions(liveSearch = TRUE, size = 10)),
-          div(class = "mn-seg-grid", shinyWidgets::radioGroupButtons("value_type", HTML(paste0("Primary View", info_tooltip("primary_view_info", "<b>Actual Values (observed):</b> Maps the raw observed/measured ground-truth data points directly without any machine learning predictions.<br><br><span style='border-top: 1px solid #ddd; display: block; margin: 8px 0;'></span><b>Machine Learning Predictions:</b> Use these options if you want to map predicted parameters from your machine learning models:<br><br>• <b>Best ML Predictions (_cve):</b> Maps predicted values from the cross-validation ensemble (CVE), which represent the best overall ML predictions.<br><br>• <b>Single Split ML Predictions (_ss):</b> Maps predicted values from a single train/test split partition.<br><br>• <b>Residuals (v - pv) of ML Predictions:</b> Maps ML model residuals (observed Actual value minus the ML Predicted value uploaded in your dataset) to study local spatial error patterns. These are NOT errors of the interpolation itself."))), choices = c("Actual values" = "actual", "ML predictions" = "pred", "Single split" = "pred_ss", "Residuals" = "resid"),
+          div(class = "mn-seg-grid", shinyWidgets::radioGroupButtons("value_type", HTML(paste0("Primary View", info_tooltip("primary_view_info", paste0(
+            tip_html("Actual Values (observed)" = "Maps the raw observed/measured ground-truth data points directly without any machine learning predictions."),
+            "<hr>",
+            tip_html("Machine Learning Predictions" = "Use these options if you want to map predicted parameters from your machine learning models:",
+                     "• <b>Best ML Predictions (_cve):</b> Maps predicted values from the cross-validation ensemble (CVE), which represent the best overall ML predictions.",
+                     "• <b>Single Split ML Predictions (_ss):</b> Maps predicted values from a single train/test split partition.",
+                     "• <b>Residuals (v - pv) of ML Predictions:</b> Maps ML model residuals (observed Actual value minus the ML Predicted value uploaded in your dataset) to study local spatial error patterns. These are <b>not</b> errors of the interpolation itself."))))), choices = c("Actual values" = "actual", "ML predictions" = "pred", "Single split" = "pred_ss", "Residuals" = "resid"),
                        size = "sm")),
                      conditionalPanel(
                        condition = "input.value_type == 'pred_ss'",
-                       selectInput("subset", HTML(paste0("Data Subset", info_tooltip("data_subset_info", "Restricts the Single Split (_ss) view to one data partition (e.g. Train/Test/Validation), read from a 'subset' column in the uploaded data. Available choices are detected when a dataset containing such a column is loaded."))), choices = c("All" = "all"), selected = "all")
+                       selectInput("subset", HTML(paste0("Data Subset", info_tooltip("data_subset_info", tip_html(
+                         "Restricts the Single Split (_ss) view to one data partition (e.g. Train/Test/Validation), read from a 'subset' column in the uploaded data.",
+                         "Available choices are detected when a dataset containing such a column is loaded.")))), choices = c("All" = "all"), selected = "all")
                      ),
                      # The three boxes below configure one thing together: whether
                      # the actual and predicted surfaces are compared, how each is
@@ -30,14 +38,19 @@ ui_sidebar_panel <- sidebarPanel(width = 3,
                        checkboxInput("comp_mode", HTML(paste0("Comparison Mode", info_tooltip("comp_mode", "Splits the viewer to compare the Actual (observed) map against the map of your uploaded ML predictions. Useful for visual validation."))), FALSE),
                        # Every prediction or residual view kriges a predicted
                        # surface, so this governs it with or without Comparison Mode.
-                       checkboxInput("sep_fit", HTML(paste0("Fit Actual/Predicted Separately", info_tooltip("sep_fit_info", "Checked (recommended): the Predicted surface gets its own model - its own variogram under Ordinary Kriging, its own power under IDW, its own lambda under TPS. Unchecked: it reuses the model fitted to the measured values - the Actual variogram (the run's own Actual fit under Auto-Fit, the applied Actual model under Manual), the Actual power, and the Actual lambda (on Auto, the one GCV selects for the measured values) - and per-locality values are set for the Actual target only. RK, RFK and CK always fit each surface on its own."))), TRUE)
+                       checkboxInput("sep_fit", HTML(paste0("Fit Actual/Predicted Separately", info_tooltip("sep_fit_info", tip_html(
+                         "Checked (recommended)" = "the Predicted surface gets its own model - its own variogram under Ordinary Kriging, its own power under IDW, its own lambda under TPS.",
+                         "Unchecked" = "the Predicted surface reuses the model fitted to the measured values - the Actual variogram (the run's own Actual fit under Auto-Fit, the applied Actual model under Manual), the Actual power, and the Actual lambda (on Auto, the one GCV selects for the measured values) - and per-locality values are set for the Actual target only.",
+                         "RK, RFK and CK always fit each surface on its own.")))), TRUE)
                      ),
                      # Also shown while the Map Viewer displays a comparison from a run
                      # with a prediction side, so it still reaches the maps it styles.
                      # The server applies Match Scales under the same condition
                      # (match_scales_shown(), ui_formatting.R): change both together.
                      conditionalPanel(condition = "(input.comp_mode && ['pred', 'pred_ss'].includes(input.value_type)) || (output.disp_has_pred == 'yes' && /^view_comp/.test(input.map_view || ''))",
-                           checkboxInput("match_scales", HTML(paste0("Match Scales", info_tooltip("match_info", "Forces the map legends for Actual and Predicted data to use the same color range, for the surfaces and for their standard-error or variance maps. Under Binned or Agronomical Jenks/K-Means styling it also classifies both surfaces with one set of class breaks computed from the two together; otherwise each surface's classes come from its own values."))), FALSE))
+                           checkboxInput("match_scales", HTML(paste0("Match Scales", info_tooltip("match_info", tip_html(
+                             "Forces the map legends for Actual and Predicted data to use the same color range, for the surfaces and for their standard-error or variance maps.",
+                             "Under Binned or Agronomical Jenks/K-Means styling it also classifies both surfaces with one set of class breaks computed from the two together; otherwise each surface's classes come from its own values.")))), FALSE))
         ))
       )
       ),
@@ -47,7 +60,14 @@ ui_sidebar_panel <- sidebarPanel(width = 3,
           tags$details(class = "sidebar-section", `data-key` = "engine", open = NA,
             tags$summary(h4("Spatial Engine")),
             div(
-            div(class = "mn-seg-grid", shinyWidgets::radioGroupButtons("method", HTML(paste0("Interpolation", info_tooltip("method_info", "Ordinary kriging: the target's spatial autocorrelation through a fitted variogram; gives a kriging variance. Regression kriging: a linear trend on the covariates plus kriging of its residuals; its variance adds the trend's to the residual kriging variance. Random forest kriging: a random-forest trend plus kriging of its out-of-bag residuals; its variance adds the forest's to the residual kriging variance. Co-kriging: the target together with its covariates through a linear model of coregionalization; gives a co-kriging variance. IDW: a distance-weighted mean of the nearest samples; no variance. Thin plate spline: a smoothing spline surface; no variance. See Scientific Guide Section 1."))),
+            div(class = "mn-seg-grid", shinyWidgets::radioGroupButtons("method", HTML(paste0("Interpolation", info_tooltip("method_info", tip_html(
+              "Ordinary kriging" = "the target's spatial autocorrelation through a fitted variogram; gives a kriging variance.",
+              "Regression kriging" = "a linear trend on the covariates plus kriging of its residuals; its variance adds the trend's to the residual kriging variance.",
+              "Random forest kriging" = "a random-forest trend plus kriging of its out-of-bag residuals; its variance adds the forest's to the residual kriging variance.",
+              "Co-kriging" = "the target together with its covariates through a linear model of coregionalization; gives a co-kriging variance.",
+              "IDW" = "a distance-weighted mean of the nearest samples; no variance.",
+              "Thin plate spline" = "a smoothing spline surface; no variance.",
+              "See Scientific Guide Section 1.")))),
                         choices = c("Ordinary kriging" = "OK",
                                     "Regression kriging" = "RK",
                                     "Random forest kriging" = "RFK",
@@ -56,11 +76,19 @@ ui_sidebar_panel <- sidebarPanel(width = 3,
                                     "Thin plate spline" = "TPS"),
                         size = "sm")),
             conditionalPanel(condition = "input.method == 'CK'",
-              sliderInput("ck_nmax", HTML(paste0("CK Max Neighbors", info_tooltip("ck_nmax_info", "Search neighbourhood for every variable in the co-kriging system: each prediction uses only the closest N samples. Smaller values assume local stationarity and are faster; larger values approach a global neighbourhood. Default 15. See Scientific Guide Section 1.4."))), min = 5, max = 60, value = 15, step = 1),
+              sliderInput("ck_nmax", HTML(paste0("CK Max Neighbors", info_tooltip("ck_nmax_info", tip_html(
+                "Search neighbourhood for every variable in the co-kriging system: each prediction uses only the closest N samples.",
+                "Smaller values assume local stationarity and are faster; larger values approach a global neighbourhood. Default 15. See Scientific Guide Section 1.4.")))), min = 5, max = 60, value = 15, step = 1),
               helpText(HTML("<em style='color: var(--mn-text-3); font-size: 0.9em; font-style: normal;'>The neighbourhood is a modelling choice, not just a speed setting: it controls how local the stationarity assumption is.</em>"))
             ),
             shinyWidgets::radioGroupButtons("cv_strategy",
-              HTML(paste0("Cross-Validation Strategy", info_tooltip("cv_strategy_info", "How held-out folds are formed for the reported performance metrics. It does not change the interpolated map, except that IDW Auto (CV) selects its power under this strategy. Folds are reproducible (fixed seed 12345).<br><br><b>Auto (Default):</b> LOOCV for n ≤ 50, seeded random 10-fold above. LOOCV and random folds estimate the accuracy of interpolation within the sampled domain, approximately without bias for a simple random sample and conservatively for a regular grid, where a held-out point is a full grid spacing from its neighbours.<br><br><b>kNNDM (Map-Matched):</b> builds 10 folds so that each held-out sample is about as far from its training samples as the map's cells are from the samples (Linnenbrink et al. 2024). It adapts to how the data were sampled: evenly spread samples get ordinary random folds, while clustered samples, transects, or a boundary that reaches beyond the samples get spatially grouped folds. The metrics then describe the error of this map over this boundary, without having to choose between random folds (optimistic for clustered samples) and blocks (pessimistic for evenly spread ones). It is deterministic, costs about the same as 10-fold CV, and uses LOOCV below n = 30.<br><br><b>Standard LOOCV:</b> leave-one-out at any sample size. The most expensive, because OK, CK, RK and RFK refit their model in every fold: on a 355-sample locality with two covariates, roughly 50 s (OK), 100 s (CK), 110 s (RK) and 135 s (RFK).<br><br><b>Spatial Block CV:</b> 10 spatially clustered (k-means) folds that hold out contiguous regions, so it estimates accuracy away from the sampled clusters (transfer to unsampled areas), which is pessimistic for a map within the sampled field. Below n = 30 it degrades to LOOCV. At 10 folds the refit costs about half a second per locality (OK), 1.3 s (CK) and 0.4 s (RK/RFK).<br><br>The <b>CV Distance Match</b> panel shows how closely any strategy's folds match the map. Scientific Guide Section 5."))),
+              HTML(paste0("Cross-Validation Strategy", info_tooltip("cv_strategy_info", tip_html(
+                "How held-out folds are formed for the reported performance metrics. It does not change the interpolated map, except that IDW Auto (CV) selects its power under this strategy. Folds are reproducible (fixed seed 12345).",
+                "Auto (Default)" = "LOOCV for n ≤ 50, seeded random 10-fold above. LOOCV and random folds estimate the accuracy of interpolation within the sampled domain, approximately without bias for a simple random sample and conservatively for a regular grid, where a held-out point is a full grid spacing from its neighbours.",
+                "kNNDM (Map-Matched)" = "builds 10 folds so that each held-out sample is about as far from its training samples as the map's cells are from the samples (Linnenbrink et al. 2024). It adapts to how the data were sampled: evenly spread samples get ordinary random folds, while clustered samples, transects, or a boundary that reaches beyond the samples get spatially grouped folds. The metrics then describe the error of this map over this boundary, without having to choose between random folds (optimistic for clustered samples) and blocks (pessimistic for evenly spread ones). It is deterministic, costs about the same as 10-fold CV, and uses LOOCV below n = 30.",
+                "Standard LOOCV" = "leave-one-out at any sample size. The most expensive, because OK, CK, RK and RFK refit their model in every fold: on a 355-sample locality with two covariates, roughly 50 s (OK), 100 s (CK), 110 s (RK) and 135 s (RFK).",
+                "Spatial Block CV" = "10 spatially clustered (k-means) folds that hold out contiguous regions, so it estimates accuracy away from the sampled clusters (transfer to unsampled areas), which is pessimistic for a map within the sampled field. Below n = 30 it degrades to LOOCV. At 10 folds the refit costs about half a second per locality (OK), 1.3 s (CK) and 0.4 s (RK/RFK).",
+                "The <b>CV Distance Match</b> panel shows how closely any strategy's folds match the map. Scientific Guide Section 5.")))),
               choices = c("Auto (Default)" = "auto", "kNNDM (Map-Matched)" = "knndm",
                           "Standard LOOCV" = "loocv", "Spatial Block CV" = "block"),
               selected = "auto", size = "sm", direction = "vertical", justified = TRUE),
@@ -73,7 +101,11 @@ ui_sidebar_panel <- sidebarPanel(width = 3,
             # so Comparable scores OK on those too (CK uses Native).
             conditionalPanel(condition = "input.method == 'OK'",
               shinyWidgets::radioGroupButtons("cv_population",
-                HTML(paste0("CV Population", info_tooltip("cv_population_info", "Which samples Ordinary Kriging is cross-validated on. Native (default): every sample with a measured target value; Co-Kriging is scored on these same samples. Comparable: only the samples that also have every selected auxiliary variable, deduplicated and folded exactly as RK and RFK use them, so the metrics of the three engines describe the same experiment. OK is TRAINED AND SCORED on those samples under Comparable; the map always uses every sample either way. The CV population ID shown in the Model Performance hover and written to the metrics export confirms that two runs on the same uploaded table scored the same rows in the same folds."))),
+                HTML(paste0("CV Population", info_tooltip("cv_population_info", tip_html(
+                  "Which samples Ordinary Kriging is cross-validated on.",
+                  "Native (default)" = "every sample with a measured target value; Co-Kriging is scored on these same samples.",
+                  "Comparable" = "only the samples that also have every selected auxiliary variable, deduplicated and folded exactly as RK and RFK use them, so the metrics of the three engines describe the same experiment. OK is <b>trained and scored</b> on those samples under Comparable; the map always uses every sample either way.",
+                  "The CV population ID shown in the Model Performance hover and written to the metrics export confirms that two runs on the same uploaded table scored the same rows in the same folds.")))),
                 choices = c("Native" = "native", "Comparable" = "comparable"),
                 selected = "native", size = "sm", justified = TRUE)
             ),
@@ -82,7 +114,12 @@ ui_sidebar_panel <- sidebarPanel(width = 3,
             # plan is deterministic keep one realization (logged).
             conditionalPanel(condition = "input.cv_strategy != 'loocv'",
               checkboxInput("cv_repeat_on",
-                HTML(paste0("Repeated CV (fold-realization stability)", info_tooltip("cv_repeat_info", "OFF (default): metrics come from ONE fold assignment (fixed seed 12345), which is reproducible and keeps method comparisons paired. ON: the cross-validation is re-run under additional fold assignments (seeds 12346, 12347, ...) and an extra table reports each metric as mean ± SD across realizations, so you can see whether a difference between two methods is larger than the split-to-split noise. The reported single-realization numbers and the interpolated map are IDENTICAL either way - realization 1 is the reference run. Cost: one extra full cross-validation per repeat, and every kriging engine refits its model in each fold, so 5 repeats is roughly 5x the CV time. Each RFK fold draws its forest from its own seed, so a repeat varies the partition and nothing else. Leave-one-out plans, and kNNDM plans that group samples spatially, are deterministic and are never repeated."))),
+                HTML(paste0("Repeated CV (fold-realization stability)", info_tooltip("cv_repeat_info", tip_html(
+                  "Off (default)" = "metrics come from <b>one</b> fold assignment (fixed seed 12345), which is reproducible and keeps method comparisons paired.",
+                  "On" = "the cross-validation is re-run under additional fold assignments (seeds 12346, 12347, ...) and an extra table reports each metric as mean ± SD across realizations, so you can see whether a difference between two methods is larger than the split-to-split noise.",
+                  "The reported single-realization numbers and the interpolated map are <b>identical</b> either way - realization 1 is the reference run.",
+                  "Cost" = "one extra full cross-validation per repeat, and every kriging engine refits its model in each fold, so 5 repeats is roughly 5x the CV time.",
+                  "Each RFK fold draws its forest from its own seed, so a repeat varies the partition and nothing else. Leave-one-out plans, and kNNDM plans that group samples spatially, are deterministic and are never repeated.")))),
                 value = FALSE),
               conditionalPanel(condition = "input.cv_repeat_on == true",
                 selectInput("cv_repeat_n", "Fold realizations:",
@@ -94,14 +131,21 @@ ui_sidebar_panel <- sidebarPanel(width = 3,
 
             conditionalPanel(condition = "input.method == 'RFK'",
               radioButtons("rfk_uncertainty",
-                HTML(paste0("RFK Uncertainty Method", info_tooltip("rfk_unc_info", "Controls ONLY the RFK uncertainty (variance) map, never the prediction surface, and never the reported metrics. Infinitesimal Jackknife (default; Wager et al. 2014): the random-forest analogue of the regression standard error, an estimate of the sampling variance of the forest's ensemble-mean prediction, slightly slower to compute. Ensemble spread (fast): the between-tree variance of the forest, a measure of where the model is least stable rather than a predictive variance. Neither is a calibrated interval. See Scientific Guide Section 7.3."))),
+                HTML(paste0("RFK Uncertainty Method", info_tooltip("rfk_unc_info", tip_html(
+                  "Controls <b>only</b> the RFK uncertainty (variance) map, never the prediction surface, and never the reported metrics.",
+                  "Infinitesimal Jackknife (default)" = "the random-forest analogue of the regression standard error (Wager et al. 2014), an estimate of the sampling variance of the forest's ensemble-mean prediction, slightly slower to compute.",
+                  "Ensemble spread (fast)" = "the between-tree variance of the forest, a measure of where the model is least stable rather than a predictive variance.",
+                  "Neither is a calibrated interval. See Scientific Guide Section 7.3.")))),
                 choices = c("Infinitesimal Jackknife" = "jackknife", "Ensemble spread (fast)" = "spread"),
                 selected = "jackknife")
             ),
 
                        conditionalPanel(condition = "['RK', 'RFK', 'CK'].includes(input.method) || (input.method == 'OK' && input.cv_population == 'comparable')",
                          div(class = "mn-subsection mn-aux-panel",
-                           h5(HTML(paste0("Auxiliary Variables", info_tooltip("aux_info", "Select secondary variables to assist interpolation (e.g. Elevation). Pearson correlation screens linear associations; RFK can also use nonlinear relationships. The run-time collinearity check offers Auto-Drop, Keep or Cancel when VIF > 10 or pairwise |r| > 0.95.")))),
+                           h5(HTML(paste0("Auxiliary Variables", info_tooltip("aux_info", tip_html(
+                             "Select secondary variables to assist interpolation (e.g. Elevation).",
+                             "Pearson correlation screens linear associations; RFK can also use nonlinear relationships.",
+                             "The run-time collinearity check offers Auto-Drop, Keep or Cancel when VIF > 10 or pairwise |r| > 0.95."))))),
                            conditionalPanel(condition = "input.method == 'OK'",
                              helpText(HTML("<em style='color: var(--mn-text-3); font-size: 0.9em; font-style: normal;'>OK does not use these covariates; they only select the samples OK is trained and scored on.</em>"))
                            ),
@@ -130,7 +174,9 @@ ui_sidebar_panel <- sidebarPanel(width = 3,
                          )
                        ),          
             conditionalPanel(condition = "['OK', 'RK', 'RFK', 'CK'].includes(input.method)",
-              shinyWidgets::radioGroupButtons("vgm_mode", HTML(paste0("Fitting Mode", info_tooltip("vgm_mode_info", "Auto-Fit runs always fit their own variogram. OPTIMIZE ALL VARIOGRAMS previews that fit for the selected variable, data subset and localities. Manual uses only models saved with Apply manual model for the current variable and subset; other localities fit their own variogram."))), choices = c("Auto-Fit" = "auto", "Manual" = "manual"), size = "sm", justified = TRUE),
+              shinyWidgets::radioGroupButtons("vgm_mode", HTML(paste0("Fitting Mode", info_tooltip("vgm_mode_info", tip_html(
+                "Auto-Fit" = "every run fits its own variogram. <b>OPTIMIZE ALL VARIOGRAMS</b> previews that fit for the selected variable, data subset and localities.",
+                "Manual" = "uses only models saved with <b>Apply manual model</b> for the current variable and subset; other localities fit their own variogram.")))), choices = c("Auto-Fit" = "auto", "Manual" = "manual"), size = "sm", justified = TRUE),
               conditionalPanel(condition = "input.vgm_mode == 'auto'",
                 actionButton("auto_fit", "OPTIMIZE ALL VARIOGRAMS", class = "btn-default btn-block", style="margin-bottom:10px;")
               ),
@@ -223,7 +269,12 @@ ui_sidebar_panel <- sidebarPanel(width = 3,
           tags$details(class = "sidebar-section", `data-key` = "domain", open = NA,
             tags$summary(h4("Domain & Grid")),
             div(
-            div(class = "mn-seg-grid", shinyWidgets::radioGroupButtons("boundary_type", HTML(paste0("Boundary Type", info_tooltip("bound", "How the interpolation surface is cropped around each locality's samples. Concave hull: follows the sample outline tightly. Convex hull: the smallest convex polygon around the samples. Buffered: the concave hull padded by the buffer distance. Point buffer: a disc around each sample."))),
+            div(class = "mn-seg-grid", shinyWidgets::radioGroupButtons("boundary_type", HTML(paste0("Boundary Type", info_tooltip("bound", tip_html(
+              "How the interpolation surface is cropped around each locality's samples.",
+              "Concave hull" = "follows the sample outline tightly.",
+              "Convex hull" = "the smallest convex polygon around the samples.",
+              "Buffered" = "the concave hull padded by the buffer distance.",
+              "Point buffer" = "a disc around each sample.")))),
                         choices = c("Concave hull" = "concave",
                                     "Convex hull" = "convex",
                                     "Buffered" = "wrapped",
@@ -231,7 +282,9 @@ ui_sidebar_panel <- sidebarPanel(width = 3,
                         size = "sm")),
             conditionalPanel(condition = "['wrapped', 'strict'].includes(input.boundary_type)",
               conditionalPanel(condition = "input.boundary_type == 'wrapped'",
-                shinyWidgets::radioGroupButtons("buff_mode", HTML(paste0("Buffer Logic", info_tooltip("buff_logic_info", "Dynamic mode calculates buffer distance per locality based on point density and selected method. Fixed allows manual setting."))),
+                shinyWidgets::radioGroupButtons("buff_mode", HTML(paste0("Buffer Logic", info_tooltip("buff_logic_info", tip_html(
+                  "Auto (Dynamic)" = "calculates buffer distance per locality based on point density and selected method.",
+                  "Fixed (Manual)" = "allows manual setting.")))),
                              choices = c("Auto (Dynamic)" = "dynamic", "Fixed (Manual)" = "fixed"), selected = "dynamic", size = "sm", justified = TRUE)
               ),
               conditionalPanel(condition = "input.boundary_type == 'strict' || (input.boundary_type == 'wrapped' && input.buff_mode == 'fixed')",
@@ -239,7 +292,11 @@ ui_sidebar_panel <- sidebarPanel(width = 3,
               )
             ),
             
-            shinyWidgets::radioGroupButtons("res_mode", HTML(paste0("Resolution Logic", info_tooltip("res", "Auto (Per Locality): each locality's cell size follows its sampling density (Hengl 2006): 0.0791 × √(boundary area / samples), never coarser than half the mean nearest-neighbour distance, limited to 1–1000 m. Auto (Global): every locality uses the finest of those sizes, on one shared lattice. Fixed: the size you set. The Map Viewer's resolution overlay lists the sizes a run used."))),
+            shinyWidgets::radioGroupButtons("res_mode", HTML(paste0("Resolution Logic", info_tooltip("res", tip_html(
+              "Auto (Per Locality)" = "each locality's cell size follows its sampling density (Hengl 2006): 0.0791 × √(boundary area / samples), never coarser than half the mean nearest-neighbour distance, limited to 1–1000 m; each locality keeps its own grid, and a GeoTIFF export holds one raster per locality.",
+              "Auto (Global)" = "every locality uses the finest of those sizes, on one shared lattice.",
+              "Fixed" = "the size you set, on one lattice too.",
+              "The Map Viewer's <b>Cell Sizes</b> overlay lists the sizes a run used.")))),
                          choices = c("Auto (Per Locality)" = "local", "Auto (Global)" = "global", "Fixed" = "fixed"),
                          size = "sm", direction = "vertical", justified = TRUE),
             conditionalPanel(condition = "input.res_mode == 'fixed'",
@@ -251,7 +308,7 @@ ui_sidebar_panel <- sidebarPanel(width = 3,
             div(class = "mn-subsection",
                 # Describes the NEXT run. In the Auto modes the cell size follows
                 # the boundaries the run builds, so the column says so; the Map
-                # Viewer's resolution overlay lists the displayed run's sizes.
+                # Viewer's Cell Sizes overlay lists the displayed run's sizes.
                 p(style = "font-size: 0.78em; margin: 0 0 4px 0; color: var(--mn-text-3);",
                   "Grid and buffer for the next run:"),
                 tableOutput("loc_res_table"),
@@ -274,7 +331,12 @@ ui_sidebar_panel <- sidebarPanel(width = 3,
               size = "sm", justified = TRUE),
             uiOutput("palette_ui"),
             conditionalPanel(condition = "input.color_style == 'agro'",
-                selectInput("agro_method", "Algorithm", choices = c("Supervised" = "limits", "Jenks" = "jenks", "K-means" = "kmeans")),
+                selectInput("agro_method", HTML(paste0("Algorithm", info_tooltip("agro_method_info", tip_html(
+                  "Supervised" = "limits you enter; for common soil nutrients at three classes they open on published limits.",
+                  "Jenks" = "the exact natural breaks, the grouping that makes the classes as internally uniform as possible, each map cell counted by its ground area.",
+                  "K-means" = "seeks the same grouping by moving seeded class centres until no value changes class, and can settle on slightly different limits.",
+                  "Jenks and K-means give the same limits each time they are applied.")))),
+                  choices = c("Supervised" = "limits", "Jenks" = "jenks", "K-means" = "kmeans")),
                 sliderInput("agro_n_classes", "Classes", min = 2, max = 5, value = 3),
                 uiOutput("agro_options"),
                 uiOutput("agro_pending_note"),

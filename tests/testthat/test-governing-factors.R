@@ -278,3 +278,114 @@ test_that("the governing-factors table keeps full precision and names its units"
   named <- gov_summary_df(res, labs)
   expect_equal(named[[1]][-1], c("Organic matter", "Texture [sand]", "Texture [clay]"))
 })
+
+
+# ── The Governing Factors tab ──────────────────────────────────────────────
+
+test_that("Governing Factors is fitted on the active groups and offers every numeric column", {
+  d <- golden_soil("core")
+  first <- golden_locality("core", "smallest")
+  active <- c(first, golden_locality("core", "largest", exclude = first))
+  seen <- new.env()
+  # The tab's module, replaced by a recorder of what the Analytics Engine
+  # hands it.
+  rlang::local_bindings(
+    gov_factors_server = function(id, data_reactive, rows_reactive, vars_metadata_reactive) {
+      seen$data <- data_reactive
+      seen$rows <- rows_reactive
+    },
+    .env = environment(desc_exploratory_server))
+  shiny::testServer(desc_exploratory_server, args = list(
+    data_reactive = shiny::reactive(d), vars_metadata_reactive = shiny::reactive(NULL)
+  ), {
+    session$setInputs(analytics_group_vars = "locality", grp_type_1 = "categorical",
+                      analytics_active_group = active)
+    rows <- seen$rows()
+    expect_lt(nrow(rows), nrow(d))
+    expect_equal(nrow(rows), sum(d$locality %in% active))
+    expect_setequal(unique(as.character(rows$locality)), active)
+    # The choices are the table's own columns, whatever the grouping.
+    expect_identical(seen$data(), d)
+  })
+})
+
+test_that("a run counts the active groups' rows against the 50-row minimum", {
+  # 60 complete rows in the table, 40 in the active groups: the run is refused.
+  d <- make_test_df(60)
+  shiny::testServer(gov_factors_server, args = list(
+    data_reactive = shiny::reactive(d), rows_reactive = shiny::reactive(d[1:40, ]),
+    vars_metadata_reactive = shiny::reactive(NULL)
+  ), {
+    session$setInputs(gov_target = "a", gov_predictors = c("b", "c"), gov_run_btn = 1)
+    expect_identical(gov_rv$ready, "no")
+    expect_null(gov_rv$res)
+  })
+})
+
+test_that("the target and factor picks survive a Variable naming switch", {
+  d <- make_test_df(30)
+  meta <- shiny::reactiveVal(NULL)
+  shiny::testServer(gov_factors_server, args = list(
+    data_reactive = shiny::reactive(d), rows_reactive = shiny::reactive(d),
+    vars_metadata_reactive = meta
+  ), {
+    session$setInputs(gov_target = "b", gov_predictors = c("c", "d"))
+    expect_match(output$gov_target_ui$html, "<option value=\"b\" selected>b</option>", fixed = TRUE)
+    meta(list(list(actual = "b", label = "Bee"), list(actual = "c", label = "Sea")))
+    session$flushReact()
+    target <- output$gov_target_ui$html
+    factors <- output$gov_predictors_ui$html
+    expect_match(target, "<option value=\"b\" selected>Bee</option>", fixed = TRUE)
+    expect_match(factors, "<option value=\"c\" selected>Sea</option>", fixed = TRUE)
+    expect_match(factors, "<option value=\"d\" selected>d</option>", fixed = TRUE)
+    expect_no_match(factors, "<option value=\"b\" selected>", fixed = TRUE)
+  })
+})
+
+test_that("the importance chart keeps its ticks, notes and labels apart on a narrow card", {
+  # Values whose round ticks fall at the axis ends (0.15 and 50).
+  res <- list(importance = data.frame(variable = c("som", "v1", "v12"),
+                                      mse_increase = c(0.135, 0.08, 0.06),
+                                      mse_increase_scaled = c(42, 20, 12)),
+              n_used = 980L, n_total = 1035L)
+  labels <- desc_var_labels(c("som", "v1", "v12"),
+                            list(list(actual = "v1", label = "Annual Mean Temperature (°C)")))
+  p <- build_gov_importance_plot(res, labels)
+  b <- ggplot2::ggplot_build(p)
+
+  # Per panel: zero and at most three other ticks, none in the last 10% of
+  # the axis, where its label would run into the next panel or off the plot.
+  at_end <- function(br, rng) br > rng[1] + 0.9 * diff(rng) & br <= rng[2]
+  for (pp in b$layout$panel_params) {
+    br <- pp$x$get_breaks()
+    br <- br[!is.na(br)]
+    rng <- pp$x$continuous_range
+    # Premise: the default ticks of this axis put one there.
+    expect_true(any(at_end(scales::breaks_extended(n = 4)(rng), rng)))
+    expect_true(0 %in% br)
+    expect_lte(length(br), 4)
+    expect_false(any(at_end(br[br != 0], rng)))
+  }
+  expect_equal(b$layout$panel_params[[1]]$x$get_labels()[1:3], c("0", "0.05", "0.1"))
+
+  # The factors in increasing importance, under their display labels, with
+  # no axis titles beside them.
+  expect_equal(b$layout$panel_params[[1]]$y$get_labels(),
+               c("v12", "Annual Mean Temperature (°C)", "som"))
+  expect_null(ggplot2::get_labs(p)$y)
+  expect_null(ggplot2::get_labs(p)$x)
+
+  # Notes wrapped to the card, starting with the title at the plot's left edge.
+  notes <- ggplot2::get_labs(p)[c("subtitle", "caption")]
+  for (note in notes) expect_true(all(nchar(strsplit(note, "\n")[[1]]) < IMPORTANCE_NOTE_WIDTH))
+  expect_equal(gsub("\n", " ", notes$subtitle), complete_case_note(980L, 1035L))
+  expect_identical(p$theme$plot.title.position, "plot")
+  expect_identical(p$theme$plot.caption.position, "plot")
+  expect_equal(p$theme$plot.caption$hjust, 0)
+
+  # Without the scaled measure the chart has one panel and no note about it.
+  bare <- build_gov_importance_plot(list(importance = res$importance[c("variable", "mse_increase")]))
+  expect_equal(nrow(ggplot2::ggplot_build(bare)$layout$layout), 1L)
+  expect_null(ggplot2::get_labs(bare)$caption)
+  expect_null(ggplot2::get_labs(bare)$subtitle)
+})

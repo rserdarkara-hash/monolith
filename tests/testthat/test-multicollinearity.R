@@ -295,3 +295,143 @@ test_that("pairs without a finite correlation are skipped, not read as uncorrela
   expect_warning(out <- detect_multicollinearity_engine(d), "only one covariate remains")
   expect_true("a" %in% out$dropped_constant)
 })
+
+# ── The collinearity dialog: each locality screened as the run screens it ──
+# Two localities of 40 samples on one table. In A, `twin` repeats `elev` up to
+# noise, so A's screen drops one of the pair; in B the two are independent, and
+# `flat` is constant there. Pooled over both localities no covariate exceeds
+# VIF 10 (`pooled_vif` below), so a screen of the pooled rows finds nothing.
+collinear_localities <- function() {
+  with_seed(11, {
+    n <- 40
+    elev <- c(rnorm(n), rnorm(n))
+    d <- data.frame(
+      x = c(500000 + runif(n, 0, 1500), 520000 + runif(n, 0, 1500)),
+      y = 4400000 + runif(2 * n, 0, 1500),
+      Locality = rep(c("A", "B"), each = n),
+      elev = elev,
+      twin = c(elev[1:n] + rnorm(n, 0, 0.02), rnorm(n)),
+      flat = c(rnorm(n), rep(3, n)))
+    d$ph <- 6 + 0.4 * d$elev + rnorm(2 * n, 0, 0.2)
+    d$ph_cve <- d$ph + rnorm(2 * n, 0, 0.1)
+    d
+  })
+}
+
+test_that("each locality is screened on its own rows, as its run screens them", {
+  d <- collinear_localities()
+  aux <- c("elev", "twin", "flat")
+  mapping <- list(x = "x", y = "y", loc = "Locality")
+  # The premise: the pooled rows trip nothing, so only a per-locality screen
+  # can find what each locality's model drops.
+  pooled <- check_vif(d[aux], threshold = 10)
+  expect_length(pooled$dropped, 0L)
+
+  frame_of <- function(l) locality_run_frame(d, mapping, l, "all", "ph", "ph_cve")
+  expect_identical(frame_of("A")$v, d$ph[d$Locality == "A"])
+  expect_identical(frame_of("A")$pv, d$ph_cve[d$Locality == "A"])
+  expect_true(all(is.na(locality_run_frame(d, mapping, "A", "all", "ph")$pv)))
+  expect_false("v" %in% names(locality_run_frame(d, mapping, "A")))
+
+  for (method in c("RK", "RFK")) {
+    scr <- lapply(c(A = "A", B = "B"), function(l) {
+      locality_screen_preview(l, frame_of(l), 32635, method, aux, 10, c("v", "pv"))
+    })
+    # A: one of the near-identical pair, as collinear. B: the constant one.
+    expect_length(scr$A$v$dropped_vif, 1L)
+    expect_true(scr$A$v$dropped_vif %in% c("elev", "twin"))
+    expect_length(scr$A$v$dropped_constant, 0L)
+    expect_identical(scr$B$v$dropped_constant, "flat")
+    expect_length(scr$B$v$dropped_vif, 0L)
+
+    # The run drops exactly what the preview lists, per locality and surface.
+    for (l in c("A", "B")) {
+      run <- suppressWarnings(run_regional_interpolation(
+        list(l = l, pts_data = frame_of(l),
+             m_params = list(cv_strategy = "auto", idw_p_act = 2, idw_p_pre = 2, idw_nmax = 12, rf_ntree = 50)),
+        method, 32635, aux, NULL, "convex", "fixed", 200, "fixed", 150, "EPSG:32635", TRUE, "actual"))
+      for (col in c("v", "pv")) {
+        expect_setequal(run[[paste0("aux_dropped_", if (col == "v") "act" else "pre")]],
+                        as.character(unlist(scr[[l]][[col]][c("dropped_constant", "dropped_vif")])))
+      }
+    }
+
+    lines <- collinearity_dialog_lines(scr, c(v = "Actual", pv = "Predicted"))
+    expect_true(lines$any_vif)
+    expect_identical(lines$lines, c(paste0("A: collinear: ", scr$A$v$dropped_vif), "B: constant: flat"))
+  }
+
+  # Keep All screens no collinear covariate; the constant one still goes.
+  keep <- locality_screen_preview("A", frame_of("A"), 32635, "RK", aux, Inf, "v")
+  expect_length(keep$v$dropped_vif, 0L)
+  expect_identical(locality_screen_preview("B", frame_of("B"), 32635, "RK", aux, Inf, "v")$v$dropped_constant, "flat")
+})
+
+test_that("a locality that only loses constants raises no question", {
+  d <- collinear_localities()
+  scr <- list(B = locality_screen_preview("B", locality_run_frame(d, list(x = "x", y = "y", loc = "Locality"), "B", "all", "ph"),
+                                          32635, "RK", c("elev", "twin", "flat"), 10, "v"))
+  lines <- collinearity_dialog_lines(scr)
+  expect_false(lines$any_vif)
+  expect_identical(lines$lines, "B: constant: flat")
+  # Nothing to drop: no line at all, and fewer than two covariates screen nothing.
+  none <- list(L = locality_screen_preview("B", locality_run_frame(d, list(x = "x", y = "y", loc = "Locality"), "B", "all", "ph"),
+                                           32635, "RK", "elev", 10, "v"))
+  expect_identical(collinearity_dialog_lines(none), list(lines = character(0), any_vif = FALSE))
+})
+
+test_that("the dialog names a surface only where a locality's two surfaces differ", {
+  s <- function(vif = character(0), cst = character(0)) list(dropped_constant = cst, dropped_vif = vif)
+  screens <- list(Kale = list(v = s("a"), pv = s("a")),
+                  Yorga = list(v = s("a", "c"), pv = s()),
+                  Tavas = list(v = s(), pv = s()),
+                  Karacasu = list(v = s("a"), pv = s("b")))
+  out <- collinearity_dialog_lines(screens, c(v = "Actual", pv = "Predicted"))
+  expect_identical(out$lines, c("Kale: collinear: a",
+                                "Yorga (Actual): collinear: a; constant: c",
+                                "Karacasu (Actual): collinear: a", "Karacasu (Predicted): collinear: b"))
+  expect_true(out$any_vif)
+})
+
+test_that("a surface left without a covariate says why, by cause", {
+  # Constants: named as constant, and no advice the user could not follow
+  # (no answer of the collinearity dialog keeps a constant covariate).
+  msg <- .screen_emptied_msg(list(dropped_constant = c("a", "b"), dropped_vif = character(0)),
+                             "RK has no trend model left")
+  expect_match(msg, "a, b are constant in this locality's samples", fixed = TRUE)
+  expect_match(msg, "so RK has no trend model left. Select covariates that vary within this locality", fixed = TRUE)
+  expect_false(grepl("Keep All", msg, fixed = TRUE))
+  expect_false(grepl("\\.$", msg))
+  one <- .screen_emptied_msg(list(dropped_constant = "a", dropped_vif = "b"), "Co-Kriging has no secondary variable left")
+  expect_match(one, "a is constant in this locality's samples; b was removed as collinear", fixed = TRUE)
+  expect_match(one, "Keep All", fixed = TRUE)
+
+  # Through the engine: every covariate constant in the locality.
+  d <- collinear_localities()
+  d$twin[d$Locality == "B"] <- 1
+  d$elev[d$Locality == "B"] <- 2
+  run <- suppressWarnings(run_regional_interpolation(
+    list(l = "B", pts_data = locality_run_frame(d, list(x = "x", y = "y", loc = "Locality"), "B", "all", "ph"),
+         m_params = list(cv_strategy = "auto", idw_p_act = 2, idw_nmax = 12)),
+    "RK", 32635, c("elev", "twin", "flat"), NULL, "convex", "fixed", 200, "fixed", 150, "EPSG:32635", FALSE, "actual"))
+  expect_match(run$log_msg, "are constant in this locality's samples", fixed = TRUE)
+  expect_match(run$log_msg, "Falling back to OK", fixed = TRUE)
+  expect_false(grepl("Keep All", run$log_msg, fixed = TRUE))
+  expect_false(is.null(run$r_a))
+})
+
+test_that("run-frame mappings read the original columns before assigning internal names", {
+  d <- data.frame(Locality = c("A", "A", "B"), x = c(10, 20, 30), y = c(100, 200, 300),
+                  v = c(7, 8, 9), pv = c(1, 2, 3))
+  got <- locality_run_frame(d, list(x = "y", y = "x", loc = "Locality"), "A",
+                            actual_col = "pv", pred_col = "v")
+  expect_equal(got$x, d$y[1:2])
+  expect_equal(got$y, d$x[1:2])
+  expect_equal(got$v, d$pv[1:2])
+  expect_equal(got$pv, d$v[1:2])
+  # Targets may themselves use the names reserved for coordinates.
+  got <- locality_run_frame(d, list(x = "v", y = "pv", loc = "Locality"), "A",
+                            actual_col = "x", pred_col = "y")
+  expect_equal(got$v, d$x[1:2])
+  expect_equal(got$pv, d$y[1:2])
+})

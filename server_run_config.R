@@ -167,10 +167,11 @@
   output$render_desc_exploratory_guide <- renderUI(withMathJax(DOCS_HTML$desc))
   output$render_scientific_guide <- renderUI(withMathJax(DOCS_HTML$sci))
   
-  # Display-layer values of the merged run rasters, cached per run
-  # (raster_value_layer(): Packed rasters are not subsettable).
-  rast_vals_act <- reactive({ raster_value_layer(rv$rast) })
-  rast_vals_pre <- reactive({ raster_value_layer(rv$rast_pred) })
+  # Prediction values of each surface of the displayed run, pooled over its
+  # localities' own rasters and cached per run (pooled_raster_values(): `v`,
+  # and `w` where the localities' cells differ in size). NULL without a surface.
+  rast_vals_act <- reactive(pooled_raster_values(rv$rast_list_act))
+  rast_vals_pre <- reactive(pooled_raster_values(rv$rast_list_pre))
 
   # ── Agronomical styling commit flow ─────────────────────────────────────
   # Agro sub-settings take effect only on Apply (applying re-encodes every map
@@ -251,32 +252,28 @@
       match_scales_shown(input$comp_mode, input$value_type, disp_has_pred(), map_view_base())
   })
 
-  # Pooled prediction values of both surfaces under Match Scales: always the
-  # PREDICTION band, which class breaks describe whatever layer is shown.
+  # Pooled prediction values of both surfaces under Match Scales (NULL without
+  # it): always the PREDICTION band, which class breaks describe whatever
+  # layer is shown.
   joint_vv <- reactive({
-    get_joint_scale_values(rv$rast, rv$rast_pred, match_scales_on(), "value")
+    if (match_scales_on()) pooled_raster_values(c(rv$rast_list_act, rv$rast_list_pre))
   })
   # Display-only twin for the SE/variance views: one colour range across both
   # surfaces' uncertainty layers under Match Scales. Never used for breaks.
   joint_uncert_vv <- reactive({
     layer <- map_view_layer()
-    if (!layer %in% c("se", "var")) return(NULL)
-    get_joint_scale_values(rv$rast, rv$rast_pred, match_scales_on(), layer)
+    if (!layer %in% c("se", "var") || !match_scales_on()) return(NULL)
+    vv <- pooled_raster_values(c(rv$rast_list_act, rv$rast_list_pre), "var1.var")$v
+    if (is.null(vv) || !identical(layer, "se")) vv else sqrt(vv)
   })
 
-  # Values one surface's class breaks are computed on: its own values, or both
-  # surfaces pooled under Match Scales. Before the first run the raw data
-  # column stands in for the Actual surface.
+  # Values one surface's class breaks are computed on (`v`, with the area
+  # weights `w` where cells differ in size): its own values, or both surfaces
+  # pooled under Match Scales. Before the first run the raw data column stands
+  # in for the Actual surface.
   classification_values <- function(meta, n_min, surface = "act") {
-    vv <- joint_vv()
-    if (is.null(vv)) {
-      vv <- if (identical(surface, "pre")) rast_vals_pre() else rast_vals_act()
-    }
-    if (is.null(vv) && !identical(surface, "pre")) {
-      v_data <- rv$user_data[[meta$actual]]
-      if (!is.null(v_data)) vv <- v_data[is.finite(v_data)]
-    }
-    if (is.null(vv) || length(vv) < n_min) return(NULL)
+    vv <- joint_vv() %||% (if (identical(surface, "pre")) rast_vals_pre() else actual_surface_values(meta))
+    if (length(vv$v) < n_min) return(NULL)
     vv
   }
 
@@ -299,12 +296,12 @@
       if (is.null(vv)) return(NULL)
       # Jenks: exact natural breaks over every value; k-means: seeded
       # (calc_class_breaks, spatial_pipeline.R).
-      return(calc_class_breaks(vv, ap$n_classes, ap$method))
+      return(calc_class_breaks(vv$v, ap$n_classes, ap$method, vv$w))
     }
     n_c <- 5
     vv <- classification_values(meta, n_c, surface)
     if (is.null(vv)) return(NULL)
-    rng <- range(vv, na.rm = TRUE)
+    rng <- range(vv$v, na.rm = TRUE)
     if (is.infinite(rng[1]) || is.infinite(rng[2]) || rng[1] == rng[2]) {
       seq(rng[1], rng[1] + 1, length.out = n_c + 1)[2:n_c]
     } else {
@@ -768,13 +765,14 @@
     rv$palette_picks <- picks
   })
 
-  # The values the Actual surface's classes are cut from: the displayed run's
-  # surface (cached per run), before a run the data column.
+  # The values the Actual surface's classes are cut from (`v`, with area
+  # weights `w` where cells differ in size): the displayed run's surface
+  # (cached per run), before a run the data column.
   actual_surface_values <- function(meta) {
     vv <- rast_vals_act()
     if (is.null(vv)) {
       v_data <- rv$user_data[[meta$actual]]
-      vv <- if (is.numeric(v_data)) v_data[is.finite(v_data)] else numeric(0)
+      vv <- list(v = if (is.numeric(v_data)) v_data[is.finite(v_data)] else numeric(0), w = NULL)
     }
     vv
   }
@@ -786,7 +784,8 @@
     req(isTruthy(n_c))
     meta <- rv$disp %||% get_current_meta()
     req(meta)
-    class_limit_defaults(meta$actual, meta$unit, n_c, actual_surface_values(meta))
+    vv <- actual_surface_values(meta)
+    class_limit_defaults(meta$actual, meta$unit, n_c, vv$v, vv$w)
   })
 
   # The variable and class count the Supervised boxes were last built for: for
@@ -810,8 +809,8 @@
     # Range hint of each surface the limits will cut (cached per run) so
     # sensible thresholds can be typed without leaving the sidebar.
     rng_note <- tryCatch({
-      act_v <- actual_surface_values(meta)
-      pre_v <- rast_vals_pre()
+      act_v <- actual_surface_values(meta)$v
+      pre_v <- rast_vals_pre()$v
       rng_line <- function(lab, v) {
         if (length(v)) sprintf("%s surface range: %s - %s", lab, format_sig(min(v)), format_sig(max(v)))
       }
@@ -824,7 +823,9 @@
 
     tagList(
       tags$label(class = "control-label", "Class limits",
-                 info_tooltip("agro_limits_info", "Default limits from published agronomic classes; sources, extraction methods and units are listed in the Scientific Guide, section 9.4.1 (Reference class limits). Each class holds its lower limit.")),
+                 info_tooltip("agro_limits_info", tip_html(
+                   "Default limits from published agronomic classes; sources, extraction methods and units are listed in the Scientific Guide, section 9.2 (Reference class limits).",
+                   "Each class holds its lower limit."))),
       rng_note,
       lapply(seq_len(n_c - 1), function(i) {
         id <- paste0("agro_limit_", i)

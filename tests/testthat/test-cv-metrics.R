@@ -1406,3 +1406,74 @@ test_that("the population note fires only when the two counts differ", {
   expect_null(pred_pop_note(152, NA))
   expect_false(is.null(pred_pop_note(152, 153)))
 })
+
+# ── Observed vs Predicted panel ────────────────────────────────────────────
+test_that("agreement regression retains variation around a large offset", {
+  pred <- 1e9 + 1:5
+  obs <- 2 * pred + 3
+  p <- build_obs_pred_plot(data.frame(observed = obs, var1.pred = pred), "offset")
+  expect_match(p$labels$subtitle, "(slope 2, intercept 3)", fixed = TRUE)
+  line <- ggplot2::ggplot_build(p)$data[[3]]
+  expect_equal(line$y, 2 * line$x + 3, tolerance = 1e-12)
+  expect_equal(diff(range(line$y)), diff(range(obs)))
+})
+
+# Observed is drawn against predicted, with the regression of observed on
+# predicted: the direction whose slope and intercept test agreement (Piñeiro et
+# al. 2008).
+
+test_that("the Observed vs Predicted panel regresses observed on predicted", {
+  # Linearly calibrated predictions: the observation is the
+  # prediction plus an error of mean zero that is exactly uncorrelated with it.
+  pred <- c(4.1, 4.9, 5.6, 6.2, 6.8, 7.5, 8.3, 9.0)
+  e <- stats::residuals(stats::lm(c(0.6, -0.4, 0.3, -0.7, 0.5, -0.2, 0.4, -0.5) ~ pred))
+  cv <- data.frame(observed = pred + e, var1.pred = pred)
+
+  p <- build_obs_pred_plot(cv, "Observed vs Predicted: L")
+  expect_s3_class(p, "ggplot")
+  expect_identical(c(p$labels$x, p$labels$y), c("Predicted", "Observed"))
+  pts <- ggplot2::ggplot_build(p)$data[[1]]
+  expect_equal(pts$x, cv$var1.pred)
+  expect_equal(pts$y, cv$observed)
+
+  # Slope and intercept from their definitions, not from lm(): cov / var of
+  # the regressor, and the line through the two means.
+  slope <- stats::cov(cv$observed, cv$var1.pred) / stats::var(cv$var1.pred)
+  icpt <- mean(cv$observed) - slope * mean(cv$var1.pred)
+  expect_lt(abs(slope - 1), 1e-12)
+  expect_lt(abs(icpt), 1e-12)
+  expect_match(p$labels$subtitle, "Blue: Observed regressed on Predicted (slope 1, intercept ", fixed = TRUE)
+  # The other direction is pulled below 1 by the same data: var(pred) / var(obs).
+  reverse <- stats::cov(cv$observed, cv$var1.pred) / stats::var(cv$observed)
+  expect_equal(reverse, stats::var(pred) / (stats::var(pred) + stats::var(e)))
+  expect_lt(reverse, 0.95)
+
+  # The drawn line is that regression: it passes through the fitted values.
+  line <- ggplot2::ggplot_build(p)$data[[3]]
+  expect_equal(line$y, icpt + slope * line$x, tolerance = 1e-9)
+
+  # A biased predictor reads off the subtitle: predictions that vary twice as
+  # much as the observations give a slope of one half.
+  half <- build_obs_pred_plot(data.frame(observed = 5 + (pred - 5) / 2, var1.pred = pred), "t")
+  expect_match(half$labels$subtitle, "(slope 0.5, intercept 2.5)", fixed = TRUE)
+})
+
+test_that("the Observed vs Predicted panel draws scored pairs only", {
+  pts <- make_test_points(12)
+  cv <- sf::st_sf(observed = pts$v, var1.pred = pts$v + rep(c(0.2, -0.1, 0.3), 4),
+                  geometry = sf::st_geometry(pts))
+  cv$var1.pred[c(2, 7)] <- NA          # a failed fold
+  p <- build_obs_pred_plot(cv, "t")
+  drawn <- ggplot2::ggplot_build(p)$data[[1]]
+  expect_equal(nrow(drawn), 10)
+  expect_equal(drawn$y, cv$observed[-c(2, 7)])
+
+  # Constant predictions leave no slope: the 1:1 line stays, with the reason.
+  flat <- build_obs_pred_plot(data.frame(observed = c(1, 2, 3, 4), var1.pred = 2.5), "t")
+  expect_length(flat$layers, 2)
+  expect_match(flat$labels$subtitle, "the predictions do not vary", fixed = TRUE)
+
+  # Nothing scored, or no CV columns: no panel.
+  expect_null(build_obs_pred_plot(data.frame(observed = c(1, 2), var1.pred = NA_real_), "t"))
+  expect_null(build_obs_pred_plot(data.frame(a = 1:3, b = 4:6), "t"))
+})

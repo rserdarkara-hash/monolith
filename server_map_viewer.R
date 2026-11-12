@@ -152,6 +152,8 @@
                            layerId = raster_img_layer_id(n_img))
     }
     legend_id <- "rast_legend"
+    # Every legend is drawn opaque (leaflet's default is half-transparent), so
+    # its swatches are the palette's own colours on a light and a dark surface.
     # The surface's own variance band decides, so a stale view-menu value (the
     # previous run's) cannot style a surface that has none.
     uncert_layer <- map_view_layer()
@@ -170,7 +172,7 @@
     }
     # Palette domain read lazily: only the continuous branch needs cell values.
     get_vv_scale <- function() {
-      jv <- if (is_uncert_view) joint_uncert_vv() else joint_vv()
+      jv <- if (is_uncert_view) joint_uncert_vv() else joint_vv()$v
       if (!is.null(jv)) return(jv)
       unlist(lapply(seq_along(r_list), function(i) {
         r_proj <- get_projected_raster(r_list[[i]], layer_key(i))
@@ -204,7 +206,7 @@
       for (i in seq_along(resid_layers)) {
         m <- add_img(m, resid_layers[[i]], pal)
       }
-      m <- m %>% leaflet::addLegend(pal = pal, values = c(-abs_max, abs_max), title = legend_var_title(map_legend_title(meta$label, layer = "resid")), layerId = legend_id)
+      m <- m %>% leaflet::addLegend(pal = pal, values = c(-abs_max, abs_max), opacity = 1, title = legend_var_title(map_legend_title(meta$label, layer = "resid")), layerId = legend_id)
     } else {
       # Classified styling with this map's surface classes when computable;
       # otherwise continuous, so a completed run never shows an empty map.
@@ -218,7 +220,7 @@
           if (is.null(r_w)) next
           m <- add_img(m, select_active_layer(r_w), pal)
         }
-        m <- m %>% leaflet::addLegend(colors = class_params$colors, labels = class_params$leg_labels, opacity = 0.8, title = legend_var_title(map_legend_title(meta$label, meta$unit)), layerId = legend_id)
+        m <- m %>% leaflet::addLegend(colors = class_params$colors, labels = class_params$leg_labels, opacity = 1, title = legend_var_title(map_legend_title(meta$label, meta$unit)), layerId = legend_id)
       } else {
         vv_scale <- get_vv_scale()
         vv_scale <- vv_scale[is.finite(vv_scale)]
@@ -236,9 +238,9 @@
 
           lg <- map_legend_scale(vv_scale)
           m <- if (!is.null(lg$constant)) {
-            m %>% leaflet::addLegend(colors = pal(mean(vv_scale)), labels = lg$constant, opacity = 0.8, title = legend_var_title(legend_title), layerId = legend_id)
+            m %>% leaflet::addLegend(colors = pal(mean(vv_scale)), labels = lg$constant, opacity = 1, title = legend_var_title(legend_title), layerId = legend_id)
           } else {
-            m %>% leaflet::addLegend(pal = pal, values = vv_scale, title = legend_var_title(legend_title), labFormat = labelFormat(digits = lg$digits), layerId = legend_id)
+            m %>% leaflet::addLegend(pal = pal, values = vv_scale, opacity = 1, title = legend_var_title(legend_title), labFormat = labelFormat(digits = lg$digits), layerId = legend_id)
           }
         } else {
           m <- m %>% leaflet::removeControl(legend_id)
@@ -256,7 +258,7 @@
   # draw_map builds the full widget only for STRUCTURAL changes (new run, view
   # switch); styling reads are isolate()d and pure styling ticks go to the
   # proxy restyler. Cheap overlays (points, borders, north arrow, scale,
-  # resolution box, base tiles) are proxy observers keyed on map_overlay_rev.
+  # cell-size box, base tiles) are proxy observers keyed on map_overlay_rev.
   draw_map <- function(r_obj, lab, map_id = NULL) {
     current_tiles <- isolate(input$base_map_layer) %||% "Esri.WorldImagery"
     current_key <- isolate(carto_api_key())
@@ -336,7 +338,7 @@
        m <- m %>% addCircleMarkers(data = pts_view, radius = 5, color = "black", weight = 1,
                                   fillColor = ~pal_pts(resid), fillOpacity = 0.9,
                                   popup = popups)
-       m <- m %>% leaflet::addLegend(pal = pal_pts, values = c(-abs_max_p, abs_max_p), title = legend_var_title(map_legend_title(meta$label, layer = "point_resid")))
+       m <- m %>% leaflet::addLegend(pal = pal_pts, values = c(-abs_max_p, abs_max_p), opacity = 1, title = legend_var_title(map_legend_title(meta$label, layer = "point_resid")))
     }
     
     m
@@ -449,25 +451,24 @@
     }
   })
 
-  # North arrow (markup shared with the Data Setup mini-map: ui_components.R)
-  north_arrow_html <- map_north_arrow_html()
+  # North arrow (add_north_arrow(), shared with the Data Setup mini-map)
   observe({
     map_overlay_rev()
     show <- isTRUE(input$show_north)
     for (map_id in overlay_map_ids) {
       proxy <- leafletProxy(map_id) %>% removeControl("north_ctrl")
-      if (show) proxy %>% addControl(html = north_arrow_html, position = "topleft", layerId = "north_ctrl")
+      if (show) add_north_arrow(proxy)
     }
   })
 
-  # Per-locality resolution box: the cell sizes the DISPLAYED run gridded at,
-  # not the sidebar's settings for the next run.
+  # Cell-size box: the cell size each locality of the DISPLAYED run was gridded
+  # at, not the sidebar's settings for the next run.
   observe({
     map_overlay_rev()
     used <- rv$disp$grid_res_used
     show <- isTRUE(input$show_res_overlay) && length(used) > 0
     res_html <- if (show) {
-      paste0("<div style='background:var(--mn-surface); color:var(--mn-text); padding:5px; border-radius:4px; border:1px solid var(--mn-line); font-size:12px; font-family:var(--mn-sans);'><b>Resolutions:</b><br>", paste(htmltools::htmlEscape(names(used)), paste0(sapply(used, function(x) round(x, 2)), " m"), sep=": ", collapse="<br>"), "</div>")
+      paste0("<div style='background:var(--mn-surface); color:var(--mn-text); padding:5px; border-radius:4px; border:1px solid var(--mn-line); font-size:12px; font-family:var(--mn-sans);'><b>Cell sizes:</b><br>", paste(htmltools::htmlEscape(names(used)), paste0(sapply(used, function(x) round(x, 2)), " m"), sep=": ", collapse="<br>"), "</div>")
     } else NULL
     for (map_id in overlay_map_ids) {
       proxy <- leafletProxy(map_id) %>% removeControl("res_overlay_ctrl")
@@ -540,11 +541,7 @@
             var sc = map._monolithScale.getContainer();
             if (c && sc) {
               c.appendChild(sc);
-              sc.style.background = 'white';
-              sc.style.padding = '5px';
-              sc.style.border = '1px solid #ccc';
-              sc.style.borderRadius = '4px';
-              sc.style.margin = '0 auto';
+              sc.classList.add('mn-map-scale');
             }
           }
         });

@@ -115,8 +115,9 @@ status_file_parts <- function(path, session_id, kind = "warn", localities = NULL
 }
 
 #' Run-duration history log in the user's data directory; tests redirect it via
-#' option `monolith_history_dir`. Appends are not locked: a torn append costs
-#' one ETA record in a single-user desktop app.
+#' option `monolith_history_dir`. One row per finished locality: `locality_sec`
+#' is the time its own worker spent on it. Appends are not locked: a torn
+#' append costs one ETA record in a single-user desktop app.
 monolith_history_file <- function() {
   file.path(
     getOption("monolith_history_dir", tools::R_user_dir("monolith", which = "data")),
@@ -138,6 +139,19 @@ with_showtext_dpi <- function(dpi, expr) {
   force(expr)
 }
 
+# Workers running side by side each do about this share of a lone worker's
+# work; a single worker loses nothing.
+RUN_WORKER_EFFICIENCY <- 0.75
+
+#' Estimated wall-clock time of a run over localities of `loc_sample_counts`
+#' samples on `cores` nested workers. Each locality's lone-worker time comes
+#' from the history log (a line fitted to at least 5 records of the method,
+#' each record's worker time rescaled from the workers it ran beside) or,
+#' without one, from a cold-start formula; on `cores` workers each locality
+#' takes that time over RUN_WORKER_EFFICIENCY. The batch can finish no sooner
+#' than its largest locality, nor than its total worker time spread over the
+#' workers, and a safety margin is added. Returns `est_time_sec`, its text
+#' forms, `is_long_run` and `n_models`.
 estimate_run_duration <- function(loc_sample_counts, method, comp_mode, cores) {
   history_file <- monolith_history_file()
 
@@ -182,9 +196,16 @@ estimate_run_duration <- function(loc_sample_counts, method, comp_mode, cores) {
   }
   
   is_history_based <- !is.null(history_data) && nrow(history_data) >= 5
-  
+  share <- function(workers) ifelse(workers > 1, RUN_WORKER_EFFICIENCY, 1)
+
   if (is_history_based) {
-    fit <- tryCatch(lm(per_locality_share_sec ~ n_samples, data = history_data), error = function(e) NULL)
+    # A record is the time its locality took on a worker that ran beside
+    # cores_used - 1 others; as a lone worker's time it is that share of it.
+    # A log missing either column falls back to the cold-start formula.
+    fit <- tryCatch({
+      history_data$lone_sec <- history_data$locality_sec * share(history_data$cores_used)
+      lm(lone_sec ~ n_samples, data = history_data)
+    }, error = function(e) NULL)
     if (!is.null(fit)) {
       preds <- predict(fit, newdata = data.frame(n_samples = loc_sample_counts))
       loc_times_sec <- pmax(5, preds)
@@ -201,15 +222,13 @@ estimate_run_duration <- function(loc_sample_counts, method, comp_mode, cores) {
     loc_times_sec <- model_time * (if (comp_mode) 2 else 1)
   }
   
-  max_single_loc_time <- max(loc_times_sec)
-  
-  # 0.75 effective cores per core.
-  eff_factor <- 0.75
-  distributed_time <- sum(loc_times_sec) / max(1, (cores * eff_factor))
-  
+  # Each locality's time on a worker of this run, beside cores - 1 others.
+  worker_sec <- loc_times_sec / share(cores)
+  distributed_time <- sum(worker_sec) / max(1, cores)
+
   # Wider margin for the cold-start formula.
   fudge_mult <- if (is_history_based) 1.25 else 1.4
-  est_time_sec <- max(max_single_loc_time, distributed_time) * fudge_mult
+  est_time_sec <- max(max(worker_sec), distributed_time) * fudge_mult
   
   est_time_str <- if (est_time_sec < 60) {
     paste(round(est_time_sec), "seconds")
@@ -1018,9 +1037,11 @@ crs_target_suitability <- function(crs, lon, lat, warn_dev = 0.001, block_dev = 
 }
 
 #' Why the Target Mapping CRS matters: the `detail` of crs_target_suitability(),
-#' shown behind a tooltip (Data Setup) or as the run gate's second paragraph.
-crs_measure_detail <- paste(
-  "The finished surface is resampled into the Target Mapping CRS, so exported rasters and their cell size, the resolution suggestion and the Map Viewer's projected ruler are all stated in its metres and carry its scale error at your data, with no error raised anywhere. The models are fitted in the Input Data CRS (or, for geographic or non-metre input, its UTM zone); for projected data choose the same UTM zone for both.",
+#' one paragraph per element, shown behind a tooltip (Data Setup) and in the
+#' run gate's dialog.
+crs_measure_detail <- c(
+  "The finished surface is resampled into the Target Mapping CRS, so exported rasters and their cell size, the resolution suggestion and the Map Viewer's projected ruler are all stated in its metres and carry its scale error at your data, with no error raised anywhere.",
+  "The models are fitted in the Input Data CRS (or, for geographic or non-metre input, its UTM zone); for projected data choose the same UTM zone for both.",
   "The Target Mapping CRS never moves your points on the map (that is the Input Data CRS); it decides what a metre means.")
 
 #' The Target Mapping CRS this data should be measured in: the WGS 84 / UTM
@@ -1160,7 +1181,7 @@ palette_choices_precomputed <- (function() {
       RColorBrewer::brewer.pal(n_cols, p)
     }
     swatches <- paste0(sapply(cols, function(c) {
-      sprintf('<div style="width: 15px; height: 15px; background-color: %s !important; border: 0.5px solid #ccc; display: inline-block; margin-left: 2px;"></div>', c)
+      sprintf('<div style="width: 15px; height: 15px; background-color: %s !important; border: 0.5px solid var(--mn-line-2); display: inline-block; margin-left: 2px;"></div>', c)
     }), collapse = "")
     display_name <- if (p == "viridis") "Viridis" else p
     sprintf('<div style="display: flex; justify-content: space-between; align-items: center; width: 100%%;"><span>%s</span><div style="display: flex;">%s</div></div>', display_name, swatches)
@@ -1225,39 +1246,62 @@ sync_styler_config <- function(cfg, session) {
   }
 }
 
-#' The payload an export-registry item draws, materialised on demand.
+#' One band of each raster of a surface (per-locality list, live or Packed) as
+#' single-band rasters, named by locality: `layer` is the band, `fun` an
+#' optional transform ("sqrt") and `name` the band's new name, which a GeoTIFF
+#' carries as its band description. A raster without the band is left out.
+surface_band <- function(r_list, layer, fun = NULL, name = NULL) {
+  Filter(Negate(is.null), lapply(live_rasters(r_list), function(r) {
+    if (!layer %in% names(r)) return(NULL)
+    b <- r[[layer]]
+    if (identical(fun, "sqrt")) b <- sqrt(b)
+    if (!is.null(name)) names(b) <- name
+    b
+  }))
+}
+
+#' The payload an export-registry item draws, materialised on demand. A map
+#' item's payload is a surface: the per-locality rasters, named by locality.
 #'
-#' Uncertainty items store a `derived` spec, not a raster: the variance band
+#' Uncertainty items store a `derived` spec, not rasters: the variance band
 #' already sits in the surface item and the SE is its square root, so a copy
 #' would cost ~30 MB per layer at the grid cap, per archived run.
-#' `derived$src` is the surface's own SpatRaster; `layer` names the band, `fun`
-#' an optional transform and `name` the GeoTIFF band description.
+#' `derived$src` is the surface's rasters that hold a variance
+#' (rasters_with_variance()), and the rest is surface_band()'s arguments.
 export_item_obj <- function(item) {
   if (is.null(item) || !is.list(item)) return(NULL)
   if (!is.null(item$obj)) return(item$obj)
   d <- item$derived
-  if (is.null(d) || is.null(d$src)) return(NULL)
-  r <- tryCatch(terra::unwrap(d$src), error = function(e) NULL)
-  if (!inherits(r, "SpatRaster")) return(NULL)
-  if (!is.null(d$layer)) {
-    if (!d$layer %in% names(r)) return(NULL)
-    r <- r[[d$layer]]
-  }
-  if (identical(d$fun, "sqrt")) r <- sqrt(r)
-  if (!is.null(d$name)) names(r) <- d$name
-  r
+  if (is.null(d$src)) return(NULL)
+  out <- surface_band(d$src, d$layer, d$fun, d$name)
+  if (length(out)) out
 }
 
-#' The raster behind an export-registry item, or NULL when it has none. The
-#' Actual vs Predicted pair ("map_combined") and the Point Error Map (sf points)
-#' have no single-raster form and stay image-only.
-export_raster_payload <- function(item) {
-  if (is.null(item) || !is.list(item)) return(NULL)
-  if (!identical(item$type, "map")) return(NULL)
-  obj <- export_item_obj(item)
-  if (inherits(obj, "PackedSpatRaster")) return(terra::unwrap(obj))
-  if (inherits(obj, "SpatRaster")) return(obj)
-  NULL
+#' How many rasters an export-registry item holds, one per locality; 0 for an
+#' item without a raster form. The Actual vs Predicted pair ("map_combined")
+#' and the Point Error Map (sf points) stay image-only.
+export_raster_count <- function(item) {
+  if (is.null(item) || !is.list(item) || !identical(item$type, "map")) return(0L)
+  src <- if (!is.null(item$obj)) item$obj else item$derived$src
+  if (!is.list(src)) return(0L)
+  sum(vapply(src, inherits, logical(1), what = c("SpatRaster", "PackedSpatRaster")))
+}
+
+#' The rasters an export-registry item writes as GeoTIFF, each named by the
+#' localities it holds; NULL for an item without a raster form. With `merge`
+#' (the run's localities share one lattice, rasters_share_lattice(), so merging
+#' moves no value) they are one raster; shared populated cells are refused.
+#' Otherwise there is one per locality,
+#' each on its own grid, and none is resampled onto another's. A variance band
+#' that holds no value is left out of its raster.
+export_rasters <- function(item, merge = FALSE) {
+  if (export_raster_count(item) == 0L) return(NULL)
+  rs <- live_rasters(export_item_obj(item))
+  if (isTRUE(merge) && length(rs) > 1) {
+    if (rasters_have_shared_cells(rs)) stop("Localities share populated cells; export one GeoTIFF per locality.")
+    rs <- stats::setNames(list(merge_wrapped_rasters(rs)), paste(names(rs), collapse = ", "))
+  }
+  lapply(rs, drop_empty_variance)
 }
 
 #' Excel sheet name for an export-registry table: at most 31 characters of
@@ -1298,6 +1342,24 @@ export_sheet_name <- function(label, id = "", used = character(0), var_label = N
 export_file_name <- function(prefix, id, method, timestamp, ext) {
   parts <- c(prefix, id, if (length(method) == 1 && !is.na(method) && nzchar(method)) method, timestamp)
   paste0(paste(parts, collapse = "_"), ".", ext)
+}
+
+#' Keep every export on case-insensitive filesystems too. Names already used
+#' in the batch are reserved; a collision gets a counter before its extension.
+unique_export_filenames <- function(filenames, used = character(0)) {
+  for (i in seq_along(filenames)) {
+    candidate <- filenames[i]
+    stem <- tools::file_path_sans_ext(candidate)
+    ext <- tools::file_ext(candidate)
+    n <- 1L
+    while (tolower(candidate) %in% tolower(used)) {
+      n <- n + 1L
+      candidate <- paste0(stem, "_", n, if (nzchar(ext)) paste0(".", ext))
+    }
+    filenames[i] <- candidate
+    used <- c(used, candidate)
+  }
+  filenames
 }
 
 #' File extension for a styler format token ("gtiff" writes a .tif).

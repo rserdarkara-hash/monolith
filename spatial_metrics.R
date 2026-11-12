@@ -990,20 +990,41 @@ build_cv_repeat_summary <- function(reps_by_loc) {
 }
 
 #' Cross-validation for RK (`model_type = "lm"`) and RFK (`"rf"`). Every fold
-#' re-screens the covariates (from `candidates`, default `aux_vars`) and refits
-#' the covariate surfaces, the trend and the residual variogram on its training
-#' rows, predicting trend + kriged residual (run_kriging_folds()). `folds` /
-#' `row_id` come from the run's CV plan; with `folds = NULL` they are built
-#' from `cv_strategy`, `fold_seed` and `cv_domain_xy`. Returns the common
-#' kriging CV schema (`var1.var` NA), or NULL below 3 complete-case rows.
-perform_kriging_loocv <- function(pts, target_var, aux_vars, lags_func, vgm_fit_func, model_type = c("lm", "rf"), l = "region", prefix = "act", rf_ntree = 200, cv_strategy = "auto", fold_seed = CV_FOLD_SEED, cov_params = list(),
+#' re-screens the covariates (from `candidates`, default `aux_vars`), kriges
+#' them at its held-out locations and refits the trend and the residual
+#' variogram on its training rows, predicting trend + kriged residual
+#' (run_kriging_folds()).
+#'
+#' The held-out covariates are kriged as the map kriges its grid. `cov_data`
+#' is the map's covariate support: every covariate-complete location, with or
+#' without a target value (run_regional_interpolation() passes its display
+#' set). A fold uses it without its held-out locations (matched on
+#' LOC_ID_COL), with lags from that set. Locations without a target are never
+#' held out and carry no target value, so they tell a fold nothing about the
+#' values it is scored on. Without `cov_data` (a direct call) the training
+#' rows are the support.
+#'
+#' `folds` / `row_id` come from the run's CV plan; with `folds = NULL` they
+#' are built from `cv_strategy`, `fold_seed` and `cv_domain_xy`. Returns the
+#' common kriging CV schema (`var1.var` NA) with attr(, "cov_support") =
+#' c(n, extra): the support's locations and how many of them carry no target;
+#' NULL below 3 complete-case rows.
+perform_kriging_loocv <- function(pts, target_var, aux_vars, model_type = c("lm", "rf"), rf_ntree = 200,
+                                  cv_strategy = "auto", fold_seed = CV_FOLD_SEED, cov_params = list(),
                                   folds = NULL, row_id = NULL, cancel_file = NULL, progress = NULL,
-                                  candidates = NULL, vif_threshold = 10, cv_domain_xy = NULL) {
+                                  candidates = NULL, vif_threshold = 10, cv_domain_xy = NULL,
+                                  cov_data = NULL) {
   model_type <- match.arg(model_type)
   candidates <- candidates %||% aux_vars
   pts <- pts[complete.cases(sf::st_drop_geometry(pts)[, c(target_var, aux_vars), drop=FALSE]), ]
   n <- nrow(pts)
   if (n < 3) return(NULL)
+  if (!is.null(cov_data)) {
+    if (!LOC_ID_COL %in% names(pts) || !LOC_ID_COL %in% names(cov_data) ||
+        !all(pts[[LOC_ID_COL]] %in% cov_data[[LOC_ID_COL]])) {
+      stop("The covariate support does not name the locations of the CV population.")
+    }
+  }
 
   # `fold_seed` moves only under repeated CV; per-fold model draws are seeded
   # from the fold label, so a repeat varies the partition only.
@@ -1033,7 +1054,7 @@ perform_kriging_loocv <- function(pts, target_var, aux_vars, lags_func, vgm_fit_
   }
 
   # `newdata` holds the held-out coordinates only: their covariates are kriged
-  # from the training rows, exactly as the map kriges its grid.
+  # from the fold's covariate support, as the map kriges its grid.
   fold_fn <- function(train, newdata, i) {
     # The covariate screen is data-driven, so it runs on the training rows only.
     kept <- screen_covariates(train, candidates, vif_threshold)$kept
@@ -1042,8 +1063,14 @@ perform_kriging_loocv <- function(pts, target_var, aux_vars, lags_func, vgm_fit_
       stop(sprintf("%d training rows cannot fit %d regression coefficients",
                    nrow(train), length(kept) + 1L))
     }
-    lags <- lags_func(train)
-    kc <- krige_covariates(train, newdata, kept, lags, cov_params)
+    lags <- calc_scientific_lags(train)
+    if (is.null(cov_data)) {
+      kc <- krige_covariates(train, newdata, kept, lags, cov_params)
+    } else {
+      held_out <- setdiff(pts[[LOC_ID_COL]], train[[LOC_ID_COL]])
+      support <- cov_data[!cov_data[[LOC_ID_COL]] %in% held_out, ]
+      kc <- krige_covariates(support, newdata, kept, calc_scientific_lags(support), cov_params)
+    }
     test_cov <- sf::st_drop_geometry(kc$grid_aux)
 
     if (model_type == "lm") {
@@ -1065,7 +1092,7 @@ perform_kriging_loocv <- function(pts, target_var, aux_vars, lags_func, vgm_fit_
     }
 
     v_emp <- variogram(residuals ~ 1, train, width = lags$width, cutoff = lags$cutoff)
-    v_fit <- vgm_fit_func(v_emp, train$residuals)
+    v_fit <- robust_vgm_fit(v_emp, train$residuals)
     res_krig <- krige(residuals ~ 1, train, newdata, model = v_fit, debug.level = 0)
     # Per-fold fit state and covariate fallbacks or flat surfaces, for the run log.
     list(pred = as.numeric(pred_trend) + res_krig$var1.pred,
@@ -1075,6 +1102,10 @@ perform_kriging_loocv <- function(pts, target_var, aux_vars, lags_func, vgm_fit_
 
   cv <- run_kriging_folds(pts, target_var, row_id, folds, fold_fn, cancel_file, progress)
   attr(cv, "cv_screen") <- .fold_screen_summary(cv, aux_vars)
+  if (!is.null(cov_data)) {
+    attr(cv, "cov_support") <- c(n = nrow(cov_data),
+                                 extra = sum(!cov_data[[LOC_ID_COL]] %in% pts[[LOC_ID_COL]]))
+  }
   cv
 }
 

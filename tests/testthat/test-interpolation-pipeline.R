@@ -119,11 +119,9 @@ test_that("calc_scientific_lags cutoff is half the bounding-box diagonal", {
 })
 
 # ── class areas: per-locality sum vs the merged grid ──────────────────────
-# The Area Coverage total is summed over the per-locality surfaces rather than
-# computed on merge_wrapped_rasters()'s output, because terra::expanse() costs
-# O(total cells) - NA padding included - and two localities far apart share a
-# merged grid that is almost entirely padding. This pins the equality that
-# makes the cheap route the same answer.
+# The Area Coverage total is summed over the per-locality rasters. A run whose
+# localities share one lattice is exported as one merged GeoTIFF
+# (merge_wrapped_rasters()), which must hold the same class areas.
 
 test_that("class areas of disjoint localities sum to the merged surface's", {
   mk <- function(x0, y0) {
@@ -142,8 +140,7 @@ test_that("class areas of disjoint localities sum to the merged surface's", {
                   7,  Inf, 3), ncol = 3, byrow = TRUE)
 
   class_ha <- function(r) {
-    e <- as.data.frame(terra::expanse(terra::classify(r[[1]], rcl, right = FALSE),
-                                      unit = "ha", byValue = TRUE))
+    e <- raster_class_areas(terra::classify(r[[1]], rcl, right = FALSE))
     ha <- rep(0, 3)
     ha[as.numeric(as.character(e$value))] <- e$area
     ha
@@ -161,10 +158,7 @@ test_that("class areas of disjoint localities sum to the merged surface's", {
   expect_s4_class(merged, "SpatRaster")
   expect_gt(terra::ncell(merged), 4 * (terra::ncell(a) + terra::ncell(b)))
 
-  # 1e-6 relative, not exact: terra computes each cell's geodesic area from its
-  # own transformed corners, and a cell sits in a different row of the merged
-  # grid than of its locality's. Measured at 1.1e-7 relative, which is ~3e-5 ha
-  # on the areas here - four orders below the table's 2-decimal display.
+  # The same cell polygons contribute on either grid; sums agree to rounding.
   per_locality <- class_ha(a) + class_ha(b)
   expect_equal(per_locality, class_ha(merged), tolerance = 1e-6)
   expect_equal(sum(per_locality), sum(class_ha(merged)), tolerance = 1e-6)
@@ -178,37 +172,210 @@ test_that("merge_wrapped_rasters returns NULL for empty or NULL input", {
   expect_null(merge_wrapped_rasters(list(NULL, NULL)))
 })
 
-# ── get_joint_scale_values ────────────────────────────────────────────────
+# A raster of `n` x `n` cells of `res` from a lower-left corner, valued `v`.
+lattice_raster <- function(xmin, ymin, n, res, v = 1, crs = "EPSG:32635") {
+  r <- terra::rast(nrows = n, ncols = n, xmin = xmin, xmax = xmin + n * res,
+                   ymin = ymin, ymax = ymin + n * res, crs = crs)
+  terra::values(r) <- rep_len(v, n * n)
+  names(r) <- "var1.pred"
+  r
+}
 
-test_that("get_joint_scale_values returns NULL when match_scales is FALSE", {
-  expect_null(get_joint_scale_values(NULL, NULL, match_scales = FALSE))
-  expect_null(get_joint_scale_values(NULL, NULL, match_scales = FALSE, layer = "se"))
+test_that("rasters share a lattice only with one CRS, cell size and origin", {
+  base <- lattice_raster(500010, 4400040, 8, 30)
+  expect_true(rasters_share_lattice(list(base)))
+  expect_true(rasters_share_lattice(list()))
+  # Another extent on the same lattice, 100 cells east and 7 north; Packed too.
+  shifted <- lattice_raster(500010 + 100 * 30, 4400040 + 7 * 30, 5, 30)
+  expect_true(rasters_share_lattice(list(A = base, B = terra::wrap(shifted))))
+  # Half a cell off, in x or in y.
+  expect_false(rasters_share_lattice(list(base, lattice_raster(500010 + 15, 4400040, 5, 30))))
+  expect_false(rasters_share_lattice(list(base, lattice_raster(500010, 4400040 + 15, 5, 30))))
+  # A whole cell less a hair is the same lattice (terra reports the origin
+  # within half a cell of zero, so the offset wraps); a thousandth of a cell
+  # is another one.
+  expect_true(rasters_share_lattice(list(base, lattice_raster(500010 + 30 - 1e-7, 4400040, 5, 30))))
+  expect_false(rasters_share_lattice(list(base, lattice_raster(500010 + 0.03, 4400040, 5, 30))))
+  # Another cell size on a common corner, and another CRS.
+  expect_false(rasters_share_lattice(list(base, lattice_raster(500010, 4400040, 8, 15))))
+  expect_false(rasters_share_lattice(list(base, lattice_raster(500010, 4400040, 8, 30, crs = "EPSG:32636"))))
+  # One odd raster among aligned ones decides.
+  expect_false(rasters_share_lattice(list(base, shifted, lattice_raster(500010, 4400040, 8, 15))))
+
+  # The merge moves no value, and refuses what terra would resample.
+  m <- merge_wrapped_rasters(list(base, shifted))
+  expect_equal(terra::res(m), c(30, 30))
+  expect_error(merge_wrapped_rasters(list(base, lattice_raster(500010 + 15, 4400040, 5, 30))),
+               "do not share one lattice")
 })
 
-test_that("get_joint_scale_values pools the band the view shows", {
-  mk <- function(pred, var) {
-    r <- terra::rast(nrows = 2, ncols = 2, xmin = 0, xmax = 2, ymin = 0, ymax = 2,
+# ── pooled_raster_values ──────────────────────────────────────────────────
+# A surface's values pooled over its localities' own rasters: what class
+# breaks and a shared colour scale are computed on.
+
+test_that("pooled_raster_values pools the band asked for, whatever the locality order", {
+  mk <- function(xmin, pred, var) {
+    r <- terra::rast(nrows = 2, ncols = 2, xmin = xmin, xmax = xmin + 2, ymin = 0, ymax = 2,
                      crs = "EPSG:32633", nlyrs = 2)
     names(r) <- c("var1.pred", "var1.var")
-    terra::values(r) <- cbind(rep(pred, 4), rep(var, 4))
+    terra::values(r) <- cbind(pred + 0:3, rep(var, 4))
     terra::wrap(r)
   }
-  a <- mk(10, 4); p <- mk(20, 9)
-  expect_setequal(get_joint_scale_values(a, p, TRUE), c(10, 20))
-  expect_setequal(get_joint_scale_values(a, p, TRUE, "var"), c(4, 9))
-  expect_setequal(get_joint_scale_values(a, p, TRUE, "se"), c(2, 3))
+  s <- list(Yorga = mk(0, 10, 4), Kale = mk(10, 20, 9))
+  pooled <- pooled_raster_values(s)
+  # Name order (Kale, then Yorga), so the order the localities ran in is not
+  # part of the pool.
+  expect_equal(pooled$v, c(20:23, 10:13))
+  expect_identical(pooled_raster_values(rev(s)), pooled)
+  # A projected grid's ground areas still vary with its scale distortion.
+  expect_equal(pooled$w, c(reference_cell_areas(terra::unwrap(s$Kale)),
+                            reference_cell_areas(terra::unwrap(s$Yorga))), tolerance = 1e-7)
+  expect_equal(pooled_raster_values(s, "var1.var")$v, rep(c(9, 4), each = 4))
 
-  # A surface without a variance band contributes nothing to an uncertainty
-  # scale, never its predictions.
-  pred_only <- terra::rast(nrows = 2, ncols = 2, xmin = 0, xmax = 2, ymin = 0, ymax = 2,
+  # A raster without a variance band, or with an empty one, contributes
+  # nothing to that pool, never its predictions.
+  pred_only <- terra::rast(nrows = 2, ncols = 2, xmin = 20, xmax = 22, ymin = 0, ymax = 2,
                            crs = "EPSG:32633", vals = 50)
   names(pred_only) <- "var1.pred"
-  expect_setequal(get_joint_scale_values(a, terra::wrap(pred_only), TRUE, "se"), 2)
+  expect_equal(pooled_raster_values(c(s["Kale"], list(Plain = pred_only)), "var1.var")$v, rep(9, 4))
+  expect_null(pooled_raster_values(list(Plain = pred_only), "var1.var"))
+  expect_null(pooled_raster_values(list()))
   expect_null(raster_value_layer(terra::wrap(pred_only), "var1.var"))
   expect_equal(unique(raster_value_layer(terra::wrap(pred_only))), 50)
 })
 
+test_that("pooled values carry each cell's area where the localities' cells differ", {
+  coarse <- lattice_raster(500000, 4400000, 4, 90, v = 1:16)     # 16 cells of 8100 m2
+  fine <- lattice_raster(510000, 4400000, 6, 15, v = 100 + 1:36) # 36 cells of 225 m2
+  pooled <- pooled_raster_values(list(Sparse = coarse, Dense = terra::wrap(fine)))
+  expect_equal(pooled$v, c(100 + 1:36, 1:16))
+  areas <- c(reference_cell_areas(fine), reference_cell_areas(coarse))
+  expect_equal(pooled$w, areas, tolerance = 1e-7)
+  # The weights add up to the mapped area of each locality.
+  expect_equal(c(sum(pooled$w[1:36]), sum(pooled$w[37:52])), c(sum(areas[1:36]), sum(areas[37:52])), tolerance = 1e-7)
+  # NA cells (outside the boundary) carry neither a value nor a weight.
+  fine[1:6] <- NA
+  holed <- pooled_raster_values(list(Sparse = coarse, Dense = fine))
+  expect_length(holed$v, 46)
+  expect_equal(holed$w, areas[-(1:6)], tolerance = 1e-7)
+
+  # A geographic target: a degree cell's ground area follows its latitude,
+  # cell by cell, within a locality as between two of them.
+  geo <- function(lat, rows = 3) {
+    r <- terra::rast(nrows = rows, ncols = 3, xmin = 29, xmax = 29.3, ymin = lat, ymax = lat + rows * 0.1,
+                     crs = "EPSG:4326", vals = seq_len(rows * 3))
+    names(r) <- "var1.pred"
+    r
+  }
+  north <- geo(60); south <- geo(10)
+  south[5] <- NA                       # a cell outside the boundary leaves with its area
+  g <- pooled_raster_values(list(South = south, North = north))
+  expect_equal(g$v, c(1:9, c(1:4, 6:9)))  # name order: North, then South
+  # Each cell's ground area, from the ellipsoid and independently of
+  # terra::cellSize(): the area of the cell's own polygon.
+  cell_m2 <- function(r) {
+    vapply(seq_len(terra::ncell(r)), function(i) {
+      e <- terra::ext(terra::rast(r, vals = NA), cells = i)
+      terra::expanse(terra::as.polygons(e, crs = "EPSG:4326"), unit = "m")
+    }, numeric(1))
+  }
+  expect_equal(g$w, c(cell_m2(north), cell_m2(south)[-5]), tolerance = 1e-6)
+  # The rows of one locality differ (a northern row is smaller), and the two
+  # localities by about the ratio of their latitudes' cosines (on the
+  # ellipsoid it departs from the sphere's ratio by about 1% here).
+  expect_lt(g$w[1], g$w[7])                                      # top row of North vs its bottom row
+  expect_equal(mean(g$w[1:9]) / mean(cell_m2(south)), cos(60.15 * pi / 180) / cos(10.15 * pi / 180),
+               tolerance = 0.02)
+  # Even one geographic locality carries its cells' areas.
+  expect_length(pooled_raster_values(list(Only = north))$w, 9)
+  # A geographic raster of one row has cells of one area, so none is needed.
+  expect_null(pooled_raster_values(list(Only = geo(60, rows = 1)))$w)
+})
+
 # ── Map Viewer views ──────────────────────────────────────────────────────
+test_that("worker cell-area caches survive serialisation and masks without recomputation", {
+  r <- terra::rast(nrows = 3, ncols = 4, xmin = 500000, xmax = 500400,
+                   ymin = 4400000, ymax = 4400300, crs = "EPSG:32635", nlyrs = 2)
+  names(r) <- c("var1.pred", "var1.var")
+  terra::values(r) <- cbind(1:12, c(NA, rep(2, 11)))
+  cached <- cache_surface_cell_areas(list(A = terra::wrap(r), B = terra::wrap(r[[1]])))
+  expect_identical(attr(cached$A, "monolith_cell_areas"), attr(cached$B, "monolith_cell_areas"))
+  cached <- unserialize(serialize(cached, NULL))
+  expected <- reference_cell_areas(r)
+  expect_equal(raster_cell_area_values(cached$A), expected, tolerance = 1e-7)
+  local_mocked_bindings(cellSize = function(...) stop("unexpected area recomputation"), .package = "terra")
+  expect_equal(pooled_raster_values(cached["A"])$w, expected, tolerance = 1e-7)
+  expect_equal(pooled_raster_values(cached["A"], "var1.var")$w, expected[-1], tolerance = 1e-7)
+  live <- live_rasters(cached)$A
+  cls <- terra::classify(live[[1]], matrix(c(-Inf, 7, 1, 7, Inf, 2), ncol = 3, byrow = TRUE),
+                         right = FALSE)
+  expect_equal(raster_class_areas(cls, raster_cell_area_values(live))$area,
+               c(sum(expected[1:6]), sum(expected[7:12])) / 1e4, tolerance = 1e-7)
+  # The same dimensions at a new position are a new geometry, not a cache hit.
+  terra::ext(live) <- terra::ext(510000, 510400, 4400000, 4400300)
+  expect_error(raster_cell_area_values(live), "unexpected area recomputation")
+})
+
+test_that("adjacent localities sharing boundary cells cannot lose them in an export merge", {
+  a <- terra::rast(nrows = 4, ncols = 3, xmin = 500000, xmax = 500030,
+                   ymin = 4400000, ymax = 4400040, vals = 1, crs = "EPSG:32633")
+  b <- terra::rast(nrows = 4, ncols = 3, xmin = 500020, xmax = 500050,
+                   ymin = 4400000, ymax = 4400040, vals = 2, crs = "EPSG:32633")
+  names(a) <- names(b) <- "var1.pred"
+  boundary <- function(x0, x1) sf::st_as_sf(terra::as.polygons(
+    terra::ext(x0, x1, 4400000, 4400040), crs = terra::crs(a)))
+  expect_equal(locality_boundary_overlap(list(A = boundary(500000, 500025),
+                                               B = boundary(500025, 500050))), 0)
+  rs <- list(A = a, B = terra::wrap(b))
+  expect_true(rasters_share_lattice(rs))
+  expect_true(rasters_have_shared_cells(rs))
+  expect_true(rasters_have_shared_cells(rev(rs)))
+  expect_error(export_rasters(list(type = "map", obj = rs), merge = TRUE), "share populated cells")
+  separate <- export_rasters(list(type = "map", obj = rs), merge = FALSE)
+  expect_equal(sum(vapply(separate, terra::ncell, numeric(1))), 24)
+  expect_match(grid_export_note(TRUE, TRUE, "10 m", shared_cells = TRUE), "one raster per locality", fixed = TRUE)
+  # Extents can overlap without both localities holding a value in a cell.
+  b[c(1, 4, 7, 10)] <- NA
+  expect_false(rasters_have_shared_cells(list(A = a, B = b)))
+})
+
+test_that("class areas sum every projected cell's own ellipsoidal area", {
+  r <- terra::rast(nrows = 2, ncols = 3, xmin = 700000, xmax = 703000,
+                   ymin = 5000000, ymax = 5002000, crs = "EPSG:32633", vals = rep(1:3, 2))
+  got <- raster_class_areas(r)
+  ref <- reference_class_areas(r)
+  expect_equal(got, ref, tolerance = 1e-10)
+  expect_true(all(diff(got$area) < 0))
+  # A mask removes the matching area, while unrepresented classes stay absent.
+  r[c(2, 5)] <- NA
+  expect_equal(raster_class_areas(r), reference_class_areas(r), tolerance = 1e-10)
+  r[] <- NA
+  expect_equal(nrow(raster_class_areas(r)), 0L)
+})
+
+test_that("projected pooling weights actual ground area even at one grid resolution", {
+  mk <- function(x, y, v) {
+    r <- terra::rast(nrows = 1, ncols = 1, xmin = x, xmax = x + 100,
+                     ymin = y, ymax = y + 100, vals = v, crs = "EPSG:32633")
+    names(r) <- "var1.pred"
+    r
+  }
+  rs <- list(A = mk(500000, 5000000, 0), B = mk(500000, 5001000, 1),
+             C = mk(730000, 5000000, 2.0001))
+  # Independent ellipsoidal polygon areas, not planar cell widths.
+  areas <- vapply(rs, function(r) terra::expanse(terra::as.polygons(terra::ext(r),
+    crs = terra::crs(r)), unit = "m"), numeric(1))
+  pooled <- pooled_raster_values(rs)
+  expect_equal(pooled$w, unname(areas), tolerance = 1e-7)
+  wss <- function(idx) {
+    x <- pooled$v[idx]; w <- areas[idx]
+    sum(w * (x - sum(w * x) / sum(w))^2)
+  }
+  # Compare the only two possible partitions of three sorted observations.
+  expect_lt(wss(2:3), wss(1:2))
+  expect_equal(natural_breaks(pooled$v, 2, pooled$w), 0.5)
+})
+
 
 test_that("parse_map_view splits a view id into surfaces and layer", {
   expect_equal(parse_map_view("view_pred_se"), list(base = "view_pred", layer = "se"))
@@ -2302,6 +2469,187 @@ test_that("natural breaks are the exact minimum within-class variance partition"
   expect_identical(calc_class_breaks(vv, 5, "jenks"), b1)
 })
 
+test_that("weighted natural breaks partition the mapped area, not the cell count", {
+  # Integer weights are repetition: a value standing for three units of area
+  # is that value three times.
+  x <- c(1.0, 1.2, 1.3, 2.9, 3.0, 3.4, 3.5, 6.0, 6.1, 6.6, 7.9, 8.0)
+  w <- c(1, 3, 1, 2, 1, 1, 4, 1, 1, 2, 1, 1)
+  expect_equal(natural_breaks(x, 3, w), natural_breaks(rep(x, w), 3))
+  expect_equal(calc_class_breaks(x, 3, "jenks", w), natural_breaks(rep(x, w), 3))
+  # Equal weights change nothing, whatever their size.
+  expect_equal(natural_breaks(x, 3, rep(2.5, length(x))), natural_breaks(x, 3))
+  # Order of the values is irrelevant, weights travelling with them.
+  o <- c(7, 2, 11, 5, 1, 9, 12, 3, 8, 4, 10, 6)
+  expect_equal(natural_breaks(x[o], 3, w[o]), natural_breaks(x, 3, w))
+  # A non-finite value leaves with its weight.
+  expect_equal(natural_breaks(c(x, NA, Inf), 3, c(w, 50, 50)), natural_breaks(x, 3, w))
+
+  # Brute force over every two-break partition of the weighted values.
+  wss <- function(v, ww) sum(ww * (v - sum(ww * v) / sum(ww))^2)
+  n <- length(x); best <- NULL
+  for (i in 1:(n - 2)) for (j in (i + 1):(n - 1)) {
+    tot <- wss(x[1:i], w[1:i]) + wss(x[(i + 1):j], w[(i + 1):j]) + wss(x[(j + 1):n], w[(j + 1):n])
+    if (is.null(best) || tot < best$w) best <- list(w = tot, i = i, j = j)
+  }
+  expect_equal(natural_breaks(x, 3, w), c((x[best$i] + x[best$i + 1]) / 2, (x[best$j] + x[best$j + 1]) / 2))
+
+  # Why it matters: a densely gridded locality holds most CELLS, a sparsely
+  # gridded one most GROUND. Counting cells, the third class is spent inside
+  # the dense locality; by area it is spent inside the sparse one, where most
+  # of the mapped ground is.
+  set.seed(4)
+  dense <- rnorm(3600, 6.0, 0.30)      # 3600 cells of 225 m2: 81 ha
+  sparse <- rnorm(400, 9.0, 0.30)      # 400 cells of 8100 m2: 324 ha
+  expect_lt(max(dense), min(sparse))   # the premise: the localities do not overlap in value
+  v <- c(dense, sparse); a <- rep(c(225, 8100), c(3600, 400))
+  by_cells <- natural_breaks(v, 3)
+  by_area <- natural_breaks(v, 3, a)
+  between <- function(b) b > max(dense) && b < min(sparse)
+  expect_true(by_cells[1] > min(dense) && by_cells[1] < max(dense) && between(by_cells[2]))
+  expect_true(between(by_area[1]) && by_area[2] > min(sparse) && by_area[2] < max(sparse))
+  # Each partition is the better one under its own measure.
+  spread <- function(b, ww) {
+    cls <- findInterval(v, b)
+    sum(vapply(split(seq_along(v), cls), function(i) wss(v[i], ww[i]), numeric(1)))
+  }
+  expect_lt(spread(by_area, a), spread(by_cells, a))
+  expect_lt(spread(by_cells, rep(1, length(v))), spread(by_area, rep(1, length(v))))
+
+  # K-Means approaches the same weighted criterion, so it too spends its
+  # classes where the ground is.
+  km_area <- calc_class_breaks(v, 3, "kmeans", a)
+  expect_true(between(km_area[1]) && km_area[2] > min(sparse) && km_area[2] < max(sparse))
+  set.seed(77); before <- .Random.seed
+  invisible(calc_class_breaks(v, 3, "kmeans", a))
+  expect_identical(.Random.seed, before)
+})
+
+test_that("K-Means breaks are Lloyd's heuristic on the weighted values, from seeded k-means++ starts", {
+  # Lloyd's algorithm written out on every value: each value to its nearest
+  # centre (the lower one on a tie), each centre to the weighted mean of its
+  # class, until no value moves. NULL when a class empties.
+  textbook <- function(x, w, ctr) {
+    cl <- NULL
+    repeat {
+      new <- max.col(-abs(outer(x, sort(ctr), "-")), ties.method = "first")
+      if (length(unique(new)) < length(ctr)) return(NULL)
+      if (identical(new, cl)) return(cl)
+      cl <- new
+      ctr <- as.vector(tapply(w * x, cl, sum) / tapply(w, cl, sum))
+    }
+  }
+  # Continuous draws: no two values are equal and none lies midway between
+  # two centres, so the nearest centre is never a tie.
+  cases <- with_seed(31, lapply(1:60, function(i) {
+    n <- sample(12:50, 1); k <- sample(2:5, 1)
+    x <- rnorm(n, 5, 2)
+    list(x = x, w = runif(n, 0.5, 3), k = k, ctr = sort(sample(x, k)))
+  }))
+  compared <- 0
+  for (cs in cases) {
+    ref <- textbook(cs$x, cs$w, cs$ctr)
+    if (is.null(ref)) next
+    o <- order(cs$x)
+    fit <- .lloyd_1d(cs$x[o], cs$w[o], cs$ctr)
+    expect_true(fit$converged)
+    brk <- (cs$x[o][fit$split] + cs$x[o][fit$split + 1L]) / 2
+    expect_identical(findInterval(cs$x, brk, left.open = TRUE) + 1L, ref)
+    compared <- compared + 1
+  }
+  expect_gt(compared, 40)   # the premise: most starts keep every class
+
+  # The breaks are that iteration's, run from the k-means++ centres drawn
+  # under the class-break seed (12345), the weights scaled to a mean of 1.
+  from_seeded <- 0
+  for (cs in cases[1:20]) {
+    o <- order(cs$x)
+    W <- cs$w[o] / mean(cs$w[o])
+    ctr <- with_seed(12345, .kmeans_pp_centres(cs$x[o], W, cs$k))
+    ref <- textbook(cs$x, cs$w, ctr)
+    if (is.null(ref)) next
+    kb <- calc_class_breaks(cs$x, cs$k, "kmeans", cs$w)
+    expect_identical(findInterval(cs$x, kb, left.open = TRUE) + 1L, ref)
+    from_seeded <- from_seeded + 1
+  }
+  expect_gt(from_seeded, 15)
+
+  # Seeded, the result is a fixed point of that iteration: k classes, and
+  # every value nearest its own class's weighted mean. It is never better than
+  # the exact optimum of the same criterion (Jenks).
+  wss <- function(x, w, b) {
+    cl <- findInterval(x, b, left.open = TRUE)
+    sum(vapply(split(seq_along(x), cl), function(i) {
+      m <- sum(w[i] * x[i]) / sum(w[i])
+      sum(w[i] * (x[i] - m)^2)
+    }, numeric(1)))
+  }
+  for (cs in cases[1:20]) {
+    kb <- calc_class_breaks(cs$x, cs$k, "kmeans", cs$w)
+    cl <- findInterval(cs$x, kb, left.open = TRUE) + 1L
+    expect_length(unique(cl), cs$k)
+    mu <- as.vector(tapply(cs$w * cs$x, cl, sum) / tapply(cs$w, cl, sum))
+    expect_identical(max.col(-abs(outer(cs$x, mu, "-")), ties.method = "first"), cl)
+    expect_gte(wss(cs$x, cs$w, kb), wss(cs$x, cs$w, calc_class_breaks(cs$x, cs$k, "jenks", cs$w)) - 1e-9)
+  }
+
+  # A heuristic, not the exact optimum. Three cells of 1, 1 and 0.01 ha with
+  # values 10, 14 and 20, from centres 12 and 20: every value is already
+  # nearest its class mean (10 and 14 to 12, 20 to 20), so Lloyd stops at
+  # {10, 14} | {20}, a weighted sum of squares of 2^2 + 2^2 = 8. Jenks finds
+  # {10} | {14, 20}: 1 * (14 - m)^2 + 0.01 * (20 - m)^2 = 0.356, m = 14.2 / 1.01.
+  stuck <- .lloyd_1d(c(10, 14, 20), c(1, 1, 0.01), c(12, 20))
+  expect_true(stuck$converged)
+  expect_identical(stuck$split, 2L)
+  expect_equal(stuck$centres, c(12, 20))
+  expect_equal(natural_breaks(c(10, 14, 20), 2, c(1, 1, 0.01)), 12)
+
+  # A class left empty restarts at the value contributing most to the sum of
+  # squares. From -1, 5 and 11, no value of -1, 0, 10, 11 is nearest 5; 0 and
+  # 10 both lie 1 from their centres, the first of them (0) takes the empty
+  # class, and the iteration ends at {-1} | {0} | {10, 11}.
+  relocated <- .lloyd_1d(c(-1, 0, 10, 11), rep(1, 4), c(-1, 5, 11))
+  expect_true(relocated$converged)
+  expect_identical(relocated$split, c(1L, 2L))
+  expect_equal(relocated$centres, c(-1, 0, 10.5))
+  # Stopped by the iteration cap right after that restart, the partition is
+  # the restarted centres' own: no class is empty, and it says so.
+  capped <- .lloyd_1d(c(-1, 0, 10, 11), rep(1, 4), c(-1, 5, 11), iter_max = 1L)
+  expect_false(capped$converged)
+  expect_identical(capped$split, c(1L, 2L))
+  # The contribution is weighted: where 10 stands for three times the ground,
+  # 10 takes the empty class, and the iteration ends at {-1, 0} | {10} | {11}.
+  expect_identical(.lloyd_1d(c(-1, 0, 10, 11), c(1, 1, 3, 1), c(-1, 5, 11))$split, c(2L, 3L))
+  # A value midway between two centres joins the lower one: from 0 and 2, the
+  # value 1 joins 0, and the classes stay {0, 1} | {2}.
+  expect_identical(.lloyd_1d(c(0, 1, 2), rep(1, 3), c(0, 2))$split, 2L)
+
+  # k-means++ draws each centre in proportion to its weight times its squared
+  # distance from the centres drawn before, so a value of no weight is never
+  # drawn, and no value is drawn twice.
+  for (s in 1:10) expect_identical(with_seed(s, .kmeans_pp_centres(c(0, 1, 2), c(0, 1, 1), 2)), c(1, 2))
+  ctr <- with_seed(3, .kmeans_pp_centres(sort(cases[[1]]$x), cases[[1]]$w, 5))
+  expect_length(unique(ctr), 5)
+  expect_true(all(ctr %in% cases[[1]]$x))
+
+  # Equal values are one weighted value: integer weights give exactly what
+  # repeating each value gives, equal weights of any size and the order of
+  # the values change nothing, and a value without a finite positive area
+  # leaves with it.
+  x <- c(1.0, 1.2, 1.3, 2.9, 3.0, 3.4, 3.5, 6.0, 6.1, 6.6, 7.9, 8.0)
+  w <- c(1, 3, 1, 2, 1, 1, 4, 1, 1, 2, 1, 1)
+  km <- calc_class_breaks(x, 3, "kmeans", w)
+  expect_length(km, 2)
+  expect_identical(calc_class_breaks(rep(x, w), 3, "kmeans"), km)
+  expect_identical(calc_class_breaks(x, 3, "kmeans", rep(2.5, length(x))), calc_class_breaks(x, 3, "kmeans"))
+  o <- c(7, 2, 11, 5, 1, 9, 12, 3, 8, 4, 10, 6)
+  expect_identical(calc_class_breaks(x[o], 3, "kmeans", w[o]), km)
+  expect_identical(calc_class_breaks(c(x, NA, 50), 3, "kmeans", c(w, 1, 0)), km)
+  # No more classes than distinct values: each its own class, as under Jenks.
+  expect_identical(calc_class_breaks(c(1, 1, 2, 2, 3), 5, "kmeans"), c(1.5, 2.5))
+  expect_equal(calc_class_breaks(c(1, 1, 2, 2, 3), 5, "jenks"), c(1.5, 2.5))
+  expect_error(calc_class_breaks(x, 3, "quantile"), "should be one of")
+})
+
 test_that("calc_class_breaks is deterministic and seed-sandboxed", {
   set.seed(999)
   vv <- rnorm(20000, 50, 10)
@@ -2958,6 +3306,9 @@ test_that("mixed localities: a stand-in locality is blank on the uncertainty sur
                as.numeric(terra::values(b[["var1.var"]], na.rm = TRUE)))
   # Every locality a stand-in: the surface has no variance band at all.
   expect_identical(names(drop_empty_variance(merge_wrapped_rasters(list(res_a$r_a)))), "var1.pred")
+  # The run's uncertainty items hold the localities that reported a variance.
+  expect_named(rasters_with_variance(list(A = res_a$r_a, B = res_b$r_a)), "B")
+  expect_length(rasters_with_variance(list(A = res_a$r_a)), 0)
 })
 
 test_that("values constant up to rounding report no variance in any engine", {
@@ -3157,26 +3508,62 @@ make_zone_test_params <- function() {
 }
 
 test_that("build_class_zone_sf returns one dissolved polygon per class present", {
-  z <- build_class_zone_sf(make_zone_test_raster(), make_zone_test_params())
+  z <- build_class_zone_sf(list(LocA = make_zone_test_raster()), make_zone_test_params())
   expect_s3_class(z, "sf")
   expect_equal(nrow(z), 3)
   expect_equal(z$class, c("Low", "Med", "High"))
+  expect_identical(z$locality, rep("LocA", 3))
   expect_true(all(sf::st_geometry_type(z) %in% c("POLYGON", "MULTIPOLYGON")))
+})
+
+test_that("class zones are dissolved locality by locality, each on its own grid", {
+  # Two localities at different cell sizes, as Auto (Per Locality) grids them.
+  # The Area Coverage table measures each on its own raster; so must the zones.
+  coarse <- make_zone_test_raster()                               # 100 m cells
+  fine <- terra::rast(nrows = 40, ncols = 40, xmin = 460000, xmax = 460400,
+                      ymin = 5810000, ymax = 5810400, crs = "EPSG:32633")   # 10 m cells
+  terra::values(fine) <- rep(c(20, 50, 50, 80), each = 400)
+  params <- make_zone_test_params()
+  surface <- list(Sparse = terra::wrap(coarse), Dense = terra::wrap(fine))
+  z <- build_class_zone_sf(surface, params, surface = "Actual", variable = "pH", method = "OK")
+  expect_equal(nrow(z), 6)
+  expect_identical(z$locality, rep(c("Sparse", "Dense"), each = 3))
+  expect_identical(z$class, rep(c("Low", "Med", "High"), 2))
+
+  # Independent sums of the individual cell polygons, per class and locality.
+  table_ha <- function(r) {
+    e <- reference_class_areas(terra::classify(r, params$rcl_mat, right = FALSE))
+    e$area[order(as.numeric(as.character(e$value)))]
+  }
+  expect_equal(z$area_ha[z$locality == "Sparse"], table_ha(coarse), tolerance = 1e-10)
+  expect_equal(z$area_ha[z$locality == "Dense"], table_ha(fine), tolerance = 1e-10)
+  # 4 ha in 4/8/4 for the dense locality, a hundredth of a 100 m cell each.
+  expect_equal(z$area_ha[z$locality == "Dense"], c(4, 8, 4), tolerance = 0.01)
+  # Each zone covers its own locality's cells: the polygon area is the cell
+  # count times that locality's cell size.
+  expect_equal(as.numeric(sf::st_area(z)) / 1e4, c(30, 40, 30, 4, 8, 4))
+  # The order the localities come in moves no zone.
+  z_rev <- build_class_zone_sf(rev(surface), params, surface = "Actual", variable = "pH", method = "OK")
+  key <- function(d) paste(d$locality, d$class)
+  expect_identical(z_rev$area_ha[match(key(z), key(z_rev))], z$area_ha)
+  # A locality without a classified cell adds no row.
+  blank <- coarse; terra::values(blank) <- NA_real_
+  expect_identical(build_class_zone_sf(c(surface, list(Empty = blank)), params)$locality, z$locality)
 })
 
 test_that("class zone areas equal the areas the Area Coverage table reports", {
   r <- make_zone_test_raster()
-  z <- build_class_zone_sf(r, make_zone_test_params())
+  z <- build_class_zone_sf(list(LocA = r), make_zone_test_params())
 
-  # Same call calc_area_df makes: classify, then expanse by value.
+  # Independent cell-polygon reference for the table and zone attributes.
   r_class <- terra::classify(r, make_zone_test_params()$rcl_mat, right = FALSE)
-  ref <- as.data.frame(terra::expanse(r_class, unit = "ha", byValue = TRUE))
+  ref <- reference_class_areas(r_class)
   ref <- ref[order(as.numeric(as.character(ref$value))), ]
 
   # Unrounded: a class under 0.005 ha must not export as 0.
   expect_equal(z$area_ha, ref$area)
   # 100 x 100 m cells, so the three classes split the grid 30/40/30. terra
-  # measures on the ellipsoid rather than in grid units (expanse transforms a
+  # measures on the ellipsoid rather than in grid units (cellSize transforms a
   # planar CRS for accuracy), which is why these are ~30.02 rather than 30.00 -
   # the app's own area table carries the same correction.
   expect_equal(z$area_ha, c(30, 40, 30), tolerance = 0.01)
@@ -3184,7 +3571,7 @@ test_that("class zone areas equal the areas the Area Coverage table reports", {
 })
 
 test_that("build_class_zone_sf keeps the analysis CRS and carries provenance", {
-  z <- build_class_zone_sf(make_zone_test_raster(), make_zone_test_params(),
+  z <- build_class_zone_sf(list(LocA = make_zone_test_raster()), make_zone_test_params(),
                            labels = make_zone_test_params()$leg_labels,
                            surface = "Predicted", variable = "pH", method = "OK")
   expect_true(sf::st_crs(z) == sf::st_crs(32633))
@@ -3196,7 +3583,7 @@ test_that("build_class_zone_sf keeps the analysis CRS and carries provenance", {
 
 test_that("open outer breaks are written as NA, never as an infinity", {
   # A GIS attribute field cannot hold -Inf/Inf, and the outer breaks always are.
-  z <- build_class_zone_sf(make_zone_test_raster(), make_zone_test_params())
+  z <- build_class_zone_sf(list(LocA = make_zone_test_raster()), make_zone_test_params())
   expect_true(is.na(z$class_min[1]))
   expect_true(is.na(z$class_max[3]))
   expect_equal(z$class_max[1], 40)
@@ -3205,18 +3592,20 @@ test_that("open outer breaks are written as NA, never as an infinity", {
 })
 
 test_that("build_class_zone_sf accepts a packed raster and rejects junk", {
-  z <- build_class_zone_sf(terra::wrap(make_zone_test_raster()), make_zone_test_params())
+  z <- build_class_zone_sf(list(LocA = terra::wrap(make_zone_test_raster())), make_zone_test_params())
   expect_equal(nrow(z), 3)
 
   expect_null(build_class_zone_sf(NULL, make_zone_test_params()))
-  expect_null(build_class_zone_sf(make_zone_test_raster(), NULL))
-  expect_null(build_class_zone_sf(make_zone_test_raster(), list(brks = c(0, 1))))
+  expect_null(build_class_zone_sf(list(), make_zone_test_params()))
+  expect_null(build_class_zone_sf(list(LocA = "not a raster"), make_zone_test_params()))
+  expect_null(build_class_zone_sf(list(LocA = make_zone_test_raster()), NULL))
+  expect_null(build_class_zone_sf(list(LocA = make_zone_test_raster()), list(brks = c(0, 1))))
 })
 
 test_that("a surface holding only one class yields one zone, not an error", {
   r <- make_zone_test_raster()
   terra::values(r) <- rep(50, 100)
-  z <- build_class_zone_sf(r, make_zone_test_params())
+  z <- build_class_zone_sf(list(LocA = r), make_zone_test_params())
   expect_equal(nrow(z), 1)
   expect_equal(z$class, "Med")
   expect_equal(z$area_ha, 100, tolerance = 0.01)
@@ -3225,7 +3614,7 @@ test_that("a surface holding only one class yields one zone, not an error", {
 test_that("an all-NA surface yields NULL rather than an empty layer", {
   r <- make_zone_test_raster()
   terra::values(r) <- NA_real_
-  expect_null(build_class_zone_sf(r, make_zone_test_params()))
+  expect_null(build_class_zone_sf(list(LocA = r), make_zone_test_params()))
 })
 
 test_that("a boundary that encloses no grid node skips the locality with a named warning", {
@@ -3676,7 +4065,7 @@ test_that("an Auto (GCV) run records the curve that selected its lambda", {
 
 test_that("a one-square-kilometre surface reports its ground area, not its projected area", {
   # A 1 km x 1 km block in UTM 35N, placed at a realistic easting for this
-  # survey. terra::expanse reprojects each cell to compute geodesic area, so
+  # survey. Exact cell areas are measured on the ellipsoid, so
   # what the Area Coverage table reports is ground hectares.
   r <- terra::rast(xmin = 650000, xmax = 651000,
                    ymin = 4150000, ymax = 4151000,
@@ -3687,7 +4076,7 @@ test_that("a one-square-kilometre surface reports its ground area, not its proje
                  rcl_mat = matrix(c(-Inf, 10, 1), ncol = 3, byrow = TRUE),
                  labels = "One", n_c = 1)
 
-  z <- build_class_zone_sf(r, params)
+  z <- build_class_zone_sf(list(LocA = r), params)
   expect_equal(nrow(z), 1L)
 
   poly <- sf::st_sfc(sf::st_polygon(list(rbind(
@@ -3700,24 +4089,6 @@ test_that("a one-square-kilometre surface reports its ground area, not its proje
   # Within a tenth of a hectare of the planar figure at this easting, but not
   # identical to it: the projection is not area-true.
   expect_lt(abs(z$area_ha - 100), 0.1)
-})
-
-test_that("calc_class_breaks reproduces the quantile and equal-interval definitions", {
-  x <- golden_soil("full")$ph
-
-  # Interior breaks only: n_c classes need n_c - 1 cuts, and the outer edges
-  # are the data's own extremes.
-  q <- calc_class_breaks(x, 4, "quantile")
-  expect_length(q, 3L)
-  expect_equal(q, unname(quantile(x, probs = c(0.25, 0.50, 0.75))),
-               tolerance = 1e-10)
-
-  e <- calc_class_breaks(x, 4, "equal")
-  expect_length(e, 3L)
-  expect_equal(e, min(x) + (1:3) * diff(range(x)) / 4, tolerance = 1e-10)
-
-  # Fewer values than classes has no answer.
-  expect_null(calc_class_breaks(c(1, 2), 5, "quantile"))
 })
 
 test_that("the Jenks break path is pinned", {
@@ -4044,6 +4415,7 @@ test_that("Fixed-mode localities share one lattice, so the merged surface is not
   b <- surface(item_at("B", 503517.1, 4402533.9))
   expect_equal(terra::origin(a), c(0, 0), tolerance = 1e-6)
   expect_equal(terra::origin(b), c(0, 0), tolerance = 1e-6)
+  expect_true(rasters_share_lattice(list(A = a, B = b)))
   expect_no_warning(m <- merge_wrapped_rasters(list(a, b)))
   # Every cell of the second locality keeps its own value in the merged surface.
   expect_equal(terra::extract(m, terra::crds(b))[["var1.pred"]],
@@ -4069,4 +4441,81 @@ test_that("the point-error surface resolves an absent IDW neighbour count", {
     "fixed", 60, "EPSG:32635", TRUE, "actual"))
   expect_false(is.null(res$r_point_err))
   expect_s4_class(terra::unwrap(res$r_point_err), "SpatRaster")
+})
+
+test_that("an Auto (Per Locality) run is exported, classified and measured on its own grids", {
+  # Two localities of different sampling density. Auto (Per Locality) grids
+  # each at its own cell size, so they share no lattice: every product has to
+  # come from the rasters as computed, with nothing resampled onto a common grid.
+  set.seed(8)
+  item_at <- function(l, x0, y0, n, span) {
+    d <- data.frame(x = x0 + runif(n, 0, span), y = y0 + runif(n, 0, span))
+    d$v <- 5 + d$x / 1e4 + rnorm(n, 0, 0.2)
+    d$pv <- NA_real_
+    list(l = l, pts_data = d,
+         m_params = list(idw_p_act = 2, idw_p_pre = 2, idw_nmax = 12,
+                         tps_lambda_act = -1, tps_lambda_pre = -1,
+                         pre_fit_act = NULL, pre_fit_pre = NULL,
+                         cv_strategy = "auto", vif_threshold = 10))
+  }
+  run <- function(item) {
+    suppressWarnings(run_regional_interpolation(
+      item, "IDW", 32635, character(0), NULL, "convex", "fixed", 200,
+      "local", 30, "EPSG:32635", FALSE, "actual"))
+  }
+  res <- list(Sparse = run(item_at("Sparse", 503517.1, 4402533.9, 25, 3000)),
+              Dense = run(item_at("Dense", 500013.7, 4400021.3, 60, 600)))
+  surface <- lapply(res, `[[`, "r_a")
+  expect_true(all(vapply(surface, function(r) !is.null(attr(r, "monolith_cell_areas")), logical(1))))
+  sizes <- vapply(res, `[[`, numeric(1), "actual_res")
+  expect_gt(sizes[["Sparse"]] / sizes[["Dense"]], 2)                     # the premise
+  own <- lapply(surface, terra::unwrap)
+  for (l in names(own)) expect_equal(terra::res(own[[l]]), rep(sizes[[l]], 2))
+  expect_false(rasters_share_lattice(surface))
+
+  # GeoTIFF export: one raster per locality, cell for cell the run's own.
+  out <- export_rasters(list(type = "map", obj = surface, label = "v - Actual Map"),
+                        merge = rasters_share_lattice(surface))
+  expect_named(out, c("Sparse", "Dense"))
+  for (l in names(out)) {
+    expect_identical(terra::values(out[[l]]), terra::values(own[[l]]))
+    expect_identical(as.vector(terra::ext(out[[l]])), as.vector(terra::ext(own[[l]])))
+    f <- tempfile(fileext = ".tif")
+    write_geotiff(out[[l]], f)
+    back <- terra::rast(f)
+    expect_equal(terra::res(back), rep(sizes[[l]], 2))
+    expect_equal(terra::values(back)[, 1], terra::values(own[[l]])[, 1], tolerance = 1e-6)
+    unlink(f)
+  }
+
+  # Pooled class breaks: every cell weighted by its area, so the breaks
+  # describe the mapped ground and do not move with the locality order.
+  pooled <- pooled_raster_values(surface)
+  expect_identical(pooled_raster_values(rev(surface)), pooled)
+  n_cells <- vapply(own, function(r) terra::global(r, "notNA")[[1]], numeric(1))
+  expected_weights <- unlist(lapply(own[c("Dense", "Sparse")], function(r) {
+    reference_cell_areas(r)[!is.na(terra::values(r[[1]], mat = FALSE))]
+  }), use.names = FALSE)
+  expect_equal(pooled$w, expected_weights, tolerance = 1e-7)
+  brk <- calc_class_breaks(pooled$v, 4, "jenks", pooled$w)
+  expect_length(brk, 3)
+  expect_false(isTRUE(all.equal(brk, calc_class_breaks(pooled$v, 4, "jenks"))))
+
+  # Class zones and the Area Coverage table's own call, locality by locality.
+  cb <- class_breaks_matrix(brk)
+  params <- list(brks = cb$brks, rcl_mat = cb$rcl_mat, n_c = cb$n_c, labels = paste("Class", seq_len(cb$n_c)))
+  z <- build_class_zone_sf(surface, params)
+  total <- rep(0, cb$n_c)
+  for (l in names(own)) {
+    e <- reference_class_areas(terra::classify(own[[l]][[1]], cb$rcl_mat, right = FALSE))
+    ha <- rep(0, cb$n_c)
+    ha[as.integer(as.character(e$value))] <- e$area
+    zl <- z[z$locality == l, ]
+    expect_equal(zl$area_ha, ha[match(zl$class, params$labels)], tolerance = 1e-10)
+    total <- total + ha
+  }
+  expect_equal(as.numeric(tapply(z$area_ha, factor(z$class, levels = params$labels), sum)), total)
+  # The zones cover each locality's own cells: no cell of either grid is lost.
+  expect_equal(sum(as.numeric(sf::st_area(z))),
+               sum(n_cells * sizes[names(n_cells)]^2))
 })

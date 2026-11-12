@@ -392,6 +392,86 @@ build_cv_distance_plot <- function(design, title = NULL) {
   p
 }
 
+#' Observed vs Predicted panel of one cross-validation frame (its observed and
+#' prediction columns, detect_cv_columns()): OBSERVED on the y axis against
+#' PREDICTED on the x axis, the 1:1 line, and the regression of observed on
+#' predicted with its slope and intercept. In that direction a slope of 1 and
+#' an intercept of 0 mean no linear calibration bias. For observed = predicted
+#' plus uncorrelated, mean-zero error, the reverse regression's slope is below
+#' 1 (Piñeiro et al. 2008). Neither line tests all nonlinear bias. Pairs
+#' without a finite value on both sides (a failed fold) are left out. NULL when
+#' no pair is scored.
+build_obs_pred_plot <- function(df, title) {
+  df <- as.data.frame(df)
+  cols <- detect_cv_columns(names(df))
+  if (is.na(cols$observed) || is.na(cols$pred)) return(NULL)
+  ok <- is.finite(df[[cols$observed]]) & is.finite(df[[cols$pred]])
+  if (!any(ok)) return(NULL)
+  d <- data.frame(Observed = df[[cols$observed]][ok], Predicted = df[[cols$pred]][ok])
+  # Constant predictions (a pure-nugget surface under leave-one-out can come
+  # close) leave no slope to estimate.
+  fit <- NULL
+  if (length(unique(d$Predicted)) > 1) {
+    # Center and scale before fitting: a large offset or small measurement
+    # unit must not make a varying predictor numerically collinear with the
+    # intercept. The line and its caption use the same least-squares fit.
+    mx <- mean(d$Predicted); my <- mean(d$Observed)
+    dx <- d$Predicted - mx; dy <- d$Observed - my
+    sx <- max(abs(dx)); sy <- max(abs(dy))
+    slope <- if (sy == 0) 0 else sum((dx / sx) * (dy / sy)) / sum((dx / sx)^2) * (sy / sx)
+    fit <- c(my - slope * mx, slope)
+    line <- data.frame(Predicted = range(d$Predicted))
+    line$Observed <- my + slope * (line$Predicted - mx)
+  }
+  # text aes on the point layer only: a per-point discrete aesthetic on the
+  # smooth layer would fragment its grouping into one group per point.
+  p <- ggplot(d, aes(x = Predicted, y = Observed)) +
+    suppressWarnings(geom_point(aes(text = paste0("Observed: ", signif(Observed, 5),
+                                                  "\nPredicted: ", signif(Predicted, 5),
+                                                  "\nResidual: ", signif(Observed - Predicted, 5))),
+                                alpha = 0.6)) +
+    geom_abline(intercept = 0, slope = 1, color = "red", linetype = "dashed")
+  if (!is.null(fit)) {
+    p <- p + geom_line(data = line, color = "blue")
+  }
+  p + labs(title = title, x = "Predicted", y = "Observed",
+           subtitle = paste0("Red: 1:1 line. ", if (is.null(fit)) {
+             "No regression line: the predictions do not vary."
+           } else {
+             sprintf("Blue: Observed regressed on Predicted (slope %s, intercept %s).",
+                     format_sig(fit[[2]]), format_sig(fit[[1]]))
+           })) +
+    theme_minimal()
+}
+
+# Layout of the importance charts, whose measure panels sit side by side on a
+# narrow card. Each panel has about three ticks, none in the last 10% of its
+# axis (an end label there would cross into the next panel or past the
+# plot's edge) and zero always; overlapping labels are dropped. The notes are
+# wrapped and start, like the title, at the plot's left edge (a right-aligned
+# caption wider than the card loses its beginning). The wider left margin
+# keeps long covariate labels whole on screens whose plot text is drawn
+# larger than it was measured (showtext's fixed 96 dpi).
+IMPORTANCE_NOTE_WIDTH <- 55
+importance_chart_layout <- function(subtitle = NULL, caption = NULL) {
+  # Only the notes given: labs(caption = NULL) would remove a caption.
+  notes <- Filter(length, list(subtitle = subtitle, caption = caption))
+  list(
+    scale_x_continuous(breaks = function(lims) {
+                         b <- scales::breaks_extended(n = 4)(lims)
+                         b[b <= lims[1] + 0.9 * diff(lims) | b == 0]
+                       },
+                       labels = axis_tick_labels,
+                       expand = expansion(mult = c(0.05, 0.2)),
+                       guide = guide_axis(check.overlap = TRUE)),
+    if (length(notes)) do.call(labs, lapply(notes, wrap_lines, width = IMPORTANCE_NOTE_WIDTH)),
+    theme(plot.title.position = "plot", plot.caption.position = "plot",
+          plot.caption = element_text(hjust = 0),
+          panel.spacing.x = unit(1, "lines"),
+          plot.margin = ggplot2::margin(5.5, 5.5, 5.5, 11))
+  )
+}
+
 # RF variable-importance dot chart: one panel per rf_importance_df() measure,
 # covariates ordered by the OOB MSE increase. Names map to display labels when
 # `vars_metadata` is given.
@@ -409,13 +489,42 @@ build_rf_importance_plot <- function(rf_mod, title, vars_metadata = NULL) {
     geom_segment(aes(x = 0, xend = Importance, yend = Variable), color = "grey70", linewidth = 0.4) +
     geom_point(color = "steelblue", size = 2.5) +
     facet_wrap(~Measure, scales = "free_x", labeller = label_wrap_gen(width = 20)) +
-    labs(title = title, x = NULL, y = NULL,
-         caption = if (RF_IMPORTANCE_LABELS[["scaled"]] %in% measures) {
-           paste0("The scaled measure grows with the number of trees (", rf_mod$ntree,
-                  " here); IncNodePurity is computed on the trees' own training rows.")
-         }) +
+    labs(title = title, x = NULL, y = NULL) +
     theme_minimal(base_size = 12) +
-    theme(plot.title = element_text(size = 12, face = "bold"))
+    theme(plot.title = element_text(size = 12, face = "bold")) +
+    importance_chart_layout(caption = if (RF_IMPORTANCE_LABELS[["scaled"]] %in% measures) {
+      paste0("The scaled measure grows with the number of trees (", rf_mod$ntree,
+             " here); IncNodePurity is computed on the trees' own training rows.")
+    })
+}
+
+# Governing Factors importance chart, from a compute_governing_factors()
+# result: the out-of-bag permutation importance as the increase in MSE, which
+# orders the factors, and divided by its SE across trees (randomForest's
+# %IncMSE), one panel each. `labels` is the suite's display-label map.
+build_gov_importance_plot <- function(res, labels = NULL, base_size = 11) {
+  vip <- res$importance
+  vip <- vip[order(vip$mse_increase), , drop = FALSE]
+  # make.unique: a run outlives the data it was fitted on, and labels of
+  # columns the current data no longer carries fall back to their names.
+  lab <- make.unique(display_var_labels(as.character(vip$variable), labels))
+  lab <- factor(lab, levels = lab)
+  long <- data.frame(variable = lab, value = vip$mse_increase,
+                     measure = RF_IMPORTANCE_LABELS[["increase"]])
+  scaled <- !is.null(vip$mse_increase_scaled)
+  if (scaled) {
+    long <- rbind(long, data.frame(variable = lab, value = vip$mse_increase_scaled,
+                                   measure = RF_IMPORTANCE_LABELS[["scaled"]]))
+  }
+  long$measure <- factor(long$measure, levels = unique(long$measure))
+  ggplot(long, aes(x = value, y = variable)) +
+    geom_col(fill = "steelblue") +
+    facet_wrap(~measure, scales = "free_x", labeller = label_wrap_gen(width = 20)) +
+    labs(title = "Global Variable Importance", x = NULL, y = NULL) +
+    theme_minimal(base_size = base_size) +
+    importance_chart_layout(
+      subtitle = if (!is.null(res$n_used)) complete_case_note(res$n_used, res$n_total),
+      caption = if (scaled) "Scaled values grow with the number of trees: compare them only between runs with the same ntree.")
 }
 
 # Rename the ids of a CK cross-variogram (empirical vm + fitted model list)
@@ -687,10 +796,16 @@ ggplotly_smart <- function(p, width = 870, height = 700) {
                  margin = list(t = top))
 }
 
+# A map item's payload is a surface: its localities' rasters, each drawn as
+# its own layer on its own grid under ONE colour scale, as the Map Viewer
+# draws them.
 # `agro_params` is one class definition, or list(act =, pre =) for the Actual
 # vs Predicted figure, whose panels each keep their own surface's classes.
 # `palette` is the displayed variable's palette, as the Map Viewer draws it.
-generate_base_plot <- function(item, input, agro_params = NULL, palette = "YlOrRd") {
+# `max_cells` caps the cells each layer draws (tidyterra's `maxcell`): every
+# cell for a file, about the canvas's pixel count for the Export Styler's
+# screen preview, which can show no more.
+generate_base_plot <- function(item, input, agro_params = NULL, palette = "YlOrRd", max_cells = Inf) {
   req(item)
 
   if (item$type == "map" || item$type == "map_combined") {
@@ -698,10 +813,12 @@ generate_base_plot <- function(item, input, agro_params = NULL, palette = "YlOrR
       if (is.null(agro_params) || !is.null(agro_params$rcl_mat)) agro_params else agro_params[[surface]]
     }
 
-    build_map <- function(obj, label, is_tiled = FALSE, kind = "value", agro_params = params_of("act")) {
+    build_map <- function(obj, label, kind = "value", agro_params = params_of("act")) {
       # Point error maps: sample-location errors drawn as markers, mirroring
       # the Map Viewer's Point Residuals panel (never a raster surface).
-      if (is.list(obj) && inherits(obj$pts, "sf")) {
+      # `[[`, not `$`: a surface's names are localities, which `$` would
+      # partial-match.
+      if (inherits(obj[["pts"]], "sf")) {
         vv <- obj$pts$resid
         abs_max <- suppressWarnings(max(abs(vv), na.rm = TRUE))
         if (is.infinite(abs_max) || is.na(abs_max)) abs_max <- 1
@@ -719,7 +836,7 @@ generate_base_plot <- function(item, input, agro_params = NULL, palette = "YlOrR
           coord_sf()
         return(bp)
       }
-      if (inherits(obj, "PackedSpatRaster")) obj <- terra::unwrap(obj)
+      layers <- lapply(live_rasters(obj), function(r) r[[1]])
       pal_name <- palette %||% "YlOrRd"
       # Registry items carry `kind`; the label match covers an item without one.
       is_resid <- identical(kind, "residual") ||
@@ -738,37 +855,40 @@ generate_base_plot <- function(item, input, agro_params = NULL, palette = "YlOrR
       # The variable and its unit, as the Map Viewer's legend reads
       # (map_legend_title, stamped on the registry item).
       leg_name <- item$legend
-      
-      bp <- ggplot() + geom_spatraster(data = obj[[1]])
-      
-      if (is_resid) {
-        vv <- as.vector(terra::values(obj[[1]], na.rm=TRUE))
-        abs_max <- max(abs(vv), na.rm = TRUE)
-        if(is.infinite(abs_max) || is.na(abs_max)) abs_max <- 1
-        resid_pal <- resolve_resid_palette(input)
-        bp <- bp + scale_fill_distiller(palette = resid_pal, direction = 1, limits = c(-abs_max, abs_max), na.value = "transparent", name = leg_name) +
-          coord_sf()
-      } else if (is_class && !is.null(agro_params)) {
-        obj_c <- terra::classify(obj[[1]], agro_params$rcl_mat, right = FALSE)
-        names(obj_c) <- "category"
-        
+
+      bp <- ggplot()
+      if (is_class && !is.null(agro_params)) {
         labels_to_use <- if(input$color_style == "bin") agro_params$leg_labels else agro_params$labels
         lvls <- data.frame(value = 1:agro_params$n_c, category = labels_to_use)
-        levels(obj_c) <- lvls
-        
         a_cols <- agro_params$colors
         if (isTruthy(input$styler_high_contrast)) {
             a_cols <- viridis::viridis(agro_params$n_c)
         }
-        
         # The legend is the full class scheme, as in the Map Viewer: every class
         # (show.legend = TRUE keeps absent ones, ggplot2 >= 3.5) and no "NA"
         # entry for the transparent cells outside the boundary.
-        bp <- ggplot() +
-          tidyterra::geom_spatraster(data = obj_c, aes(fill = category), show.legend = TRUE) +
+        for (r in layers) {
+          obj_c <- terra::classify(r, agro_params$rcl_mat, right = FALSE)
+          names(obj_c) <- "category"
+          levels(obj_c) <- lvls
+          # A capped preview layer is resampled on purpose; tidyterra's note is noise.
+          bp <- bp + suppressMessages(tidyterra::geom_spatraster(data = obj_c, aes(fill = category),
+                                                                 maxcell = max_cells, show.legend = TRUE))
+        }
+        return(bp +
           scale_fill_manual(values = a_cols,
                             labels = agro_params$leg_labels,
                             na.translate = FALSE, name = leg_name, drop = FALSE) +
+          coord_sf())
+      }
+      for (r in layers) bp <- bp + suppressMessages(geom_spatraster(data = r, maxcell = max_cells))
+
+      if (is_resid) {
+        vv <- unlist(lapply(layers, function(r) as.vector(terra::values(r, na.rm = TRUE))))
+        abs_max <- suppressWarnings(max(abs(vv), na.rm = TRUE))
+        if(is.infinite(abs_max) || is.na(abs_max)) abs_max <- 1
+        resid_pal <- resolve_resid_palette(input)
+        bp <- bp + scale_fill_distiller(palette = resid_pal, direction = 1, limits = c(-abs_max, abs_max), na.value = "transparent", name = leg_name) +
           coord_sf()
       } else {
         is_viridis <- pal_name %in% c("viridis", "cividis")
@@ -790,8 +910,8 @@ generate_base_plot <- function(item, input, agro_params = NULL, palette = "YlOrR
     if (item$type == "map") {
       return(build_map(obj, item$label, kind = item$kind))
     } else {
-      p1 <- build_map(obj$act, "Actual", is_tiled = TRUE, kind = item$kind, agro_params = params_of("act"))
-      p2 <- build_map(obj$pre, "Predicted", is_tiled = TRUE, kind = item$kind, agro_params = params_of("pre"))
+      p1 <- build_map(obj$act, "Actual", kind = item$kind, agro_params = params_of("act"))
+      p2 <- build_map(obj$pre, "Predicted", kind = item$kind, agro_params = params_of("pre"))
       return(list(p1 = p1, p2 = p2))
     }
     

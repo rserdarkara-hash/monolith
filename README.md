@@ -158,7 +158,7 @@ The kriging engines (OK, CK, RK, RFK) return a prediction variance with each pre
 
 Every map, table and plot a run produces is registered on the Export tab. The WYSIWYG Export Styler sets typography, DPI and layout for publication figures (PNG, TIFF, JPEG, PDF), and a batch export writes the selected items as one ZIP, with the tables merged into a single Excel workbook.
 
-Results also leave as data, not only as pictures. Any single-raster surface (Actual, Predicted, Delta, interpolated point errors, and the variance and standard-error surfaces) exports as a **GeoTIFF** in the run's Target Mapping CRS, with kriging surfaces written as multi-band files carrying prediction and variance (no variance where a variogram could not be estimated). Each band stores its real statistics (minimum, maximum, mean, standard deviation, valid share), and metadata tags inside the `.tif` identify the run: `MONOLITH_VARIABLE`, `MONOLITH_UNIT`, `MONOLITH_PRODUCT`, `MONOLITH_METHOD`, `MONOLITH_LOCALITY`, `MONOLITH_RUN_ID`, `MONOLITH_APP_VERSION`, `MONOLITH_TARGET_CRS` and `MONOLITH_CREATED`. The displayed **class zones export as a GIS vector layer**, one dissolved polygon per class with its break limits and its area in hectares, as Shapefile, GeoJSON, KML or GeoPackage; polygons drawn on the map export the same four ways. The Classification Suite writes its class, probability and entropy surfaces as GeoTIFFs; the class raster downloads as a zip holding `predicted_class.tif`, its `predicted_class.tif.aux.xml` (the class names GIS software reads beside the file) and `predicted_class_legend.csv` (`ID,class`). A run's configuration downloads separately as JSON, recording the settings the run actually used together with the R and package versions behind it.
+Results also leave as data, not only as pictures. Any single-raster surface (Actual, Predicted, Delta, interpolated point errors, and the variance and standard-error surfaces) exports as a **GeoTIFF** in the run's Target Mapping CRS, with kriging surfaces written as multi-band files carrying prediction and variance (no variance where a variogram could not be estimated). Each band stores its real statistics (minimum, maximum, mean, standard deviation, valid share), and metadata tags inside the `.tif` identify the run: `MONOLITH_VARIABLE`, `MONOLITH_UNIT`, `MONOLITH_PRODUCT`, `MONOLITH_METHOD`, `MONOLITH_LOCALITY`, `MONOLITH_RUN_ID`, `MONOLITH_APP_VERSION`, `MONOLITH_TARGET_CRS` and `MONOLITH_CREATED`. The displayed **class zones export as a GIS vector layer**, one dissolved polygon per class and locality with its break limits and its area in hectares, as Shapefile, GeoJSON, KML or GeoPackage; polygons drawn on the map export the same four ways. The Classification Suite writes its class, probability and entropy surfaces as GeoTIFFs; the class raster downloads as a zip holding `predicted_class.tif`, its `predicted_class.tif.aux.xml` (the class names GIS software reads beside the file) and `predicted_class_legend.csv` (`ID,class`). A run's configuration downloads separately as JSON, recording the settings the run actually used together with the R and package versions behind it.
 
 ![The session export registry and run history with the Export Styler open over them](assets/fig5.jpg)
 
@@ -366,7 +366,7 @@ monolith/
 │
 ├── ui_helpers.R                      # UI/analytics helper loader (sources the four ui_* helper files)
 ├── ui_colors.R                       # Palettes & colour resolution
-├── ui_formatting.R                   # Labels, metadata matching & fuzzy matching helpers
+├── ui_formatting.R                   # Labels, metadata and column matching helpers
 ├── ui_components.R                   # Shiny widget/tag generators
 ├── ui_plotting.R                     # Descriptive, correlation, PCA & diagnostic plot builders
 │
@@ -417,7 +417,7 @@ Detailed guides live in the [docs/](docs/) directory and open inside the app fro
 
 ## Testing and Reproducibility
 
-Monolith ships with a `testthat` suite of 7,897 assertions across 36 test files, covering the interpolation pipeline, cross-validation metrics, variogram fitting, the classification engine, the descriptive, correlation and PCA plot builders, metadata matching and the Governing Factors module. Where a quantity has an external or closed-form reference, the tests assert against that rather than against the app's own output:
+Monolith ships with a `testthat` suite of 8,668 assertions across 36 test files, covering the interpolation pipeline, cross-validation metrics, variogram fitting, the classification engine, the descriptive, correlation and PCA plot builders, metadata matching and the Governing Factors module. Where a quantity has an external or closed-form reference, the tests assert against that rather than against the app's own output:
 
 *   IDW against the hand-written Shepard sum; Ordinary Kriging against its exactness and pure-nugget closed forms; RK and RFK against the trend-plus-kriged-residual decomposition.
 *   VIF against `1/(1 - R²)` from an actual regression; Moran's I against a hand-built weight matrix; Lin's CCC against a value computed independently with `DescTools`.

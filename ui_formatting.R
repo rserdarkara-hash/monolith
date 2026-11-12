@@ -206,9 +206,9 @@ parse_map_view <- function(view) {
 }
 
 # Choices of the Map Viewer view menu: the surfaces the displayed run computed
-# and the standard-error and variance views of those whose merged surface
-# carries a variance band (`variance_surfaces`: "act", "pre"); the comparison
-# view needs both. Groups become <optgroup>s.
+# and the standard-error and variance views of those with a variance on some
+# locality (`variance_surfaces`: "act", "pre"); the comparison view needs
+# both. Groups become <optgroup>s.
 map_view_choices <- function(has_pred, has_resid, variance_surfaces = character(0)) {
   surf <- c("View: Actual" = "view_act")
   if (has_pred) surf <- c(surf, "View: ML Predicted" = "view_pred",
@@ -244,6 +244,28 @@ res_mode_label <- function(res_mode) {
   switch(as.character(res_mode),
          "fixed" = "Fixed", "global" = "Auto (Global)",
          "local" = "Auto (Per Locality)", as.character(res_mode))
+}
+
+# Run-log line of a multi-locality run: whether its localities share one
+# lattice (`lattice`, rasters_share_lattice()), lie apart (`apart`, no
+# boundary overlap) and populate no cell twice (`shared_cells`, as at touching
+# edges), and what a GeoTIFF export therefore holds. `resolution` is the run
+# record's cell-size text ("30 m", or a range).
+grid_export_note <- function(lattice, apart, resolution, shared_cells = FALSE) {
+  size <- if (is.null(resolution)) "" else paste0(" (cell size ", resolution, ")")
+  if (isTRUE(lattice) && isTRUE(apart) && !isTRUE(shared_cells)) {
+    paste0("[Grid] Every locality is on one lattice", size,
+           ": a GeoTIFF export holds them in one raster, cell for cell.")
+  } else if (isTRUE(lattice)) {
+    paste0("[Grid] The localities share one lattice", size,
+           if (isTRUE(shared_cells)) " but share populated cells, " else " but their boundaries overlap, ",
+           "so a GeoTIFF export is a zip with one raster per locality, each holding all of its own cells.")
+  } else {
+    paste0("[Grid] The localities are gridded separately", size,
+           ": a GeoTIFF export is a zip with one raster per locality on its own grid, ",
+           "and class breaks pooled over the localities weight each cell by its area. ",
+           "No locality is resampled onto another's grid.")
+  }
 }
 
 get_method_label <- function(method) {
@@ -596,7 +618,7 @@ cv_repeats_export_df <- function(summ, source_label) {
 
 # Metric dictionary for an uploaded prediction column; perform_cv() owns the
 # definitions, so it cannot drift from Model Performance. Departures
-# (Scientific Guide 5): MBE is predicted minus observed, and NMAE (no CV
+# (Scientific Guide 5.5): MBE is predicted minus observed, and NMAE (no CV
 # counterpart) follows NRMSE (mean)'s sign-crossing rule. No Moran (no CV
 # residual field). `Note` marks values NA because the metric does not apply.
 pred_perf_df <- function(obs, pre) {
@@ -665,6 +687,18 @@ format_sig <- function(x) {
   out[big] <- formatC(round(x[big]) + 0, format = "f", digits = 0)
   out[small] <- formatC(x[small], format = "e", digits = 3)
   out[rest] <- trimws(formatC(signif(x[rest], 4), format = "fg", digits = 4))
+  out
+}
+
+# Axis tick labels at any magnitude: the notation format() picks for the whole
+# axis (fixed, or scientific where that is shorter), without trailing zeros or
+# exponent padding ("2e-4", "2e5"), and zero as "0". NA for non-finite.
+axis_tick_labels <- function(x) {
+  out <- format(x, trim = TRUE, drop0trailing = TRUE)
+  out <- sub("e([+-])0*(\\d)", "e\\1\\2", out)
+  out <- sub("e+", "e", out, fixed = TRUE)
+  out[x %in% 0] <- "0"
+  out[!is.finite(x)] <- NA_character_
   out
 }
 
@@ -1279,49 +1313,20 @@ rk_fit_stats_df <- function(lm_sum) {
   )
 }
 
+#' The display label of column `v`: the label of the variable-list entry whose
+#' `actual` is that column, else the column name. Every `actual` is a column
+#' name of the table, so only the same name is the same variable; a looser
+#' match would hand the column another column's label.
 get_var_label <- function(v, vars_metadata) {
   if (is.null(v) || is.na(v) || v == "") return(v)
-  if (!is.null(vars_metadata)) {
-    all_actuals <- sapply(vars_metadata, function(x) x$actual)
-    fuzzy_actual <- fuzzy_match_column(v, all_actuals)
-    if (!is.null(fuzzy_actual)) {
-      match_fuzzy <- Filter(function(x) x$actual == fuzzy_actual, vars_metadata)
-      if (length(match_fuzzy) > 0 && !is.null(match_fuzzy[[1]]$label) && match_fuzzy[[1]]$label != "") {
-        return(match_fuzzy[[1]]$label)
-      }
-    }
-  }
-  return(v)
+  entry <- Find(function(x) identical(as.character(x$actual), as.character(v)), vars_metadata %||% list())
+  lab <- entry$label
+  if (length(lab) == 1 && !is.na(lab) && nzchar(lab)) as.character(lab) else v
 }
 
 get_var_labels <- function(vars, vars_metadata) {
   if (is.null(vars)) return(NULL)
   sapply(vars, get_var_label, vars_metadata = vars_metadata)
-}
-
-fuzzy_match_column <- function(act_name, user_cols) {
-  if (act_name %in% user_cols) {
-    return(act_name)
-  }
-  if (tolower(act_name) %in% tolower(user_cols)) {
-    return(user_cols[tolower(user_cols) == tolower(act_name)][1])
-  }
-  clean_act <- tolower(gsub("[^a-zA-Z0-9]", "", act_name))
-  clean_user <- tolower(gsub("[^a-zA-Z0-9]", "", user_cols))
-  if (clean_act %in% clean_user) {
-    return(user_cols[clean_user == clean_act][1])
-  }
-  
-  dists <- as.vector(adist(clean_act, clean_user))
-  min_idx <- which.min(dists)
-  if (length(min_idx) > 0) {
-    min_dist <- dists[min_idx]
-    if (min_dist <= 2 && (min_dist / max(1, nchar(clean_act))) <= 0.3) {
-      return(user_cols[min_idx])
-    }
-  }
-  
-  return(NULL)
 }
 
 # Display labels for variables (a presentation map, never a column rename);
@@ -1493,38 +1498,44 @@ rank_auxiliary_correlations <- function(data, mapping, variable, value_type = "a
        subset = subset, n = nrow(data), skipped = setdiff(candidates, results$Variable))
 }
 
+#' The uploaded-prediction column of `target` among `candidates`: the first of
+#' the naming forms below that is a candidate's whole name, ignoring case
+#' ("cve": the best-model prediction; "ss": the single-split one). Names are
+#' compared as plain text, so a header may hold any character. NA when no form
+#' is present.
 detect_pred_column <- function(target, candidates, type = "cve") {
   if (is.null(target) || is.na(target) || length(candidates) == 0) return(NA)
-  
-  patterns <- if (type == "cve") {
-    c(
-      paste0("^", target, "_cve$"),
-      paste0("^", target, "_pred$"),
-      paste0("^", target, "_predicted$"),
-      paste0("^", target, "Pred$"),
-      paste0("^", target, "Predicted$"),
-      paste0("^pred_", target, "$"),
-      paste0("^predicted_", target, "$")
-    )
+  forms <- if (type == "cve") {
+    c(paste0(target, c("_cve", "_pred", "_predicted", "Pred", "Predicted")),
+      paste0(c("pred_", "predicted_"), target))
   } else {
-    c(
-      paste0("^", target, "_ss$"),
-      paste0("^", target, "_split$"),
-      paste0("^", target, "_test$"),
-      paste0("^", target, "Split$"),
-      paste0("^", target, "Test$")
-    )
+    paste0(target, c("_ss", "_split", "_test", "Split", "Test"))
   }
-  
-  for (pat in patterns) {
-    matches <- grep(pat, candidates, ignore.case = TRUE, value = TRUE)
-    if (length(matches) > 0) return(matches[1])
-  }
-  
-  return(NA)
+  hit <- match(tolower(forms), tolower(candidates))
+  hit <- hit[!is.na(hit)]
+  if (length(hit)) candidates[hit[1]] else NA
 }
 
+# The three rules a variable-list row is matched to a column by, strictest
+# first: the same name, the same name ignoring case, the same letters and
+# digits ignoring case and everything else (spaces, underscores, brackets).
+# Letters and digits of every script count, so names in another alphabet are
+# never reduced to nothing.
+.column_match_keys <- list(
+  identity,
+  tolower,
+  function(x) tolower(gsub("[^\\p{L}\\p{N}]+", "", enc2utf8(x), perl = TRUE))
+)
+
+#' The variable list `m_df` (one row per variable: column name, label,
+#' category, unit) matched to the table's columns `user_cols`. Each rule of
+#' .column_match_keys runs over every row before the next one and a column
+#' goes to one row only, so a looser match never takes a column another row
+#' names more exactly; names are never matched by similarity. Returns
+#' `list(vars, unmatched)`: the mapped variables in row order, and the names of
+#' the rows that found no column.
 match_metadata_columns <- function(m_df, user_cols) {
+  if (!ncol(m_df)) return(list(vars = list(), unmatched = character(0)))
   cols <- colnames(m_df)
   col_act <- if (length(grep("actual|column|variable", cols, ignore.case=TRUE)) > 0) grep("actual|column|variable", cols, ignore.case=TRUE, value=TRUE)[1] else 1
   col_lab <- if (length(grep("label|name|display|ID", cols, ignore.case=TRUE)) > 0) grep("label|name|display|ID", cols, ignore.case=TRUE, value=TRUE)[1] else NA
@@ -1533,43 +1544,44 @@ match_metadata_columns <- function(m_df, user_cols) {
   # "units" (whole word, so "Community" is not a unit column).
   col_unit <- grep("^units?$|\\bunits?\\b", cols, ignore.case = TRUE, value = TRUE)[1]
 
-  new_vars <- list()
-  # seq_len: a headers-only upload yields an empty mapping. The NA check runs
-  # before the fuzzy match, so adist() never sees NA.
-  for (i in seq_len(nrow(m_df))) {
-    act_name <- as.character(m_df[i, col_act])
-    if (is.na(act_name) || act_name == "") next
-    matched_col <- fuzzy_match_column(act_name, user_cols)
-
-    if (!is.null(matched_col)) {
-      cat_val <- if (!is.na(col_cat)) as.character(m_df[i, col_cat]) else "Uploaded Data"
-      lab_val <- if (!is.na(col_lab)) as.character(m_df[i, col_lab]) else act_name
-      unit_val <- if (!is.na(col_unit)) trimws(as.character(m_df[[col_unit]][i])) else ""
-      if (is.na(unit_val)) unit_val <- ""
-
-      already_mapped <- sapply(new_vars, function(x) x$actual)
-      if (length(already_mapped) > 0 && matched_col %in% already_mapped) next
-
-      p_cve <- detect_pred_column(matched_col, user_cols, "cve")
-      p_ss  <- detect_pred_column(matched_col, user_cols, "ss")
-
-      new_var <- list(
-        actual = matched_col,
-        pred = p_cve,
-        pred_ss = p_ss,
-        label = lab_val,
-        category = cat_val,
-        unit = unit_val,
-        palette = get_default_palette(matched_col, cat_val, lab_val)
-      )
-      
-      new_vars[[length(new_vars) + 1]] <- new_var
+  act <- as.character(m_df[[col_act]])
+  rows <- which(!is.na(act) & nzchar(act))
+  col_of <- rep(NA_integer_, length(act))
+  for (key in .column_match_keys) {
+    k_cols <- key(user_cols)
+    for (i in rows[is.na(col_of[rows])]) {
+      k <- key(act[i])
+      hit <- setdiff(which(nzchar(k) & k_cols == k), col_of)
+      if (length(hit)) col_of[i] <- hit[1]
     }
   }
-  return(new_vars)
+
+  matched <- rows[!is.na(col_of[rows])]
+  vars <- lapply(matched, function(i) {
+    matched_col <- user_cols[col_of[i]]
+    # An empty cell takes the value the mapping editor would show for it.
+    cell <- function(col, empty) {
+      val <- if (is.na(col)) NA_character_ else as.character(m_df[[col]][i])
+      if (is.na(val) || !nzchar(trimws(val))) empty else val
+    }
+    cat_val <- cell(col_cat, "Uploaded Data")
+    lab_val <- cell(col_lab, act[i])
+    unit_val <- trimws(cell(col_unit, ""))
+    list(
+      actual = matched_col,
+      pred = detect_pred_column(matched_col, user_cols, "cve"),
+      pred_ss = detect_pred_column(matched_col, user_cols, "ss"),
+      label = lab_val,
+      category = cat_val,
+      unit = unit_val,
+      palette = get_default_palette(matched_col, cat_val, lab_val)
+    )
+  })
+  # A row repeating a mapped row's name is a duplicate, not a missing column.
+  list(vars = vars, unmatched = setdiff(act[setdiff(rows, matched)], act[matched]))
 }
 
-discretize_numeric_var <- function(x, method = "median", custom_breaks = NULL, var_name = "") {
+discretize_numeric_var <- function(x, method = "median", var_name = "") {
   prefix <- if(nchar(var_name) > 0) paste0(var_name, ": ") else ""
   if (all(is.na(x))) return(factor(rep(NA, length(x))))
   
@@ -1593,15 +1605,6 @@ discretize_numeric_var <- function(x, method = "median", custom_breaks = NULL, v
     if (length(q) < 6) return(factor(ifelse(is.na(x), NA_character_, paste0(prefix, "Low Variation"))))
     lbls <- paste0(prefix, c("Q1", "Q2", "Q3", "Q4", "Q5"))
     return(cut(x, breaks = q, include.lowest = TRUE, labels = lbls))
-  } else if (method == "custom" && !is.null(custom_breaks)) {
-    brks <- sort(unique(c(-Inf, custom_breaks, Inf)))
-    lbls <- character(length(brks) - 1)
-    for (i in 1:(length(brks)-1)) {
-      if (i == 1) lbls[i] <- paste(prefix, "<=", brks[i+1])
-      else if (i == length(brks)-1) lbls[i] <- paste(prefix, ">", brks[i])
-      else lbls[i] <- paste0(prefix, "(", brks[i], "-", brks[i+1], "]")
-    }
-    return(cut(x, breaks = brks, include.lowest = TRUE, labels = lbls))
   }
   return(as.factor(x))
 }
@@ -1778,6 +1781,50 @@ run_locality_rows <- function(df, loc_col, l, eff_subset = "all") {
     keep <- keep & !is.na(df[[subset_col]]) & df[[subset_col]] == eff_subset
   }
   df[keep, , drop = FALSE]
+}
+
+#' One locality's rows as a run reads them (run_locality_rows()), with the
+#' columns the pipeline names: `x`, `y` and, with `actual_col`, the measured
+#' values `v` and the uploaded predictions `pv` (NA without a prediction
+#' column). `mapping` holds the column names `x`, `y` and `loc`.
+locality_run_frame <- function(df, mapping, l, eff_subset = "all", actual_col = NULL, pred_col = NULL) {
+  rows <- run_locality_rows(df, mapping$loc, l, eff_subset)
+  out <- rows
+  # Every source lookup reads the untouched frame: uploaded column names can
+  # themselves be x/y/v/pv, in any mapping order.
+  out$x <- rows[[mapping$x]]
+  out$y <- rows[[mapping$y]]
+  if (!is.null(actual_col)) {
+    out$v <- rows[[actual_col]]
+    out$pv <- if (is_valid_col_ref(pred_col) && pred_col %in% names(rows)) rows[[pred_col]] else NA
+  }
+  out
+}
+
+#' The collinearity dialog's findings, one line per locality (per surface where
+#' a locality's two surfaces differ): the covariates the run's screen would
+#' drop as collinear, and those constant there, which are dropped whatever the
+#' answer. `screens` is locality -> surface column -> screen
+#' (locality_screen_preview()); `surfaces` maps the surface columns to their
+#' names. Returns `lines` (empty when no locality drops anything) and
+#' `any_vif`: whether any collinear drop exists, the only finding the dialog's
+#' answer changes.
+collinearity_dialog_lines <- function(screens, surfaces = c(v = "Actual")) {
+  finding <- function(s) {
+    paste(c(if (length(s$dropped_vif)) paste0("collinear: ", paste(s$dropped_vif, collapse = ", ")),
+            if (length(s$dropped_constant)) paste0("constant: ", paste(s$dropped_constant, collapse = ", "))),
+          collapse = "; ")
+  }
+  lines <- unlist(lapply(names(screens), function(l) {
+    found <- vapply(names(surfaces), function(tg) finding(screens[[l]][[tg]]), character(1))
+    if (!any(nzchar(found))) return(NULL)
+    if (length(unique(found)) == 1) return(paste0(l, ": ", found[1]))
+    paste0(l, " (", surfaces[nzchar(found)], "): ", found[nzchar(found)])
+  }), use.names = FALSE)
+  list(lines = lines %||% character(0),
+       any_vif = any(vapply(screens, function(by_surface) {
+         any(vapply(by_surface, function(s) length(s$dropped_vif) > 0, logical(1)))
+       }, logical(1))))
 }
 
 tuning_key <- function(col, eff_subset = "all") {

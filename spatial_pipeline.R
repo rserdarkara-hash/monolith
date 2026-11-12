@@ -129,20 +129,6 @@ strict_buffer_message <- function(buffer, res, label = NULL, res_floor = 5) {
     res_arm)
 }
 
-#' Pooled values of two rasters, so a comparison view can share one colour
-#' scale. `layer` "value" pools the predictions, "var" the prediction
-#' variances and "se" their square roots (a raster without a variance band
-#' contributes nothing). NULL when scales are not matched.
-get_joint_scale_values <- function(r1_packed, r2_packed, match_scales, layer = "value") {
-  if (!isTRUE(match_scales)) return(NULL)
-  band <- if (layer %in% c("se", "var")) "var1.var" else "var1.pred"
-  res <- c(raster_value_layer(r1_packed, band), raster_value_layer(r2_packed, band))
-  if (length(res) == 0) return(NULL)
-  if (identical(layer, "se")) res <- sqrt(res)
-  res
-}
-
-
 # Per-observation worker of the Governing Factors SHAP loop. TOP-LEVEL (like
 # interp_run_item()): a lambda inside compute_governing_factors() would make
 # future serialize that whole frame, the live PSOCK cluster included, to every
@@ -287,20 +273,75 @@ compute_governing_factors <- function(df, target_col, predictors, rf_ntree = 100
   })
 }
 
-#' Merge per-locality rasters (live or Packed) into one SpatRaster; NULL when
-#' the list holds none. Where localities overlap, each cell's prediction and
-#' variance come from the same locality.
-merge_wrapped_rasters <- function(raster_list) {
-  if (is.null(raster_list) || length(raster_list) == 0) return(NULL)
-  valid_list <- Filter(Negate(is.null), raster_list)
-  if (length(valid_list) == 0) return(NULL)
+# ── A run's surfaces: one raster per locality ──────────────────────────────
+# Each locality is interpolated on its own grid, and a surface is the named
+# list of its localities' rasters. Maps, class breaks, class zones, areas and
+# exports read those rasters as computed; nothing resamples them onto a
+# common grid.
 
-  unwrap_if_needed <- function(r) {
-    if (inherits(r, "PackedSpatRaster")) terra::unwrap(r) else r
+#' A surface's rasters as live SpatRasters: a per-locality list, live or
+#' Packed, with its names kept and NULL entries dropped.
+live_rasters <- function(r_list) {
+  lapply(Filter(Negate(is.null), r_list), function(r) {
+    if (!inherits(r, "PackedSpatRaster")) return(r)
+    out <- terra::unwrap(r)
+    attr(out, "monolith_cell_areas") <- attr(r, "monolith_cell_areas", exact = TRUE)
+    out
+  })
+}
+
+#' TRUE when the rasters (live or Packed) lie on one lattice: one CRS, one
+#' cell size and one origin, so that merging them moves no value. Fixed and
+#' Auto (Global) grids in a projected Target Mapping CRS do; Auto (Per
+#' Locality) grids, a geographic target and a locality coarsened by the
+#' candidate-cell cap do not. The tolerance is a millionth of a cell, far
+#' inside the tenth of a cell terra::merge itself accepts as aligned.
+rasters_share_lattice <- function(r_list) {
+  rs <- live_rasters(r_list)
+  if (length(rs) < 2) return(TRUE)
+  res0 <- terra::res(rs[[1]])
+  org0 <- terra::origin(rs[[1]])
+  tol <- 1e-6 * res0
+  all(vapply(rs[-1], function(r) {
+    if (!terra::same.crs(rs[[1]], r) || any(abs(terra::res(r) - res0) > tol)) return(FALSE)
+    # terra reports an origin within half a cell of zero, so two aligned
+    # lattices can differ by a whole cell there.
+    off <- abs(terra::origin(r) - org0) %% res0
+    all(pmin(off, res0 - off) <= tol)
+  }, logical(1)))
+}
+
+#' TRUE when two localities populate the same cell on a shared lattice.
+#' Boundary polygons alone cannot decide this: boundary-inclusive clipping
+#' keeps a centre on their shared edge in both rasters. Only intersections
+#' of extents are read, without constructing a sparse merged raster.
+rasters_have_shared_cells <- function(r_list) {
+  rs <- lapply(live_rasters(r_list), function(r) r[[1]])
+  if (length(rs) < 2) return(FALSE)
+  for (i in seq_len(length(rs) - 1L)) for (j in seq.int(i + 1L, length(rs))) {
+    if (!rasters_share_lattice(rs[c(i, j)])) next
+    a <- as.vector(terra::ext(rs[[i]])); b <- as.vector(terra::ext(rs[[j]]))
+    overlap <- c(max(a[1], b[1]), min(a[2], b[2]), max(a[3], b[3]), min(a[4], b[4]))
+    if (overlap[1] >= overlap[2] || overlap[3] >= overlap[4]) next
+    left <- terra::crop(rs[[i]], terra::ext(overlap))
+    right <- terra::crop(rs[[j]], terra::ext(overlap))
+    if (terra::global(!is.na(left) & !is.na(right), "sum", na.rm = TRUE)[[1]] > 0) return(TRUE)
   }
+  FALSE
+}
 
-  rasters <- lapply(unname(valid_list), unwrap_if_needed)
+#' Merge rasters (live or Packed) that share one lattice into one SpatRaster,
+#' which moves no value; NULL when the list holds none. Where localities
+#' overlap, each cell's prediction and variance come from the same locality.
+#' Rasters on different lattices are refused, because terra::merge would
+#' resample them onto the first one's.
+merge_wrapped_rasters <- function(raster_list) {
+  rasters <- unname(live_rasters(raster_list))
+  if (length(rasters) == 0) return(NULL)
   if (length(rasters) == 1) return(rasters[[1]])
+  if (!rasters_share_lattice(rasters)) {
+    stop("These rasters do not share one lattice; merging them would resample their values.")
+  }
   # terra::merge takes each LAYER from the first raster holding a value, so a
   # withheld variance (NA beside a prediction, .withhold_variance()) would be
   # filled from an overlapping locality's. Marked -Inf for the merge, it keeps
@@ -315,14 +356,107 @@ merge_wrapped_rasters <- function(raster_list) {
   merged
 }
 
-#' A merged kriging surface without its variance band when no cell of it holds
-#' a value: no locality's variogram supported one (vgm_variance_withheld()), so
-#' the surface has no uncertainty product (as under IDW and TPS) rather than an
-#' empty one.
+#' A kriging raster without its variance band when no cell of it holds a
+#' value: no variogram behind it supported one (vgm_variance_withheld()), so
+#' the exported file has no uncertainty band (as under IDW and TPS) rather
+#' than an empty one.
 drop_empty_variance <- function(r) {
   if (is.null(r) || !"var1.var" %in% names(r)) return(r)
   if (terra::global(r[["var1.var"]], "notNA")[[1]] > 0) return(r)
   r[["var1.pred"]]
+}
+
+#' The rasters of a surface (per-locality list, live or Packed) whose variance
+#' band holds a value, as given. A locality whose variogram supported no
+#' variance carries an all-NA band and is left out, so a surface without any
+#' has no uncertainty product.
+rasters_with_variance <- function(r_list) {
+  r_list <- Filter(Negate(is.null), r_list)
+  keep <- vapply(live_rasters(r_list), function(r) {
+    "var1.var" %in% names(r) && terra::global(r[["var1.var"]], "notNA")[[1]] > 0
+  }, logical(1))
+  r_list[keep]
+}
+
+# Locality boundaries overlapping by more than this many square metres put
+# cells of two localities on the same ground (locality_boundary_overlap()):
+# their areas cannot be summed, and one raster cannot hold both.
+LOCALITY_OVERLAP_TOL_M2 <- 0.5
+
+# Geometry alone fixes ground area; value bands, masks and class breaks do not.
+.area_geometry <- function(r) {
+  list(dim = c(nrow(r), ncol(r)), extent = as.vector(terra::ext(r)), crs = terra::crs(r))
+}
+
+#' Full-grid ellipsoidal cell areas. Workers cache this once per geometry;
+#' the main session reads a numeric vector, never a worker's terra pointer.
+#' The geometry check rejects stale caches after a raster is moved or resized.
+raster_cell_area_values <- function(r) {
+  r <- live_rasters(list(r))[[1]]
+  cache <- attr(r, "monolith_cell_areas", exact = TRUE)
+  if (identical(cache$geometry, .area_geometry(r))) return(cache$values)
+  # rcx disables coarse-grid interpolation. Projected cells also differ in
+  # ground area because the projection's scale varies spatially.
+  as.vector(terra::values(terra::cellSize(r[[1]], mask = FALSE, unit = "m",
+                                        rcx = max(nrow(r), ncol(r)))))
+}
+
+#' Attach serialisable areas to a locality's surfaces before they leave its
+#' worker. Surfaces on the same geometry share one vector in memory.
+cache_surface_cell_areas <- function(r_list) {
+  caches <- list()
+  for (i in seq_along(r_list)) {
+    if (is.null(r_list[[i]])) next
+    r <- live_rasters(r_list[i])[[1]]
+    geometry <- .area_geometry(r)
+    idx <- which(vapply(caches, function(x) identical(x$geometry, geometry), logical(1)))
+    cache <- if (length(idx)) caches[[idx[1]]] else list(geometry = geometry, values = raster_cell_area_values(r))
+    if (!length(idx)) caches[[length(caches) + 1L]] <- cache
+    attr(r_list[[i]], "monolith_cell_areas") <- cache
+  }
+  r_list
+}
+
+# Ground area per populated value of raster_value_layer(r, band), in order.
+.cell_areas <- function(r, band) {
+  layer <- if (band %in% names(r)) r[[band]] else r[[1]]
+  raster_cell_area_values(r)[!is.na(terra::values(layer, mat = FALSE))]
+}
+
+#' Exact ellipsoidal hectares by numeric raster class code. Summing the area
+#' of each populated cell avoids terra 1.9.50's projected expanse(byValue)
+#' row-indexing defect. Labels are joined by consumers from their class keys.
+raster_class_areas <- function(r, cell_areas = NULL) {
+  values <- as.vector(terra::values(r[[1]]))
+  held <- !is.na(values)
+  values <- values[held]
+  if (!length(values)) return(data.frame(value = numeric(0), area = numeric(0)))
+  if (is.null(cell_areas)) cell_areas <- raster_cell_area_values(r)
+  stopifnot(length(cell_areas) == terra::ncell(r))
+  totals <- rowsum(cell_areas[held] / 1e4, group = values, reorder = TRUE)
+  data.frame(value = as.numeric(rownames(totals)), area = as.vector(totals))
+}
+
+#' One band's values over a surface's rasters, pooled: what class breaks and a
+#' shared colour scale are computed on. Localities are taken in name order
+#' (byte order, the same in every locale), so the pool does not depend on the
+#' order they were run in. `w` is the ground area the cell behind each value
+#' stands for (.cell_areas()), given only where cells differ in area: a
+#' locality gridded at 15 m would otherwise count its ground 36 times as often
+#' as one gridded at 90 m, and in a geographic CRS a cell at 60° covers half
+#' the ground of one at the equator. NULL `w` means every value stands for the
+#' same area. Returns NULL when no raster holds a value of the band.
+pooled_raster_values <- function(r_list, band = "var1.pred") {
+  rs <- live_rasters(r_list)
+  if (!is.null(names(rs))) rs <- rs[order(names(rs), method = "radix")]
+  vals <- lapply(rs, raster_value_layer, band = band)
+  held <- lengths(vals) > 0
+  if (!any(held)) return(NULL)
+  # One exact ground area per populated cell, aligned with its band's values.
+  area <- Map(.cell_areas, rs[held], band)
+  span <- range(unlist(lapply(area, range)))
+  list(v = unlist(vals[held], use.names = FALSE),
+       w = if (diff(span) > 1e-9 * span[2]) unlist(area, use.names = FALSE))
 }
 
 # Metres per projected axis unit; shared by worker projections and UI gates.
@@ -374,6 +508,18 @@ validate_and_project_sf <- function(pts_sf) {
   return(pts_sf)
 }
 
+#' The co-location key of each point: its coordinates rounded to `dp` decimals
+#' (1 cm in a metric CRS). Points sharing a key are one location.
+location_key <- function(pts_sf, dp = 2) {
+  cc <- sf::st_coordinates(pts_sf)
+  paste(round(cc[, 1], dp), round(cc[, 2], dp))
+}
+
+# The column holding each row's location index within its locality's point
+# set (.locality_points()). merge_colocated() averages a location's equal
+# integers exactly, so every set merged from those rows names a location alike.
+LOC_ID_COL <- ".mn_loc_id"
+
 #' Merge samples whose projected coordinates agree to `dp` decimals (1 cm):
 #' numeric columns become the mean of the non-missing values (NA when none),
 #' the geometry the mean coordinate, CV_ROW_ID_COL the smallest id, any other
@@ -385,13 +531,13 @@ validate_and_project_sf <- function(pts_sf) {
 #' attr(, "majority_ties") counts the ties per `majority` column.
 merge_colocated <- function(pts_sf, dp = 2, count = FALSE, majority = character(0)) {
   if (is.null(pts_sf) || nrow(pts_sf) == 0) return(pts_sf)
-  cc <- sf::st_coordinates(pts_sf)
-  key <- paste(round(cc[, 1], dp), round(cc[, 2], dp))
+  key <- location_key(pts_sf, dp)
   g <- match(key, unique(key))
   if (!anyDuplicated(g)) {
     if (count) pts_sf$.mn_n_rep <- 1L
     return(pts_sf)
   }
+  cc <- sf::st_coordinates(pts_sf)
 
   n_rep <- tabulate(g)
   ids <- if (CV_ROW_ID_COL %in% names(pts_sf)) pts_sf[[CV_ROW_ID_COL]] else seq_len(nrow(pts_sf))
@@ -480,8 +626,7 @@ dedup_valid_points <- function(pts_sf, target) {
 #' is the mean of EVERY sample there that measured it; the target keeps the
 #' mean of the samples that measured it.
 ck_design_rows <- function(pts_all, target, aux_vars) {
-  cc <- sf::st_coordinates(pts_all)
-  key <- paste(round(cc[, 1], 2), round(cc[, 2], 2))
+  key <- location_key(pts_all)
   # A location index, merged exactly (the mean of equal integers) by both
   # merges, joins the two sets without re-deriving a coordinate key.
   pts_all$.mn_ck_loc <- match(key, unique(key))
@@ -635,6 +780,10 @@ grid_template <- function(bbox, res, crs_wkt, snap = FALSE) {
   if (nrow(pts_projected) < 3) {
     return(list(ok = FALSE, msg = paste0("Warning in ", l, ": Insufficient data points after covariate filtering (needed >= 3, got ", nrow(pts_projected), ").")))
   }
+  # Each row's location, so that a surface's point set and the display set,
+  # both merged from these rows, can be matched location by location.
+  key <- location_key(pts_projected)
+  pts_projected[[LOC_ID_COL]] <- match(key, unique(key))
 
   # The DISPLAY set: co-located samples merged, NOT filtered on the target. A
   # location's value is the mean over the rows that measured it; one with none
@@ -762,6 +911,38 @@ shared_auto_resolution <- function(items, run_params) {
   min(sizes, na.rm = TRUE)
 }
 
+#' The covariate screen a run would apply to one locality, per surface, on the
+#' point sets run_regional_interpolation() fits (.locality_points(), then
+#' dedup_valid_points() for RK/RFK or ck_design_rows() with the collocation
+#' minimum for CK). `targets` names the surfaces' value columns: "v", and "pv"
+#' when the run maps predictions. Returns, per target, `dropped_constant` and
+#' `dropped_vif`; a surface the run would not screen (fewer than two
+#' candidates or three points, a skipped locality) reports neither.
+locality_screen_preview <- function(l, pts_data, current_crs, method, aux_vars,
+                                    vif_threshold = 10, targets = "v") {
+  none <- list(dropped_constant = character(0), dropped_vif = character(0))
+  out <- stats::setNames(rep(list(none), length(targets)), targets)
+  if (length(aux_vars) < 2) return(out)
+  pp <- tryCatch(.locality_points(l, pts_data, current_crs, method, aux_vars, list()),
+                 error = function(e) NULL)
+  if (!isTRUE(pp$ok)) return(out)
+  for (tg in targets) {
+    scr <- tryCatch({
+      if (identical(method, "CK")) {
+        rows <- ck_design_rows(pp$pts_all, tg, aux_vars)
+        colloc <- vapply(aux_vars, function(av) sum(!is.na(rows$t[[av]])), integer(1))
+        cand <- aux_vars[colloc >= CK_MIN_COLLOCATED]
+        if (nrow(rows$t) >= 3 && length(cand) > 1) .ck_screen(rows$t, rows$x, cand, vif_threshold)
+      } else {
+        p <- dedup_valid_points(pp$pts_projected, tg)
+        if (nrow(p) >= 3) screen_covariates(p, aux_vars, vif_threshold)
+      }
+    }, error = function(e) NULL)
+    if (!is.null(scr)) out[[tg]] <- scr[c("dropped_constant", "dropped_vif")]
+  }
+  out
+}
+
 #' One locality's whole run: clean, project and deduplicate the points, build
 #' the boundary and the prediction grid, screen and krige covariates, run the
 #' selected engine on the actual (and, in comparison mode, the predicted)
@@ -776,11 +957,12 @@ run_regional_interpolation <- function(item, current_method, current_crs, aux_va
   if (!is.null(cancel_file_val) && file.exists(cancel_file_val)) {
     stop("Model generation cancelled by user.")
   }
-  
+  t_start <- proc.time()[["elapsed"]]
+
   l <- item$l
   pts_data <- item$pts_data
-  m_params <- item$m_params        
-  
+  m_params <- item$m_params
+
   # cv_reps_* carry the extra fold realizations of an opt-in repeated-CV run
   # (NULL otherwise); the main session turns them into the mean +/- SD report.
   # cv_design_* are the CV Distance Match records (cv_distance_summary).
@@ -848,7 +1030,8 @@ run_regional_interpolation <- function(item, current_method, current_crs, aux_va
       actual_res <- cap_res(shared_res, "Shared Auto (Global) resolution")
     } else {
       # Auto (Per Locality): this locality's own sampling density (Hengl 2006).
-      # grid_res is hidden outside Fixed and holds a dataset-wide suggestion.
+      # grid_res is hidden outside Fixed and holds a suggestion measured on the
+      # selected localities together.
       if (identical(res_mode, "global")) {
         write_warning_file(l, "act", "The shared Auto (Global) resolution could not be computed; this locality uses its own Auto resolution.")
       }
@@ -873,8 +1056,9 @@ run_regional_interpolation <- function(item, current_method, current_crs, aux_va
     }
 
     # Fixed and Auto (Global) grids snap to one lattice of multiples of the
-    # cell size, so terra::merge need not resample localities onto the first
-    # one's origin. Auto (Per Locality) grids start at their boundary's corner.
+    # cell size, so their localities can share one GeoTIFF without resampling
+    # (rasters_share_lattice()). Auto (Per Locality) grids start at their
+    # boundary's corner.
     grid_r <- grid_template(bbox, actual_res, sf::st_crs(pts)$wkt,
                             snap = shared_grid || identical(res_mode, "fixed"))
 
@@ -1031,6 +1215,11 @@ run_regional_interpolation <- function(item, current_method, current_crs, aux_va
     # The covariate surfaces' IDW fallback, in the map and every RK/RFK fold:
     # p = 2 whatever the target's IDW setting (Auto, -1, is not a power).
     mp_cov_fallback <- list(idw_p = 2, idw_nmax = m_params$idw_nmax)
+    # RK/RFK: the locations the covariate surfaces rest on, every
+    # covariate-complete location whether or not it carries a target. Each CV
+    # fold kriges its held-out covariates from the same set less the held-out
+    # locations (perform_kriging_loocv()).
+    cov_support <- if (current_method %in% c("RK", "RFK") && length(aux_vars) > 0) pts
     grid_aux <- grid_p
     cov_log_msg <- ""
     aux_kept_a <- NULL; aux_kept_p <- NULL
@@ -1048,7 +1237,7 @@ run_regional_interpolation <- function(item, current_method, current_crs, aux_va
                                 paste(dropped_cov, collapse = ", "), ".")
         }
         if (length(cov_vars) > 0) {
-          lags_cov <- calc_scientific_lags(pts)
+          lags_cov <- calc_scientific_lags(cov_support)
           # Cancel checkpoint per covariate: the longest stretch between checks,
           # and krige() cannot be interrupted.
           cov_cancel <- if (!is.null(cancel_file_val)) {
@@ -1056,7 +1245,7 @@ run_regional_interpolation <- function(item, current_method, current_crs, aux_va
               if (file.exists(cancel_file_val)) stop("Model generation cancelled by user.")
             }
           } else NULL
-          krig_cov <- krige_covariates(pts, grid_p, cov_vars, lags_cov, mp_cov_fallback, on_var = cov_cancel)
+          krig_cov <- krige_covariates(cov_support, grid_p, cov_vars, lags_cov, mp_cov_fallback, on_var = cov_cancel)
           grid_aux <- krig_cov$grid_aux
           cov_log_msg <- paste0(cov_log_msg, krig_cov$log_msg)
         }
@@ -1073,7 +1262,7 @@ run_regional_interpolation <- function(item, current_method, current_crs, aux_va
                                     .degenerate_target_msg)
         }
         lags_a <- calc_scientific_lags(pts_a)
-        mp_a <- list(idw_p = m_params$idw_p_act, idw_nmax = m_params$idw_nmax, cov_params = mp_cov_fallback, tps_lambda = m_params$tps_lambda_act, pre_fit = m_params$pre_fit_act, grid_aux = grid_aux, cv_strategy = m_params$cv_strategy, cv_repeats = m_params$cv_repeats, cv_domain_xy = cv_domain_xy, cancel_file = cancel_file_val, rfk_uncertainty = m_params$rfk_uncertainty, rf_ntree = m_params$rf_ntree, ck_nmax = m_params$ck_nmax, ck_extra = ck_a$x, aux_kept = aux_kept_a)
+        mp_a <- list(idw_p = m_params$idw_p_act, idw_nmax = m_params$idw_nmax, cov_params = mp_cov_fallback, tps_lambda = m_params$tps_lambda_act, pre_fit = m_params$pre_fit_act, grid_aux = grid_aux, cv_strategy = m_params$cv_strategy, cv_repeats = m_params$cv_repeats, cv_domain_xy = cv_domain_xy, cancel_file = cancel_file_val, rfk_uncertainty = m_params$rfk_uncertainty, rf_ntree = m_params$rf_ntree, ck_nmax = m_params$ck_nmax, ck_extra = ck_a$x, aux_kept = aux_kept_a, cov_data = cov_support)
         mp_a <- attach_cv_plan(mp_a, cv_population_of(pts_a, "v"), "act")
         if (!is.null(cancel_file_val) && file.exists(cancel_file_val)) stop("Model generation cancelled by user.")
         res_a_list <- apply_interpolation(pts_a, "v", current_method, grid_p, aux_vars, lags_a, mp_a, l, "act", vif_threshold)
@@ -1130,7 +1319,7 @@ run_regional_interpolation <- function(item, current_method, current_crs, aux_va
                                         .degenerate_target_msg)
             }
             lags_p <- calc_scientific_lags(pts_p)
-            mp_p <- list(idw_p = m_params$idw_p_pre, idw_nmax = m_params$idw_nmax, cov_params = mp_cov_fallback, tps_lambda = m_params$tps_lambda_pre, pre_fit = m_params$pre_fit_pre, grid_aux = grid_aux, cv_strategy = m_params$cv_strategy, cv_repeats = m_params$cv_repeats, cv_domain_xy = cv_domain_xy, cancel_file = cancel_file_val, rfk_uncertainty = m_params$rfk_uncertainty, rf_ntree = m_params$rf_ntree, ck_nmax = m_params$ck_nmax, ck_extra = ck_p$x, aux_kept = aux_kept_p)
+            mp_p <- list(idw_p = m_params$idw_p_pre, idw_nmax = m_params$idw_nmax, cov_params = mp_cov_fallback, tps_lambda = m_params$tps_lambda_pre, pre_fit = m_params$pre_fit_pre, grid_aux = grid_aux, cv_strategy = m_params$cv_strategy, cv_repeats = m_params$cv_repeats, cv_domain_xy = cv_domain_xy, cancel_file = cancel_file_val, rfk_uncertainty = m_params$rfk_uncertainty, rf_ntree = m_params$rf_ntree, ck_nmax = m_params$ck_nmax, ck_extra = ck_p$x, aux_kept = aux_kept_p, cov_data = cov_support)
             mp_p <- attach_cv_plan(mp_p, cv_population_of(pts_p, "pv"), "pre")
             if (!is.null(cancel_file_val) && file.exists(cancel_file_val)) stop("Model generation cancelled by user.")
             if (current_method == "OK" && isFALSE(m_params$sep_fit) && is.null(mp_p$pre_fit)) {
@@ -1211,18 +1400,14 @@ run_regional_interpolation <- function(item, current_method, current_crs, aux_va
         res_out$r_point_err <- terra::wrap(r_err)
     }
     
-    # CV residuals are joined by sample position (the dedup passes' 2-dp
-    # coordinate key), not by row: a CV population need not be the point set
-    # (OK Comparable). `pts` is deduplicated, so the key is unique.
-    coord_key <- function(s) {
-      cc <- sf::st_coordinates(s)
-      paste(round(cc[, 1], 2), round(cc[, 2], 2))
-    }
+    # CV residuals are joined by sample position (location_key(), the dedup
+    # passes' key), not by row: a CV population need not be the point set (OK
+    # Comparable). `pts` is deduplicated, so the key is unique.
     join_cv_residuals <- function(cv_obj) {
       out <- rep(NA_real_, nrow(pts))
       if (inherits(cv_obj, "Spatial")) cv_obj <- tryCatch(sf::st_as_sf(cv_obj), error = function(e) NULL)
       if (!inherits(cv_obj, "sf") || nrow(cv_obj) == 0) return(out)
-      idx <- match(coord_key(cv_obj), coord_key(pts))
+      idx <- match(location_key(cv_obj), location_key(pts))
       ok <- !is.na(idx)
       out[idx[ok]] <- get_cv_residuals(cv_obj, nrow(cv_obj))[ok]
       out
@@ -1232,17 +1417,25 @@ run_regional_interpolation <- function(item, current_method, current_crs, aux_va
 
     res_out$bound <- sf::st_transform(bound, crs_sel)
     res_out$pts <- sf::st_transform(pts, crs_sel) %>% dplyr::mutate(loc = l, resid = v - pv)
-    # The CV row id is internal: rv$sf is res_out$pts, whose columns the popup,
-    # colour-by and label pickers offer by name.
+    # The CV row id and the location index are internal: rv$sf is res_out$pts,
+    # whose columns the popup, colour-by and label pickers offer by name.
     res_out$pts[[CV_ROW_ID_COL]] <- NULL
+    res_out$pts[[LOC_ID_COL]] <- NULL
     res_out$actual_res <- actual_res
+
+    # Exact ground areas are independent of classification. Compute them in
+    # this worker so pooling and class-area redraws do not block Shiny.
+    surface_fields <- c("r_a", "r_p", "r_res", "r_point_err")
+    res_out[surface_fields] <- cache_surface_cell_areas(res_out[surface_fields])
     
     res_out
   }, error = function(e) {
     res_out$log_msg <- paste0(res_out$log_msg, "\nError in ", l, ": ", e$message)
     res_out
   })
-  
+
+  # This worker's time on the locality, for the run-duration history.
+  res_out$elapsed_sec <- proc.time()[["elapsed"]] - t_start
   return(res_out)
 }
 
@@ -1347,61 +1540,177 @@ raster_value_layer <- function(r, band = "var1.pred") {
 #' (Ckmeans.1d.dp, Wang & Song 2011). Each break lies midway between adjacent
 #' classes, so the partition holds under either interval closure (classInt
 #' puts it ON a class maximum, which [low, high) would move up a class).
+#' With weights `w` (the area each value's cell stands for,
+#' pooled_raster_values()) the weighted sum of squares is minimised, which is
+#' the partition of the mapped area rather than of the cell count; integer
+#' weights give what repeating each value that many times gives.
 #' Returns the inner breaks; fewer than k - 1 for fewer distinct values.
-natural_breaks <- function(x, k) {
-  x <- x[is.finite(x)]
+natural_breaks <- function(x, k, w = NULL) {
+  ok <- is.finite(x)
+  x <- x[ok]
+  if (!is.null(w)) w <- w[ok]
   if (length(x) < 2 || k < 2) return(numeric(0))
   # The package warns (and uses every distinct value as a class) when x holds
   # fewer distinct values than k; the shorter result says the same thing.
-  fit <- suppressWarnings(Ckmeans.1d.dp::Ckmeans.1d.dp(x, k = k))
-  kk <- length(fit$size)
-  if (kk < 2) return(numeric(0))
-  # Clusters are numbered in increasing order of value, so on sorted values
-  # each one ends where the cumulative size says.
-  xs <- sort(x)
-  ends <- cumsum(fit$size)[-kk]
+  fit <- suppressWarnings(Ckmeans.1d.dp::Ckmeans.1d.dp(x, k = k, y = if (is.null(w)) 1 else w))
+  if (length(fit$size) < 2) return(numeric(0))
+  # Classes are runs of consecutive values numbered in increasing order, so
+  # along the sorted values a break sits wherever the class changes.
+  o <- order(x, fit$cluster)
+  xs <- x[o]
+  ends <- which(diff(fit$cluster[o]) != 0)
   (xs[ends] + xs[ends + 1L]) / 2
 }
 
-# Class breaks for the Agronomical styling algorithms: "jenks" is
-# natural_breaks(); the classInt styles run under with_seed(12345) ("kmeans"
-# draws random starts). Returns the n_c - 1 inner breaks (fewer for fewer
-# distinct values), or NULL when vv is too short.
-calc_class_breaks <- function(vv, n_c, style) {
-  vv <- vv[is.finite(vv)]
-  if (length(vv) < n_c) return(NULL)
-  if (identical(style, "jenks")) return(natural_breaks(vv, n_c))
+# Lloyd iterations stop when no value changes class; this cap only guards
+# against a pathological run (each iteration costs O(k log n)).
+KMEANS_MAX_ITER <- 1000L
 
-  with_seed(12345, {
-    tryCatch({
-      # suppressMessages: a message() escaping a reactive aborts it mid-evaluation.
-      suppressMessages(suppressWarnings(
-        classInt::classIntervals(vv, n = n_c, style = style)$brks[2:n_c]))
-    }, error = function(e) {
-      seq(min(vv, na.rm = TRUE), max(vv, na.rm = TRUE), length.out = n_c + 1)[2:n_c]
-    })
-  })
+#' k-means++ starting centres (Arthur & Vassilvitskii 2007) for the sorted
+#' distinct values `u` of total weights `W`: the first drawn with probability
+#' proportional to its weight, each next one to its weight times its squared
+#' distance from the nearest centre already drawn, so integer weights draw as
+#' repeated values would. Draws from the caller's random state.
+.kmeans_pp_centres <- function(u, W, k) {
+  m <- length(u)
+  draw <- function(p) {
+    cs <- cumsum(p)
+    i <- findInterval(stats::runif(1) * cs[m], cs) + 1L
+    # A product rounding up to the total would point past the last value.
+    if (i > m || p[i] <= 0) i <- max(which(p > 0))
+    i
+  }
+  idx <- integer(k)
+  idx[1] <- draw(W)
+  d2 <- (u - u[idx[1]])^2
+  for (j in seq_len(k)[-1]) {
+    idx[j] <- draw(W * d2)
+    d2 <- pmin(d2, (u - u[idx[j]])^2)
+  }
+  sort(u[idx])
 }
 
-# Dissolve a classified surface into class-zone polygons for GIS export. The
+#' Lloyd's algorithm (Lloyd 1982) in one dimension, from `centres`, on the
+#' sorted distinct values `u` of total weights `W`. Each value joins its
+#' nearest centre (one midway between two joins the lower), and each centre
+#' moves to the weighted mean of its class, until no value changes class. In
+#' one dimension the classes are runs of consecutive values, so an iteration
+#' is k - 1 binary searches and k differences of cumulative sums. A class left
+#' empty takes, as its new centre, the value contributing most to the
+#' weighted sum of squares. Returns `split` (the index of the last value of
+#' each class but the last; a class still empty when the iteration cap is
+#' reached is left out), the final `centres`, `iterations` and `converged`.
+.lloyd_1d <- function(u, W, centres, iter_max = KMEANS_MAX_ITER) {
+  m <- length(u)
+  k <- length(centres)
+  # Sums of values centred on their mean, to keep the differences of large
+  # cumulative sums accurate.
+  shift <- sum(W * u) / sum(W)
+  P0 <- c(0, cumsum(W))
+  P1 <- c(0, cumsum(W * (u - shift)))
+  ctr <- sort(centres)
+  split <- NULL
+  converged <- FALSE
+  it <- 0L
+  while (it < iter_max) {
+    it <- it + 1L
+    s <- findInterval((ctr[-k] + ctr[-1]) / 2, u)
+    starts <- c(1L, s + 1L)
+    ends <- c(s, m)
+    empty <- ends < starts
+    if (any(empty)) {
+      own <- rep.int(seq_len(k), pmax(ends - starts + 1L, 0L))
+      far <- order(-W * (u - ctr[own])^2)[seq_len(sum(empty))]
+      ctr <- sort(c(ctr[!empty], u[far]))
+      split <- NULL
+      next
+    }
+    if (identical(s, split)) {
+      converged <- TRUE
+      break
+    }
+    split <- s
+    ctr <- (P1[ends + 1L] - P1[starts]) / (P0[ends + 1L] - P0[starts]) + shift
+  }
+  if (is.null(split)) split <- findInterval((ctr[-k] + ctr[-1]) / 2, u)
+  list(split = unique(split[split > 0 & split < m]), centres = ctr, iterations = it,
+       converged = converged)
+}
+
+#' K-Means class breaks: the weighted within-class sum of squares that
+#' natural_breaks() minimises exactly, approached by Lloyd's heuristic
+#' (.lloyd_1d()) from one set of k-means++ starting centres
+#' (.kmeans_pp_centres()) drawn from the caller's random state. `w` is the
+#' area each value stands for (pooled_raster_values()); without it every
+#' value counts once, which is the ordinary k-means. The result is a
+#' partition in which every value is nearest its own class's weighted mean,
+#' which can be a local optimum natural_breaks() beats. Equal values are one
+#' weighted value, so integer weights give exactly what repeating each value
+#' that many times gives, and the order of the values does not matter. Each
+#' break lies midway between adjacent classes. Returns the inner breaks; for k
+#' or fewer distinct values, the midpoints between them.
+kmeans_breaks <- function(x, k, w = NULL) {
+  ok <- is.finite(x)
+  x <- x[ok]
+  w <- if (is.null(w)) rep(1, length(x)) else w[ok]
+  if (length(x) < 2 || k < 2) return(numeric(0))
+  o <- order(x)
+  xs <- x[o]
+  ws <- w[o]
+  first <- c(TRUE, diff(xs) != 0)
+  u <- xs[first]
+  # Each distinct value's total weight; only repeated values need summing.
+  W <- ws[first]
+  if (!all(first)) {
+    extra <- rowsum(ws[!first], cumsum(first)[!first], reorder = FALSE)
+    at <- as.integer(rownames(extra))
+    W[at] <- W[at] + extra[, 1]
+  }
+  W <- W / mean(W)
+  m <- length(u)
+  if (m <= k) return(if (m > 1) (u[-m] + u[-1]) / 2 else numeric(0))
+  fit <- .lloyd_1d(u, W, .kmeans_pp_centres(u, W, k))
+  (u[fit$split] + u[fit$split + 1L]) / 2
+}
+
+# Class breaks for the Agronomical styling algorithms, from the values `vv`
+# and, where they stand for unequal areas, each value's ground area `w`
+# (pooled_raster_values(); values without a positive finite area are left
+# out). "jenks" is the exact natural_breaks(); "kmeans" is kmeans_breaks(),
+# seeded with 12345 in the two-sided sandbox, so it is reproducible and
+# leaves the caller's random state alone. Returns the n_c - 1 inner breaks
+# (fewer for fewer distinct values), or NULL when vv is too short.
+calc_class_breaks <- function(vv, n_c, style = c("jenks", "kmeans"), w = NULL) {
+  style <- match.arg(style)
+  ok <- is.finite(vv)
+  if (!is.null(w)) ok <- ok & is.finite(w) & w > 0
+  vv <- vv[ok]
+  if (!is.null(w)) w <- w[ok]
+  if (length(vv) < n_c) return(NULL)
+  if (identical(style, "jenks")) return(natural_breaks(vv, n_c, w))
+  with_seed(12345, kmeans_breaks(vv, n_c, w))
+}
+
+# Dissolve a classified surface (per-locality rasters, live or Packed) into
+# class-zone polygons for GIS export, each locality from its own raster. The
 # classification is the map's and the Area Coverage table's own call
-# (terra::classify, rcl_mat, right = FALSE) and the areas come from
-# terra::expanse(byValue = TRUE), so the export agrees with both. Boundaries
-# are cell edges (not smoothed). `params` is classification_params() (brks,
-# rcl_mat, labels, n_c). One row per class present; NULL when none.
-build_class_zone_sf <- function(r, params, labels = NULL,
+# (terra::classify, rcl_mat, right = FALSE) on the same raster and the areas
+# come from raster_class_areas(), so the export agrees with both.
+# Boundaries are cell edges (not smoothed). `params` is classification_params()
+# (brks, rcl_mat, labels, n_c). One row per locality and class present; NULL
+# when none.
+build_class_zone_sf <- function(r_list, params, labels = NULL,
                                 surface = NA_character_,
                                 variable = NA_character_,
                                 method = NA_character_) {
-  if (is.null(r) || is.null(params) || is.null(params$rcl_mat)) return(NULL)
-  if (inherits(r, "PackedSpatRaster")) r <- terra::unwrap(r)
-  if (!inherits(r, "SpatRaster")) return(NULL)
-
+  if (is.null(params) || is.null(params$rcl_mat)) return(NULL)
   labs <- if (!is.null(labels)) labels else params$labels
   if (length(labs) == 0) return(NULL)
+  rs <- tryCatch(live_rasters(r_list), error = function(e) list())
+  locs <- names(rs) %||% rep(NA_character_, length(rs))
 
-  zones <- tryCatch({
-    r_class <- terra::classify(r[[1]], params$rcl_mat, right = FALSE)
+  zones <- lapply(seq_along(rs), function(i) tryCatch({
+    r_class <- terra::classify(rs[[i]][[1]], params$rcl_mat, right = FALSE)
     names(r_class) <- "class_id"
 
     polys <- terra::as.polygons(r_class, dissolve = TRUE, na.rm = TRUE)
@@ -1414,7 +1723,7 @@ build_class_zone_sf <- function(r, params, labels = NULL,
     ids <- ids[keep]
     if (nrow(z) == 0) return(NULL)
 
-    area_df <- as.data.frame(terra::expanse(r_class, unit = "ha", byValue = TRUE))
+    area_df <- raster_class_areas(r_class, raster_cell_area_values(rs[[i]]))
     area_ha <- rep(NA_real_, length(ids))
     if (all(c("value", "area") %in% names(area_df))) {
       area_ha <- area_df$area[match(ids, as.numeric(as.character(area_df$value)))]
@@ -1430,14 +1739,17 @@ build_class_zone_sf <- function(r, params, labels = NULL,
       class_min = fin(brks[ids]),
       class_max = fin(brks[ids + 1L]),
       area_ha   = area_ha,
+      locality  = as.character(locs[i]),
       surface   = as.character(surface),
       variable  = as.character(variable),
       method    = as.character(method),
       geometry  = sf::st_geometry(z)
     )
-  }, error = function(e) NULL)
+  }, error = function(e) NULL))
 
-  zones
+  zones <- Filter(Negate(is.null), zones)
+  if (length(zones) == 0) return(NULL)
+  do.call(rbind, zones)
 }
 
 # ── Top-level furrr worker entry points ─────────────────────────────────────

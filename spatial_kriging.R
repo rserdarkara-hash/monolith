@@ -397,6 +397,25 @@ screen_covariates <- function(df, candidates, vif_threshold = 10) {
   )
 }
 
+#' Why a surface is left without a covariate after its screen (`vif_res`),
+#' worded by cause and ending without a full stop: a constant covariate is
+#' named as constant, which no answer changes, and only a collinearity drop is
+#' something "Keep All" keeps. `consequence` completes the sentence.
+.screen_emptied_msg <- function(vif_res, consequence) {
+  cst <- vif_res$dropped_constant
+  col <- vif_res$dropped_vif
+  cause <- c(
+    if (length(cst)) sprintf("%s %s constant in this locality's samples", paste(cst, collapse = ", "),
+                             if (length(cst) == 1) "is" else "are"),
+    if (length(col)) sprintf("%s %s removed as collinear", paste(col, collapse = ", "),
+                             if (length(col) == 1) "was" else "were"))
+  paste0("The covariate screen left no covariate for this surface",
+         if (length(cause)) paste0(" (", paste(cause, collapse = "; "), ")"),
+         ", so ", consequence, ". ",
+         if (length(col)) "Select other covariates, or answer \"Keep All\" in the collinearity dialog to keep the collinear ones"
+         else "Select covariates that vary within this locality")
+}
+
 #' Krige each covariate onto the prediction grid, so the RK trend is evaluated
 #' wherever the target is predicted. Each uses its own robust variogram and
 #' falls back to IDW when kriging fails (error, repeated location, or any
@@ -507,9 +526,19 @@ safe_run_cv <- function(res, expr, label) {
         ".")
     }
   }
+  # Locations without a target value in the folds' covariate support, as on
+  # the map (perform_kriging_loocv()).
+  support <- attr(cv_obj, "cov_support")
+  if (isTRUE(support[["extra"]] > 0)) {
+    res$log_msg <- paste0(
+      res$log_msg, "\n[", label, " CV] each fold kriged its held-out covariates from the map's ",
+      support[["n"]], " covariate locations less the held-out ones; ", support[["extra"]],
+      " of them carry no target value.")
+  }
   # A fold whose covariate kriging failed took the IDW fallback for its
   # held-out covariates (krige_covariates), as the map does for its grid; one
-  # whose covariate variogram was a pure nugget held them at the training mean.
+  # whose covariate variogram was a pure nugget held them at the mean of its
+  # covariate locations.
   fold_meta <- attr(cv_obj, "cv_fold_meta")
   fold_cov_note <- function(field, what) {
     hits <- unlist(lapply(fold_meta, `[[`, field), use.names = FALSE)
@@ -522,7 +551,7 @@ safe_run_cv <- function(res, expr, label) {
     res$log_msg,
     fold_cov_note("cov_fallback", "covariate kriging failed, so the held-out values came from IDW"),
     fold_cov_note("cov_flat", paste("covariate variogram was a pure nugget, so the held-out values",
-                                    "were the training mean")))
+                                    "were the mean of the fold's covariate locations")))
 
   # Per-fold variogram state, summarised as plain data so the Model Performance
   # card can say that some folds were not `ok` without re-reading the CV object.
@@ -885,7 +914,8 @@ apply_kriging_pipeline <- function(engine = c("OK", "RK", "RFK"), data, target_v
     # The full selected set: every CV fold re-screens THIS list on its own rows.
     candidates <- aux_vars
     krig_res <- tryCatch({
-      if (engine %in% c("RK", "RFK") && length(aux_vars) > 1) {
+      vif_res <- NULL
+      if (length(aux_vars) > 1) {
         # run_regional_interpolation() resolves this gate up front (so dropped
         # covariates are never kriged) and passes method_params$aux_kept.
         vif_res <- .resolve_aux_gate(data, aux_vars, method_params, vif_threshold)
@@ -901,10 +931,7 @@ apply_kriging_pipeline <- function(engine = c("OK", "RK", "RFK"), data, target_v
       # An empty set would fail later in as.formula() with an obscure message;
       # name the cause (the locality still takes the OK fallback).
       if (length(aux_vars) == 0) {
-        stop("The covariate screen removed every covariate for this surface ",
-             "(constant and/or collinear within this locality), so ", engine,
-             " has no trend model left. Select different covariates, or answer ",
-             "\"Keep All\" in the collinearity dialog.")
+        stop(.screen_emptied_msg(vif_res, paste(engine, "has no trend model left")))
       }
 
       if (!is.null(method_params$grid_aux)) {
@@ -914,6 +941,19 @@ apply_kriging_pipeline <- function(engine = c("OK", "RK", "RFK"), data, target_v
                                      method_params$cov_params %||% method_params)
         grid_aux <- krig_cov$grid_aux
         res$log_msg <- paste0(res$log_msg, krig_cov$log_msg)
+      }
+      # One realization of the trend engines' CV. Every fold re-screens
+      # `candidates` and kriges its held-out covariates from the map's
+      # covariate support less the held-out locations (method_params$cov_data).
+      trend_cv <- function(model_type, rf_ntree = 200) {
+        function(pop, folds, row_id, progress) {
+          perform_kriging_loocv(pop, target_var, aux_vars, model_type = model_type, rf_ntree = rf_ntree,
+                                cov_params = method_params$cov_params %||% method_params,
+                                folds = folds, row_id = row_id,
+                                cancel_file = method_params$cancel_file, progress = progress,
+                                candidates = candidates, vif_threshold = vif_threshold,
+                                cov_data = method_params$cov_data)
+        }
       }
 
       if (engine == "RK") {
@@ -945,17 +985,7 @@ apply_kriging_pipeline <- function(engine = c("OK", "RK", "RFK"), data, target_v
           var1.pred = as.vector(pred_trend$fit + res_krig$var1.pred), 
           var1.var = as.vector(trend_var + res_krig$var1.var)
         )
-        cv_rk <- function(pop, folds, row_id, progress) {
-          perform_kriging_loocv(pop, target_var, aux_vars, calc_scientific_lags, robust_vgm_fit,
-                                model_type = "lm", l, prefix,
-                                cv_strategy = method_params$cv_strategy,
-                                cov_params = method_params$cov_params %||% method_params,
-                                folds = folds, row_id = row_id,
-                                cancel_file = method_params$cancel_file, progress = progress,
-                                candidates = candidates, vif_threshold = vif_threshold,
-                                cv_domain_xy = method_params$cv_domain_xy)
-        }
-        res <- .run_kriging_cv(res, cv_rk, method_params, data, "RK", l, prefix)
+        res <- .run_kriging_cv(res, trend_cv("lm"), method_params, data, "RK", l, prefix)
         res <- .log_vgm_fold_status(res, "RK", l)
       } else if (engine == "RFK") {
         rf_ntree <- if (!is.null(method_params$rf_ntree)) method_params$rf_ntree else 200
@@ -1017,17 +1047,7 @@ apply_kriging_pipeline <- function(engine = c("OK", "RK", "RFK"), data, target_v
           var1.pred = as.vector(pred_mean + res_krig$var1.pred), 
           var1.var = as.vector(trend_var + res_krig$var1.var)
         )
-        cv_rfk <- function(pop, folds, row_id, progress) {
-          perform_kriging_loocv(pop, target_var, aux_vars, calc_scientific_lags, robust_vgm_fit,
-                                model_type = "rf", l, prefix, rf_ntree = rf_ntree,
-                                cv_strategy = method_params$cv_strategy,
-                                cov_params = method_params$cov_params %||% method_params,
-                                folds = folds, row_id = row_id,
-                                cancel_file = method_params$cancel_file, progress = progress,
-                                candidates = candidates, vif_threshold = vif_threshold,
-                                cv_domain_xy = method_params$cv_domain_xy)
-        }
-        res <- .run_kriging_cv(res, cv_rfk, method_params, data, "RFK", l, prefix)
+        res <- .run_kriging_cv(res, trend_cv("rf", rf_ntree), method_params, data, "RFK", l, prefix)
         res <- .log_vgm_fold_status(res, "RFK", l)
       }
       # The total needs the residual kriging variance; the trend variance alone
@@ -1337,6 +1357,7 @@ apply_CK <- function(data, target_var, grid_p, lags, method_params, aux_vars, l 
     # coregionalization near-singular. Runs on every location carrying all
     # candidates, covariate-only rows included (.ck_screen()).
     kept <- candidates
+    vif_res <- NULL
     if (length(candidates) > 1) {
       vif_res <- .ck_screen(data, extra, candidates, vif_threshold)
       if (isTRUE(vif_res$unscreened)) {
@@ -1356,12 +1377,9 @@ apply_CK <- function(data, target_var, grid_p, lags, method_params, aux_vars, l 
     if (length(kept) == 0) {
       stop(if (length(candidates) == 0) {
         paste0("No selected covariate is measured with the target at ", CK_MIN_COLLOCATED,
-               " or more locations, so Co-Kriging has no secondary variable.")
+               " or more locations, so Co-Kriging has no secondary variable")
       } else {
-        paste0("The covariate screen removed every covariate for this surface ",
-               "(constant and/or collinear within this locality), so Co-Kriging ",
-               "has no secondary variable left. Select different covariates, or ",
-               "answer \"Keep All\" in the collinearity dialog.")
+        .screen_emptied_msg(vif_res, "Co-Kriging has no secondary variable left")
       })
     }
 
@@ -1880,12 +1898,10 @@ apply_interpolation <- function(data, target_var, method, grid_p, aux_vars, lags
       stop("Unknown interpolation method: ", method)
     }
   }, error = function(e) {
-    list(
-      v_emp = NULL, fit = NULL, cv_metrics = NULL, model_summary = NULL, 
-      rf_model = NULL, gstat_obj = NULL, res_sf = NULL, 
-      log_msg = paste0("Error in apply_interpolation: ", e$message), cv_obj = NULL
-    )
+    res <- init_interpolation_res()
+    res$log_msg <- paste0("Error in apply_interpolation: ", e$message)
+    res
   })
-  
+
   return(res)
 }

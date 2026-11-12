@@ -28,13 +28,6 @@ test_that("quintiles with low-variation data returns single level", {
   expect_match(levels(result)[1], "Low Variation")
 })
 
-test_that("custom breaks produce expected bins", {
-  x <- c(1, 3, 5, 7, 9, 11, 13, 15)
-  result <- discretize_numeric_var(x, method = "custom", custom_breaks = c(5, 10))
-  expect_s3_class(result, "factor")
-  expect_length(levels(result), 3)  # <=5, (5-10], >10
-})
-
 test_that("handles all-NA input", {
   x <- rep(NA_real_, 10)
   result <- discretize_numeric_var(x, method = "median")

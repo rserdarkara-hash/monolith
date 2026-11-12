@@ -76,6 +76,19 @@ make_test_wrapped_raster <- function(seed = 7) {
   terra::wrap(r)
 }
 
+# A map item's payload: the surface's per-locality rasters, here one locality.
+make_test_surface <- function(seed = 7) list(LocA = make_test_wrapped_raster(seed))
+
+# Two localities gridded at different cell sizes, as Auto (Per Locality) leaves
+# them: 100 m cells with values near 50, 25 m cells with values near 90.
+make_test_two_grid_surface <- function() {
+  set.seed(21)
+  fine <- terra::rast(nrows = 16, ncols = 16, xmin = 452000, xmax = 452400,
+                      ymin = 5802000, ymax = 5802400, crs = "EPSG:32633")
+  terra::values(fine) <- rnorm(256, mean = 90, sd = 4)
+  list(LocA = make_test_wrapped_raster(), LocB = terra::wrap(fine))
+}
+
 make_test_agro_params <- function() {
   brks <- c(-Inf, 40, 60, Inf)
   list(
@@ -106,14 +119,14 @@ test_that("an exported map's legend names the variable, its unit and its layer",
 
   for (style in c("cont", "agro")) {
     inp <- mock_input_full; inp$color_style <- style
-    item <- list(type = "map", obj = make_test_wrapped_raster(), kind = "value",
+    item <- list(type = "map", obj = make_test_surface(), kind = "value",
                  label = "Total N - Actual Map - Ordinary Kriging", legend = "Total N %")
     p <- generate_base_plot(item, inp, agro_params = make_test_agro_params())
     expect_equal(fill_scale_of(p)$name, "Total N %")
   }
   # The figure's title is the registry label, which names the method. The
   # mock's empty styler_title (see the fixture) is the empty title box.
-  styled <- generate_styled_plot(list(type = "map", obj = make_test_wrapped_raster(), kind = "value",
+  styled <- generate_styled_plot(list(type = "map", obj = make_test_surface(), kind = "value",
                                       label = "Total N - Actual Map - Ordinary Kriging",
                                       legend = "Total N %"), mock_input_full)
   expect_equal(styled$labels$title, "Total N - Actual Map - Ordinary Kriging")
@@ -130,7 +143,7 @@ test_that("an exported file's name carries the item, the method and the time", {
 test_that("an exported value map is drawn in the palette it is handed", {
   # The server hands the displayed variable's palette (export_palette), the one
   # the Map Viewer draws; the picker input is not read here.
-  item <- list(type = "map", obj = make_test_wrapped_raster(), kind = "value", label = "pH - Actual Map")
+  item <- list(type = "map", obj = make_test_surface(), kind = "value", label = "pH - Actual Map")
   ends <- function(p) fill_scale_of(p)$palette(c(0, 1))
   for (pal in c("Blues", "Greens")) {
     expect_identical(ends(generate_base_plot(item, mock_input_full, palette = pal)),
@@ -150,10 +163,35 @@ test_that("an exported value map is drawn in the palette it is handed", {
 test_that("value maps ARE classified under agro styling", {
   input_agro <- mock_input_full
   input_agro$color_style <- "agro"
-  item <- list(type = "map", obj = make_test_wrapped_raster(),
+  item <- list(type = "map", obj = make_test_surface(),
                label = "pH - Actual Map", kind = "value")
   p <- generate_base_plot(item, input_agro, agro_params = make_test_agro_params())
   expect_s3_class(fill_scale_of(p), "ScaleDiscrete")
+})
+
+test_that("large exported figures retain the computed cells in both colour styles", {
+  r <- terra::rast(nrows = 800, ncols = 800, xmin = 500000, xmax = 500800,
+                   ymin = 4400000, ymax = 4400800, crs = "EPSG:32635",
+                   vals = rep(c(30, 50, 70, NA), 160000))
+  names(r) <- "var1.pred"
+  item <- list(type = "map", obj = list(L = terra::wrap(r)), kind = "value", label = "Large")
+  for (style in c("continuous", "agro")) {
+    inp <- mock_input_full; inp$color_style <- style
+    p <- generate_base_plot(item, inp, agro_params = make_test_agro_params())
+    held <- p$layers[[1]]$data$spatraster[[1]]
+    expect_equal(terra::ncell(held), terra::ncell(r), info = style)
+    expect_equal(terra::res(held), terra::res(r), info = style)
+    expected <- if (style == "agro") terra::classify(r, make_test_agro_params()$rcl_mat, right = FALSE) else r
+    expect_equal(as.vector(terra::values(held)), as.vector(terra::values(expected)), info = style)
+
+    # The Export Styler's screen preview passes its canvas's pixel count: a
+    # layer draws no more cells than the canvas can show, quietly.
+    expect_no_message(prev <- generate_base_plot(item, inp, agro_params = make_test_agro_params(),
+                                                 max_cells = 1e4))
+    shown <- prev$layers[[1]]$data$spatraster[[1]]
+    expect_lt(terra::ncell(shown), 1.05e4, label = style)
+    expect_gt(terra::ncell(shown), 0.95e4, label = style)
+  }
 })
 
 test_that("a classified export's legend is the class scheme: every class swatched, no NA key", {
@@ -183,8 +221,9 @@ test_that("a classified export's legend is the class scheme: every class swatche
     for (box in gt$grobs[grepl("^guide-box", gt$layout$name)]) walk(box)
     toupper(substr(fills[!is.na(fills)], 1, 7))
   }
-  single <- list(type = "map", obj = terra::wrap(r), kind = "value", label = "P - Actual Map")
-  paired <- list(type = "map_combined", obj = list(act = terra::wrap(r), pre = terra::wrap(r)),
+  single <- list(type = "map", obj = list(LocA = terra::wrap(r)), kind = "value", label = "P - Actual Map")
+  paired <- list(type = "map_combined",
+                 obj = list(act = list(LocA = terra::wrap(r)), pre = list(LocA = terra::wrap(r))),
                  kind = "value", label = "P - Actual vs Predicted")
   for (style in c("agro", "bin")) {
     inp <- mock_input_full; inp$color_style <- style
@@ -204,7 +243,7 @@ test_that("a classified export's legend is the class scheme: every class swatche
 test_that("point error maps are NOT classified under agro styling", {
   input_agro <- mock_input_full
   input_agro$color_style <- "agro"
-  item <- list(type = "map", obj = make_test_wrapped_raster(),
+  item <- list(type = "map", obj = make_test_surface(),
                label = "pH - ML Predictions Point Error Map", kind = "residual")
   p <- generate_base_plot(item, input_agro, agro_params = make_test_agro_params())
   expect_s3_class(fill_scale_of(p), "ScaleContinuous")
@@ -213,7 +252,7 @@ test_that("point error maps are NOT classified under agro styling", {
 test_that("residual maps keep a symmetric diverging domain under agro styling", {
   input_agro <- mock_input_full
   input_agro$color_style <- "agro"
-  item <- list(type = "map", obj = make_test_wrapped_raster(),
+  item <- list(type = "map", obj = make_test_surface(),
                label = "pH - ML Predictions Residual Map (Delta)", kind = "residual")
   p <- generate_base_plot(item, input_agro, agro_params = make_test_agro_params())
   sc <- fill_scale_of(p)
@@ -226,7 +265,7 @@ test_that("uncertainty maps are NOT classified under agro or bin styling", {
   for (style in c("agro", "bin")) {
     input_s <- mock_input_full
     input_s$color_style <- style
-    item <- list(type = "map", obj = make_test_wrapped_raster(),
+    item <- list(type = "map", obj = make_test_surface(),
                  label = "pH - Uncertainty Map (SE - Actual)", kind = "uncertainty")
     p <- generate_base_plot(item, input_s, agro_params = if (style == "agro") make_test_agro_params() else NULL)
     sc <- fill_scale_of(p)
@@ -240,7 +279,7 @@ test_that("legacy archived items without kind fall back to label matching", {
   input_agro <- mock_input_full
   input_agro$color_style <- "agro"
   # Simulates a registry item archived before the kind field existed
-  item <- list(type = "map", obj = make_test_wrapped_raster(),
+  item <- list(type = "map", obj = make_test_surface(),
                label = "pH - ML Predictions Point Error Map")
   p <- generate_base_plot(item, input_agro, agro_params = make_test_agro_params())
   expect_s3_class(fill_scale_of(p), "ScaleContinuous")
@@ -448,30 +487,121 @@ test_that("map_combined assembles two named panes on its own legend defaults", {
                c(10, 10, 10, 15) * 0.3)
 })
 
-# ── GeoTIFF / GIS export routing ────────────────────────────────────────────
-# The styler offers GeoTIFF only for registry items that really hold one
-# raster: writing a paired comparison or a point layer under a .tif name would
-# hand the user a corrupt file.
+# ── A surface drawn from its localities' own rasters ───────────────────────
+# Each locality is a layer on its own grid under one colour scale; no merged
+# raster stands between the run and the figure.
 
-test_that("export_raster_payload unwraps a single-raster map item", {
-  item <- list(type = "map", obj = make_test_wrapped_raster(), label = "pH - Actual Map")
-  r <- export_raster_payload(item)
-  expect_s4_class(r, "SpatRaster")
-  expect_equal(terra::ncell(r), 100)
+# The raster layers of a built map figure, in drawing order (tidyterra pairs
+# each with an invisible extent layer).
+raster_layers <- function(p) {
+  Filter(function(d) "spatraster" %in% names(d), ggplot2::ggplot_build(p)$data)
+}
+
+test_that("an exported map draws every locality on its own grid under one scale", {
+  item <- list(type = "map", obj = make_test_two_grid_surface(), kind = "value",
+               label = "pH - Actual Map", legend = "pH")
+  rs <- live_rasters(item$obj)
+  p <- generate_base_plot(item, mock_input_full)
+  drawn <- raster_layers(p)
+  expect_length(drawn, 2)
+  # Every cell of each locality is drawn, at its own cell size and value.
+  for (i in 1:2) {
+    d <- drawn[[i]]
+    expect_equal(nrow(d), terra::ncell(rs[[i]]))
+    expect_equal(sort(d$value), sort(terra::values(rs[[i]])[, 1]))
+    expect_equal(unique(round(d$xmax - d$xmin, 6)), terra::res(rs[[i]])[1])
+  }
+  # One scale spans both localities.
+  all_v <- unlist(lapply(rs, function(r) terra::values(r)[, 1]))
+  expect_equal(ggplot2::ggplot_build(p)$plot$scales$get_scales("fill")$get_limits(), range(all_v))
+  expect_length(Filter(function(s) "fill" %in% s$aesthetics, p$scales$scales), 1)
+
+  # Classified: both localities carry the one class scheme, and each cell the
+  # class its own value falls in.
+  inp <- mock_input_full; inp$color_style <- "agro"
+  ap <- make_test_agro_params()
+  pc <- generate_base_plot(item, inp, agro_params = ap)
+  drawn_c <- raster_layers(pc)
+  expect_identical(ggplot2::get_guide_data(pc, "fill")$.label, ap$leg_labels)
+  for (i in 1:2) {
+    cls <- cut(terra::values(rs[[i]])[, 1], ap$brks, right = FALSE, labels = FALSE)
+    expect_equal(as.integer(table(factor(toupper(substr(drawn_c[[i]]$fill, 1, 7)), levels = toupper(ap$colors)))),
+                 as.integer(table(factor(cls, levels = 1:3))))
+  }
+
+  # A residual figure's symmetric domain covers every locality.
+  resid <- generate_base_plot(utils::modifyList(item, list(kind = "residual")), mock_input_full)
+  expect_equal(fill_scale_of(resid)$limits, c(-1, 1) * max(abs(all_v)))
+
+  # The paired figure takes a surface per panel.
+  pair <- generate_base_plot(list(type = "map_combined", kind = "value", label = "pH - Actual vs Predicted",
+                                  obj = list(act = item$obj, pre = item$obj["LocB"])), mock_input_full)
+  expect_length(raster_layers(pair$p1), 2)
+  expect_length(raster_layers(pair$p2), 1)
+
+  # A locality whose name `$` would complete to "pts" is still a raster layer.
+  odd <- list(type = "map", kind = "value", label = "x", obj = stats::setNames(item$obj, c("pts_field", "b")))
+  expect_length(raster_layers(generate_base_plot(odd, mock_input_full)), 2)
 })
 
-test_that("export_raster_payload rejects the two non-raster map payloads", {
+# ── GeoTIFF / GIS export routing ────────────────────────────────────────────
+# The styler offers GeoTIFF only for registry items that really hold rasters:
+# writing a paired comparison or a point layer under a .tif name would hand the
+# user a corrupt file.
+
+test_that("export_rasters gives a single-locality item its raster as computed", {
+  item <- list(type = "map", obj = make_test_surface(), label = "pH - Actual Map")
+  expect_identical(export_raster_count(item), 1L)
+  rs <- export_rasters(item)
+  expect_named(rs, "LocA")
+  expect_identical(terra::values(rs$LocA), terra::values(terra::unwrap(item$obj$LocA)))
+  # One locality needs no merge, whatever the run's lattice.
+  expect_identical(terra::values(export_rasters(item, merge = TRUE)[[1]]), terra::values(rs$LocA))
+})
+
+test_that("localities on different grids are exported one raster each, untouched", {
+  item <- list(type = "map", obj = make_test_two_grid_surface(), label = "pH - Actual Map")
+  expect_false(rasters_share_lattice(item$obj))
+  expect_identical(export_raster_count(item), 2L)
+  rs <- export_rasters(item, merge = FALSE)
+  expect_named(rs, c("LocA", "LocB"))
+  for (l in names(rs)) {
+    src <- terra::unwrap(item$obj[[l]])
+    expect_identical(terra::values(rs[[l]]), terra::values(src))
+    expect_identical(as.vector(terra::ext(rs[[l]])), as.vector(terra::ext(src)))
+    expect_identical(terra::res(rs[[l]]), terra::res(src))
+  }
+  # Asking for one raster where the lattices differ is refused, never resampled.
+  expect_error(export_rasters(item, merge = TRUE), "do not share one lattice")
+})
+
+test_that("localities on one lattice are exported as one raster holding every cell", {
+  a <- terra::unwrap(make_test_wrapped_raster())
+  b <- terra::rast(nrows = 4, ncols = 6, xmin = 453000, xmax = 453600,
+                   ymin = 5803000, ymax = 5803400, crs = "EPSG:32633")
+  terra::values(b) <- seq(1, 24)
+  item <- list(type = "map", obj = list(A = terra::wrap(a), B = terra::wrap(b)), label = "pH - Actual Map")
+  expect_true(rasters_share_lattice(item$obj))
+  rs <- export_rasters(item, merge = TRUE)
+  expect_named(rs, "A, B")
+  m <- rs[[1]]
+  expect_identical(terra::res(m), terra::res(a))
+  expect_equal(terra::extract(m, terra::crds(a))[[1]], terra::values(a)[, 1], tolerance = 0)
+  expect_equal(terra::extract(m, terra::crds(b))[[1]], terra::values(b)[, 1], tolerance = 0)
+  expect_equal(terra::global(m, "notNA")[[1]], terra::ncell(a) + terra::ncell(b))
+})
+
+test_that("an item without a raster form holds no raster", {
   comparison <- list(type = "map_combined",
-                     obj = list(act = make_test_wrapped_raster(),
-                                pre = make_test_wrapped_raster(seed = 8)),
+                     obj = list(act = make_test_surface(), pre = make_test_surface(seed = 8)),
                      label = "pH - Actual vs Predicted Comparison")
   point_err <- list(type = "map",
                     obj = list(pts = make_test_resid_points(), bound = NULL),
                     label = "pH - ML Predictions Point Error Map")
-  expect_null(export_raster_payload(comparison))
-  expect_null(export_raster_payload(point_err))
-  expect_null(export_raster_payload(list(type = "table", obj = mtcars, label = "t")))
-  expect_null(export_raster_payload(NULL))
+  for (item in list(comparison, point_err, list(type = "table", obj = mtcars, label = "t"), NULL)) {
+    expect_identical(export_raster_count(item), 0L)
+    expect_null(export_rasters(item))
+  }
 })
 
 # ── Derived (uncertainty) registry items ────────────────────────────────────
@@ -493,7 +623,7 @@ make_test_kriging_raster <- function() {
 }
 
 test_that("export_item_obj returns a stored payload unchanged", {
-  item <- list(type = "map", obj = make_test_wrapped_raster(), label = "pH - Actual Map")
+  item <- list(type = "map", obj = make_test_surface(), label = "pH - Actual Map")
   expect_identical(export_item_obj(item), item$obj)
   expect_null(export_item_obj(NULL))
 })
@@ -502,19 +632,20 @@ test_that("export_item_obj rebuilds the variance and SE bands from the surface",
   src <- make_test_kriging_raster()
   var_item <- list(type = "map", obj = NULL, kind = "uncertainty",
                    label = "pH - Uncertainty Map (Variance - Actual)",
-                   derived = list(src = src, layer = "var1.var", name = "var1.var"))
+                   derived = list(src = list(LocA = terra::wrap(src)), layer = "var1.var", name = "var1.var"))
   se_item <- list(type = "map", obj = NULL, kind = "uncertainty",
                   label = "pH - Uncertainty Map (SE - Actual)",
-                  derived = list(src = src, layer = "var1.var", fun = "sqrt",
+                  derived = list(src = list(LocA = src), layer = "var1.var", fun = "sqrt",
                                  name = "var1.se"))
 
   v <- export_item_obj(var_item)
-  expect_s4_class(v, "SpatRaster")
-  expect_equal(terra::nlyr(v), 1L)
-  expect_equal(names(v), "var1.var")
-  expect_equal(terra::values(v)[, 1], terra::values(src[["var1.var"]])[, 1])
+  expect_named(v, "LocA")
+  expect_s4_class(v$LocA, "SpatRaster")
+  expect_equal(terra::nlyr(v$LocA), 1L)
+  expect_equal(names(v$LocA), "var1.var")
+  expect_equal(terra::values(v$LocA)[, 1], terra::values(src[["var1.var"]])[, 1])
 
-  se <- export_item_obj(se_item)
+  se <- export_item_obj(se_item)$LocA
   # The layer name travels into the GeoTIFF as the band description, so the
   # square root must not describe itself as a variance.
   expect_equal(names(se), "var1.se")
@@ -528,21 +659,46 @@ test_that("a derived item routes through the raster and plot export paths", {
   src <- make_test_kriging_raster()
   item <- list(type = "map", obj = NULL, kind = "uncertainty",
                label = "pH - Uncertainty Map (SE - Actual)",
-               derived = list(src = src, layer = "var1.var", fun = "sqrt",
+               derived = list(src = list(LocA = src), layer = "var1.var", fun = "sqrt",
                               name = "var1.se"))
   # GeoTIFF export is offered for it, and the styler preview builds.
-  r <- export_raster_payload(item)
+  expect_identical(export_raster_count(item), 1L)
+  r <- export_rasters(item)$LocA
   expect_s4_class(r, "SpatRaster")
   expect_equal(names(r), "var1.se")
   expect_s3_class(generate_base_plot(item, mock_input_full), "ggplot")
 })
 
-test_that("a derived item whose source lacks the band yields no payload", {
-  src <- make_test_kriging_raster()[["var1.pred"]]
+test_that("an uncertainty item holds only the localities that reported a variance", {
+  # As the run registers it: rasters_with_variance() keeps a kriged locality
+  # and leaves out one whose variance was withheld (an all-NA band).
+  fitted <- make_test_kriging_raster()
+  no_var <- fitted[["var1.var"]]
+  terra::values(no_var) <- NA_real_
+  withheld <- c(fitted[["var1.pred"]], no_var)
+  surface <- list(Fit = terra::wrap(fitted), StandIn = terra::wrap(withheld))
+  with_var <- rasters_with_variance(surface)
+  expect_named(with_var, "Fit")
+  expect_s4_class(with_var$Fit, "PackedSpatRaster")       # as given, not unwrapped
+  expect_length(rasters_with_variance(surface["StandIn"]), 0)
+  expect_length(rasters_with_variance(list(A = fitted[["var1.pred"]])), 0)
+
   item <- list(type = "map", obj = NULL, kind = "uncertainty", label = "x",
-               derived = list(src = src, layer = "var1.var", name = "var1.var"))
-  expect_null(export_item_obj(item))
-  expect_null(export_raster_payload(item))
+               derived = list(src = with_var, layer = "var1.var", fun = "sqrt", name = "var1.se"))
+  expect_identical(export_raster_count(item), 1L)
+  expect_named(export_rasters(item), "Fit")
+
+  # The surface's own GeoTIFFs: the stand-in locality's file carries the
+  # prediction only, never an empty variance band.
+  per_loc <- export_rasters(list(type = "map", obj = surface, label = "x"))
+  expect_identical(names(per_loc$Fit), c("var1.pred", "var1.var"))
+  expect_identical(names(per_loc$StandIn), "var1.pred")
+
+  # A source without the band yields no payload.
+  none <- list(type = "map", obj = NULL, kind = "uncertainty", label = "x",
+               derived = list(src = list(A = fitted[["var1.pred"]]), layer = "var1.var", name = "var1.var"))
+  expect_null(export_item_obj(none))
+  expect_length(export_rasters(none), 0)
 })
 
 test_that("export_sheet_name drops exactly the variable-label prefix", {

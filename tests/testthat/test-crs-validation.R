@@ -1275,9 +1275,10 @@ test_that("the suitability verdict separates the finding from its consequence", 
   # msg carries the facts and only the facts, so a caller can lead with it.
   expect_match(bad$msg, "1.010729", fixed = TRUE)
   expect_false(grepl("Grid resolution", bad$msg, fixed = TRUE))
-  # detail is the standing explanation, one copy, shared with the run gate.
+  # detail is the standing explanation, one copy, shared with the run gate:
+  # one paragraph per element.
   expect_identical(bad$detail, crs_measure_detail)
-  expect_match(crs_measure_detail, "never moves your points", fixed = TRUE)
+  expect_match(crs_measure_detail, "never moves your points", fixed = TRUE, all = FALSE)
   # An "ok" verdict carries neither.
   expect_null(crs_target_suitability("EPSG:32633", 12.958, 52.466)$detail)
 })
@@ -1300,7 +1301,7 @@ test_that("the Target CRS advisory is one readout with a one-click remedy", {
   expect_match(ds, "is geographic: maps and exports come out", fixed = TRUE)
   # The run gate prescribes as well as diagnoses.
   expect_match(exec, "rec <- crs_recommend_target(pos$lon, pos$lat)", fixed = TRUE)
-  expect_match(exec, "tags$p(suit$detail)", fixed = TRUE)
+  expect_match(exec, "lapply(suit$detail, tags$p)", fixed = TRUE)
 })
 
 test_that("Web Mercator is offered as an input CRS and never as a target", {
@@ -1400,9 +1401,11 @@ test_that("the suitability gate is advisory at selection time and enforced at ru
   expect_match(exec, "rv$run_config_summary$crs_scale_factor <- ", fixed = TRUE)
 
   # The collinearity screen is one function, called after the CRS gate from
-  # exactly two places: the Run handler and the CRS override.
-  expect_equal(length(gregexpr("    run_collinearity_gate()\n", exec, fixed = TRUE)[[1]]), 2L)
-  expect_equal(length(gregexpr("check_vif(df_aux, threshold = 10)", exec, fixed = TRUE)[[1]]), 1L)
+  # exactly two places: the Run handler and the CRS override, and it screens
+  # the localities in one place.
+  n_fixed <- function(pattern) lengths(regmatches(exec, gregexpr(pattern, exec, fixed = TRUE)))
+  expect_equal(n_fixed("    run_collinearity_gate()\n"), 2L)
+  expect_equal(n_fixed("locality_screen_preview(\n"), 1L)
 
   # Restoring an archived run must not be re-gated: it replays stored results
   # and never re-enters the pipeline.

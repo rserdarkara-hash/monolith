@@ -128,7 +128,7 @@
       cfg <- rv$run_config_summary
       req(cfg)
       pkgs <- c("sf", "gstat", "fields", "randomForest", "terra", "spdep", "FNN",
-                "classInt", "Ckmeans.1d.dp", "concaveman", "units")
+                "Ckmeans.1d.dp", "concaveman", "units")
       pkg_versions <- setNames(
         lapply(pkgs, function(p) tryCatch(as.character(utils::packageVersion(p)),
                                           error = function(e) NA_character_)),
@@ -207,9 +207,8 @@
 
         # The run on screen goes into the archive through the same snapshot
         # the archive takes, or a second restore would bring back half a run.
-        current <- snapshot_display_state()
-        if (!is.null(current$config) && length(current$registry) > 0) {
-          push_run_history(current, base = history_list[-idx])
+        if (displayed_run_has_results()) {
+          push_run_history(snapshot_display_state(), base = history_list[-idx])
         } else {
           rv$run_history <- history_list[-idx]
         }
@@ -228,19 +227,39 @@
                          type = "message")
       }, ignoreInit = TRUE)
 
+      # Removing an archived run cannot be undone, so it is confirmed first
+      # (input$confirm_delete_run, below).
       obs_delete <- observeEvent(input[[paste0("delete_run_", run_id)]], {
-        history_list <- isolate(rv$run_history)
-        idx <- which(sapply(history_list, function(x) x$config$run_id) == run_id)[1]
-        if (!is.na(idx)) {
-          rv$run_history <- history_list[-idx]
-          showNotification("Archived run removed.", type = "warning")
-        }
+        cfg <- run$config
+        env_hist$pending_delete <- run_id
+        showModal(modalDialog(
+          title = "Remove Archived Run",
+          tags$p(sprintf("Run #%s (%s, %s) will be removed from the archive, with its maps, tables and export items.",
+                         cfg$run_id, cfg$variable, cfg$method)),
+          tags$p("This cannot be undone."),
+          footer = tagList(
+            actionButton("confirm_delete_run", "Remove Run", class = "btn-danger", icon = icon("trash")),
+            modalButton("Cancel")
+          ),
+          size = "m", easyClose = TRUE
+        ))
       }, ignoreInit = TRUE)
-      
+
       env_hist$history_obs[[paste0("restore_", run_id)]] <- obs_restore
       env_hist$history_obs[[paste0("delete_", run_id)]] <- obs_delete
     })
   }, ignoreNULL = FALSE)
+
+  observeEvent(input$confirm_delete_run, {
+    removeModal()
+    history_list <- rv$run_history
+    idx <- which(vapply(history_list, function(x) identical(x$config$run_id, env_hist$pending_delete),
+                        logical(1)))[1]
+    env_hist$pending_delete <- NULL
+    if (is.na(idx)) return()
+    rv$run_history <- history_list[-idx]
+    showNotification("Archived run removed.", type = "message")
+  })
 
   active_styler_item <- reactiveVal(NULL)
   
@@ -290,12 +309,16 @@
     req(active_styler_item(), rv$export_registry)
     item <- rv$export_registry[[active_styler_item()]]
     req(item)
+    g <- preview_geom_d()
 
+    # A layer draws no more cells than the preview canvas has pixels, so a
+    # large surface redraws quickly; the exported file draws every cell.
     generate_base_plot(
       item = item,
       input = input,
       agro_params = export_class_params(item),
-      palette = export_palette()
+      palette = export_palette(),
+      max_cells = ceiling(g$w_in * g$h_in * g$res^2)
     )
   })
   
@@ -308,7 +331,7 @@
     req(base_p)
     
     apply_styler_theme(
-      p = base_p,
+      p_obj = base_p,
       input = input,
       item_label = item$label,
       item_type = item$type
@@ -365,7 +388,29 @@
     updateCheckboxGroupInput(session, "selected_assets", selected = character(0))
   })
   
+  # Clearing empties the export list of the run on screen; nothing rebuilds it
+  # but another run, so it is confirmed first.
   observeEvent(input$clear_registry, {
+    n_items <- length(rv$export_registry)
+    if (n_items == 0) {
+      showNotification("The export registry is already empty.", type = "message")
+      return()
+    }
+    showModal(modalDialog(
+      title = "Clear Session Registry",
+      tags$p(sprintf("All %d export item%s of the displayed run will be removed from this list.",
+                     n_items, if (n_items == 1) "" else "s")),
+      tags$p("The maps, tables and plots stay on screen, and archived runs keep their own items. Apart from a Quick export of the map on screen, this run's items are rebuilt only by a new run."),
+      footer = tagList(
+        actionButton("confirm_clear_registry", "Clear Registry", class = "btn-danger", icon = icon("trash")),
+        modalButton("Cancel")
+      ),
+      size = "m", easyClose = TRUE
+    ))
+  })
+
+  observeEvent(input$confirm_clear_registry, {
+    removeModal()
     rv$export_registry <- list()
     showNotification("Export registry cleared.", type = "message")
   })
@@ -378,29 +423,24 @@
     # The run's own variance surfaces decide, so a stale menu value cannot
     # export an uncertainty layer from a concentration map.
     layer <- if (length(meta$variance_surfaces)) map_view_layer() else "value"
-    # An SE or variance view exports that layer as its own single-band raster,
-    # the same product the run registered as "Uncertainty Map".
-    uncert_layer <- function(r) {
-      if (is.null(r) || layer == "value") return(r)
-      ru <- terra::unwrap(r)
-      if (!"var1.var" %in% names(ru)) return(NULL)
-      v <- ru[["var1.var"]]
-      if (layer == "se") {
-        # The layer name becomes the GeoTIFF band description.
-        v <- sqrt(v)
-        names(v) <- "var1.se"
-      }
-      terra::wrap(v)
+    # An SE or variance view exports that layer as single-band rasters, the
+    # same product the run registered as "Uncertainty Map": the localities
+    # that hold a variance, the SE named var1.se (the GeoTIFF band description).
+    shown <- function(surface) {
+      if (layer == "value") return(surface)
+      surface_band(rasters_with_variance(surface), "var1.var",
+                   fun = if (layer == "se") "sqrt",
+                   name = if (layer == "se") "var1.se" else "var1.var")
     }
     target <- switch(view,
-      "view_pred"  = uncert_layer(rv$rast_pred),
-      "view_resid" = rv$rast_res,
+      "view_pred"  = shown(rv$rast_list_pre),
+      "view_resid" = rv$rast_list_res,
       "view_comp"  = {
-        a <- uncert_layer(rv$rast); p <- uncert_layer(rv$rast_pred)
-        if (!is.null(a) && !is.null(p)) list(act = a, pre = p) else NULL
+        a <- shown(rv$rast_list_act); p <- shown(rv$rast_list_pre)
+        if (length(a) && length(p)) list(act = a, pre = p)
       },
-      uncert_layer(rv$rast))
-    req(target)
+      shown(rv$rast_list_act))
+    req(length(target) > 0)
 
     type <- if (view == "view_comp") "map_combined" else "map"
     kind <- if (view == "view_resid") "residual" else if (layer != "value") "uncertainty" else "value"
@@ -445,16 +485,15 @@
       }
     ")
     
-    # GeoTIFF is offered only for items whose payload IS one raster surface;
+    # GeoTIFF is offered only for items whose payload IS a raster surface;
     # every styling control switches off while it is selected.
     styler_item <- tryCatch(rv$export_registry[[active_styler_item()]], error = function(e) NULL)
     fmt_choices <- c("PNG" = "png", "TIFF (image)" = "tiff", "PDF" = "pdf", "JPEG" = "jpg")
-    # Resolved once: a derived uncertainty item is rebuilt on each call.
-    styler_raster <- export_raster_payload(styler_item)
-    if (!is.null(styler_raster)) {
+    has_raster <- export_raster_count(styler_item) > 0L
+    if (has_raster) {
       fmt_choices <- c(fmt_choices, "GeoTIFF (data)" = "gtiff")
     }
-    image_only_map <- is.null(styler_raster) &&
+    image_only_map <- !has_raster &&
       !is.null(styler_item) && styler_item$type %in% c("map", "map_combined")
     legend_defaults <- item_legend_defaults(styler_item)
 
@@ -473,12 +512,16 @@
                               condition = "input.styler_format == 'gtiff'",
                               tags$p(style = "font-size: 0.8em; color: var(--mn-text-2); background: var(--mn-surface-2); border: 1px solid var(--mn-line); border-left: 2px solid var(--mn-accent); padding: 8px; border-radius: 3px;",
                                      icon("info-circle"),
-                                     " GeoTIFF writes the raster values, coordinate reference system and extent of the displayed surface, in the run's Target Mapping CRS, for use in QGIS or ArcGIS. Typography, palette, DPI and layout settings do not apply to it. Kriging surfaces are written as multi-band files (prediction, then variance; the variance is empty over a locality whose variogram could not be estimated, and absent when no locality's could).")
+                                     " GeoTIFF writes the raster values, coordinate reference system and extent of this surface as the run produced it, in the run's Target Mapping CRS, for use in QGIS or ArcGIS. ",
+                                     if (has_raster && !gtiff_single(styler_item)) {
+                                       tags$b("These localities need separate files to preserve every grid and value. The download is a zip with one GeoTIFF per locality, each at its own cell size. ")
+                                     },
+                                     "Typography, palette, DPI and layout settings do not apply to it. Kriging surfaces carry two bands, prediction then variance. The variance is empty over a locality whose variogram could not be estimated, and a file left without any variance carries the prediction only.")
                             ),
                             if (image_only_map) {
                               tags$p(style = "font-size: 0.8em; color: var(--mn-text-2); background: var(--mn-surface-2); border: 1px solid var(--mn-line); border-left: 2px solid var(--mn-warn); padding: 8px; border-radius: 3px;",
                                      icon("exclamation-triangle"),
-                                     " This item is not a single raster surface (a paired comparison map, or point geometry), so it exports as an image only. For GIS layers of point and polygon geometry, use the Class zones and Drawn polygons entries in the Map Viewer toolbar's Downloads menu.")
+                                     " This item is not a raster surface (a paired comparison map, or point geometry), so it exports as an image only. For GIS layers of point and polygon geometry, use the Class zones and Drawn polygons entries in the Map Viewer toolbar's Downloads menu.")
                             },
                             conditionalPanel(
                               condition = "input.styler_format != 'gtiff'",
@@ -609,7 +652,7 @@
     # (it is not among that item's formats).
     if (identical(cfg$format, "gtiff") || identical(cfg$styler_format, "gtiff")) {
       item <- tryCatch(rv$export_registry[[active_styler_item()]], error = function(e) NULL)
-      if (is.null(export_raster_payload(item))) {
+      if (export_raster_count(item) == 0L) {
         cfg$format <- NULL
         cfg$styler_format <- NULL
       }
@@ -620,15 +663,8 @@
     apply_item_legend_defaults()
   })
 
-  observeEvent(input$styler_width, {
-    req(input$styler_width, input$styler_height)
-    new_ratio <- round(input$styler_width / input$styler_height, 2)
-    if (abs(new_ratio - (input$styler_aspect_ratio %||% 0)) > 0.01) {
-      updateNumericInput(session, "styler_aspect_ratio", value = new_ratio)
-    }
-  }, ignoreInit = TRUE)
-
-  observeEvent(input$styler_height, {
+  # Width or height sets the ratio; the ratio sets the height (below).
+  observeEvent(list(input$styler_width, input$styler_height), {
     req(input$styler_width, input$styler_height)
     new_ratio <- round(input$styler_width / input$styler_height, 2)
     if (abs(new_ratio - (input$styler_aspect_ratio %||% 0)) > 0.01) {
@@ -681,17 +717,26 @@
     setColWidths(wb, sheet, cols = seq_len(max(1L, ncol(df))), widths = "auto")
   }
 
+  # A raster item's GeoTIFF is ONE file when it holds one locality or the
+  # run's localities share a lattice without overlapping (rv$disp$mergeable,
+  # set when the run lands), and a zip of one file per locality otherwise. The
+  # registry and rv$disp always describe the same run (a restore swaps them
+  # together).
+  gtiff_single <- function(item) {
+    export_raster_count(item) == 1L || isTRUE(rv$disp$mergeable)
+  }
+
   # What a registry item is written as: "gtiff" only for items holding a
   # raster, else PNG (the batch handler logs the swap).
   export_ext_for <- function(item, fmt) {
     if (!item$type %in% c("plot", "map", "map_combined")) return("xlsx")
-    if (identical(fmt, "gtiff") && is.null(export_raster_payload(item))) return("png")
-    styler_format_ext(fmt)
+    if (!identical(fmt, "gtiff")) return(styler_format_ext(fmt))
+    if (export_raster_count(item) == 0L) return("png")
+    if (gtiff_single(item)) styler_format_ext(fmt) else "zip"
   }
 
-  # GeoTIFF metadata identifying the run. The registry and rv$disp always
-  # describe the same run (a restore swaps them together).
-  geotiff_tags <- function(item) {
+  # GeoTIFF metadata identifying the run and the localities the file holds.
+  geotiff_tags <- function(item, localities) {
     d <- rv$disp
     cfg <- rv$run_config_summary
     lab <- item$var_label %||% d$label %||% ""
@@ -702,23 +747,35 @@
       MONOLITH_UNIT = d$unit %||% "",
       MONOLITH_PRODUCT = product,
       MONOLITH_METHOD = get_method_label(d$method %||% ""),
-      MONOLITH_LOCALITY = paste(d$localities, collapse = ", "),
+      MONOLITH_LOCALITY = localities,
       MONOLITH_RUN_ID = as.character(cfg$run_id %||% ""),
       MONOLITH_APP_VERSION = cfg$app_version %||% app_version,
       MONOLITH_TARGET_CRS = d$crs_sel %||% "",
       MONOLITH_CREATED = format(Sys.time(), "%Y-%m-%dT%H:%M:%S%z"))
   }
 
-  # A missing tag must never cost the file: write_geotiff keeps the raster and
+  # Writes a raster item's GeoTIFFs into `dir` under `stem` and returns their
+  # file names: one file, or one per locality with the locality in its name.
+  # A missing tag must never cost a file: write_geotiff keeps the raster and
   # warns, and the warning is put where the user can see it.
-  write_tagged_geotiff <- function(item, path) {
-    withCallingHandlers(
-      write_geotiff(export_raster_payload(item), path, tags = geotiff_tags(item)),
-      warning = function(w) {
-        rv$log <- paste0(rv$log, "\n[Export] ", item$label, ": ", conditionMessage(w))
-        showNotification(conditionMessage(w), type = "warning", duration = 10)
-        invokeRestart("muffleWarning")
-      })
+  write_item_geotiffs <- function(item, dir, stem) {
+    rasters <- export_rasters(item, merge = isTRUE(rv$disp$mergeable))
+    if (length(rasters) == 0) stop("No raster surface to export.")
+    filenames <- unique_export_filenames(
+      paste0(stem, if (length(rasters) > 1) paste0("_", safe_key(names(rasters))), ".tif"),
+      used = list.files(dir))
+    vapply(seq_along(rasters), function(i) {
+      loc <- names(rasters)[i]
+      name <- filenames[i]
+      withCallingHandlers(
+        write_geotiff(rasters[[i]], file.path(dir, name), tags = geotiff_tags(item, loc)),
+        warning = function(w) {
+          rv$log <- paste0(rv$log, "\n[Export] ", item$label, " (", loc, "): ", conditionMessage(w))
+          showNotification(conditionMessage(w), type = "warning", duration = 10)
+          invokeRestart("muffleWarning")
+        })
+      name
+    }, character(1))
   }
 
   output$confirm_export <- downloadHandler(
@@ -736,8 +793,18 @@
 
       withProgress(message = paste("Exporting", item$type, "..."), {
         tryCatch({
-          if (identical(ext, "tif")) {
-            write_tagged_geotiff(item, file)
+          if (ext %in% c("tif", "zip")) {
+            dir <- tempfile("gtiff_")
+            dir.create(dir)
+            on.exit(unlink(dir, recursive = TRUE), add = TRUE)
+            stem <- tools::file_path_sans_ext(export_file_name(
+              "Export", item$id, rv$disp$method, format(Sys.time(), "%Y%m%d_%H%M%S"), "tif"))
+            files <- write_item_geotiffs(item, dir, stem)
+            if (identical(ext, "zip")) {
+              zip::zip(zipfile = file, files = files, root = dir)
+            } else {
+              file.copy(file.path(dir, files), file, overwrite = TRUE)
+            }
           } else if (item$type %in% c("plot", "map", "map_combined")) {
             p_obj <- generate_styled_plot(
               item, input,
@@ -829,24 +896,27 @@
           
           timestamp <- format(Sys.time(), "%Y%m%d_%H%M%S")
           ext <- export_ext_for(item, input$styler_format)
-          if (identical(input$styler_format, "gtiff") && !identical(ext, "tif")) {
+          if (identical(input$styler_format, "gtiff") && identical(ext, "png")) {
             rv$log <- paste0(rv$log, "\n[Batch] ", item$label,
-                             " is not a single raster surface; exported as PNG instead of GeoTIFF.")
+                             " is not a raster surface; exported as PNG instead of GeoTIFF.")
           }
 
-          filename <- export_file_name("Batch", item$id, rv$disp$method, timestamp, ext)
-          filepath <- file.path(temp_dir, filename)
+          filename <- unique_export_filenames(
+            export_file_name("Batch", item$id, rv$disp$method, timestamp, ext),
+            used = list.files(temp_dir))
 
           tryCatch({
-            if (identical(ext, "tif")) {
-              write_tagged_geotiff(item, filepath)
+            if (ext %in% c("tif", "zip")) {
+              # Per-locality GeoTIFFs sit beside the other files, not in a
+              # zip of their own.
+              filename <- write_item_geotiffs(item, temp_dir, tools::file_path_sans_ext(filename))
             } else {
               p <- generate_styled_plot(
                 item, input,
                 agro_params = export_class_params(item),
                 palette = export_palette()
               )
-              export_plot_to_file(p, filepath, ext, input)
+              export_plot_to_file(p, file.path(temp_dir, filename), ext, input)
             }
             files_to_zip <- c(files_to_zip, filename)
           }, error = function(e) {

@@ -43,12 +43,17 @@ ui <- fluidPage(
       });
     ")),
     # Bind popovers at startup and, for icons rendered later (renderUI), on
-    # first focus.
+    # first focus. An output that renders again replaces its icons, so their
+    # popovers close first: one left open would stay on screen with no icon
+    # to close it.
     tags$script(HTML(
       "$(function () { $('[data-toggle=\"popover\"]').popover({html: true, container: 'body'}); });
        $(document).on('focusin', '[data-toggle=\"popover\"]', function () {
          var $t = $(this);
          if (!$t.data('bs.popover')) { $t.popover({html: true, container: 'body'}); $t.popover('show'); }
+       });
+       $(document).on('shiny:value', function (e) {
+         $(e.target).find('[data-toggle=\"popover\"]').popover('destroy');
        });"
     )),
     # ionRangeSlider centres edge labels on the track ends, so large values

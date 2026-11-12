@@ -80,7 +80,8 @@ smoke_app <- local({
       '    method = rv$run_config_summary$method,',
       '    status = rv$run_config_summary$status,',
       '    disp_method = rv$disp$method,',
-      '    rast_hash = if (!is.null(rv$rast)) rlang::hash(terra::values(rv$rast, mat = FALSE)),',
+      '    rast_hash = if (length(rv$rast_list_act)) rlang::hash(lapply(rv$rast_list_act,',
+      '      function(r) terra::values(terra::unwrap(r), mat = FALSE))),',
       '    rmse = if (length(rv$cv_metrics_act)) rv$cv_metrics_act[[1]]$rmse,',
       '    map_label = rv$export_registry$map_actual$label,',
       '    history = vapply(rv$run_history, function(h) h$config$method, character(1))),',
@@ -219,7 +220,7 @@ test_that("the documentation drawer renders the three shipped guides", {
   app$set_inputs(docs_tabs = "Scientific Guide")
   app$wait_for_idle()
   expect_true(guide_len("render_scientific_guide") > 1000)
-  expect_true(grepl("Validation Diagnostics", app$get_html("#docs_drawer"), fixed = TRUE))
+  expect_true(grepl("Cross-Validation and Performance Metrics", app$get_html("#docs_drawer"), fixed = TRUE))
 
   app$set_inputs(docs_tabs = "Descriptive and Exploratory Suite")
   app$wait_for_idle()

@@ -113,6 +113,19 @@ a { color: var(--mn-accent); text-decoration: none; }
 a:hover, a:focus { color: var(--mn-accent-hover); text-decoration: underline; }
 hr { border-top: 1px solid var(--mn-line); margin: 14px 0; }
 code, pre, .mn-mono { font-family: var(--mn-mono); }
+/* Bootstrap ships these three with fixed light colours. */
+code { color: var(--mn-text); background-color: var(--mn-surface-3); }
+pre {
+  color: var(--mn-text); background-color: var(--mn-surface-2);
+  border: 1px solid var(--mn-line); border-radius: var(--mn-radius);
+}
+pre code { background-color: transparent; }
+blockquote { border-left-color: var(--mn-line-2); }
+/* An error message quoted in a dialog: wrapped, never clipped. */
+pre.mn-error-pre {
+  border-left: 2px solid var(--mn-danger);
+  padding: 12px; white-space: pre-wrap; overflow-x: auto; font-size: 0.9em;
+}
 ::selection { background: var(--mn-accent-weak); color: var(--mn-text); }
 :focus-visible { outline: 2px solid var(--mn-accent); outline-offset: 2px; }
 
@@ -819,6 +832,19 @@ input[type='checkbox'], input[type='radio'] { accent-color: var(--mn-accent); }
 .setup-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(240px, 1fr)); gap: 0 16px; align-items: start; }
 .setup-grid .shiny-input-container { width: 100% !important; }
 .setup-hint { font-size: 11.5px; font-style: normal; color: var(--mn-text-3); line-height: 1.45; margin: 2px 0 10px 0; }
+/* Variable Mapping: one row per variable, in a list that scrolls inside the
+   card, so its filter above and the Confirm button below stay on screen
+   however many variables the table holds. */
+.mn-mapping-filter { display: flex; align-items: center; gap: 12px; margin-bottom: 10px; }
+.mn-mapping-filter .form-control { max-width: 340px; }
+.mn-mapping-count { font-size: 11.5px; color: var(--mn-text-3); }
+.mn-mapping-rows {
+  max-height: min(62vh, 640px); overflow-y: auto;
+  border: 1px solid var(--mn-line); border-radius: var(--mn-radius);
+  padding: 0 12px; margin-bottom: 12px;
+}
+.mn-mapping-row { border-bottom: 1px solid var(--mn-line); padding: 10px 0 0 0; }
+.mn-mapping-row:last-child { border-bottom: 0; }
 /* The dataset and the variable list that describes its columns: two fields of
    one pass, side by side, so the optional one is chosen while the required one
    is still on screen rather than three cards further down. */
@@ -1062,6 +1088,22 @@ table.dataTable tbody tr.odd { background-color: var(--mn-surface-2) !important;
   font-size: 12.5px; font-weight: 600;
 }
 .popover-content, .popover-body { color: var(--mn-text-2) !important; }
+/* Info popover text (tip_html(), ui_components.R): paragraphs one blank line
+   apart (Bootstrap's popover line-height, 1.42857), and bold lead-ins in the
+   primary text colour so the eye can run down the choices. */
+.popover-content p, .popover-body p { margin: 0; }
+.popover-content p + p, .popover-body p + p { margin-top: 1.42857em; }
+.popover-content b, .popover-content strong,
+.popover-body b, .popover-body strong { color: var(--mn-text); }
+/* The arrow in every placement: its outline is the popover's border, its fill
+   the popover's surface (Bootstrap paints both a fixed grey and white). */
+.popover.top > .arrow { border-top-color: var(--mn-line) !important; }
+.popover.top > .arrow:after { border-top-color: var(--mn-surface) !important; }
+.popover.bottom > .arrow { border-bottom-color: var(--mn-line) !important; }
+.popover.bottom > .arrow:after { border-bottom-color: var(--mn-surface) !important; }
+.popover.left > .arrow { border-left-color: var(--mn-line) !important; }
+.popover.left > .arrow:after { border-left-color: var(--mn-surface) !important; }
+.popover.right > .arrow { border-right-color: var(--mn-line) !important; }
 .popover.right > .arrow:after { border-right-color: var(--mn-surface) !important; }
 .info-icon { color: var(--mn-text-3) !important; }
 .info-icon:hover { color: var(--mn-accent) !important; }
@@ -1117,11 +1159,42 @@ table.dataTable tbody tr.odd { background-color: var(--mn-surface-2) !important;
 .shiny-notification-close:hover { color: var(--mn-text); }
 
 /* ==== leaflet =========================================================== */
+/* Preserve the draw toolbar's sprite and its position in every button state. */
 .leaflet-bar a, .leaflet-control-layers, .leaflet-popup-content-wrapper, .leaflet-popup-tip {
-  background: var(--mn-surface); color: var(--mn-text); border-color: var(--mn-line);
+  background-color: var(--mn-surface); color: var(--mn-text); border-color: var(--mn-line);
 }
-.leaflet-bar a:hover { background: var(--mn-surface-2); color: var(--mn-text); }
+.leaflet-bar a:hover { background-color: var(--mn-surface-2); color: var(--mn-text); }
+.leaflet-bar a.leaflet-disabled, .leaflet-bar a.leaflet-disabled:hover {
+  background-color: var(--mn-surface-2); color: var(--mn-text-3);
+}
 .leaflet-container { font-family: var(--mn-sans); }
+/* Leaflet.draw paints each tool's glyph from a dark sprite on the button's own
+   background. On the dark surface a copy of that sprite, inverted, is laid over
+   it, and the button keeps its token colours. */
+:root[data-theme='dark'] .leaflet-draw-toolbar a { position: relative; }
+:root[data-theme='dark'] .leaflet-draw-toolbar a::before {
+  content: ''; position: absolute; inset: 0; pointer-events: none;
+  background-image: inherit; background-position: inherit;
+  background-size: inherit; background-repeat: inherit;
+  filter: invert(1);
+}
+/* A disabled tool's glyph is light grey in the sprite: inverted, it would
+   vanish into the dark button. The copy darkens it instead, so it reads as
+   dimmed beside the enabled tools' glyphs. */
+:root[data-theme='dark'] .leaflet-draw-toolbar a.leaflet-disabled::before { filter: brightness(0.6); }
+/* The north arrow is drawn on the basemap itself (white over a shadow), so its
+   control carries no box of its own. */
+.leaflet .mn-north-arrow { background: none; border: 0; box-shadow: none; padding: 0; }
+/* The distance scale, moved out of the map into the strip below it
+   (#distance_scale_container): a page element, so it takes page colours. */
+.mn-map-scale {
+  background: var(--mn-surface); border: 1px solid var(--mn-line);
+  border-radius: 4px; padding: 5px; margin: 0 auto;
+}
+.mn-map-scale .leaflet-control-scale-line {
+  background: transparent; color: var(--mn-text);
+  border-color: var(--mn-text-3); text-shadow: none;
+}
 
 /* Legend. leaflet lays the box out as a title block above two floated columns
    (colour ramp, tick labels), and sizes it shrink-to-fit, so the TITLE decides

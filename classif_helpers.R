@@ -442,23 +442,47 @@ classif_folds_to_rset <- function(train_df, fold_id, assess_df = NULL, target = 
   df
 }
 
-#' Each fold's covariates at its held-out locations, interpolated from that
-#' fold's analysis rows only (target labels kept for scoring, never passed to
-#' the surface builder). attr(, "cov_fallback") and attr(, "cov_flat"):
-#' (fold, covariate) rows whose values came from the IDW fallback, or from a
-#' pure-nugget variogram's flat surface; NULL when no fold had one.
-.classif_fold_assessment <- function(keep_sf, train_df, predictors, fold_id,
-                                     cancel_file = NULL, progress = NULL) {
+#' Candidate covariate support outside the scored complete-case population.
+#' A row can carry a label but lack a predictor the fold later removes. Its
+#' label is never used; eligibility is decided on the fold's kept predictors.
+.classif_unscored_covariates <- function(pts_sf, target, predictors) {
+  df <- as.data.frame(sf::st_drop_geometry(pts_sf))
+  scored <- stats::complete.cases(df[, c(target, predictors), drop = FALSE])
+  pts_sf[!scored, predictors, drop = FALSE]
+}
+
+#' Each fold's covariates at its held-out locations, interpolated as the map
+#' interpolates its grid: from that fold's analysis rows and the
+#' unscored rows `extra_sf` (.classif_unscored_covariates()), whose labels are
+#' excluded and which are never held out. Target labels are kept for scoring and never
+#' passed to the surface builder. attr(, "cov_fallback") and attr(,
+#' "cov_flat"): (fold, covariate) rows whose values came from the IDW fallback,
+#' or from a pure-nugget variogram's flat surface; NULL when no fold had one.
+.classif_fold_assessment <- function(keep_sf, train_df, predictors, fold_id, extra_sf = NULL,
+                                     cancel_file = NULL, progress = NULL, vif_threshold = NULL) {
   assess_df <- train_df
   ids <- sort(unique(fold_id))
   fallback <- list()
   flat <- list()
+  extra_n <- integer(length(ids))
+  with_extra <- !is.null(extra_sf) && nrow(extra_sf) > 0
   for (k in seq_along(ids)) {
     .classif_check_cancel(cancel_file)
     idx <- which(fold_id == ids[k])
     grid <- sf::st_sf(geometry = sf::st_geometry(keep_sf[idx, ]))
+    analysis <- fold_id != ids[k]
+    retained <- setdiff(predictors, .classif_screen_all_rows(train_df[analysis, , drop = FALSE],
+                                                           predictors, vif_threshold))
+    # Use the same training-only screen as the recipe. Dropped columns stay
+    # in assess_df for recipe bookkeeping but are never used for prediction.
+    support <- keep_sf[analysis, retained, drop = FALSE]
+    if (with_extra) {
+      eligible <- stats::complete.cases(sf::st_drop_geometry(extra_sf)[, retained, drop = FALSE])
+      extra_n[k] <- sum(eligible)
+      support <- rbind(support, extra_sf[eligible, retained, drop = FALSE])
+    }
     aux <- build_classification_grid_aux(
-      keep_sf[fold_id != ids[k], ], grid, predictors,
+      support, grid, retained,
       cancel_file = cancel_file,
       progress = function(f) {
         if (is.function(progress)) progress((k - 1 + f) / length(ids))
@@ -473,7 +497,7 @@ classif_folds_to_rset <- function(train_df, fold_id, assess_df = NULL, target = 
       flat[[length(flat) + 1]] <- data.frame(fold = ids[k], covariate = fl, stringsAsFactors = FALSE)
     }
     cov <- sf::st_drop_geometry(aux)
-    for (p in predictors) {
+    for (p in retained) {
       values <- cov[[p]]
       if (is.factor(train_df[[p]])) {
         values <- factor(as.character(values), levels = levels(train_df[[p]]),
@@ -489,6 +513,7 @@ classif_folds_to_rset <- function(train_df, fold_id, assess_df = NULL, target = 
   }
   attr(assess_df, "cov_fallback") <- if (length(fallback)) do.call(rbind, fallback)
   attr(assess_df, "cov_flat") <- if (length(flat)) do.call(rbind, flat)
+  attr(assess_df, "extra_n") <- extra_n
   assess_df
 }
 
@@ -653,15 +678,13 @@ classif_compute_metrics <- function(pred_df, target) {
 
   prob_out <- tryCatch({
     if (length(prob_cols) == length(levs) && length(levs) >= 2) {
+      pm <- yardstick::metric_set(yardstick::roc_auc, yardstick::mn_log_loss,
+                                  yardstick::brier_class)
       if (length(levs) == 2) {
         # Binary prob metrics take the first (event) level's column only.
-        pm <- yardstick::metric_set(yardstick::roc_auc, yardstick::mn_log_loss,
-                                    yardstick::brier_class)
         pm(pred_df, truth = !!rlang::sym(target), !!rlang::sym(prob_cols[1]),
            event_level = "first")
       } else {
-        pm <- yardstick::metric_set(yardstick::roc_auc, yardstick::mn_log_loss,
-                                    yardstick::brier_class)
         pm(pred_df, truth = !!rlang::sym(target), !!!rlang::syms(prob_cols))
       }
     } else {
@@ -833,8 +856,9 @@ run_classification_cv <- function(pts_sf, target, predictors,
   fold_share <- 1 - cov_share - tune_share
   report_cv <- if (is.function(progress_cb)) progress_cb else function(...) invisible(NULL)
   report_cv(0, "Interpolating held-out covariates...")
+  extra_sf <- .classif_unscored_covariates(pts_sf, target, predictors)
   assess_df <- .classif_fold_assessment(
-    keep_sf, train_df, predictors, fold_id, cancel_file = cancel_file,
+    keep_sf, train_df, predictors, fold_id, extra_sf, cancel_file = cancel_file, vif_threshold = vif_threshold,
     progress = function(f) report_cv(cov_share * f,
                                       "Interpolating held-out covariates..."))
   rset <- classif_folds_to_rset(train_df, fold_id, assess_df, target = target)
@@ -905,8 +929,8 @@ run_classification_cv <- function(pts_sf, target, predictors,
                                          strategy, target = target,
                                          v = inner_v, seed = seed + i, domain_xy = domain_xy)
         inner_assess <- .classif_fold_assessment(
-          keep_sf[fold_id != i, , drop = FALSE], tr, predictors, inner_id,
-          cancel_file = cancel_file,
+          keep_sf[fold_id != i, , drop = FALSE], tr, predictors, inner_id, extra_sf,
+          cancel_file = cancel_file, vif_threshold = vif_threshold,
           progress = function(f) report_cv(
             cov_share + tune_share + fold_share * ((k - 1 + 0.25 * f) / n_fold),
             sprintf("Interpolating inner-fold covariates: fold %d of %d", k, n_fold)))
@@ -1004,6 +1028,9 @@ run_classification_cv <- function(pts_sf, target, predictors,
     # or from a pure-nugget variogram's flat surface.
     cov_fallback = attr(assess_df, "cov_fallback"),
     cov_flat = attr(assess_df, "cov_flat"),
+    # Rows carrying every covariate and no class, in every fold's covariate
+    # support beside its analysis rows.
+    covariate_extra_n = range(attr(assess_df, "extra_n")),
     weights_applied = weights_applied
   )
 }
@@ -1420,7 +1447,9 @@ fit_classification_model <- function(pts_sf, target, predictors,
                      nrow(cv_assessment_df) == nrow(train_df)) {
       cv_assessment_df
     } else {
-      .classif_fold_assessment(keep_sf, train_df, predictors, fold_id)
+      .classif_fold_assessment(keep_sf, train_df, predictors, fold_id,
+                               .classif_unscored_covariates(pts_sf, target, predictors),
+                               vif_threshold = vif_threshold)
     }
     rset <- classif_folds_to_rset(train_df, fold_id, assess_df, target = target)
     tuned <- .classif_with_seed(seed, {
@@ -1530,15 +1559,23 @@ predict_classification_surface <- function(model, newdata, chunk_size = NULL,
 }
 
 # ── Rasterisation ───────────────────────────────────────────────────────────
+# The common geometry of class, probability and entropy layers, also used by
+# the worker to measure cell areas once before the main session rasterises.
+classif_surface_template <- function(xy, res, crs_wkt) {
+  ext <- terra::ext(min(xy$x) - res / 2, max(xy$x) + res / 2,
+                    min(xy$y) - res / 2, max(xy$y) + res / 2)
+  terra::rast(ext, resolution = res, crs = crs_wkt)
+}
+
 #' Rasterise a prediction surface (`grid_sf` with projected x/y and the
 #' predict_classification_surface() columns): a categorical class SpatRaster,
 #' a probability stack, an entropy layer, and a per-class area table in
-#' ellipsoidal hectares (terra::expanse, as the app's other area reports).
+#' ellipsoidal hectares (raster_class_areas, as the app's other area reports).
 #' `conf_threshold` is the reject option (Chow 1970): cells whose maximum class
 #' probability is below it become "Unclassified" (grey). 0 disables it; values
 #' <= 1/k never fire (a k-class maximum is always >= 1/k).
 classif_surface_to_rasters <- function(grid_sf, res, crs_wkt, levels_order = NULL,
-                                       conf_threshold = 0) {
+                                       conf_threshold = 0, cell_areas = NULL) {
   df <- as.data.frame(grid_sf)
   if (is.null(df$x) || is.null(df$y)) {
     coords <- sf::st_coordinates(grid_sf)
@@ -1561,9 +1598,7 @@ classif_surface_to_rasters <- function(grid_sf, res, crs_wkt, levels_order = NUL
   levs_map <- if (use_abstain) c(levs, "Unclassified") else levs
   cls_int <- match(cls_chr, levs_map)
 
-  ext <- terra::ext(min(df$x) - res / 2, max(df$x) + res / 2,
-                    min(df$y) - res / 2, max(df$y) + res / 2)
-  templ <- terra::rast(ext, resolution = res, crs = crs_wkt)
+  templ <- classif_surface_template(df, res, crs_wkt)
 
   # One coordinate matrix for every layer (not one per probability layer).
   xy <- as.matrix(df[, c("x", "y")])
@@ -1594,20 +1629,11 @@ classif_surface_to_rasters <- function(grid_sf, res, crs_wkt, levels_order = NUL
   }
 
   counts <- table(factor(cls_chr, levels = levs_map))
-  # Ellipsoidal area from terra::expanse, as the interpolation Area Coverage
-  # table and the class-zone export, so the three agree. n_cells x res^2 is the
-  # projection-plane area, off by the CRS's area scale k^2 (-0.08% on a UTM
-  # central meridian, +0.19% at the zone edge); it is the fallback only if
-  # expanse fails. class_r is categorical: expanse(byValue = TRUE) reports the
-  # class LABEL as `value`.
-  cell_ha <- (res * res) / 10000
-  area_ha <- as.numeric(counts) * cell_ha
-  area_exp <- tryCatch({
-    e <- as.data.frame(terra::expanse(class_r, unit = "ha", byValue = TRUE))
-    if (all(c("value", "area") %in% names(e)))
-      e$area[match(levs_map, as.character(e$value))] else NULL
-  }, error = function(e) NULL)
-  if (!is.null(area_exp)) area_ha <- ifelse(is.na(area_exp), 0, area_exp)
+  # The same exact per-cell ellipsoidal areas as interpolation tables and
+  # class zones. The helper returns numeric codes, even on a factor raster.
+  e <- raster_class_areas(class_r, cell_areas)
+  area_ha <- e$area[match(seq_along(levs_map), e$value)]
+  area_ha[is.na(area_ha)] <- 0
 
   area_tbl <- data.frame(
     class = levs_map,
@@ -2445,6 +2471,7 @@ run_classification_pipeline <- function(df, target, predictors,
                                            cbind(gr$grid_p$x, gr$grid_p$y), cv$levels)
       out$res <- gr$res
       out$crs_wkt <- gr$crs_wkt
+      out$cell_areas <- raster_cell_area_values(classif_surface_template(out$surface_df, out$res, out$crs_wkt))
       out$grid_warning <- gr$strict_warning
     }
     report("surface", 1, "Finishing...")
@@ -2479,6 +2506,9 @@ run_classification_pipeline <- function(df, target, predictors,
     # Classes some fold could not learn because its analysis rows held none of
     # them; NULL in the ordinary case. A CV-design caveat the module reports.
     class_gaps = cv$class_gaps,
+    # Locations with every covariate and no class: part of the covariate
+    # surfaces' support in every fold and on the map, never scored.
+    covariate_extra_n = cv$covariate_extra_n,
     method = method, strategy = strategy, depth = depth,
     n = length(cv$fold_id), levels = levs, predictors = predictors,
     target_col = target,
@@ -2618,6 +2648,7 @@ run_classification_pipeline <- function(df, target, predictors,
     }
     out$res <- gr$res
     out$crs_wkt <- gr$crs_wkt
+    out$cell_areas <- raster_cell_area_values(classif_surface_template(out$surface_df, out$res, out$crs_wkt))
     # Advisory carried back to the main session (the module raises it as a
     # notification): a strict boundary too narrow for the cell size leaves
     # isolated samples with no mapped cell.

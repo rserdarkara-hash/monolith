@@ -148,6 +148,24 @@ test_that("build_rf_importance_plot maps covariate names through metadata", {
   b_imp <- ggplot_build(build_rf_importance_plot(rf_imp, "T", NULL))
   expect_equal(levels(b_imp$layout$layout$Measure), unname(RF_IMPORTANCE_LABELS))
   expect_equal(tail(b_imp$layout$panel_params[[1]]$y$get_labels(), 1), "a")
+
+  # The Governing Factors chart's layout: the caption wrapped to the card and
+  # set from the plot's left edge, where none of it is cut off.
+  p_imp <- build_rf_importance_plot(rf_imp, "T", NULL)
+  caption <- strsplit(ggplot2::get_labs(p_imp)$caption, "\n")[[1]]
+  expect_gt(length(caption), 1L)
+  expect_true(all(nchar(caption) < IMPORTANCE_NOTE_WIDTH))
+  expect_match(paste(caption, collapse = " "), "(25 here)", fixed = TRUE)
+  expect_identical(p_imp$theme$plot.caption.position, "plot")
+})
+
+test_that("axis tick labels stay short at any magnitude", {
+  expect_equal(axis_tick_labels(c(0, 2e-4, 4e-4)), c("0", "2e-4", "4e-4"))
+  expect_equal(axis_tick_labels(c(-1e-5, 0, 1e-5)), c("-1e-5", "0", "1e-5"))
+  expect_equal(axis_tick_labels(c(0, 2e5, 4e5)), c("0", "2e5", "4e5"))
+  expect_equal(axis_tick_labels(c(0, 25, 50)), c("0", "25", "50"))
+  expect_equal(axis_tick_labels(c(0, 0.05, 0.1)), c("0", "0.05", "0.1"))
+  expect_equal(axis_tick_labels(c(0, 1.5e-4, 3e-4, NA)), c("0", "0.00015", "0.0003", NA))
 })
 
 test_that("relabel_ck_variogram renames direct and cross ids consistently", {

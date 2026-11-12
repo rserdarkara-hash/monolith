@@ -50,7 +50,7 @@ test_that("a cold-start estimate is labelled rough and a history-fitted one is n
       n_samples = rep(100, 6),
       cores_used = rep(4, 6),
       batch_elapsed_sec = rep(40, 6),
-      per_locality_share_sec = rep(40, 6),
+      locality_sec = rep(40, 6),
       stringsAsFactors = FALSE
     ),
     monolith_history_file(), row.names = FALSE
@@ -165,8 +165,8 @@ test_that("estimate_run_duration prefers history with matching cores when enough
 
   history_file <- monolith_history_file()
 
-  # Mock history: OK, comp_mode FALSE, 5 records at 2 cores (10 s per locality)
-  # and 5 at 4 cores (100 s).
+  # Mock history: OK, comp_mode FALSE, 5 records at 2 workers (each locality
+  # took its worker 10 s) and 5 at 4 workers (100 s).
   mock_history <- data.frame(
     timestamp = rep("2026-07-03 12:00:00", 10),
     method = rep("OK", 10),
@@ -175,13 +175,13 @@ test_that("estimate_run_duration prefers history with matching cores when enough
     n_samples = rep(100, 10),
     cores_used = c(rep(2, 5), rep(4, 5)),
     batch_elapsed_sec = c(rep(10, 5), rep(100, 5)),
-    per_locality_share_sec = c(rep(10, 5), rep(100, 5)),
+    locality_sec = c(rep(10, 5), rep(100, 5)),
     stringsAsFactors = FALSE
   )
   write.csv(mock_history, history_file, row.names = FALSE)
 
-  # Expected = max(single-locality time, total / (0.75 * cores)) * 1.25, the
-  # history-based margin.
+  # Expected = max(largest locality's time, total / (0.75 * workers)) * 1.25,
+  # the history-based margin.
   # cores 4: its 5 matching records give 100 s -> 100 * 1.25 = 125.
   res_cores_4 <- estimate_run_duration(c(100), "OK", comp_mode = FALSE, cores = 4)
 
@@ -195,6 +195,63 @@ test_that("estimate_run_duration prefers history with matching cores when enough
   expect_equal(res_cores_4$est_time_sec, 125)
   expect_equal(res_cores_2$est_time_sec, 12.5)
   expect_equal(res_cores_8$est_time_sec, 68.75)
+})
+
+
+test_that("a history-based estimate spreads the localities' own times over the workers once", {
+  # Each record is the time a locality's worker spent on it, beside the other
+  # workers of its run, so it already carries their 0.75 share. A run on as
+  # many workers takes that time per locality, spread over the workers, and no
+  # batch finishes sooner than its largest locality.
+  tmp_dir <- tempfile("run_estimator_workers_")
+  dir.create(tmp_dir)
+  old_hist <- getOption("monolith_history_dir")
+  options(monolith_history_dir = tmp_dir)
+  on.exit({
+    options(monolith_history_dir = old_hist)
+    unlink(tmp_dir, recursive = TRUE)
+  }, add = TRUE)
+
+  # 0.5 s per sample, at 1 and at 6 workers (six records each, so the
+  # estimator narrows to the matching worker count).
+  n <- c(40, 80, 120, 160, 200, 240)
+  hist <- data.frame(
+    timestamp = "2026-11-10 12:00:00", method = "OK", comp_mode = FALSE,
+    n_locs_in_batch = rep(c(1, 7), each = 6), n_samples = rep(n, 2),
+    cores_used = rep(c(1, 6), each = 6), batch_elapsed_sec = NA_real_,
+    locality_sec = 0.5 * rep(n, 2), stringsAsFactors = FALSE)
+  write.csv(hist, monolith_history_file(), row.names = FALSE)
+
+  # One locality on one worker: its own time, plus the margin.
+  one <- estimate_run_duration(200, "OK", comp_mode = FALSE, cores = 1)
+  expect_equal(one$est_time_sec, 100 * 1.25)
+
+  # Seven localities of 200 samples on six workers, from records taken on six
+  # workers (100 s each): 700 s of worker time over 6 workers, which exceeds
+  # the largest locality's 100 s. The 0.75 share is in the records already.
+  seven <- estimate_run_duration(rep(200, 7), "OK", comp_mode = FALSE, cores = 6)
+  expect_equal(seven$est_time_sec, 700 / 6 * 1.25)
+
+  # One large locality among small ones sets the floor.
+  mixed <- estimate_run_duration(c(2000, 40, 40), "OK", comp_mode = FALSE, cores = 6)
+  expect_equal(mixed$est_time_sec, 1000 * 1.25)
+
+  # Records from lone workers predict a lone worker's time: on six workers
+  # each locality takes it over 0.75. Only the one-worker records remain.
+  hist_lone <- hist[hist$cores_used == 1, ]
+  write.csv(hist_lone, monolith_history_file(), row.names = FALSE)
+  six <- estimate_run_duration(rep(200, 7), "OK", comp_mode = FALSE, cores = 6)
+  expect_equal(six$est_time_sec, 7 * (100 / 0.75) / 6 * 1.25)
+  expect_equal(estimate_run_duration(200, "OK", comp_mode = FALSE, cores = 1)$est_time_sec, 100 * 1.25)
+})
+
+test_that("a cold-start estimate for one locality is the formula plus its margin", {
+  # The formula is 70% of the two measured per-model times it was fitted to, and
+  # the margin is 1.4, so a lone locality's estimate sits at 98% of them: one
+  # worker loses nothing to running beside others.
+  cold <- estimate_run_duration(79, "RFK", comp_mode = TRUE, cores = 1)
+  expect_equal(cold$est_time_sec, (16.45 + 0.455 * 79) * 2 * 1.4)
+  expect_equal(cold$est_time_sec / 150, 0.98, tolerance = 0.01)
 })
 
 

@@ -151,6 +151,96 @@ test_that("classification holdout predictions do not use the held-out covariate"
                as.numeric(a[a$.row == 1, prob_cols]), tolerance = 1e-8)
 })
 
+test_that("a fold's covariate surfaces also rest on the locations without a class, as the map's do", {
+  # 20 of 80 locations carry every covariate and no class. They are never
+  # scored, and each fold interpolates its held-out covariates from its
+  # analysis rows together with them: the map's covariate support less the
+  # held-out rows.
+  pts <- make_classif_points(n = 80)
+  pts$soil[61:80] <- NA
+  predictors <- c("elev", "slope", "parent")
+  extra <- .classif_unscored_covariates(pts, "soil", predictors)
+  expect_equal(nrow(extra), 20L)
+  # Candidate rows are filtered against each fold's retained predictors.
+  holed <- pts
+  holed$elev[80] <- NA
+  expect_equal(nrow(.classif_unscored_covariates(holed, "soil", predictors)), 20L)
+
+  keep <- pts[1:60, ]
+  train_df <- sf::st_drop_geometry(keep)[, c("soil", predictors)]
+  fold_id <- classif_make_fold_id(keep, "standard", target = "soil", v = 5L)
+  with_extra <- .classif_fold_assessment(keep, train_df, predictors, fold_id, extra)
+  alone <- .classif_fold_assessment(keep, train_df, predictors, fold_id)
+  for (k in sort(unique(fold_id))) {
+    idx <- which(fold_id == k)
+    grid <- sf::st_sf(geometry = sf::st_geometry(keep[idx, ]))
+    expected <- build_classification_grid_aux(
+      rbind(keep[fold_id != k, predictors], extra[predictors]), grid, predictors)
+    expect_equal(with_extra$elev[idx], expected$elev)
+    expect_equal(with_extra$slope[idx], expected$slope)
+    expect_identical(as.character(with_extra$parent[idx]), as.character(expected$parent))
+  }
+  # The extra rows change what a fold is given, so the premise is not vacuous.
+  expect_gt(max(abs(with_extra$elev - alone$elev)), 1e-6)
+
+  cv <- suppressWarnings(run_classification_cv(pts, "soil", predictors, method = "multinom",
+                                               strategy = "standard", v = 5L, depth = "none"))
+  expect_equal(cv$covariate_extra_n, c(20L, 20L))
+  expect_equal(nrow(cv$predictions), 60L)
+  # The run reads them: a covariate moved at those rows alone moves the
+  # covariates interpolated at the held-out rows, and the probabilities with them.
+  moved <- pts
+  moved$elev[61:80] <- moved$elev[61:80] + 5
+  cv_moved <- suppressWarnings(run_classification_cv(moved, "soil", predictors, method = "multinom",
+                                                     strategy = "standard", v = 5L, depth = "none"))
+  prob_cols <- paste0(".pred_", cv$levels)
+  expect_gt(max(abs(as.matrix(cv_moved$predictions[prob_cols]) - as.matrix(cv$predictions[prob_cols]))), 1e-8)
+  # Without such rows the result is the one the analysis rows alone give.
+  cv_plain <- suppressWarnings(run_classification_cv(pts[1:60, ], "soil", predictors, method = "multinom",
+                                                     strategy = "standard", v = 5L, depth = "none"))
+  expect_equal(cv_plain$covariate_extra_n, c(0L, 0L))
+  expect_equal(cv_plain$assessment_df[predictors], alone[predictors])
+})
+
+test_that("fold support uses rows complete for its retained predictors, without held-out labels", {
+  pts <- make_classif_points(n = 80)
+  pts$flat <- c(rep(1, 60), rep(NA_real_, 20))
+  pts$soil[61:70] <- NA
+  predictors <- c("elev", "flat")
+  keep <- pts[1:60, ]
+  train <- sf::st_drop_geometry(keep)[, c("soil", predictors)]
+  folds <- rep(1:5, length.out = 60)
+  extra <- .classif_unscored_covariates(pts, "soil", predictors)
+  got <- .classif_fold_assessment(keep, train, predictors, folds, extra, vif_threshold = 10)
+  for (k in 1:5) {
+    idx <- which(folds == k)
+    grid <- sf::st_sf(geometry = sf::st_geometry(keep[idx, ]))
+    expected <- build_classification_grid_aux(pts[-idx, "elev"], grid, "elev")
+    expect_equal(got$elev[idx], expected$elev)
+  }
+  expect_equal(attr(got, "extra_n"), rep(20L, 5))
+  cv <- suppressWarnings(run_classification_cv(pts, "soil", predictors, method = "multinom",
+    strategy = "standard", v = 5L, depth = "none", vif_threshold = 10))
+  expect_equal(cv$covariate_extra_n, c(20L, 20L))
+  expect_equal(nrow(cv$predictions), 60L)
+  # Inner CV gets only the original unscored support, never the outer holdout.
+  outer_train <- which(folds != 1)
+  inner <- rep(1:4, length.out = length(outer_train))
+  nested <- .classif_fold_assessment(keep[outer_train, ], train[outer_train, ], predictors,
+                                    inner, extra, vif_threshold = 10)
+  idx <- which(inner == 1)
+  expected <- build_classification_grid_aux(
+    pts[c(outer_train[-idx], 61:80), "elev"],
+    sf::st_sf(geometry = sf::st_geometry(keep[outer_train[idx], ])), "elev")
+  expect_equal(nested$elev[idx], expected$elev)
+  # Eligibility follows each fold's own screen, not the full-data screen.
+  keep$flat[31:60] <- 1:30
+  train$flat <- keep$flat
+  by_fold <- .classif_fold_assessment(keep, train, predictors, rep(1:2, each = 30),
+                                     extra, vif_threshold = 10)
+  expect_equal(attr(by_fold, "extra_n"), c(0L, 20L))
+})
+
 test_that("an integer covariate survives held-out and grid kriging", {
   # read.csv stores whole-number columns as integer; kriged values are double,
   # which a workflow trained on the integer column refused.
@@ -409,6 +499,22 @@ test_that("krige_covariates reports each covariate and propagates a cancel", {
     "cancelled by user")
 })
 
+test_that("classification hectares sum each cell's own ellipsoidal area", {
+  grid <- expand.grid(x = seq(700500, 702500, by = 1000), y = c(5000500, 5001500))
+  grid$.pred_class <- factor(rep(c("a", "b", "c"), 2))
+  got <- classif_surface_to_rasters(grid, res = 1000, crs_wkt = sf::st_crs(32633)$wkt,
+                                    levels_order = c("a", "b", "c"))
+  ref <- reference_class_areas(got$class)
+  expect_equal(got$area$area_ha, ref$area[match(1:3, ref$value)], tolerance = 1e-10)
+  expect_true(all(diff(got$area$area_ha) < 0))
+  # A confidence/view redraw consumes the worker's areas, not new geometry work.
+  areas <- reference_cell_areas(got$class)
+  local_mocked_bindings(cellSize = function(...) stop("unexpected area recomputation"), .package = "terra")
+  cached <- classif_surface_to_rasters(grid, res = 1000, crs_wkt = sf::st_crs(32633)$wkt,
+                                       levels_order = c("a", "b", "c"), cell_areas = areas)
+  expect_equal(cached$area, got$area)
+})
+
 test_that("surface rasterisation yields aligned class/prob/entropy layers and hectare areas", {
   pts <- make_classif_points(n = 50)
   mod <- fit_classification_model(pts, "soil", c("elev", "slope"), method = "rf")
@@ -426,7 +532,7 @@ test_that("surface rasterisation yields aligned class/prob/entropy layers and he
   expect_equal(names(rl$entropy), "entropy")
   expect_true(terra::is.factor(rl$class))
   # Area accounting tracks the cell count. Areas are ELLIPSOIDAL
-  # (terra::expanse, the same call the interpolation Area Coverage table and
+  # (raster_class_areas, the same call the interpolation Area Coverage table and
   # the class-zone export make), so they differ from the planimetric
   # cells x cell-area figure by the CRS's area scale factor k^2 - ~0.1% in
   # UTM. Assert the correspondence with a tolerance, never exact equality.
@@ -1735,6 +1841,21 @@ test_that("Jenks targets draw no random numbers above 3,000 values", {
   })
   b <- with_seed(2, suppressWarnings(classif_build_target(df, "bin", NULL, "v", 4, "jenks")))
   expect_identical(a, b)
+})
+
+test_that("binned targets fall on the quantile and equal-interval definitions", {
+  # A binned target's classes are cut at the data's extremes and k - 1 interior
+  # breaks: the type-7 quantiles at 1/k, ..., (k - 1)/k, or k equal intervals of
+  # the range. Each value takes its class from [low, high), the top one closed.
+  x <- golden_soil("full")$ph
+  df <- data.frame(ph = x)
+  class_of <- function(inner) findInterval(x, c(min(x), inner, max(x)), rightmost.closed = TRUE)
+  q <- classif_build_target(df, "bin", NULL, "ph", n_classes = 4, style = "quantile")
+  expect_identical(nlevels(q), 4L)
+  expect_identical(as.integer(q), class_of(stats::quantile(x, c(0.25, 0.5, 0.75), type = 7, names = FALSE)))
+  e <- classif_build_target(df, "bin", NULL, "ph", n_classes = 4, style = "equal")
+  expect_identical(nlevels(e), 4L)
+  expect_identical(as.integer(e), class_of(min(x) + (1:3) * diff(range(x)) / 4))
 })
 
 test_that("classif_build_target widens label precision when rounded breaks collide", {

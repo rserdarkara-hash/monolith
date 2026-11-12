@@ -179,7 +179,7 @@ test_that("a value on a break follows its mode's interval convention", {
 
   # Same breaks under the agro convention, right = FALSE: the break belongs to
   # the interval ABOVE it, because that is what terra::classify paints on the
-  # map (docs/scientific_guide.md §5). The two modes deliberately differ here.
+  # map (docs/scientific_guide.md §5.7). The two modes deliberately differ here.
   agro <- compute_agreement_metrics(
     x, x, method = "agro",
     params = agree_params(brks_inner = c(3, 5, 7), labels = paste0("C", 1:4))

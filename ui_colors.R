@@ -87,7 +87,7 @@ apply_desc_palette <- function(p, pal, continuous = FALSE) {
 # get_nut_key() recognise the nutrient. The DTPA micronutrient classes are
 # local limits (Çokuysal & Erbaş 2004) on the DTPA test of Lindsay & Norvell
 # (1978), who publish only critical levels. Full references: Scientific Guide
-# 9.4.1.
+# 9.2.
 DTPA_LOCAL_SOURCE <- "local limits of Çokuysal & Erbaş (2004) on the DTPA test of Lindsay & Norvell (1978)"
 NUTRIENT_REFERENCE <- list(
   TN = list(symbol = "TN", name = "NITROGEN", method = "Total N", unit = "%",
@@ -177,14 +177,24 @@ reference_unit_status <- function(var_unit, ref_unit) {
   if (identical(family(var_unit), family(ref_unit))) "equivalent" else "different"
 }
 
+#' Quantiles of values that stand for unequal amounts (a surface's cells,
+#' weighted by their area): for each of `probs`, the smallest value at which
+#' the cumulative share of the weight reaches it.
+weighted_quantile <- function(x, w, probs) {
+  o <- order(x)
+  share <- cumsum(w[o]) / sum(w)
+  x[o][vapply(probs, function(p) which(share >= p - 1e-12)[1], integer(1))]
+}
+
 #' The limits the Supervised boxes open with for one variable and class count.
 #' The reference limits (NUTRIENT_REFERENCE) apply at three classes when the
 #' variable's unit is theirs or not recorded; otherwise the k - 1
-#' equal-probability quantiles of `values` (type 7) are offered, which describe
-#' the data and carry no agronomic meaning. Returns `limits`, `source`
-#' ("reference" or "quantile"), the registry entry `ref` (NULL without one) and
-#' `unit_status`.
-class_limit_defaults <- function(var_id, unit, n_classes, values) {
+#' equal-probability quantiles of `values` are offered (type 7, or
+#' weighted_quantile() when `weights` says the values stand for unequal
+#' areas), which describe the data and carry no agronomic meaning. Returns
+#' `limits`, `source` ("reference" or "quantile"), the registry entry `ref`
+#' (NULL without one) and `unit_status`.
+class_limit_defaults <- function(var_id, unit, n_classes, values, weights = NULL) {
   key <- get_nut_key(var_id)
   ref <- if (!is.null(key)) NUTRIENT_REFERENCE[[key]]
   k <- as.integer(n_classes)
@@ -192,10 +202,16 @@ class_limit_defaults <- function(var_id, unit, n_classes, values) {
   if (!is.null(ref) && isTRUE(k == 3L) && status %in% c("empty", "equivalent")) {
     return(list(limits = ref$limits, source = "reference", ref = ref, unit_status = status))
   }
-  v <- values[is.finite(values)]
-  q <- if (length(v) && isTRUE(k >= 2L)) {
-    stats::quantile(v, probs = seq_len(k - 1L) / k, type = 7, names = FALSE)
-  } else rep(NA_real_, max(k - 1L, 0L))
+  ok <- is.finite(values)
+  v <- values[ok]
+  probs <- seq_len(max(k - 1L, 0L)) / k
+  q <- if (!length(v) || !isTRUE(k >= 2L)) {
+    rep(NA_real_, length(probs))
+  } else if (is.null(weights)) {
+    stats::quantile(v, probs = probs, type = 7, names = FALSE)
+  } else {
+    weighted_quantile(v, weights[ok], probs)
+  }
   list(limits = q, source = "quantile", ref = ref, unit_status = status)
 }
 

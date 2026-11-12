@@ -292,12 +292,9 @@
   # CV Distance Match: the displayed run's own distance record for the
   # selected locality (every strategy, every engine), with a Predicted facet
   # when the run mapped one. Each locality's folds are matched to its own map,
-  # so the pooled selection has nothing to draw.
+  # so the card is hidden under the pooled selection (ui_main_tabs.R).
   build_cv_distance_diag <- function() {
-    loc <- input$sel_loc_stats; req(loc, rv$disp)
-    if (identical(loc, "Total (Combined)")) {
-      return(sci_placeholder("Select a locality: each locality's folds are matched to its own map."))
-    }
+    loc <- input$sel_loc_stats; req(loc, rv$disp, !identical(loc, "Total (Combined)"))
     designs <- Filter(Negate(is.null), list(
       Actual = rv$cv_design_act[[loc]],
       Predicted = if (isTRUE(rv$has_predictions)) rv$cv_design_pre[[loc]]))
@@ -309,55 +306,14 @@
     list("cv_distance", input$sel_loc_stats, rv$results_rev, isTRUE(rv$has_predictions))
   }, cache = "session")
 
-  build_obs_pred_plot <- function(df, title, x_lab = "Observed", y_lab = "Predicted") {
-    req(df, nrow(df) > 0)
-    
-    if (inherits(df, "Spatial")) {
-      df <- as.data.frame(df)
-    } else if (inherits(df, "sf")) {
-      df <- sf::st_drop_geometry(df)
-    }
-    df <- as.data.frame(df)
-    
-    cnames <- names(df)
-    cols <- detect_cv_columns(cnames)
-    obs_col <- cols$observed
-    pre_col <- cols$pred
-    
-    req(obs_col, pre_col)
-    
-    # A failed CV fold leaves NA predictions; plot the scored pairs only.
-    ok <- is.finite(df[[obs_col]]) & is.finite(df[[pre_col]])
-    req(any(ok))
-    df_plot <- data.frame(Observed = df[[obs_col]][ok], Predicted = df[[pre_col]][ok])
-    # text aes on the point layer only: a per-point discrete aesthetic on the
-    # smooth layer would fragment its grouping into one group per point.
-    ggplot(df_plot, aes(x = Observed, y = Predicted)) +
-      suppressWarnings(geom_point(aes(text = paste0("Observed: ", signif(Observed, 5),
-                                                    "\nPredicted: ", signif(Predicted, 5),
-                                                    "\nResidual: ", signif(Observed - Predicted, 5))),
-                                  alpha = 0.6)) +
-      geom_abline(intercept = 0, slope = 1, color = "red", linetype = "dashed") +
-      geom_smooth(method = "lm", color = "blue", se = FALSE) +
-      labs(title = title, subtitle = "Red: 1:1 Line, Blue: Regression", x = x_lab, y = y_lab) +
-      theme_minimal()
-  }
-
   build_obs_pred_diag <- function(target) {
     data_list <- if (target == "act") rv$cv_data_act else rv$cv_data_pre
     req(input$sel_loc_stats, data_list)
     loc <- input$sel_loc_stats
-    if(loc == "Total (Combined)") {
-       # pool_cv_sf normalizes each locality's CV schema (an engine fallback
-       # produces a different one), so the pooled scatter never goes blank.
-       df <- pool_cv_sf(data_list)
-       req(df)
-       df <- st_drop_geometry(df)
-    } else {
-       df <- data_list[[loc]]
-       if(inherits(df, "sf")) df <- st_drop_geometry(df)
-       if(inherits(df, "Spatial")) df <- as.data.frame(df)
-    }
+    # pool_cv_sf normalizes each locality's CV schema (an engine fallback
+    # produces a different one), so the pooled scatter never goes blank.
+    df <- if (loc == "Total (Combined)") pool_cv_sf(data_list) else data_list[[loc]]
+    req(df)
     title <- if (target == "act") paste("Observed vs Predicted:", loc) else paste("Observed vs Predicted (Predicted Map):", loc)
     build_obs_pred_plot(df, title = title)
   }
@@ -551,9 +507,8 @@
     sci_dt(st, scroll_x = FALSE, signif_cols = setdiff(names(st), "Metric"))
   })
 
-  # Hectares per class for ONE surface, UNROUNDED and in class order (0 for an
-  # empty class); NULL when unclassifiable. expanse() reprojects every cell,
-  # NA padding included, so it is never handed a sparse merged grid
+  # Hectares per class of ONE locality's raster, UNROUNDED and in class order
+  # (0 for an empty class); NULL when unclassifiable. The Total sums these
   # (class_area_ha_sum()).
   class_area_ha <- function(r_obj, params, r_id = NULL) {
     if (is.null(r_obj) || is.null(params)) return(NULL)
@@ -569,22 +524,15 @@
       }
     }
     # unwrap only on a cache miss (deserializing a packed raster is expensive)
-    if (inherits(r_obj, "PackedSpatRaster")) r_obj <- terra::unwrap(r_obj)
+    if (inherits(r_obj, "PackedSpatRaster")) r_obj <- live_rasters(list(r_obj))[[1]]
 
     out <- tryCatch({
       r_class <- classify(r_obj[[1]], params$rcl_mat, right = FALSE)
-      area_df <- as.data.frame(expanse(r_class, unit = "ha", byValue = TRUE))
+      area_df <- raster_class_areas(r_class, raster_cell_area_values(r_obj))
 
       ha <- rep(0, params$n_c)
       if ("value" %in% names(area_df)) {
-        class_names <- if (isTruthy(input$color_style == "bin")) params$leg_labels else params$labels
-        # A categorical layer reports `value` as the label rather than the code
-        is_label <- any(as.character(area_df$value) %in% class_names)
-        idx <- if (is_label) {
-          match(as.character(area_df$value), class_names)
-        } else {
-          suppressWarnings(as.numeric(as.character(area_df$value)))
-        }
+        idx <- area_df$value
         keep <- !is.na(idx) & idx >= 1 & idx <= params$n_c
         if (any(keep)) {
           agg <- tapply(area_df$area[keep], idx[keep], sum, na.rm = TRUE)
@@ -599,9 +547,8 @@
   }
 
   # Total across a run's localities, summed on UNROUNDED per-locality hectares
-  # (so it equals the rows above). Not computed on the merged rv$rast, which
-  # spans the union of extents and can be ~97% NA (109 s vs 1.4 s per locality
-  # measured). Reported only after the overlap check confirms the areas add.
+  # (so it equals the rows above), each from the locality's own raster.
+  # Reported only after the overlap check confirms the areas add.
   class_area_ha_sum <- function(r_list, id_prefix, params) {
     r_list <- Filter(Negate(is.null), r_list)
     if (length(r_list) == 0) return(NULL)
@@ -648,32 +595,22 @@
     area_ha_to_df(class_area_ha(r_obj, params, r_id), params)
   }
 
-  area_df_total_act <- reactive({
-    req(rv$rast)
-    ov <- (rv$bound_overlap_m2 %||% c(act = 0))[["act"]]
+  # One surface's Total Area Coverage ("act" / "pre").
+  area_df_total <- function(surface) {
+    r_list <- if (surface == "pre") rv$rast_list_pre else rv$rast_list_act
+    req(length(r_list) > 0)
+    ov <- (rv$bound_overlap_m2 %||% c(act = 0, pre = 0))[[surface]]
     if (!is.finite(ov)) return(data.frame(Status = "Locality overlap could not be measured; see the per-locality area tables."))
-    if (ov > 0.5) return(data.frame(Status = sprintf(
+    if (ov > LOCALITY_OVERLAP_TOL_M2) return(data.frame(Status = sprintf(
       "Overlapping locality boundaries would count %.3g ha more than once; no combined total is reported. See the per-locality tables.", ov / 1e4)))
-    params <- tryCatch(classification_params("act"), error = function(e) NULL)
+    if (isTRUE(rv$disp$shared_cells[[surface]])) return(data.frame(Status =
+      "Localities share populated grid cells at their boundaries; no combined total is reported. See the per-locality tables."))
+    params <- tryCatch(classification_params(surface), error = function(e) NULL)
     if (is.null(params)) return(area_ha_to_df(NULL, NULL))
-    ha <- class_area_ha_sum(rv$rast_list_act, "loc_act", params)
-    # The merged grid is a fallback only for a run without per-locality rasters.
-    if (is.null(ha)) ha <- class_area_ha(rv$rast, params, "total_act_merged")
-    area_ha_to_df(ha, params)
-  })
-
-  area_df_total_pre <- reactive({
-    req(rv$rast_pred)
-    ov <- (rv$bound_overlap_m2 %||% c(pre = 0))[["pre"]]
-    if (!is.finite(ov)) return(data.frame(Status = "Locality overlap could not be measured; see the per-locality area tables."))
-    if (ov > 0.5) return(data.frame(Status = sprintf(
-      "Overlapping locality boundaries would count %.3g ha more than once; no combined total is reported. See the per-locality tables.", ov / 1e4)))
-    params <- tryCatch(classification_params("pre"), error = function(e) NULL)
-    if (is.null(params)) return(area_ha_to_df(NULL, NULL))
-    ha <- class_area_ha_sum(rv$rast_list_pre, "loc_pre", params)
-    if (is.null(ha)) ha <- class_area_ha(rv$rast_pred, params, "total_pre_merged")
-    area_ha_to_df(ha, params)
-  })
+    area_ha_to_df(class_area_ha_sum(r_list, paste0("loc_", surface), params), params)
+  }
+  area_df_total_act <- reactive(area_df_total("act"))
+  area_df_total_pre <- reactive(area_df_total("pre"))
 
   output$area_table_total_act <- DT::renderDataTable({ req(length(rv$loc_names) > 1, input$color_style %in% c("agro", "bin")); area_card(area_df_total_act()) })
   output$area_table_total_pre <- DT::renderDataTable({ req(length(rv$loc_names) > 1, input$color_style %in% c("agro", "bin")); area_card(area_df_total_pre()) })
@@ -708,7 +645,7 @@
     params_now <- tryCatch(classification_params("act"), error = function(e) NULL)
     if (is.null(params_now) || !isTruthy(input$color_style %in% c("agro", "bin"))) return()
     meta <- get_display_meta()
-    req(meta, !is.null(rv$rast))
+    req(meta, length(rv$rast_list_act) > 0)
     has_pre <- isTRUE(rv$disp$comp_mode) || !identical(rv$disp$value_type, "actual")
 
     reg_if_df <- function(id, label, df) {
@@ -719,7 +656,7 @@
 
     reg_if_df("table_area_total", "Total Area Coverage",
               tryCatch(area_df_total_act(), error = function(e) NULL))
-    if (has_pre && !is.null(rv$rast_pred)) {
+    if (has_pre && length(rv$rast_list_pre) > 0) {
       reg_if_df("table_area_pre_total", "Total Area Coverage (Predicted)",
                 tryCatch(area_df_total_pre(), error = function(e) NULL))
     }
@@ -909,7 +846,6 @@
     # The column set is CV_METRIC_LABELS (shared with the export), minus
     # Moran's E[I], which rides along here as a per-row tooltip.
     keys <- setdiff(names(CV_METRIC_LABELS), "moran_e")
-    metric_cols <- c("Source", unname(CV_METRIC_LABELS[keys]))
     # Four-significant-digit display; the two scale-dependent metrics and the
     # Moran cells are character, since they can carry a marker.
     num_cols <- unname(CV_METRIC_LABELS[setdiff(keys, c("nrmse_mean", "smape",
@@ -1286,7 +1222,7 @@
   })
 
   class_zone_block_reason <- reactive({
-    if (is.null(rv$rast) && is.null(rv$rast_pred))
+    if (length(rv$rast_list_act) + length(rv$rast_list_pre) == 0)
       return("No interpolated surface yet. Run an interpolation first.")
     if (!isTRUE(input$color_style %in% c("agro", "bin")))
       return("Class zones exist only under Agronomical or Binned map styling. Switch Map Styling in the sidebar (Agronomical also needs Apply to maps and statistics).")
@@ -1336,17 +1272,18 @@
   )
 
   # Class zones of the surface on screen (the view switcher, not the sidebar),
-  # as for Quick Export.
+  # as for Quick Export, dissolved locality by locality from the rasters the
+  # Area Coverage tables measure.
   class_zone_sf <- reactive({
     meta <- get_display_meta()
     if (is.null(meta)) return(NULL)
 
     view <- map_view_base()
     sources <- switch(view,
-      "view_pred"  = list(list(r = rv$rast_pred, tag = "Predicted", surface = "pre")),
-      "view_comp"  = list(list(r = rv$rast, tag = "Actual", surface = "act"),
-                          list(r = rv$rast_pred, tag = "Predicted", surface = "pre")),
-      list(list(r = rv$rast, tag = "Actual", surface = "act")))
+      "view_pred"  = list(list(r = rv$rast_list_pre, tag = "Predicted", surface = "pre")),
+      "view_comp"  = list(list(r = rv$rast_list_act, tag = "Actual", surface = "act"),
+                          list(r = rv$rast_list_pre, tag = "Predicted", surface = "pre")),
+      list(list(r = rv$rast_list_act, tag = "Actual", surface = "act")))
 
     # Each surface is dissolved with its own classes, as the map draws it.
     parts <- lapply(sources, function(s) {

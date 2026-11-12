@@ -18,7 +18,12 @@ ui_main_tabs <- mainPanel(width = 9,
                              # chosen in one pass); its pairs are edited in step 4.
                              div(class = "setup-upload-field",
                                  fileInput("meta_file",
-                                           HTML(paste0("Variable List (Optional)", info_tooltip("meta_file_info", "A second table giving your columns readable labels, units, categories and their Actual/Predicted pairs. Headers containing 'label' or 'name' supply the labels shown on every map and report; headers containing 'cat' or 'group' file the variables into folders; a 'Unit' or 'Units' header supplies the units shown in map legends. Without one the pairs are auto-detected from the column names. Either way they are listed for review and editing under Variable Mapping & Verification, at the foot of this tab."))),
+                                           HTML(paste0("Variable List (Optional)", info_tooltip("meta_file_info", tip_html(
+                                             "A second table giving your columns readable labels, units and categories:",
+                                             "• Headers containing 'label' or 'name' supply the labels shown on every map and report.",
+                                             "• Headers containing 'cat' or 'group' file the variables into folders.",
+                                             "• A 'Unit' or 'Units' header supplies the units shown in map legends.",
+                                             "The Actual/Predicted pairs are detected from the column names, with or without a list. Everything is listed for review and editing under <b>Variable Mapping & Verification</b>, at the foot of this tab.")))),
                                            accept = c(".xlsx", ".xls", ".csv"))
                              )
                          ),
@@ -114,7 +119,7 @@ ui_main_tabs <- mainPanel(width = 9,
                          div(class = "mn-maptoolbar",
                              mn_popover("Overlays", icon_tag = icon("layer-group"), width = "270px",
                                  checkboxInput("show_points_viewer", HTML(paste0("Show Points", info_tooltip("show_points_info", "Rendering the sampling points on the map can take a while, up to ~30 seconds depending on the number of samples and the size of the dataset. The map stays responsive while the points are being drawn."))), FALSE, width = "auto"),
-                                 checkboxInput("show_res_overlay", "Show Res", FALSE, width = "auto"),
+                                 checkboxInput("show_res_overlay", "Cell Sizes", FALSE, width = "auto"),
                                  checkboxInput("show_north", "North Arrow", FALSE, width = "auto"),
                                  checkboxInput("show_borders", "Borders", FALSE, width = "auto"),
                                  checkboxInput("show_scale", "Map Scale", FALSE, width = "auto"),
@@ -140,12 +145,12 @@ ui_main_tabs <- mainPanel(width = 9,
                                    div(style = "display:flex; align-items:center; gap:6px;",
                                        textInput("carto_api_key", NULL, value = "", width = "175px",
                                                  placeholder = "CARTO API key"),
-                                       info_tooltip("carto_key_info", paste0(
-                                         "CARTO now requires a free API key for its Positron and Dark Matter basemaps. ",
-                                         "Without one the tiles arrive stamped with an 'API key required' watermark. ",
-                                         "Request a key at carto.com/basemaps/apikey and paste it here. ",
-                                         "The key is held for this session only - it is sent to CARTO to fetch tiles and ",
-                                         "is never written into a run configuration, an export, or the run history.")))
+                                       info_tooltip("carto_key_info", tip_html(
+                                         paste("CARTO now requires a free API key for its Positron and Dark Matter basemaps.",
+                                               "Without one the tiles arrive stamped with an 'API key required' watermark."),
+                                         "Request a key at carto.com/basemaps/apikey and paste it here.",
+                                         paste("The key is held for this session only - it is sent to CARTO to fetch tiles and",
+                                               "is never written into a run configuration, an export, or the run history."))))
                                  )
                              ),
                                  uiOutput("locality_pan_ui"),
@@ -169,7 +174,7 @@ ui_main_tabs <- mainPanel(width = 9,
                                                   title = "Downloads all polygons drawn on the map, in the format selected above.")),
                                  tags$span(id = "class_zone_dl_wrap", style = "display: inline-flex;",
                                    downloadButton("class_zone_download_btn", "Class zones", class = "btn-default btn-sm btn-block",
-                                                  title = "Downloads the class zones of the surface currently displayed as a GIS vector layer, in the format selected above. One dissolved polygon per class, carrying its label, its break limits and its area in hectares.")),
+                                                  title = "Downloads the class zones of the surface currently displayed as a GIS vector layer, in the format selected above. One dissolved polygon per class and locality, carrying its label, its break limits and its area in hectares.")),
                                  downloadButton("export_updated_data", "Updated dataset", class = "btn-default btn-sm btn-block",
                                                 title = "Use after modifying your dataset in the app - e.g. after drawing a polygon on the map and saving it as a new group ('Assign Locality / Analysis Group'). Downloads the current dataset as .xlsx, including the 'Assigned_Locality' column.")
                              )
@@ -272,18 +277,29 @@ ui_main_tabs <- mainPanel(width = 9,
                               conditionalPanel(condition = "output.has_cv_repeats === true",
                                 hr(),
                                 sci_table("cv_repeats_table", label = "Fold-Realization Stability",
-                                  title = HTML(paste0("Fold-Realization Stability", info_tooltip("cv_repeats_info", "Repeated cross-validation: the same model re-scored under alternative fold assignments (the partition is the only thing that changes). Cells are mean ± SD across realizations. Treat the SD as the resolution of the comparison: two methods whose metrics differ by less than this are separated by fold luck, not skill. Leave-one-out plans, and kNNDM plans that group samples spatially, are deterministic and are never repeated. Moran's I is reported for realization 1 only, in the table above."))),
+                                  title = HTML(paste0("Fold-Realization Stability", info_tooltip("cv_repeats_info", tip_html(
+                                    "Repeated cross-validation: the same model re-scored under alternative fold assignments (the partition is the only thing that changes). Cells are mean ± SD across realizations.",
+                                    "Treat the SD as the resolution of the comparison: two methods whose metrics differ by less than this are separated by fold luck, not skill.",
+                                    "Leave-one-out plans, and kNNDM plans that group samples spatially, are deterministic and are never repeated. Moran's I is reported for realization 1 only, in the table above.")))),
                                   content = tagList(
                                     div(class = "table-container", DT::dataTableOutput("cv_repeats_table")),
                                     uiOutput("cv_repeats_notes")
                                   ))
                               ),
                               # How closely the folds' held-out distances match
-                              # the map's, under every strategy and engine.
-                              conditionalPanel(condition = "output.disp_method && output.disp_method != ''",
+                              # the map's, under every strategy and engine. Each
+                              # locality's folds are matched to its own map, so the
+                              # card is shown for a named locality only.
+                              conditionalPanel(condition = "output.disp_method && output.disp_method != '' && input.sel_loc_stats && input.sel_loc_stats != 'Total (Combined)'",
                                 hr(),
                                 sci_plot_card("cv_distance_plot", "CV Distance Match",
-                                              info = info_tooltip("cv_distance_info", "Three distance distributions for the selected locality, as cumulative curves. Map cells → nearest sample: how far the map predicts from the data. Held-out → nearest training sample: how far this run's cross-validation predicted. Sample → nearest other sample: the sampling density. The closer the held-out curve lies to the map curve, the better the reported metrics describe this map's accuracy: a held-out curve to the left means they are optimistic for this map, to the right pessimistic. W is the area between those two curves (Wasserstein distance, in map units), shown for this run's folds and for random 10-fold; kNNDM chooses its folds to make it small. Scientific Guide Section 5.1."))
+                                              info = info_tooltip("cv_distance_info", tip_html(
+                                                "Three distance distributions for the selected locality, as cumulative curves.",
+                                                "Map cells → nearest sample" = "how far the map predicts from the data.",
+                                                "Held-out → nearest training sample" = "how far this run's cross-validation predicted.",
+                                                "Sample → nearest other sample" = "the sampling density.",
+                                                "The closer the held-out curve lies to the map curve, the better the reported metrics describe this map's accuracy: a held-out curve to the left means they are optimistic for this map, to the right pessimistic.",
+                                                "W is the area between those two curves (Wasserstein distance, in map units), shown for this run's folds and for random 10-fold; kNNDM chooses its folds to make it small. Scientific Guide Section 5.1.")))
                               )
                             ),
                             div(id = "prediction_performance_ui",
@@ -330,7 +346,9 @@ ui_main_tabs <- mainPanel(width = 9,
                                 conditionalPanel(condition = "output.sci_multiple_localities == 'yes'",
                                   sci_table("stats_table_total", "Descriptive Statistics")
                                 ),
-                                sci_table("stats_table_loc", label = "Selected locality descriptive statistics")
+                                conditionalPanel(condition = "input.sel_loc_stats && input.sel_loc_stats != 'Total (Combined)'",
+                                  sci_table("stats_table_loc", label = "Selected locality descriptive statistics")
+                                )
                               )
                             ),
                             conditionalPanel(condition = "output.sci_diag_method == 'OK' || output.sci_vgm_tuning == 'yes'",
@@ -387,7 +405,11 @@ ui_main_tabs <- mainPanel(width = 9,
                                                         selected = "v", size = "sm"))
                                ),
                                sci_plot_card("directional_vgm_plot", "Directional Variogram (Anisotropy Check)",
-                                 info = info_tooltip("dir_vgm", "Semivariance computed separately within four angular cones (bearings measured clockwise from north). If the four curves reach their sill at clearly different distances, the spatial structure is directional (anisotropic) and a single omnidirectional range under-describes it. The switches above choose the point set: the measured values or an uploaded ML prediction column, and for either one the values themselves or that surface's cross-validation residuals. Diagnostic only: every interpolation engine in this app is omnidirectional, so nothing on the map changes because of what you read here. On Total (Combined) each direction is pooled within localities, and the lag axis stops at the half-diagonal of the smallest eligible locality, as on the other variogram cards."),
+                                 info = info_tooltip("dir_vgm", tip_html(
+                                   "Semivariance computed separately within four angular cones (bearings measured clockwise from north). If the four curves reach their sill at clearly different distances, the spatial structure is directional (anisotropic) and a single omnidirectional range under-describes it.",
+                                   "The switches above choose the point set: the measured values or an uploaded ML prediction column, and for either one the values themselves or that surface's cross-validation residuals.",
+                                   "Diagnostic only" = "every interpolation engine in this app is omnidirectional, so nothing on the map changes because of what you read here.",
+                                   "On Total (Combined) each direction is pooled within localities, and the lag axis stops at the half-diagonal of the smallest eligible locality, as on the other variogram cards.")),
                                  height = "330px")
                             ),
                             div(id = "validation_diagnostics_act_ui",

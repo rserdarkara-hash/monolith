@@ -112,9 +112,9 @@
 
   # Archived entries (snapshot_display_state()) hold rasters, CV objects and
   # models, so the archive keeps the most recent few. On the 7-locality golden
-  # set (OK, comparison, Auto grid) an entry carries the merged surfaces plus
-  # 78 MB of per-locality state, hence 3; uncertainty maps are derivations,
-  # not copies.
+  # set (OK, comparison, Auto grid) an entry carries 78 MB of per-locality
+  # state, hence 3; map items share those rasters and uncertainty maps are
+  # derivations, not copies.
   MAX_RUN_HISTORY <- 3L
   push_run_history <- function(entry, base = NULL) {
     # A cancelled run produced nothing, so it is never archived as a result.
@@ -133,25 +133,31 @@
     rv$run_history <- hist
   }
 
-  archive_and_proceed <- function(action, meta, n_locs, estimate_text, is_long_run) {
-    if (action == "archive") {
-      current <- snapshot_display_state()
-      if (!is.null(current$config) && length(current$registry) > 0) {
-        push_run_history(current)
-      }
+  # The Run button as it stands between runs.
+  reset_run_button <- function() {
+    shinyjs::enable("run")
+    updateActionButton(session, "run", label = "Run Interpolation", icon = character(0))
+    shinyjs::runjs("$('#run i').remove();")
+  }
+
+  # After the previous-results decision: archive the run on screen when asked
+  # to, then start the run, through the estimate confirmation when it is long.
+  archive_and_proceed <- function(action, est = calculate_run_estimates()) {
+    if (action == "archive" && displayed_run_has_results()) {
+      push_run_history(snapshot_display_state())
     }
-    
-    if (is_long_run) {
+
+    if (est$is_long_run) {
       showModal(modalDialog(
         title = "Ready to Run Interpolation",
         tags$p("You are about to start the spatial interpolation pipeline with the following parameters:"),
         div(style = "background-color: var(--mn-surface-2); padding: 12px; border-radius: 5px; margin: 10px 0;",
           tags$strong("Method: "), tags$span(input$method), tags$br(),
-          tags$strong("Localities: "), tags$span(n_locs), tags$br(),
-          tags$strong("Variables: "), tags$span(meta$label)
+          tags$strong("Localities: "), tags$span(est$n_locs), tags$br(),
+          tags$strong("Variables: "), tags$span(est$meta$label)
         ),
         div(class = "mn-notice",
-          icon("hourglass-half"), tags$strong(" Run Estimate: "), tags$span(estimate_text)
+          icon("hourglass-half"), tags$strong(" Run Estimate: "), tags$span(est$estimate_text)
         ),
         footer = tagList(
           actionButton("confirm_start_run", "Start Interpolation", class = "btn-primary", icon = icon("play")),
@@ -201,7 +207,7 @@
       title = tags$div(style = "color: var(--mn-danger); font-weight: 600;",
                        icon("exclamation-triangle"), suit$title),
       tags$p(suit$msg),
-      tags$p(suit$detail),
+      lapply(suit$detail, tags$p),
       # Name the CRS that IS right, here too, for a user who skipped the Data
       # Setup advisory.
       local({
@@ -254,24 +260,34 @@
   # override. Every run asks again; the answer travels in rv$vif_choice_made,
   # which the proceed_vif observer consumes and clears.
   run_collinearity_gate <- function() {
-    if (input$method %in% c("RK", "RFK", "CK") && length(input$aux_vars) > 1) {
-       # Screened on the selected localities' data, which the run fits.
-       df_vif <- sf::st_drop_geometry(rv$user_data)
-       locs <- resolve_selected_localities(input$locality, df_vif, rv$mapping$loc)
-       eff_subset <- effective_subset(input$value_type, input$subset, names(df_vif))
-       df_vif <- run_locality_rows(df_vif, rv$mapping$loc, locs, eff_subset)
-       df_aux <- df_vif[, input$aux_vars, drop = FALSE]
-       vif_res <- check_vif(df_aux, threshold = 10)
+    meta <- get_current_meta()
+    if (input$method %in% c("RK", "RFK", "CK") && length(input$aux_vars) > 1 && !is.null(meta)) {
+       # Each selected locality is screened as the run will screen it: on its
+       # own fitted point set, per surface (locality_screen_preview()). The
+       # dialog opens when any of them would drop a collinear covariate, the
+       # one finding its answer decides.
+       locs <- resolve_selected_localities(input$locality, rv$user_data, rv$mapping$loc)
+       eff_subset <- effective_subset(input$value_type, input$subset, names(rv$user_data))
+       pred_col <- if (identical(input$value_type, "pred_ss")) meta$pred_ss else meta$pred
+       has_pre <- (isTRUE(input$comp_mode) || !identical(input$value_type, "actual")) && is_valid_col_ref(pred_col)
+       surfaces <- c(v = "Actual", if (has_pre) c(pv = "Predicted"))
+       screens <- lapply(stats::setNames(locs, locs), function(l) {
+         locality_screen_preview(
+           l, locality_run_frame(rv$user_data, rv$mapping, l, eff_subset, meta$actual, if (has_pre) pred_col),
+           rv$mapping$crs, input$method, input$aux_vars, 10, names(surfaces))
+       })
+       found <- collinearity_dialog_lines(screens, surfaces)
 
-       if (length(vif_res$dropped) > 0) {
+       if (found$any_vif) {
           showModal(modalDialog(
             title = tags$div(style = "color: var(--mn-danger); font-weight: 600;", icon("exclamation-triangle"), "High Multicollinearity Detected"),
-            tags$p("High correlation / multicollinearity detected among the selected variables within the selected localities. This may destabilize the spatial estimation model."),
-            tags$p(tags$b("Variables recommended to be dropped:"), paste(vif_res$dropped, collapse=", ")),
+            tags$p("The selected covariates are collinear (variance inflation factor above 10) within at least one selected locality. This may destabilize the spatial estimation model."),
+            tags$p(tags$b("What each locality's model would drop:")),
+            tags$ul(style = "max-height: 220px; overflow-y: auto;", lapply(found$lines, tags$li)),
             # The answer is a rule, applied to each locality's samples and
             # again inside every CV fold.
             tags$p(style = "font-size: 0.9em; color: var(--mn-text-2);",
-                   "Your answer sets the rule. The map applies it to all samples of each locality; cross-validation applies it again inside every fold, using only that fold's training samples, so a fold can keep a different set. Constant covariates are always dropped."),
+                   "Your answer sets the rule for the collinear covariates. The map applies it to all samples of each locality; cross-validation applies it again inside every fold, using only that fold's training samples, so a fold can keep a different set. A covariate that is constant within a locality is dropped there whatever the answer."),
             tags$p("What would you like to do?"),
             footer = tagList(
               actionButton("vif_drop_btn", "Auto-Drop and Continue", class = "btn-success"),
@@ -313,7 +329,7 @@
       showNotification("A model run is already in progress.", type = "warning")
       return()
     }
-    # Cross-feature guard (mirrors run_optimizer_async()): both spawn cores - 1
+    # Cross-feature guard (mirrors run_autofit_async()): both spawn cores - 1
     # workers.
     if (isTRUE(rv$opt_running)) {
       showNotification("An optimization is running; start the interpolation after it finishes.", type = "warning")
@@ -343,16 +359,12 @@
     rv$active_vif_thresh <- vif_thresh
     
     est <- calculate_run_estimates()
-    meta <- est$meta
-    n_locs <- est$n_locs
-    estimate_text <- est$estimate_text
-    is_long_run <- est$is_long_run
-    
-    if (!is.null(rv$run_config_summary) && length(rv$export_registry) > 0) {
-      if (rv$auto_archive_choice == "archive") {
-        archive_and_proceed("archive", meta, n_locs, estimate_text, is_long_run)
-      } else if (rv$auto_archive_choice == "discard") {
-        archive_and_proceed("discard", meta, n_locs, estimate_text, is_long_run)
+
+    # Asked whenever the run on screen has results, whatever the export
+    # registry holds: clearing the registry does not make them disposable.
+    if (displayed_run_has_results()) {
+      if (rv$auto_archive_choice %in% c("archive", "discard")) {
+        archive_and_proceed(rv$auto_archive_choice, est)
       } else {
         showModal(modalDialog(
           title = "Previous Results Detected",
@@ -365,7 +377,7 @@
               format(rv$run_config_summary$timestamp, "%H:%M:%S")))
           ),
           div(class = "mn-notice",
-            icon("hourglass-half"), tags$strong(" Run Estimate: "), tags$span(estimate_text)
+            icon("hourglass-half"), tags$strong(" Run Estimate: "), tags$span(est$estimate_text)
           ),
           checkboxInput("auto_archive_remember", "Remember my choice (apply automatically for future runs)", FALSE),
           footer = tagList(
@@ -377,38 +389,18 @@
         ))
       }
     } else {
-      archive_and_proceed("none", meta, n_locs, estimate_text, is_long_run)
+      archive_and_proceed("none", est)
     }
   })
 
-  observeEvent(input$archive_prev_run, {
-    removeModal()
-    if (isTRUE(input$auto_archive_remember)) {
-      rv$auto_archive_choice <- "archive"
-    }
-    
-    est <- calculate_run_estimates()
-    meta <- est$meta
-    n_locs <- est$n_locs
-    estimate_text <- est$estimate_text
-    is_long_run <- est$is_long_run
-    
-    archive_and_proceed("archive", meta, n_locs, estimate_text, is_long_run)
-  })
-
-  observeEvent(input$discard_prev_run, {
-    removeModal()
-    if (isTRUE(input$auto_archive_remember)) {
-      rv$auto_archive_choice <- "discard"
-    }
-    
-    est <- calculate_run_estimates()
-    meta <- est$meta
-    n_locs <- est$n_locs
-    estimate_text <- est$estimate_text
-    is_long_run <- est$is_long_run
-    
-    archive_and_proceed("discard", meta, n_locs, estimate_text, is_long_run)
+  # The two answers of the Previous Results dialog.
+  for (.choice in c("archive", "discard")) local({
+    choice <- .choice
+    observeEvent(input[[paste0(choice, "_prev_run")]], {
+      removeModal()
+      if (isTRUE(input$auto_archive_remember)) rv$auto_archive_choice <- choice
+      archive_and_proceed(choice)
+    })
   })
 
   observeEvent(input$confirm_start_run, {
@@ -496,7 +488,7 @@
         showModal(modalDialog(
           title = tags$div(style = "color: var(--mn-danger); font-weight: 600;", icon("exclamation-triangle"), "Missing Covariates"),
           tags$p("The following selected covariates do not exist in the dataset:"),
-          tags$pre(style = "background-color: var(--mn-surface-2); color: var(--mn-text); border: 1px solid var(--mn-line); border-left: 2px solid var(--mn-danger); padding: 10px; border-radius: 4px;", paste(missing_vars, collapse = ", ")),
+          tags$pre(class = "mn-error-pre", paste(missing_vars, collapse = ", ")),
           easyClose = TRUE,
           footer = modalButton("Dismiss")
         ))
@@ -515,7 +507,7 @@
         showModal(modalDialog(
           title = tags$div(style = "color: var(--mn-danger); font-weight: 600;", icon("exclamation-triangle"), "Non-Numeric Covariates"),
           tags$p("The following selected covariates do not contain sufficient valid numeric values (minimum 3 required):"),
-          tags$pre(style = "background-color: var(--mn-surface-2); color: var(--mn-text); border: 1px solid var(--mn-line); border-left: 2px solid var(--mn-danger); padding: 10px; border-radius: 4px;", paste(non_numeric_vars, collapse = ", ")),
+          tags$pre(class = "mn-error-pre", paste(non_numeric_vars, collapse = ", ")),
           easyClose = TRUE,
           footer = modalButton("Dismiss")
         ))
@@ -690,9 +682,9 @@
     tryCatch({
       rv$export_registry <- list()
       rv$rast_list_act <- list(); rv$rast_list_pre <- list(); sf_list <- list(); b_list <- list()
-      rv$rast <- NULL; rv$rast_pred <- NULL; rv$rast_res <- NULL; rv$has_predictions <- FALSE
+      rv$has_predictions <- FALSE
       # Set only when this run produces them, so cleared here.
-      rv$rast_point_res <- NULL; rv$sf <- NULL; rv$bound <- NULL
+      rv$sf <- NULL; rv$bound <- NULL
       rv$bound_overlap_m2 <- c(act = 0, pre = 0)
     rv$log <- paste0("[Run #", rv$run_counter, "] Starting spatial interpolation using method: ", input$method, "...")
     rv$run_warnings <- character(0)
@@ -714,9 +706,6 @@
     
     current_method <- input$method
     current_crs <- rv$mapping$crs
-    current_loc_col <- rv$mapping$loc
-    current_x_col <- rv$mapping$x
-    current_y_col <- rv$mapping$y
     val_type <- input$value_type
     actual_col <- meta$actual
     b_type <- input$boundary_type
@@ -750,19 +739,13 @@
     user_rows[[CV_ROW_ID_COL]] <- seq_len(nrow(user_rows))
     cv_population_sel <- if (identical(current_method, "OK")) (input$cv_population %||% "native") else "native"
 
+    # Only a run that maps a prediction side carries the prediction column, or
+    # an Actual-only run would register ML-prediction products.
+    run_uses_pred <- isTRUE(comp_mode) || !identical(val_type, "actual")
     df_list <- lapply(locs, function(l) {
-      sub_df <- run_locality_rows(user_rows, current_loc_col, l, eff_subset)
-      
-      pts_data <- sub_df
-      pts_data$x <- sub_df[[current_x_col]]
-      pts_data$y <- sub_df[[current_y_col]]
-      pts_data$v <- sub_df[[actual_col]]
-      # Only a run that maps a prediction side carries the prediction column,
-      # or an Actual-only run would register ML-prediction products.
-      run_uses_pred <- isTRUE(comp_mode) || !identical(val_type, "actual")
-      pts_data$pv <- if (run_uses_pred && !is.null(pred_col) &&
-                         pred_col %in% colnames(sub_df)) sub_df[[pred_col]] else NA
-      
+      pts_data <- locality_run_frame(user_rows, rv$mapping, l, eff_subset, actual_col,
+                                     if (run_uses_pred) pred_col)
+
       pre_fit_act <- resolve_stored_vgm(rv$v_fit_list[[paste0(l, "_act")]], vgm_mode, tuning_keys[["act"]])
       idw_param <- function(target) {
         if (!idw_per_locality) return(idw_p_val)
@@ -967,29 +950,30 @@
         history_file <- monolith_history_file()
         dir.create(dirname(history_file), recursive = TRUE, showWarnings = FALSE)
 
-        total_samples <- sum(log_sample_counts)
-        per_locality_share <- if (total_samples > 0) {
-          batch_elapsed_sec * (log_sample_counts / total_samples)
-        } else {
-          rep(batch_elapsed_sec / log_n_locs, log_n_locs)
-        }
-        
-        new_rows <- data.frame(
-          timestamp = format(Sys.time(), "%Y-%m-%d %H:%M:%S"),
-          method = log_method,
-          comp_mode = log_comp_mode,
-          n_locs_in_batch = log_n_locs,
-          n_samples = log_sample_counts,
-          cores_used = log_cores,
-          batch_elapsed_sec = batch_elapsed_sec,
-          per_locality_share_sec = per_locality_share,
-          stringsAsFactors = FALSE
-        )
-        
-        if (file.exists(history_file)) {
-          write.table(new_rows, history_file, append = TRUE, sep = ",", row.names = FALSE, col.names = FALSE)
-        } else {
-          write.table(new_rows, history_file, append = FALSE, sep = ",", row.names = FALSE, col.names = TRUE)
+        # One record per locality that produced a surface: the time its own
+        # worker spent on it (res$elapsed_sec), which estimate_run_duration()
+        # spreads over the workers of the next run. A share of the batch's
+        # wall-clock time would already be divided by this run's workers.
+        loc_sec <- vapply(res_all, function(r) as.numeric(r$elapsed_sec %||% NA_real_)[1], numeric(1))
+        done <- is.finite(loc_sec) &
+          vapply(res_all, function(r) !is.null(r$r_a) || !is.null(r$r_p), logical(1))
+        if (any(done)) {
+          new_rows <- data.frame(
+            timestamp = format(Sys.time(), "%Y-%m-%d %H:%M:%S"),
+            method = log_method,
+            comp_mode = log_comp_mode,
+            n_locs_in_batch = log_n_locs,
+            n_samples = log_sample_counts[done],
+            cores_used = log_cores,
+            batch_elapsed_sec = batch_elapsed_sec,
+            locality_sec = loc_sec[done],
+            stringsAsFactors = FALSE
+          )
+          # A log without the locality_sec column holds another quantity and
+          # is started again.
+          fresh <- !file.exists(history_file) ||
+            !grepl("locality_sec", readLines(history_file, n = 1L, warn = FALSE), fixed = TRUE)
+          write.table(new_rows, history_file, append = !fresh, sep = ",", row.names = FALSE, col.names = fresh)
         }
       }, error = function(e) {})
       
@@ -1086,7 +1070,7 @@
         if (current_method == "CK") rv$run_config_summary$ck_design <- cov_rec$design
       }
       # Each locality's cell size (the Auto modes set it during the run), for
-      # the resolution overlay and the run record.
+      # the Cell Sizes overlay and the run record.
       rv$disp$grid_res_used <- grid_res_used
       if (length(grid_res_used)) {
         used <- round(unlist(grid_res_used), 1)
@@ -1118,7 +1102,7 @@
           lapply(names(failed_regions), function(l) {
             tagList(
               tags$p(style = "margin-bottom: 4px;", tags$b(l)),
-              tags$pre(style = "background-color: var(--mn-surface-2); color: var(--mn-text); border: 1px solid var(--mn-line); border-left: 2px solid var(--mn-danger); padding: 15px; border-radius: 4px; overflow-x: auto; white-space: pre-wrap; font-family: monospace; font-size: 0.9em;", failed_regions[[l]])
+              tags$pre(class = "mn-error-pre", failed_regions[[l]])
             )
           }),
           easyClose = TRUE,
@@ -1129,68 +1113,49 @@
     # Map labels double as the exported figure's title, which names the method
     # as the Map Viewer's title does.
     m_lab <- get_method_label(current_method)
-    valid_a <- Filter(Negate(is.null), rv$rast_list_act)
-    valid_p <- Filter(Negate(is.null), rv$rast_list_pre)
-    valid_r <- Filter(Negate(is.null), rv$rast_list_res)
-    valid_pr <- Filter(Negate(is.null), rv$rast_list_point_res)
-    
-    if(length(valid_a) > 0) {
-      rv$rast <- drop_empty_variance(merge_wrapped_rasters(valid_a))
-      register_export_item("map_actual", paste(meta$label, "- Actual Map -", m_lab), "map", rv$rast, meta$category,
-                           legend = map_legend_title(meta$label, meta$unit), surface = "act")
-      
+
+    # A map item's payload is the surface as computed: its per-locality
+    # rasters, each on its own grid (shared with rv$rast_list_*, not copied).
+    surfaces <- list(act = list(rasters = rv$rast_list_act, id = "map_actual", name = "Actual"),
+                     pre = list(rasters = rv$rast_list_pre, id = "map_predicted", name = "Predicted"))
+    for (tgt in names(surfaces)) {
+      s <- surfaces[[tgt]]
+      if (length(s$rasters) == 0) next
+      register_export_item(s$id, paste(meta$label, "-", s$name, "Map -", m_lab), "map", s$rasters, meta$category,
+                           legend = map_legend_title(meta$label, meta$unit), surface = tgt)
       # Uncertainty products for the kriging engines only (IDW's var1.var is
       # all NA, TPS has none), and only for a surface where some locality
       # reported a variance (vgm_variance_withheld()), as in the Map Viewer.
-      temp_rast_a <- terra::unwrap(rv$rast)
-      if (method_has_variance(current_method) && "var1.var" %in% names(temp_rast_a)) {
-        # The Map Viewer's SE/variance views key on this, so menu and registry
-        # agree.
-        rv$disp$variance_surfaces <- c(rv$disp$variance_surfaces, "act")
-        # Registered as derivations of the surface (export_item_obj()), not
-        # copies. `name` is the GeoTIFF band description, so the SE is named
-        # var1.se.
-        register_export_item("map_uncert_var_act", paste(meta$label, "- Uncertainty Map (Variance - Actual) -", m_lab), "map", NULL, meta$category, kind = "uncertainty",
-                             legend = map_legend_title(meta$label, meta$unit, "var"),
-                             derived = list(src = temp_rast_a, layer = "var1.var", name = "var1.var"))
-        register_export_item("map_uncert_se_act", paste(meta$label, "- Uncertainty Map (SE - Actual) -", m_lab), "map", NULL, meta$category, kind = "uncertainty",
-                             legend = map_legend_title(meta$label, meta$unit, "se"),
-                             derived = list(src = temp_rast_a, layer = "var1.var", fun = "sqrt", name = "var1.se"))
-      }
+      with_var <- if (method_has_variance(current_method)) rasters_with_variance(s$rasters)
+      if (length(with_var) == 0) next
+      # The Map Viewer's SE/variance views key on this, so menu and registry
+      # agree.
+      rv$disp$variance_surfaces <- c(rv$disp$variance_surfaces, tgt)
+      # Registered as derivations of the surface (export_item_obj()), not
+      # copies. `name` is the GeoTIFF band description, so the SE is named
+      # var1.se.
+      register_export_item(paste0("map_uncert_var_", tgt), paste0(meta$label, " - Uncertainty Map (Variance - ", s$name, ") - ", m_lab), "map", NULL, meta$category, kind = "uncertainty",
+                           legend = map_legend_title(meta$label, meta$unit, "var"),
+                           derived = list(src = with_var, layer = "var1.var", name = "var1.var"))
+      register_export_item(paste0("map_uncert_se_", tgt), paste0(meta$label, " - Uncertainty Map (SE - ", s$name, ") - ", m_lab), "map", NULL, meta$category, kind = "uncertainty",
+                           legend = map_legend_title(meta$label, meta$unit, "se"),
+                           derived = list(src = with_var, layer = "var1.var", fun = "sqrt", name = "var1.se"))
     }
-    if(length(valid_p) > 0) {
-      rv$rast_pred <- drop_empty_variance(merge_wrapped_rasters(valid_p))
-      rv$has_predictions <- TRUE
-      register_export_item("map_predicted", paste(meta$label, "- Predicted Map -", m_lab), "map", rv$rast_pred, meta$category,
-                           legend = map_legend_title(meta$label, meta$unit), surface = "pre")
-      
-      temp_rast_p <- terra::unwrap(rv$rast_pred)
-      if (method_has_variance(current_method) && "var1.var" %in% names(temp_rast_p)) {
-        rv$disp$variance_surfaces <- c(rv$disp$variance_surfaces, "pre")
-        register_export_item("map_uncert_var_pre", paste(meta$label, "- Uncertainty Map (Variance - Predicted) -", m_lab), "map", NULL, meta$category, kind = "uncertainty",
-                             legend = map_legend_title(meta$label, meta$unit, "var"),
-                             derived = list(src = temp_rast_p, layer = "var1.var", name = "var1.var"))
-        register_export_item("map_uncert_se_pre", paste(meta$label, "- Uncertainty Map (SE - Predicted) -", m_lab), "map", NULL, meta$category, kind = "uncertainty",
-                             legend = map_legend_title(meta$label, meta$unit, "se"),
-                             derived = list(src = temp_rast_p, layer = "var1.var", fun = "sqrt", name = "var1.se"))
-      }
-    }
-    if(length(valid_r) > 0) {
-      rv$rast_res <- merge_wrapped_rasters(valid_r)
-      register_export_item("map_residuals", paste(meta$label, "- ML Predictions Residual Map (Delta) -", m_lab), "map", rv$rast_res, meta$category, kind = "residual",
+    rv$has_predictions <- length(rv$rast_list_pre) > 0
+    if (length(rv$rast_list_res) > 0) {
+      register_export_item("map_residuals", paste(meta$label, "- ML Predictions Residual Map (Delta) -", m_lab), "map", rv$rast_list_res, meta$category, kind = "residual",
                            legend = map_legend_title(meta$label, layer = "resid"))
     }
-    if(length(valid_pr) > 0) {
-      rv$rast_point_res <- merge_wrapped_rasters(valid_pr)
-      register_export_item("map_interp_point_errors", paste(meta$label, "- ML Predictions Interpolated Point Errors Map"), "map", rv$rast_point_res, meta$category, kind = "residual",
+    if (length(rv$rast_list_point_res) > 0) {
+      register_export_item("map_interp_point_errors", paste(meta$label, "- ML Predictions Interpolated Point Errors Map"), "map", rv$rast_list_point_res, meta$category, kind = "residual",
                            legend = map_legend_title(meta$label, layer = "resid"))
     }
-    
-    if(!is.null(rv$rast) && !is.null(rv$rast_pred)) {
-       register_export_item("map_comparison", paste(meta$label, "- Actual vs Predicted Comparison -", m_lab), "map_combined", list(act = rv$rast, pre = rv$rast_pred), meta$category,
+    if (length(rv$rast_list_act) > 0 && length(rv$rast_list_pre) > 0) {
+       register_export_item("map_comparison", paste(meta$label, "- Actual vs Predicted Comparison -", m_lab), "map_combined",
+                            list(act = rv$rast_list_act, pre = rv$rast_list_pre), meta$category,
                             legend = map_legend_title(meta$label, meta$unit))
     }
-    
+
     if(length(sf_list) > 0) {
       target_crs <- sf::st_crs(sf_list[[1]])
       sf_list_aligned <- lapply(sf_list, function(x) {
@@ -1206,6 +1171,23 @@
     rv$bound_overlap_m2 <- c(
       act = tryCatch(locality_boundary_overlap(b_list[names(rv$rast_list_act)]), error = function(e) NA_real_),
       pre = tryCatch(locality_boundary_overlap(b_list[names(rv$rast_list_pre)]), error = function(e) NA_real_))
+    # One GeoTIFF holds a whole surface only when its localities sit on one
+    # lattice and share neither boundary area nor populated cells: a merge
+    # keeps one locality's value where two cover a cell, including a centre
+    # on their common boundary. Otherwise each locality is written on its own grid
+    # (server_export.R). Every surface of a locality sits on that locality's grid.
+    run_grids <- c(rv$rast_list_act, rv$rast_list_pre)
+    run_grids <- run_grids[!duplicated(names(run_grids))]
+    rv$disp$shared_cells <- c(
+      act = rasters_have_shared_cells(rv$rast_list_act),
+      pre = rasters_have_shared_cells(rv$rast_list_pre))
+    if (length(run_grids) > 1) {
+      lattice <- rasters_share_lattice(run_grids)
+      apart <- all(is.finite(rv$bound_overlap_m2)) && all(rv$bound_overlap_m2 <= LOCALITY_OVERLAP_TOL_M2)
+      shared <- any(rv$disp$shared_cells)
+      rv$disp$mergeable <- lattice && apart && !shared
+      rv$log <- paste0(rv$log, "\n", grid_export_note(lattice, apart, rv$run_config_summary$resolution, shared))
+    }
     if(length(valid_bounds) > 0) {
       target_crs_b <- sf::st_crs(valid_bounds[[1]])
       b_list_aligned <- lapply(valid_bounds, function(x) {
@@ -1217,7 +1199,7 @@
       })
       rv$bound <- do.call(rbind, unname(b_list_aligned)) %>% sf::st_union()
     }
-    rv$loc_names <- names(valid_a)
+    rv$loc_names <- names(rv$rast_list_act)
     # This run supersedes any standalone variogram preview: the curves on the
     # Scientific Analysis tab now belong to a run again.
     rv$vgm_preview <- FALSE
@@ -1362,15 +1344,13 @@
         shinyjs::hide("cancel_model_btn")
         shinyjs::html("map_processing_title", "Results Assembly Failed")
         shinyjs::show("reveal_maps_btn")
-        shinyjs::enable("run")
-        updateActionButton(session, "run", label = "Run Interpolation", icon = character(0))
-        shinyjs::runjs("$('#run i').remove();")
+        reset_run_button()
         rv$model_running <- FALSE
         persist_run_warnings()
         showModal(modalDialog(
           title = tags$div(style = "color: var(--mn-danger); font-weight: 600;", icon("exclamation-triangle"), "Results Assembly Failed"),
-          tags$p("The parallel interpolation finished, but an error occurred while assembling the results (merging rasters, building tables, or registering exports) in the main session:"),
-          tags$pre(style = "background-color: var(--mn-surface-2); color: var(--mn-text); border: 1px solid var(--mn-line); border-left: 2px solid var(--mn-danger); padding: 15px; border-radius: 4px; overflow-x: auto; white-space: pre-wrap; font-family: monospace; font-size: 0.9em;", conditionMessage(e)),
+          tags$p("The parallel interpolation finished, but an error occurred while assembling the results (collecting the surfaces, building tables, or registering exports) in the main session:"),
+          tags$pre(class = "mn-error-pre", conditionMessage(e)),
           tags$p(style = "margin-top: 15px;", "The model outputs themselves are not in question. Any surfaces already assembled can be revealed, but maps, tables and the export registry may be incomplete for this run."),
           easyClose = TRUE,
           footer = modalButton("Dismiss")
@@ -1383,9 +1363,7 @@
       shinyjs::hide("cancel_model_btn")
       shinyjs::hide("reveal_maps_btn")
       
-      shinyjs::enable("run")
-      updateActionButton(session, "run", label = "Run Interpolation", icon = character(0))
-      shinyjs::runjs("$('#run i').remove();")
+      reset_run_button()
       
       if (grepl("cancelled", tolower(err$message))) {
         mark_run_cancelled()
@@ -1397,7 +1375,7 @@
         showModal(modalDialog(
           title = tags$div(style = "color: var(--mn-danger); font-weight: 600;", icon("exclamation-triangle"), "Parallel Interpolation Failed"),
           tags$p("An error occurred while executing the parallel interpolation algorithms:"),
-          tags$pre(style = "background-color: var(--mn-surface-2); color: var(--mn-text); border: 1px solid var(--mn-line); border-left: 2px solid var(--mn-danger); padding: 15px; border-radius: 4px; overflow-x: auto; white-space: pre-wrap; font-family: monospace; font-size: 0.9em;", err$message),
+          tags$pre(class = "mn-error-pre", err$message),
           tags$p(style = "margin-top: 15px; font-weight: bold;", "Recommended Troubleshooting Steps:"),
           tags$ul(
             tags$li("Verify that your selected coordinate columns (X, Y) are strictly numeric and contain no missing values (NAs)."),
@@ -1422,9 +1400,7 @@
       showNotification(paste("Model preparation failed:", e$message), type = "error")
       rv$model_running <- FALSE
       
-      shinyjs::enable("run")
-      updateActionButton(session, "run", label = "Run Interpolation", icon = character(0))
-      shinyjs::runjs("$('#run i').remove();")
+      reset_run_button()
     })
     
     NULL
@@ -1537,23 +1513,18 @@
     old_files <- list.files(path = session_progress_dir, pattern = paste0("^(progress|warn)_", session_id, "_.*_.*\\.txt$"), full.names = TRUE)
     if(length(old_files) > 0) tryCatch(file.remove(old_files), error = function(e) NULL)
     
-    shinyjs::enable("run")
-    updateActionButton(session, "run", label = "Run Interpolation", icon = character(0))
-    shinyjs::runjs("$('#run i').remove();")
+    reset_run_button()
   })
 
   observeEvent(input$reveal_maps_btn, {
     shinyjs::hide("map_processing_overlay")
     # The run button was held disabled from the moment the run completed;
     # revealing the results is what makes starting another run legitimate.
-    shinyjs::enable("run")
+    reset_run_button()
     # The widget may still be the placeholder rendered at dispatch; an
     # explicit fit + resize shows tiles and surfaces at once.
     fit_maps_to_data()
     showNotification("Maps and scientific analysis metrics are now available.", type = "message")
-    
-    updateActionButton(session, "run", label = "Run Interpolation", icon = character(0))
-    shinyjs::runjs("$('#run i').remove();")
   })
 
   observeEvent(input$resid_info_btn, {

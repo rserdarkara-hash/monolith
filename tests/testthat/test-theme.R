@@ -187,6 +187,30 @@ test_that("readonly and disabled fields resolve to theme surfaces", {
   expect_match(block, "opacity: 1", fixed = TRUE)
 })
 
+test_that("the drawing tools keep a visible glyph in the dark variant", {
+  css <- monolith_theme_css()
+  # The declaration block of a selector, found as plain text.
+  rule <- function(selector) {
+    at <- regexpr(paste0(selector, " {"), css, fixed = TRUE)
+    if (at < 0) return(character(0))
+    rest <- substring(css, at)
+    substring(rest, 1, regexpr("}", rest, fixed = TRUE))
+  }
+  # Leaflet.draw paints its glyphs dark on the button: on the dark surface an
+  # inverted copy of the sprite is laid over each button...
+  on <- rule(":root[data-theme='dark'] .leaflet-draw-toolbar a::before")
+  expect_length(on, 1)
+  expect_match(on, "filter: invert(1)", fixed = TRUE)
+  expect_match(on, "background-position: inherit", fixed = TRUE)
+  # ...except a disabled one, whose glyph the sprite draws light grey: inverted
+  # it would vanish into the dark button, so the copy darkens it instead. The
+  # button's own sprite stays underneath, so the copy must stay opaque.
+  off <- rule(":root[data-theme='dark'] .leaflet-draw-toolbar a.leaflet-disabled::before")
+  expect_length(off, 1)
+  expect_match(off, "filter: brightness(0.6)", fixed = TRUE)
+  expect_no_match(off, "opacity", fixed = TRUE)
+})
+
 test_that("one chevron serves every closed control", {
   css <- monolith_theme_css()
 
@@ -359,29 +383,72 @@ test_that("no UI file paints a colour outside the token set", {
     # palettes (map ramps, group colours), which are not interface chrome.
     c("theme_helpers.R", "ui_colors.R")
   )
-  pattern <- paste0(
-    "(background|background-color|color|border-color)\\s*:\\s*",
-    "(#[0-9A-Fa-f]{3,8}|white|black|red|silver|gray|grey|whitesmoke)\\b"
+  # A literal colour: hex, rgb()/hsl(), or a colour name.
+  literal <- paste0("(#[0-9A-Fa-f]{3,8}\\b|\\b(rgb|hsl)a?\\(|",
+                    "\\b(white|black|red|green|blue|yellow|orange|silver|gray|grey|whitesmoke)\\b)")
+  patterns <- c(
+    # A CSS declaration, in an inline style or a stylesheet fragment: a colour
+    # property or a border/outline shorthand whose value holds a literal.
+    css = paste0("\\b(background|background-color|color|border-color|outline|",
+                 "border(-top|-right|-bottom|-left)?)\\s*:\\s*[^;'\"]*", literal),
+    # A style assignment in shipped JavaScript: el.style.background = 'white'.
+    js = paste0("\\.style\\.(background|backgroundColor|color|border[A-Za-z]*|outline[A-Za-z]*)",
+                "\\s*=\\s*['\"][^'\"]*", literal)
   )
+  # The scan must see every form it claims to: each of these is a one-variant
+  # colour, and the token forms beside them are not.
+  caught <- c("style = 'color: #333;'", "background: white;", "border: 1px solid #ccc;",
+              "border-bottom: 1px solid rgba(0,0,0,.2)", "sc.style.background = 'white';",
+              "el.style.border = '1px solid #ccc';", "outline: 2px solid red")
+  clean <- c("color: var(--mn-text);", "border: 1px solid var(--mn-line);", "border-radius: 4px;",
+             "sc.classList.add('mn-map-scale');", "fill = \"#2c7fb8\"", "border: none;")
+  hit_any <- function(x) Reduce(`|`, lapply(patterns, grepl, x = x, perl = TRUE))
+  expect_true(all(hit_any(caught)))
+  expect_false(any(hit_any(clean)))
 
   # NOT an exemption list entry, but deliberately outside this scan:
   # server_export.R's `fgFill = "#EFEFEF"` is the exported worksheet's header
   # fill. Excel has no access to the interface tokens, so a literal is correct
-  # there. The pattern does not match `fgFill =`; if it is ever widened to
+  # there. The patterns do not match `fgFill =`; if they are ever widened to
   # catch hex values in any argument, exempt that line rather than "fixing" it.
-  # The north arrow is drawn ON basemap tiles by leaflet's addControl(), not on
-  # an app surface, so it is white-over-shadow in both variants by design.
-  exempt <- "text-shadow: 1px 1px 2px black"
+  exempt <- c(
+    # The north arrow is drawn ON basemap tiles, not on an app surface, so it
+    # is white-over-shadow in both variants by design.
+    "text-shadow: 1px 1px 2px black",
+    # The ruler button's frame, drawn over basemap tiles: Leaflet's own
+    # translucent control border, which the plugin's stylesheet omits.
+    ".leaflet-touch .leaflet-control-measure { border: 2px solid rgba(0,0,0,0.2)"
+  )
 
   offenders <- unlist(lapply(files, function(f) {
     lines <- readLines(file.path(root, f), warn = FALSE)
-    hits <- grep(pattern, lines, perl = TRUE)
-    hits <- hits[!grepl(exempt, lines[hits], fixed = TRUE)]
+    hits <- which(hit_any(lines))
+    for (ex in exempt) hits <- hits[!grepl(ex, lines[hits], fixed = TRUE)]
     if (!length(hits)) return(NULL)
     paste0(f, ":", hits)
   }))
 
   expect_equal(offenders, NULL)
+})
+
+test_that("info popovers set every choice and point on a paragraph of its own", {
+  # A named argument is a choice, its label the bold lead-in; a vector gives
+  # one paragraph per element.
+  expect_identical(tip_html("Lead.", "Concave hull" = "follows the outline.", "Tail."),
+                   "<p>Lead.</p><p><b>Concave hull:</b> follows the outline.</p><p>Tail.</p>")
+  expect_identical(tip_html(c("One.", "Two.")), "<p>One.</p><p>Two.</p>")
+  # The theme sets the paragraphs one blank line apart and lifts the lead-ins.
+  css <- monolith_theme_css()
+  expect_match(css, ".popover-content p + p, .popover-body p + p { margin-top: 1.42857em; }",
+               fixed = TRUE)
+  expect_match(css, ".popover-body b, .popover-body strong { color: var(--mn-text); }",
+               fixed = TRUE)
+  # The arrow takes the popover's surface in every placement, not Bootstrap's
+  # white, which stands out on the dark variant.
+  for (side in c("top", "bottom", "left", "right")) {
+    expect_match(css, sprintf(".popover.%s > .arrow:after { border-%s-color: var(--mn-surface) !important; }",
+                              side, side), fixed = TRUE)
+  }
 })
 
 test_that("every variogram banner band is painted with tokens", {

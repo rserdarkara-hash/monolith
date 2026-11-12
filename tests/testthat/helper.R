@@ -859,3 +859,21 @@ make_cm_pred_df <- function(cm = make_cm_known(), target = "soil") {
   out$.pred_class <- factor(out$.pred_class, levels = levs)
   out
 }
+#' Independent area reference: polygonise numbered cells, then measure each
+#' polygon on the ellipsoid. Never calls the raster-area implementation.
+reference_cell_areas <- function(r) {
+  ids <- terra::rast(r[[1]])
+  terra::values(ids) <- seq_len(terra::ncell(ids))
+  levels(ids) <- NULL
+  names(ids) <- "cell_id"
+  p <- terra::as.polygons(ids, dissolve = FALSE)
+  a <- terra::expanse(p, unit = "m")
+  a[order(terra::values(p)[, "cell_id"])]
+}
+
+reference_class_areas <- function(r) {
+  v <- as.vector(terra::values(r[[1]]))
+  ok <- !is.na(v)
+  agg <- rowsum(reference_cell_areas(r)[ok] / 1e4, v[ok], reorder = TRUE)
+  data.frame(value = as.numeric(rownames(agg)), area = as.vector(agg))
+}
