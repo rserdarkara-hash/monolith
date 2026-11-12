@@ -8,8 +8,8 @@ abstract: >-
   geostatistical prediction engines (inverse distance weighting, thin plate
   splines, and ordinary, co-, regression, and random-forest kriging) with
   automated and manual variogram fitting and selectable cross-validation
-  strategies (leave-one-out, k-fold, and spatial block), reporting RMSE, MAE,
-  R-squared, NSE, CCC, RPD, RPIQ, and Moran's I. Continuous predictions can be
+  strategies (leave-one-out, k-fold, spatial block, and kNNDM), reporting RMSE,
+  MAE, R-squared, NSE, CCC, RPD, RPIQ, and Moran's I. Continuous predictions can be
   classified into user-defined zones with per-class area statistics, while
   surface-delta and point-error maps expose the spatial structure of prediction
   error. A separate Classification Suite performs predictive multiclass
@@ -26,8 +26,8 @@ authors:
     given-names: R. Serdar
     email: r.serdarkara@gmail.com
     orcid: "https://orcid.org/0000-0003-1297-2328"
-version: 1.1.4
-date-released: "2026-09-26"
+version: 1.1.5
+date-released: "2026-11-12"
 license: GPL-3.0
 repository-code: "https://github.com/rserdarkara-hash/monolith"
 doi: "10.5281/zenodo.21130951"

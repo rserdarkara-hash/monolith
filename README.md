@@ -2,7 +2,7 @@
 
 # Monolith Spatial Analysis Dashboard
 
-[![Version](https://img.shields.io/badge/version-1.1.4%20%2B%20unreleased-orange)](CHANGELOG.md)
+[![Version](https://img.shields.io/badge/version-1.1.5-6f42c1)](#)
 [![R](https://img.shields.io/badge/R-%E2%89%A5%204.5.0-276DC3?logo=r&logoColor=white)](https://cran.r-project.org/)
 [![Shiny](https://img.shields.io/badge/built%20with-Shiny-1f77b4)](https://shiny.posit.co/)
 [![Tests](https://github.com/rserdarkara-hash/monolith/actions/workflows/tests.yaml/badge.svg)](https://github.com/rserdarkara-hash/monolith/actions/workflows/tests.yaml)
@@ -272,7 +272,7 @@ The full dependency suite, grouped by function:
 | **Called directly, not attached** | `parallelly`, `units`, `rlang`, `htmltools`, `tibble`, `viridisLite` |
 
 <details>
-<summary><strong>Tested version matrix</strong>: the exact package versions Monolith 1.1.4 is developed and validated against (click to expand)</summary>
+<summary><strong>Tested version matrix</strong>: the exact package versions Monolith 1.1.5 is developed and validated against (click to expand)</summary>
 
 <br>
 
@@ -505,7 +505,7 @@ Human oversight remained central throughout: all methodological choices, model f
   title     = {Monolith: A Spatial Analysis Dashboard for Geostatistical Modeling and Mapping},
   author    = {Kara, R. Serdar},
   year      = {2026},
-  version   = {1.1.4},
+  version   = {1.1.5},
   doi       = {10.5281/zenodo.21130951},
   publisher = {Zenodo},
   url       = {https://github.com/rserdarkara-hash/monolith},
@@ -513,7 +513,7 @@ Human oversight remained central throughout: all methodological choices, model f
 }
 ```
 
-The same reference is available from GitHub's **Cite this repository** button, which reads the [CITATION.cff](CITATION.cff) file in the repository root. The DOI above is the **concept DOI** and always resolves to the latest release; Zenodo also mints a version-specific DOI for each release, which is the one to cite when the exact version matters for reproducing a result. The `main` branch can include changes not yet in a Zenodo release (see the Unreleased section of the [CHANGELOG](CHANGELOG.md)); when citing results from it, add the commit hash.
+The same reference is available from GitHub's **Cite this repository** button, which reads the [CITATION.cff](CITATION.cff) file in the repository root. The DOI above is the **concept DOI** and always resolves to the latest release; Zenodo also mints a version-specific DOI for each release, which is the one to cite when the exact version matters for reproducing a result. The `main` branch can include changes not yet in a Zenodo release; when citing results from it, add the commit hash.
 
 ## Contributing and Support
 
