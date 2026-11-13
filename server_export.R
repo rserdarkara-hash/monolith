@@ -3,7 +3,7 @@
 
   # Returns the item's registry key (safe_key() of `id`), which a caller that
   # selects the item must use.
-  register_export_item <- function(id, label, type, obj, category = "General", kind = "value",
+  register_export_item <- function(id, label, type, obj, kind = "value",
                                    var_label = NULL, legend = NULL, derived = NULL,
                                    surface = NULL) {
     # `derived` items carry no payload of their own: export_item_obj()
@@ -22,7 +22,6 @@
       var_label = var_label,
       type = type, # "plot", "table", "map"
       obj = obj,
-      category = category,
       # Maps: "value" (may be class-styled), "residual" or "uncertainty" (never
       # classified: class limits are in the variable's units).
       kind = kind,
@@ -456,7 +455,7 @@
 
     # The registry key, not the raw id: a column name such as "Total N (%)"
     # is stored under its safe key, which every lookup below reads.
-    key <- register_export_item(id, label, type, target, meta$category, kind = kind, legend = legend,
+    key <- register_export_item(id, label, type, target, kind = kind, legend = legend,
                                 surface = if (view == "view_pred") "pre" else if (view == "view_act") "act")
     active_styler_item(key)
 

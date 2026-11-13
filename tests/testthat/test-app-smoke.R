@@ -14,9 +14,11 @@
 # parallel futures and would make the suite depend on wall-clock timing. The
 # tests that do run the pipeline need it for subjects no other route reaches:
 # whether a rendered DataTable puts its values under their own headings is a
-# property of the browser's layout, whether a restored or cancelled run is
-# described consistently across the panels needs real runs to archive, restore
-# and cancel, and a TPS lambda must reach the run unchanged. They compare runs
+# property of the browser's layout, whether point styling reaches a run's map
+# in place and a click opens a point's pop-up is a property of its leaflet
+# widget, whether a restored or cancelled run is described consistently across
+# the panels needs real runs to archive, restore and cancel, and a TPS lambda
+# must reach the run unchanged. They compare runs
 # with each other (hashes, the record's fields, the parameter used), never with
 # fixed numbers, and skip rather than fail if a run does not complete in time.
 #
@@ -535,10 +537,145 @@ test_that("Model Performance values sit under their own headings", {
   expect_equal(jsonlite::fromJSON(js_out), format_sig(vals))
 })
 
-# The archive and the cancel path, in the booted app: both are about which run
-# every panel describes, and neither can be asserted without a real run.
+# The run on screen, as the shim exports it.
 smoke_run_state <- function(app) app$get_value(export = "run_state")
 
+test_that("point styling restyles in place and a pop-up opens on click", {
+  app <- smoke_app()
+  # The previous test leaves its IDW run of 30 points on screen (columns
+  # locality, x, y, lon, lat, value), in the Actual view.
+  skip_if(!identical(smoke_run_state(app)$disp_method, "IDW"),
+          "the IDW run of the Model Performance test is not on screen")
+  app$set_inputs(main_tabs = "tab_map")
+  app$click("toggle_pt_style")
+  app$wait_for_idle()
+
+  # Size and methods of every leaflet-calls message the page receives, and how
+  # often the ruler measures the attribution (a forced layout each time).
+  app$run_js("
+    (function () {
+      var sock = Shiny.shinyapp.$socket;
+      window.__mnPtMsgs = [];
+      window.__mnPtOnMsg = sock.onmessage;
+      sock.onmessage = function (e) {
+        var s = (typeof e.data === 'string') ? e.data : '';
+        if (s.indexOf('\"leaflet-calls\"') >= 0) {
+          var ms = s.match(/\"method\":\"[A-Za-z]+\"/g) || [];
+          window.__mnPtMsgs.push({len: s.length, methods: ms.map(function (x) { return x.slice(10, -1); })});
+        }
+        return window.__mnPtOnMsg.call(this, e);
+      };
+      window.__mnRects = 0;
+      window.__mnRectFn = Element.prototype.getBoundingClientRect;
+      Element.prototype.getBoundingClientRect = function () {
+        if (this.classList && this.classList.contains('leaflet-control-attribution')) window.__mnRects++;
+        return window.__mnRectFn.apply(this, arguments);
+      };
+    })();")
+  # A value read in the page once the browser has drawn what was sent.
+  settled <- function(js, want, timeout = 30) {
+    end <- Sys.time() + timeout
+    repeat {
+      got <- tryCatch(app$get_js(js), error = function(e) NULL)
+      if (isTRUE(all.equal(got, want)) || Sys.time() > end) return(got)
+      Sys.sleep(0.25)
+    }
+  }
+  count <- function(sel) sprintf("document.querySelectorAll('#main_map %s').length", sel)
+  marker <- "HTMLWidgets.find('#main_map').getMap().layerManager.getLayer('marker', 'pt_1')"
+
+  # Show Points: one marker per point of the display set.
+  app$set_inputs(show_points_viewer = TRUE)
+  expect_equal(settled(count("path.leaflet-interactive"), 30), 30)
+
+  # Color By restyles the markers it already drew; no marker is sent again.
+  app$run_js("window.__mnPtMsgs = [];")
+  app$set_inputs(pt_color_by = "locality")
+  expect_identical(settled(paste0(marker, ".options.color"), "white"), "white")
+  sent <- jsonlite::fromJSON(app$get_js("JSON.stringify(window.__mnPtMsgs)"), simplifyVector = FALSE)
+  expect_gt(length(sent), 0)
+  expect_false(any(vapply(sent, function(x) "addCircleMarkers" %in% unlist(x$methods), logical(1))))
+  expect_lt(sum(vapply(sent, function(x) x$len, numeric(1))), 50 * 1024)
+
+  # Labels: one per point, placed as a tooltip drawn the way the labels were
+  # before (leaflet's own text-only tooltip, 8 px above a 1 px icon).
+  app$set_inputs(pt_show_labels = TRUE, pt_label_field = "value")
+  expect_equal(settled(count(".mn-pt-label"), 30), 30)
+  # The ruler measures the attribution once per frame, not once per added
+  # layer: 30 markers and 30 labels would otherwise have forced 60 layouts.
+  expect_lt(app$get_js("window.__mnRects"), 10)
+  place <- jsonlite::fromJSON(app$get_js(sprintf("(function () {
+    var map = HTMLWidgets.find('#main_map').getMap(), mk = %s;
+    var p = mk.getElement().getBoundingClientRect(), py = (p.top + p.bottom) / 2, px = (p.left + p.right) / 2;
+    var span = document.querySelector('#main_map .mn-pt-label span');
+    var box = function (el) { var r = document.createRange(); r.selectNodeContents(el); return r.getBoundingClientRect(); };
+    var ll = mk.getLatLng();
+    LeafletWidget.methods.addMarkers.call(map, [ll.lat], [ll.lng],
+      {iconUrl: 'data:image/gif;base64,R0lGODlhAQABAAAAACw=', iconWidth: 1, iconHeight: 1}, null, 'mn_tooltip_ref', {},
+      null, null, null, null, span.textContent,
+      {permanent: true, direction: 'top', textOnly: true, offset: [0, -8],
+       style: {'font-size': '11px', 'font-weight': 'bold', color: 'white'}});
+    var a = box(span), b = box(document.querySelector('#main_map .leaflet-tooltip'));
+    LeafletWidget.methods.clearGroup.call(map, 'mn_tooltip_ref');
+    return JSON.stringify({gap: py - a.bottom, ref_gap: py - b.bottom, dx: (a.left + a.right) / 2 - px});
+  })()", marker)))
+  expect_lte(abs(place$gap - place$ref_gap), 1)
+  expect_gte(place$gap, 20)                                    # above the point, clear of it
+  expect_lte(abs(place$dx), 1)                                 # centred
+
+  # Label Size sets the size on the map.
+  app$set_inputs(pt_label_size = 15)
+  expect_identical(settled("getComputedStyle(document.querySelector('#main_map .mn-pt-label span')).fontSize", "15px"), "15px")
+
+  # A click on pt_1 and the pop-up it opens. A pop-up already open fades out
+  # for 200 ms, so it is tagged first and only the new one is read.
+  click_pt1 <- function() {
+    app$run_js(sprintf("(function () {
+      document.querySelectorAll('#main_map .leaflet-popup').forEach(function (p) { p.setAttribute('data-mn-old', '1'); });
+      var el = %s.getElement(), r = el.getBoundingClientRect();
+      el.dispatchEvent(new MouseEvent('click', {bubbles: true, cancelable: true, view: window,
+        clientX: (r.left + r.right) / 2, clientY: (r.top + r.bottom) / 2}));
+    })();", marker))
+    expect_equal(settled(count(".leaflet-popup:not([data-mn-old]) .leaflet-popup-content"), 1), 1)
+    jsonlite::fromJSON(app$get_js("(function () {
+      var p = document.querySelector('#main_map .leaflet-popup:not([data-mn-old]) .leaflet-popup-content');
+      return JSON.stringify({text: p.innerText, rows: Array.prototype.map.call(p.querySelectorAll('tr'), function (tr) {
+        return Array.prototype.map.call(tr.cells, function (td) { return td.textContent; }); })});
+    })()"), simplifyVector = FALSE)
+  }
+
+  # The point's own pop-up, built when clicked: its value row is the value its
+  # label shows.
+  rows <- click_pt1()
+  expect_match(rows$text, "Point Details", fixed = TRUE)
+  value_row <- Filter(function(r) length(r) == 2 && identical(r[[1]], "value"), rows$rows)
+  expect_length(value_row, 1L)
+  label_1 <- app$get_js("document.querySelector('#main_map .mn-pt-label span').textContent")
+  expect_lt(abs(as.numeric(value_row[[1]][[2]]) - as.numeric(label_1)), 0.006)
+
+  # Pop-up Content (Point styling) sets what the next pop-up lists: its
+  # variable's category by name, or variables chosen (none: the notes only).
+  app$set_inputs(pt_popup_content = "cat:Uploaded Data")
+  expect_length(Filter(function(r) identical(r[[1]], "value"), click_pt1()$rows), 1L)
+  app$set_inputs(pt_popup_content = "manual")
+  rows <- click_pt1()
+  expect_match(rows$text, "Point Details", fixed = TRUE)
+  expect_length(rows$rows, 0L)
+
+  # Off, and the styling back to its defaults: no point, label or pop-up stays.
+  app$set_inputs(show_points_viewer = FALSE)
+  app$set_inputs(pt_show_labels = FALSE, pt_label_field = "none", pt_color_by = "none", pt_label_size = 11,
+                 pt_popup_content = "auto")
+  left <- sprintf("[%s, %s, %s].join()", count("path.leaflet-interactive"), count(".mn-pt-label"), count(".leaflet-popup"))
+  expect_identical(settled(left, "0,0,0"), "0,0,0")
+  app$run_js("Shiny.shinyapp.$socket.onmessage = window.__mnPtOnMsg;
+              Element.prototype.getBoundingClientRect = window.__mnRectFn;")
+  app$click("toggle_pt_style")
+  app$wait_for_idle()
+})
+
+# The archive and the cancel path, in the booted app: both are about which run
+# every panel describes, and neither can be asserted without a real run.
 test_that("restoring an archived run brings back its maps, metrics and record together", {
   app <- smoke_app()
   first <- smoke_run_state(app)

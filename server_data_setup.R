@@ -69,9 +69,10 @@
       }
     }
     rv$mapping$vars <- new_vars
-    
-    rv$pop_up_vars <- num_cols[!is_coord_col(num_cols)]
-    
+    # A new table starts from the default Pop-up Content and the palettes' colours.
+    session_state$popup_fresh <- TRUE
+    rv$pt_color_overrides <- list()
+
     curr_locs <- isolate(input$locality)
     # input$map_loc is still the pre-updateSelectInput value here, so use
     # the freshly guessed column instead of the stale input.
@@ -923,18 +924,14 @@
     }
   })
 
-  # The variables the mapping editor lists, one row each: the variable list an
-  # upload fills with every numeric column that is not a coordinate, or the
-  # rows of an uploaded variable list or loaded configuration.
-  mapping_targets <- function() {
-    vapply(rv$mapping$vars, function(x) as.character(x$actual), character(1))
-  }
-
   output$var_mapping_ui <- renderUI({
     req(rv$user_data)
     cols <- colnames(rv$user_data)
     num_cols <- cols[sapply(rv$user_data, is.numeric)]
-    targets <- mapping_targets()
+    # The variables the mapping editor lists, one row each: the variable list an
+    # upload fills with every numeric column that is not a coordinate, or the
+    # rows of an uploaded variable list or loaded configuration.
+    targets <- var_actuals(rv$mapping$vars)
     if (!length(targets)) {
       return(tags$p(class = "mn-empty-line", "This table has no numeric column besides its coordinates, so there is no variable to map."))
     }
@@ -991,7 +988,7 @@
 
   observeEvent(input$confirm_mapping, {
     req(rv$user_data)
-    targets <- mapping_targets()
+    targets <- var_actuals(rv$mapping$vars)
 
     new_vars <- list()
     for (i in seq_along(targets)) {
@@ -1057,13 +1054,14 @@
   output$setup_minimap <- renderLeaflet({
     req(rv$user_data, rv$mapping$x, rv$mapping$y, rv$mapping$crs)
 
-    color_by <- input$pt_color_by %||% "none"
+    # The Map Viewer's colour set, only while it is applied here.
     apply_mini <- isTRUE(input$pt_apply_minimap)
+    color_by <- if (apply_mini) input$pt_color_by %||% "none" else "none"
     loc_col <- rv$mapping$loc
     has_loc <- !is.null(loc_col) && loc_col %in% colnames(rv$user_data)
 
     needed <- c(rv$mapping$x, rv$mapping$y)
-    if (apply_mini && color_by != "none" && color_by %in% colnames(rv$user_data)) needed <- c(needed, color_by)
+    if (color_by != "none" && color_by %in% colnames(rv$user_data)) needed <- c(needed, color_by)
     if (has_loc) needed <- c(needed, loc_col)
     needed <- unique(needed)
 
@@ -1083,15 +1081,9 @@
     m <- leaflet(pts, options = leafletOptions(zoomControl = FALSE)) %>%
       add_base_tiles(current_tiles, carto_api_key())
 
-    if (apply_mini && color_by != "none") {
-      m <- add_styled_points(m, pts,
-        color_by = color_by,
-        custom_colors = rv$pt_style_colors,
-        show_labels = FALSE,
-        label_field = "none",
-        label_size = 11,
-        marker_size = input$pt_marker_size %||% 3
-      )
+    if (color_by != "none") {
+      m <- add_styled_points(m, pts, point_style_spec(pts, color_by, pt_group_colors()),
+                             marker_size = input$pt_marker_size %||% 3)
     } else if (has_loc) {
       # Validation view: one colour per locality, so a mis-mapped coordinate
       # pair or CRS shows as points landing in the wrong group.

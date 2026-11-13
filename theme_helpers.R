@@ -1185,6 +1185,21 @@ table.dataTable tbody tr.odd { background-color: var(--mn-surface-2) !important;
 /* The north arrow is drawn on the basemap itself (white over a shadow), so its
    control carries no box of its own. */
 .leaflet .mn-north-arrow { background: none; border: 0; box-shadow: none; padding: 0; }
+/* Sampling-point labels (point_layer_js()) are drawn on the basemap itself:
+   white over a dark halo in both variants. Each label's empty box sits on its
+   point; the text is centred and raised 20.5 px, where leaflet's text-only
+   tooltips put it at every size. Label Size sets --mn-pt-label-size on each
+   map. */
+.leaflet-container { --mn-pt-label-size: 11px; }
+.mn-pt-labels { position: absolute; left: 0; top: 0; pointer-events: none; }
+.mn-pt-label { position: absolute; width: 0; height: 0; }
+.mn-pt-label > span {
+  position: absolute; left: 0; bottom: 0;
+  transform: translate(-50%, -20.5px);
+  white-space: nowrap; pointer-events: none;
+  font-size: var(--mn-pt-label-size); font-weight: bold; color: #fff;
+  text-shadow: 1px 1px 2px rgba(0,0,0,0.9), -1px -1px 2px rgba(0,0,0,0.9), 1px -1px 2px rgba(0,0,0,0.9), -1px 1px 2px rgba(0,0,0,0.9);
+}
 /* The distance scale, moved out of the map into the strip below it
    (#distance_scale_container): a page element, so it takes page colours. */
 .mn-map-scale {

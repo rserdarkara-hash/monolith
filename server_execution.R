@@ -1121,7 +1121,7 @@
     for (tgt in names(surfaces)) {
       s <- surfaces[[tgt]]
       if (length(s$rasters) == 0) next
-      register_export_item(s$id, paste(meta$label, "-", s$name, "Map -", m_lab), "map", s$rasters, meta$category,
+      register_export_item(s$id, paste(meta$label, "-", s$name, "Map -", m_lab), "map", s$rasters,
                            legend = map_legend_title(meta$label, meta$unit), surface = tgt)
       # Uncertainty products for the kriging engines only (IDW's var1.var is
       # all NA, TPS has none), and only for a surface where some locality
@@ -1134,25 +1134,25 @@
       # Registered as derivations of the surface (export_item_obj()), not
       # copies. `name` is the GeoTIFF band description, so the SE is named
       # var1.se.
-      register_export_item(paste0("map_uncert_var_", tgt), paste0(meta$label, " - Uncertainty Map (Variance - ", s$name, ") - ", m_lab), "map", NULL, meta$category, kind = "uncertainty",
+      register_export_item(paste0("map_uncert_var_", tgt), paste0(meta$label, " - Uncertainty Map (Variance - ", s$name, ") - ", m_lab), "map", NULL, kind = "uncertainty",
                            legend = map_legend_title(meta$label, meta$unit, "var"),
                            derived = list(src = with_var, layer = "var1.var", name = "var1.var"))
-      register_export_item(paste0("map_uncert_se_", tgt), paste0(meta$label, " - Uncertainty Map (SE - ", s$name, ") - ", m_lab), "map", NULL, meta$category, kind = "uncertainty",
+      register_export_item(paste0("map_uncert_se_", tgt), paste0(meta$label, " - Uncertainty Map (SE - ", s$name, ") - ", m_lab), "map", NULL, kind = "uncertainty",
                            legend = map_legend_title(meta$label, meta$unit, "se"),
                            derived = list(src = with_var, layer = "var1.var", fun = "sqrt", name = "var1.se"))
     }
     rv$has_predictions <- length(rv$rast_list_pre) > 0
     if (length(rv$rast_list_res) > 0) {
-      register_export_item("map_residuals", paste(meta$label, "- ML Predictions Residual Map (Delta) -", m_lab), "map", rv$rast_list_res, meta$category, kind = "residual",
+      register_export_item("map_residuals", paste(meta$label, "- ML Predictions Residual Map (Delta) -", m_lab), "map", rv$rast_list_res, kind = "residual",
                            legend = map_legend_title(meta$label, layer = "resid"))
     }
     if (length(rv$rast_list_point_res) > 0) {
-      register_export_item("map_interp_point_errors", paste(meta$label, "- ML Predictions Interpolated Point Errors Map"), "map", rv$rast_list_point_res, meta$category, kind = "residual",
+      register_export_item("map_interp_point_errors", paste(meta$label, "- ML Predictions Interpolated Point Errors Map"), "map", rv$rast_list_point_res, kind = "residual",
                            legend = map_legend_title(meta$label, layer = "resid"))
     }
     if (length(rv$rast_list_act) > 0 && length(rv$rast_list_pre) > 0) {
        register_export_item("map_comparison", paste(meta$label, "- Actual vs Predicted Comparison -", m_lab), "map_combined",
-                            list(act = rv$rast_list_act, pre = rv$rast_list_pre), meta$category,
+                            list(act = rv$rast_list_act, pre = rv$rast_list_pre),
                             legend = map_legend_title(meta$label, meta$unit))
     }
 
@@ -1212,7 +1212,7 @@
     if (!is.null(rv$sf) && "resid" %in% colnames(rv$sf) && any(!is.na(rv$sf$resid))) {
       pts_err <- rv$sf[!is.na(rv$sf$resid), c("resid", "loc")]
       register_export_item("map_point_residuals", paste(meta$label, "- ML Predictions Point Error Map"),
-                           "map", list(pts = pts_err, bound = rv$bound), meta$category, kind = "residual",
+                           "map", list(pts = pts_err, bound = rv$bound), kind = "residual",
                            legend = map_legend_title(meta$label, layer = "point_resid"))
     }
     
@@ -1250,26 +1250,26 @@
     }
     cv_tot_a <- pooled_cv(rv$cv_data_act, rv$cv_metrics_act, "Actual Model", rv$cv_info_act, pooled_cv_metrics$act)
     if(!is.null(cv_tot_a)) {
-      register_export_item("table_cv_total", paste(meta$label, "- Total Model CV Metrics (Actual)"), "table", cv_tot_a, meta$category)
+      register_export_item("table_cv_total", paste(meta$label, "- Total Model CV Metrics (Actual)"), "table", cv_tot_a)
     }
     if(comp_mode || val_type != "actual") {
       cv_tot_p <- pooled_cv(rv$cv_data_pre, rv$cv_metrics_pre, "Predicted Model", rv$cv_info_pre, pooled_cv_metrics$pre)
       if(!is.null(cv_tot_p)) {
-        register_export_item("table_cv_pre_total", paste(meta$label, "- Total Model CV Metrics (Predicted)"), "table", cv_tot_p, meta$category)
+        register_export_item("table_cv_pre_total", paste(meta$label, "- Total Model CV Metrics (Predicted)"), "table", cv_tot_p)
       }
     }
     if(!is.null(rv$cv_repeats_act$total)) {
-      register_export_item("table_cv_repeats_total", paste(meta$label, "- Total Fold-Realization Stability (Actual)"), "table", cv_repeats_export_df(rv$cv_repeats_act$total, "Actual Model"), meta$category)
+      register_export_item("table_cv_repeats_total", paste(meta$label, "- Total Fold-Realization Stability (Actual)"), "table", cv_repeats_export_df(rv$cv_repeats_act$total, "Actual Model"))
     }
     if((comp_mode || val_type != "actual") && !is.null(rv$cv_repeats_pre$total)) {
-      register_export_item("table_cv_repeats_pre_total", paste(meta$label, "- Total Fold-Realization Stability (Predicted)"), "table", cv_repeats_export_df(rv$cv_repeats_pre$total, "Predicted Model"), meta$category)
+      register_export_item("table_cv_repeats_pre_total", paste(meta$label, "- Total Fold-Realization Stability (Predicted)"), "table", cv_repeats_export_df(rv$cv_repeats_pre$total, "Predicted Model"))
     }
 
     # Every fitted variogram of the run in one sheet, one row per
     # locality/target - the combined view of the Variogram Parameters card.
     vgm_par_total <- vgm_params_export_df(rv$disp$v_fits, of = disp_vgm_of())
     if(!is.null(vgm_par_total)) {
-      register_export_item("table_vgm_params_total", paste(meta$label, "-", vgm_params_title(current_method), "(all localities)"), "table", vgm_par_total, meta$category)
+      register_export_item("table_vgm_params_total", paste(meta$label, "-", vgm_params_title(current_method), "(all localities)"), "table", vgm_par_total)
     }
 
     # Regional IDW power / TPS lambda for every locality of the run: the
@@ -1279,7 +1279,7 @@
                                                rv$disp$regional_params,
                                                has_pre = comp_mode || val_type != "actual", export = TRUE)
       if(!is.null(params_total)) {
-        register_export_item("table_params_total", paste(meta$label, "- Model Parameters (all localities)"), "table", params_total, meta$category)
+        register_export_item("table_params_total", paste(meta$label, "- Model Parameters (all localities)"), "table", params_total)
       }
     }
 
@@ -1288,7 +1288,7 @@
       # Same builder as the on-screen Prediction Performance card.
       perf_total <- pred_perf_df(df_perf$v, df_perf$pv)
       if(!is.null(perf_total)) {
-        register_export_item("table_perf_uploaded_total", paste(meta$label, "- Total Prediction Performance"), "table", perf_total, meta$category)
+        register_export_item("table_perf_uploaded_total", paste(meta$label, "- Total Prediction Performance"), "table", perf_total)
       }
     }
 
@@ -1299,7 +1299,7 @@
       stats_total <- summary_stats_df(sv_total$act, sv_total$pre,
                                       labels = c("Total_Actual", "Total_Predicted"))
       if(!is.null(stats_total)) {
-        register_export_item("table_stats_total", paste(meta$label, "- Total Descriptive Statistics"), "table", stats_total, meta$category)
+        register_export_item("table_stats_total", paste(meta$label, "- Total Descriptive Statistics"), "table", stats_total)
       }
     }
 

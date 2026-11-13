@@ -1552,7 +1552,7 @@ config_vars_in <- function(vars, cols) {
 #' The palettes the user picked (column -> palette) as a session configuration
 #' carries them: the entries of variables in `vars`.
 config_palettes_out <- function(picks, vars) {
-  cols <- vapply(vars %||% list(), function(v) as.character(v$actual), character(1))
+  cols <- var_actuals(vars %||% list())
   picks <- picks %||% list()
   picks[intersect(names(picks), cols)]
 }
@@ -1564,7 +1564,7 @@ config_palettes_in <- function(palettes, vars, legacy_palette = NULL, legacy_var
   if (is.null(palettes) && !is.null(legacy_palette) && !is.null(legacy_var)) {
     palettes <- stats::setNames(list(legacy_palette), legacy_var)
   }
-  cols <- vapply(vars %||% list(), function(v) as.character(v$actual), character(1))
+  cols <- var_actuals(vars %||% list())
   picks <- list(); skipped <- character(0)
   for (var in intersect(names(palettes %||% list()), cols)) {
     p <- config_scalar(palettes[[var]])

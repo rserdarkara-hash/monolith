@@ -650,7 +650,7 @@
 
     reg_if_df <- function(id, label, df) {
       if (is.data.frame(df) && nrow(df) > 0 && !identical(names(df), "Status")) {
-        register_export_item(id, paste(meta$label, "-", label), "table", df, meta$category)
+        register_export_item(id, paste(meta$label, "-", label), "table", df)
       }
     }
 

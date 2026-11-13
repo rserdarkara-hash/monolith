@@ -735,6 +735,85 @@ window.mnFormatSig = function (d) {
 "
 }
 
+# Point-layer methods of the Map Viewer's leaflet widgets, mounted once in
+# ui_main.R's head. R calls them with leaflet::invokeMethod() on a leafletProxy,
+# so they queue with, and after, the proxy's other calls (the markers they
+# address). Markers are found by layer id: POINT_LAYER_ID_PREFIX + row. The
+# labels are one layer, its HTML built from escaped label text: a marker per
+# label is placed by a 3D transform, which gives each label a compositing layer
+# of its own, and ten thousand of them took seconds to draw, zoom or pan.
+point_layer_js <- function() {
+  "
+(function () {
+  function esc(s) {
+    return String(s).replace(/[&<>\"']/g, function (c) {
+      return {'&': '&amp;', '<': '&lt;', '>': '&gt;', '\"': '&quot;', \"'\": '&#39;'}[c];
+    });
+  }
+  function at(v, i) { return Array.isArray(v) ? v[i] : v; }
+  function install() {
+    var LW = window.LeafletWidget;
+    if (!LW || !LW.methods) return false;
+    if (LW.methods.mnStylePoints) return true;
+    // Fill, outline and fill opacity (each a value or one per marker) and the radius.
+    LW.methods.mnStylePoints = function (prefix, n, fill, stroke, fillOpacity, radius) {
+      var lm = this.layerManager;
+      for (var i = 0; i < n; i++) {
+        var m = lm.getLayer('marker', prefix + (i + 1));
+        if (!m) continue;
+        m.setStyle({fillColor: at(fill, i), color: at(stroke, i), fillOpacity: at(fillOpacity, i)});
+        m.setRadius(radius);
+      }
+    };
+    // The label layer: one container in the marker pane holding an empty box
+    // per label, placed in pixels at its point. Hidden during a zoom animation
+    // (leaflet-zoom-hide) and placed again when the zoom ends.
+    var Labels = L.Layer.extend({
+      initialize: function (latlngs, html) { this._latlngs = latlngs; this._html = html; },
+      onAdd: function (map) {
+        this._el = L.DomUtil.create('div', 'mn-pt-labels leaflet-zoom-hide', map.getPane('markerPane'));
+        this._el.innerHTML = this._html;
+        this._place();
+      },
+      onRemove: function () { L.DomUtil.remove(this._el); this._el = null; },
+      getEvents: function () { return {zoom: this._place, viewreset: this._place}; },
+      _place: function () {
+        var boxes = this._el.children;
+        for (var i = 0; i < boxes.length; i++) {
+          var p = this._map.latLngToLayerPoint(this._latlngs[i]);
+          boxes[i].style.left = Math.round(p.x) + 'px';
+          boxes[i].style.top = Math.round(p.y) + 'px';
+        }
+      }
+    });
+    // One label per marker with text (null: none); null instead of text clears them.
+    // The labels are not interactive and measure nothing.
+    LW.methods.mnPointLabels = function (prefix, text) {
+      var map = this;
+      if (map._mnPointLabels) { map.removeLayer(map._mnPointLabels); map._mnPointLabels = null; }
+      if (text === null || text === undefined) return;
+      if (!Array.isArray(text)) text = [text];
+      var lm = map.layerManager, latlngs = [], html = [];
+      for (var i = 0; i < text.length; i++) {
+        if (text[i] === null) continue;
+        var m = lm.getLayer('marker', prefix + (i + 1));
+        if (!m) continue;
+        latlngs.push(m.getLatLng());
+        html.push('<div class=\"mn-pt-label\"><span>' + esc(text[i]) + '</span></div>');
+      }
+      map._mnPointLabels = new Labels(latlngs, html.join('')).addTo(map);
+    };
+    LW.methods.mnPointLabelSize = function (px) {
+      this.getContainer().style.setProperty('--mn-pt-label-size', px + 'px');
+    };
+    return true;
+  }
+  install();
+  if (window.jQuery) jQuery(install);
+})();
+"
+}
+
 # The three markers a result table can print in place of a number, and the one
 # sentence each needs under every table that uses it; table_footnote() emits
 # only the markers a table used.

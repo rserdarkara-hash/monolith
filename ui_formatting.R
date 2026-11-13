@@ -717,6 +717,64 @@ popup_group_row <- function(title) {
          htmltools::htmlEscape(as.character(title)), "</b></td></tr>")
 }
 
+# The column names (`actual`) of variable-list entries, in list order.
+var_actuals <- function(vars) vapply(vars, function(x) as.character(x$actual), character(1))
+
+# Variable-list entries by category, categories and entries in list order.
+group_vars_by_category <- function(vars) {
+  cat_of <- vapply(vars, function(x) as.character(x$category %||% ""), character(1))
+  split(vars, factor(cat_of, levels = unique(cat_of)))
+}
+
+# The variables a point's pop-up lists, in list order, for the Pop-up Content
+# choice `content`: "auto" the variables in `focus_var`'s category,
+# "cat:<category>" that category's, "all" every variable, "manual" the listed
+# variables `chosen` names (none chosen: the notes only).
+popup_variables <- function(vars, content = "auto", chosen = NULL, focus_var = NULL) {
+  if (identical(content, "all")) return(vars)
+  if (identical(content, "manual")) return(vars[var_actuals(vars) %in% chosen])
+  groups <- group_vars_by_category(vars)
+  if (startsWith(content, "cat:")) {
+    g <- groups[names(groups) == substring(content, 5L)]
+    return(if (length(g)) g[[1]] else list())
+  }
+  for (g in groups) if (isTRUE(focus_var %in% var_actuals(g))) return(g)
+  list()
+}
+
+# The Pop-up Content choices for a variable list: the mapped variable's
+# category, each category (in list order), every variable, or a choice of them.
+popup_content_choices <- function(vars) {
+  cats <- names(group_vars_by_category(vars))
+  c(list(`Mapped variable's category` = "auto"),
+    if (length(cats)) list(Categories = stats::setNames(paste0("cat:", cats), cats)),
+    list(`All variables` = "all", `Variables I choose` = "manual"))
+}
+
+# A sampling point's pop-up: its notes (no measured value, merged co-located
+# samples) and one row per variable of `groups` (group_vars_by_category() of
+# popup_variables()), read from `row`, the point's one-row attribute table. A
+# variable is read from the column of its own name only, so a point set without
+# it (a run made before another table was loaded) shows N/A, never a column
+# whose name merely resembles it.
+point_popup_html <- function(row, groups) {
+  row <- as.list(row)
+  val <- function(col) if (col %in% names(row)) row[[col]]
+  note <- function(txt) paste0("<p style='margin: 0 0 6px 0; color: var(--mn-text-3); font-style: italic;'>", txt, "</p>")
+  n_rep <- suppressWarnings(as.integer(row[[".mn_n_rep"]] %||% 1L))
+  rows <- unlist(lapply(names(groups), function(cat) {
+    c(popup_group_row(cat),
+      vapply(groups[[cat]], function(v) popup_value_row(v$label, val(as.character(v$actual))), character(1)))
+  }))
+  paste0(c("<div style='max-height: 300px; overflow-y: auto; font-family: sans-serif; min-width: 200px;'>",
+           "<h4>Point Details</h4>",
+           if ("v" %in% names(row) && all(is.na(row[["v"]])))
+             note("No measured value for the mapped variable: this point was not used in the fit."),
+           if (isTRUE(n_rep > 1L)) note(paste0("Co-located samples: ", n_rep, " (values averaged)")),
+           "<table style='width: 100%; border-collapse: collapse;'>", rows, "</table></div>"),
+         collapse = "")
+}
+
 # The classes built on inner breaks: every break with the open ends -Inf/Inf,
 # and terra's reclassification matrix with one [low, high) row per class. The
 # map and the class areas classify with it at right = FALSE, so a value equal

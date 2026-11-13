@@ -93,6 +93,29 @@
     Filter(Negate(is.null), r_list)
   }
 
+  # The map widgets the current view displays, once rendered: the main map in
+  # Actual and Predicted, both panels in Comparison and Residuals.
+  shown_map_ids <- function() {
+    if (map_view_base() %in% c("view_act", "view_pred")) {
+      if (isTRUE(session_state$main_map_rendered)) "main_map" else character(0)
+    } else if (isTRUE(session_state$comp_maps_rendered)) {
+      c("comp_map_left", "comp_map_right")
+    } else character(0)
+  }
+
+  # What a map widget draws in the current view: its rasters and its draw_map()
+  # label. The Residuals view's right panel draws the point residuals.
+  map_surface <- function(map_id, view = map_view_base()) {
+    switch(map_id,
+      main_map = if (view == "view_pred") {
+        list(r = rv$rast_list_pre, lab = if (identical(rv$disp$value_type, "pred_ss")) "pred_ss" else "pred")
+      } else list(r = rv$rast_list_act, lab = "actual"),
+      comp_map_left = if (view == "view_resid") list(r = rv$rast_list_res, lab = "resid_raster")
+                      else list(r = rv$rast_list_act, lab = "Actual"),
+      comp_map_right = if (view == "view_resid") list(r = NULL, lab = "resid_points")
+                       else list(r = rv$rast_list_pre, lab = "Predicted"))
+  }
+
   # Styling signature per map widget, stamped by draw_map and checked by the
   # proxy restyler, so a tick matching what a map already shows costs nothing.
   map_style_sig <- new.env(parent = emptyenv())
@@ -100,6 +123,11 @@
   # Raster image layers each widget carries, so a restyle with fewer images
   # retires the surplus (remove_surplus_raster_images()).
   map_raster_count <- new.env(parent = emptyenv())
+
+  # The sampling-point layer each map widget shows, as last sent: point set,
+  # style, legend, labels, label size. A pass sends only the parts that differ;
+  # draw_map() clears a map's entry with its widget.
+  pt_state <- new.env(parent = emptyenv())
 
   # The surface a map widget's label shows, whose own class breaks and variance
   # band style it; NULL for the residual maps, which have neither.
@@ -260,6 +288,8 @@
   # proxy restyler. Cheap overlays (points, borders, north arrow, scale,
   # cell-size box, base tiles) are proxy observers keyed on map_overlay_rev.
   draw_map <- function(r_obj, lab, map_id = NULL) {
+    # A new widget holds no points: the point overlay redraws them in full.
+    if (!is.null(map_id)) pt_state[[map_id]] <- NULL
     current_tiles <- isolate(input$base_map_layer) %||% "Esri.WorldImagery"
     current_key <- isolate(carto_api_key())
 
@@ -325,19 +355,17 @@
     }
 
 
+    # The point residuals; a click opens a point's pop-up by its layer id.
     if(lab == "resid_points") {
-       req(rv$sf, "resid" %in% colnames(rv$sf))
-       pts_view <- st_transform(rv$sf, 4326)
-       abs_max_p <- max(abs(pts_view$resid), na.rm=T)
+       pts_view <- pts_view_4326()
+       req(pts_view, "resid" %in% colnames(pts_view))
+       abs_max_p <- max(abs(pts_view$resid), na.rm = TRUE)
        if(is.infinite(abs_max_p) || is.na(abs_max_p)) abs_max_p <- 1
        pal_pts <- colorNumeric("RdBu", domain = c(-abs_max_p, abs_max_p), na.color = "black")
-       df_clean <- st_drop_geometry(pts_view)
-       popup_builder <- make_popup_fn(colnames(df_clean))
-       popups <- vapply(seq_len(nrow(df_clean)), function(i) popup_builder(df_clean[i, ]), character(1))
-       
        m <- m %>% addCircleMarkers(data = pts_view, radius = 5, color = "black", weight = 1,
                                   fillColor = ~pal_pts(resid), fillOpacity = 0.9,
-                                  popup = popups)
+                                  layerId = paste0(RESID_POINT_ID_PREFIX, seq_len(nrow(pts_view))),
+                                  group = "resid_points")
        m <- m %>% leaflet::addLegend(pal = pal_pts, values = c(-abs_max_p, abs_max_p), opacity = 1, title = legend_var_title(map_legend_title(meta$label, layer = "point_resid")))
     }
     
@@ -363,77 +391,82 @@
 
     if (is.null(rv$disp)) return(invisible(NULL))
     view <- map_view_base()
-
-    targets <- list()
-    if (view %in% c("view_act", "view_pred") && isTRUE(session_state$main_map_rendered)) {
-      lab <- if (view == "view_pred") {
-        if (identical(rv$disp$value_type, "pred_ss")) "pred_ss" else "pred"
-      } else "actual"
-      targets$main_map <- list(r = if (view == "view_pred") rv$rast_list_pre else rv$rast_list_act, lab = lab)
-    } else if (view == "view_comp" && isTRUE(session_state$comp_maps_rendered)) {
-      targets$comp_map_left  <- list(r = rv$rast_list_act, lab = "Actual")
-      targets$comp_map_right <- list(r = rv$rast_list_pre, lab = "Predicted")
-    } else if (view == "view_resid" && isTRUE(session_state$comp_maps_rendered)) {
-      # comp_map_right (point residuals) has no surface styling to swap
-      targets$comp_map_left <- list(r = rv$rast_list_res, lab = "resid_raster")
-    }
-
-    for (map_id in names(targets)) {
-      tgt <- targets[[map_id]]
-      r_list <- as_raster_list(tgt$r)
+    for (map_id in shown_map_ids()) {
+      s <- map_surface(map_id, view)
+      r_list <- as_raster_list(s$r)        # empty for the point-residual panel
       if (length(r_list) == 0) next
-      sig <- current_style_sig(tgt$lab, class_params_for(tgt$lab))
+      sig <- current_style_sig(s$lab, class_params_for(s$lab))
       if (identical(get0(map_id, envir = map_style_sig), sig)) next
-      style_map_rasters(leafletProxy(map_id), r_list, tgt$lab, map_id)
+      style_map_rasters(leafletProxy(map_id), r_list, s$lab, map_id)
       assign(map_id, sig, envir = map_style_sig)
     }
   }, priority = -10)
 
   # --- proxy-managed overlays (no raster re-encode on toggle) ---
 
-  # Run points reprojected for Leaflet, cached on rv$sf only.
+  # Run points reprojected for Leaflet, cached on rv$sf only: the point overlay,
+  # the point residuals and the point pop-ups (chunk C) read this one copy.
   pts_view_4326 <- reactive({
     pts <- rv$sf
     if (is.null(pts) || nrow(pts) == 0) return(NULL)
     tryCatch(st_transform(pts, 4326), error = function(e) NULL)
   })
 
-  # Styled sampling points + labels + their legend
+  # Styled sampling points: a new point set (or a rebuilt widget) gets the
+  # whole layer; a styling change restyles, relabels or resizes in place. The
+  # Residuals view's panels carry no styled points. rv$sf is the DISPLAY set
+  # (never NA-target filtered), so points without a measured target ("v") are
+  # styled apart even when covariates or predictions exist.
   observe({
     map_overlay_rev()
-    show <- isTRUE(input$show_points_viewer)
-    is_resid <- identical(map_view_base(), "view_resid")
-
-    pts_view <- NULL
-    popup_fn <- NULL
-    if (show) {
-      pts_view <- pts_view_4326()
-      if (!is.null(pts_view)) popup_fn <- make_popup_fn(colnames(st_drop_geometry(pts_view)))
+    pts <- if (isTRUE(input$show_points_viewer)) pts_view_4326()
+    targets <- if (identical(map_view_base(), "view_resid")) character(0) else shown_map_ids()
+    if (!length(targets)) return(invisible(NULL))
+    coords <- if (!is.null(pts)) sf::st_coordinates(pts)
+    if (!is.null(pts)) {
+      spec <- point_style_spec(pts, input$pt_color_by %||% "none", pt_group_colors(), value_col = "v")
+      radius <- input$pt_marker_size %||% 3
+      style <- list(spec$fill, spec$stroke, spec$fill_opacity, radius)
+      labels <- if (isTRUE(input$pt_show_labels)) point_label_text(pts, input$pt_label_field)
+      label_px <- input$pt_label_size %||% 11
     }
-
-    for (map_id in overlay_map_ids) {
-      proxy <- leafletProxy(map_id) %>%
-        clearGroup("styled_points") %>%
-        clearGroup("styled_labels") %>%
-        removeControl("styled_points_legend")
-      # Same rule as draw_map: no styled points on the residual
-      # comparison maps (resid_raster / resid_points views)
-      eligible <- map_id == "main_map" || !is_resid
-      if (eligible && !is.null(pts_view)) {
-        add_styled_points(proxy, pts_view,
-          color_by = input$pt_color_by %||% "none",
-          custom_colors = rv$pt_style_colors,
-          show_labels = isTRUE(input$pt_show_labels),
-          label_field = input$pt_label_field %||% "none",
-          label_size = input$pt_label_size %||% 11,
-          marker_size = input$pt_marker_size %||% 3,
-          popup_fn = popup_fn,
-          legend_layer_id = "styled_points_legend",
-          # rv$sf is the DISPLAY set (never NA-target filtered). Missing measured
-          # targets are styled apart even when covariates or predictions exist.
-          value_col = "v"
-        )
+    for (map_id in targets) {
+      st <- pt_state[[map_id]] %||% list()
+      proxy <- leafletProxy(map_id)
+      if (!identical(st$coords, coords)) {
+        if (!is.null(st$coords)) {
+          proxy %>% leaflet::removePopup(POINT_POPUP_ID) %>%
+            leaflet::invokeMethod(NULL, "mnPointLabels", POINT_LAYER_ID_PREFIX, NULL) %>%
+            clearGroup("styled_points") %>% removeControl("styled_points_legend")
+        }
+        st <- list(coords = coords, label_px = st$label_px)
+        if (!is.null(pts)) {
+          add_styled_points(proxy, pts, spec, marker_size = radius, legend_layer_id = "styled_points_legend",
+                            layer_ids = paste0(POINT_LAYER_ID_PREFIX, seq_len(nrow(pts))))
+          st$style <- style; st$legend <- spec$legend
+        }
       }
+      if (!is.null(pts)) {
+        if (!identical(st$style, style)) {
+          proxy %>% leaflet::invokeMethod(NULL, "mnStylePoints", POINT_LAYER_ID_PREFIX, nrow(pts),
+                                          spec$fill, spec$stroke, spec$fill_opacity, radius)
+          st$style <- style
+        }
+        if (!identical(st$legend, spec$legend)) {
+          proxy %>% removeControl("styled_points_legend") %>%
+            add_point_legend(spec$legend, "styled_points_legend")
+          st$legend <- spec$legend
+        }
+        if (!identical(st$labels, labels)) {
+          proxy %>% leaflet::invokeMethod(NULL, "mnPointLabels", POINT_LAYER_ID_PREFIX, labels)
+          st$labels <- labels
+        }
+        if (!identical(st$label_px, label_px)) {
+          proxy %>% leaflet::invokeMethod(NULL, "mnPointLabelSize", label_px)
+          st$label_px <- label_px
+        }
+      }
+      pt_state[[map_id]] <- st
     }
   })
 
@@ -776,41 +809,25 @@
   })
 
   output$main_map <- renderLeaflet({
-    d <- rv$disp; req(d)
-    view <- map_view_base()
-    req(view %in% c("view_act", "view_pred"))
-    target <- if (view == "view_pred") rv$rast_list_pre else rv$rast_list_act
-    view_lab <- if (view == "view_pred") {
-      if (identical(d$value_type, "pred_ss")) "pred_ss" else "pred"
-    } else "actual"
-    m <- draw_map(target, view_lab, map_id = "main_map")
+    req(rv$disp, map_view_base() %in% c("view_act", "view_pred"))
+    s <- map_surface("main_map")
+    m <- draw_map(s$r, s$lab, map_id = "main_map")
     session_state$main_map_rendered <- TRUE
     map_overlay_rev(isolate(map_overlay_rev()) + 1L)
     m
   })
 
-  output$comp_map_left <- renderLeaflet({
-    req(rv$disp, map_view_base() %in% c("view_comp", "view_resid"))
-    m <- if(map_view_base() == "view_resid") {
-      draw_map(rv$rast_list_res, "resid_raster", map_id = "comp_map_left")
-    } else {
-      draw_map(rv$rast_list_act, "Actual", map_id = "comp_map_left")
-    }
-    session_state$comp_maps_rendered <- TRUE
-    map_overlay_rev(isolate(map_overlay_rev()) + 1L)
-    m
-  })
-
-  output$comp_map_right <- renderLeaflet({
-    req(rv$disp, map_view_base() %in% c("view_comp", "view_resid"))
-    m <- if(map_view_base() == "view_resid") {
-      draw_map(NULL, "resid_points", map_id = "comp_map_right")
-    } else {
-      draw_map(rv$rast_list_pre, "Predicted", map_id = "comp_map_right")
-    }
-    session_state$comp_maps_rendered <- TRUE
-    map_overlay_rev(isolate(map_overlay_rev()) + 1L)
-    m
+  # Both comparison panels, in the Comparison and Residuals views.
+  for (.comp_id in c("comp_map_left", "comp_map_right")) local({
+    map_id <- .comp_id
+    output[[map_id]] <- renderLeaflet({
+      req(rv$disp, map_view_base() %in% c("view_comp", "view_resid"))
+      s <- map_surface(map_id)
+      m <- draw_map(s$r, s$lab, map_id = map_id)
+      session_state$comp_maps_rendered <- TRUE
+      map_overlay_rev(isolate(map_overlay_rev()) + 1L)
+      m
+    })
   })
       output$locality_pan_ui <- renderUI({
       req(rv$loc_names)

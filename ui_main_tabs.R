@@ -118,7 +118,7 @@ ui_main_tabs <- mainPanel(width = 9,
                              ),
                          div(class = "mn-maptoolbar",
                              mn_popover("Overlays", icon_tag = icon("layer-group"), width = "270px",
-                                 checkboxInput("show_points_viewer", HTML(paste0("Show Points", info_tooltip("show_points_info", "Rendering the sampling points on the map can take a while, up to ~30 seconds depending on the number of samples and the size of the dataset. The map stays responsive while the points are being drawn."))), FALSE, width = "auto"),
+                                 checkboxInput("show_points_viewer", "Show Points", FALSE, width = "auto"),
                                  checkboxInput("show_res_overlay", "Cell Sizes", FALSE, width = "auto"),
                                  checkboxInput("show_north", "North Arrow", FALSE, width = "auto"),
                                  checkboxInput("show_borders", "Borders", FALSE, width = "auto"),
@@ -158,10 +158,9 @@ ui_main_tabs <- mainPanel(width = 9,
                                      uiOutput("map_view_ui")),
                              div(class = "mn-tb-spacer"),
                              actionButton("refresh_map_area", "Refresh", icon = icon("sync"), class = "btn-default btn-sm"),
-                             actionButton("show_popup_settings", "Pop-up", icon = icon("cog"), class = "btn-default btn-sm"),
                              actionButton("quick_export_map", "Quick export", icon = icon("camera"), class = "btn-default btn-sm", title = "Immediately send the currently viewed map to the Export Registry."),
                              actionButton("toggle_pt_style", "Point styling", icon = icon("palette"), class = "btn-default btn-sm",
-                                          title = "Colour, label and size the sampling points drawn on the map"),
+                                          title = "Colour, label and size the sampling points drawn on the map, and choose what their pop-ups list"),
                              # Named apart from "Quick export" on purpose: that
                              # button sends the map to the Export Registry, this
                              # one writes GIS/data files straight to disk.
@@ -199,6 +198,17 @@ ui_main_tabs <- mainPanel(width = 9,
                                tags$label("Point Options", style = "font-size: 11px; color: var(--mn-text-3); margin-bottom: 2px; display: block; text-transform: uppercase; letter-spacing: 0.5px;"),
                                sliderInput("pt_marker_size", "Point Size", min = 1, max = 12, value = 3, step = 1, width = "130px", ticks = FALSE),
                                checkboxInput("pt_apply_minimap", "Apply Colour Set to Mini Map", FALSE, width = "auto")
+                             ),
+                             div(style = "min-width: 180px;",
+                               tags$label("Pop-up", style = "font-size: 11px; color: var(--mn-text-3); margin-bottom: 2px; display: block; text-transform: uppercase; letter-spacing: 0.5px;"),
+                               # Choices come from the variable list (server_map_interactions.R).
+                               selectInput("pt_popup_content", "Pop-up Content", choices = c("Mapped variable's category" = "auto"),
+                                           selected = "auto", width = "180px", selectize = FALSE),
+                               conditionalPanel("input.pt_popup_content == 'manual'",
+                                 pickerInput("pt_popup_vars", NULL, choices = character(0), multiple = TRUE, width = "180px",
+                                             options = list(`actions-box` = TRUE, `live-search` = TRUE,
+                                                            `selected-text-format` = "count > 2",
+                                                            `none-selected-text` = "None: notes only")))
                              )
                            )
                          ),

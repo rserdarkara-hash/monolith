@@ -16,8 +16,9 @@
 
   # One handler set per map: a newly drawn shape opens the assign-locality
   # modal, and polygons are also kept in rv$drawn_polygons for map exports.
-  # Keys are prefixed with the map id; leaflet ids are only unique per map.
-  for (.map_id in c("main_map", "comp_map_left", "comp_map_right")) local({
+  # Keys are prefixed with the map id; leaflet ids are only unique per map. A
+  # click on a sampling point opens its pop-up.
+  for (.map_id in overlay_map_ids) local({
     map_id <- .map_id
     poly_key <- function(feat) paste0(map_id, "_", feat$properties$`_leaflet_id`)
     observeEvent(input[[paste0(map_id, "_draw_new_feature")]], {
@@ -34,6 +35,26 @@
       for (feat in input[[paste0(map_id, "_draw_deleted_features")]]$features) {
         rv$drawn_polygons[[poly_key(feat)]] <- NULL
       }
+    })
+    # A point's pop-up, built for that point when it is clicked: a styled
+    # sampling point, or a point of the Residuals view's point residuals.
+    # pts_view_4326() (chunk H) is looked up when the click arrives.
+    observeEvent(input[[paste0(map_id, "_marker_click")]], {
+      ev <- input[[paste0(map_id, "_marker_click")]]
+      prefix <- switch(ev$group %||% "", styled_points = POINT_LAYER_ID_PREFIX,
+                       resid_points = RESID_POINT_ID_PREFIX, NULL)
+      id <- as.character(ev$id %||% "")
+      if (is.null(prefix) || !startsWith(id, prefix)) return(invisible(NULL))
+      pts <- pts_view_4326()
+      i <- suppressWarnings(as.integer(substring(id, nchar(prefix) + 1L)))
+      if (is.null(pts) || !isTRUE(i >= 1L && i <= nrow(pts))) return(invisible(NULL))
+      # A click sent before a rebuild names a marker of the previous point set.
+      xy <- sf::st_coordinates(pts)[i, ]
+      near <- function(a, b) isTRUE(abs(a - b) < 1e-9)
+      if (!near(xy[["X"]], ev$lng) || !near(xy[["Y"]], ev$lat)) return(invisible(NULL))
+      row <- sf::st_drop_geometry(pts)[i, , drop = FALSE]
+      leafletProxy(map_id) %>%
+        leaflet::addPopups(ev$lng, ev$lat, point_popup_html(row, popup_groups()), layerId = POINT_POPUP_ID)
     })
   })
 
@@ -102,138 +123,28 @@
     }
   }
 
-  popup_metadata_cache <- reactive({
-    req(rv$mapping$vars)
-    meta_list <- rv$mapping$vars
-    
-    vars_to_show <- rv$pop_up_vars
-    if(is.null(vars_to_show) || length(vars_to_show) == 0) {
-      soil_vars <- Filter(function(x) grepl("Soil|Physicochem", x$category, ignore.case = TRUE), meta_list)
-      if(length(soil_vars) > 0) {
-        vars_to_show <- sapply(soil_vars, function(x) x$actual)
-      } else {
-        vars_to_show <- sapply(meta_list, function(x) x$actual)
-      }
-    }
-    
-    all_cats <- unique(sapply(meta_list, function(x) x$category))
-    priority_cats <- all_cats[grepl("Soil|Physicochem", all_cats, ignore.case = TRUE)]
-    other_cats <- setdiff(all_cats, priority_cats)
-    cats <- c(priority_cats, other_cats)
-    
-    grouped_vars <- list()
-    for(cat in cats) {
-      cat_vars <- Filter(function(x) x$category == cat && x$actual %in% vars_to_show, meta_list)
-      if(length(cat_vars) > 0) {
-        grouped_vars[[cat]] <- cat_vars
-      }
-    }
-    
-    meta_actuals <- sapply(meta_list, function(x) x$actual)
-    
-    list(
-      vars_to_show = vars_to_show,
-      grouped_vars = grouped_vars,
-      meta_actuals = meta_actuals
-    )
+  # The variable rows of a point's pop-up, by category, as Pop-up Content sets.
+  popup_groups <- reactive({
+    group_vars_by_category(popup_variables(rv$mapping$vars %||% list(), input$pt_popup_content %||% "auto",
+                                           input$pt_popup_vars, focus_var()))
   })
 
-  # A popup_fn(data_row) closure for a point set with columns `cnames`. A
-  # variable is read from the column of its own name only: a point set that
-  # lacks it (a run made before another table was loaded) shows no value for
-  # it, never a column whose name merely resembles it.
-  make_popup_fn <- function(cnames) {
-    function(data_row) generate_popup(data_row, cnames)
-  }
-
-  generate_popup <- function(data_row, cnames) {
-    data_row <- as.list(data_row)
-    names_in_row <- names(data_row)
-
-    find_val <- function(key) if (key %in% cnames) data_row[[key]]
-
-    cache <- popup_metadata_cache()
-    vars_to_show <- cache$vars_to_show
-    grouped_vars <- cache$grouped_vars
-    meta_actuals <- cache$meta_actuals
-    
-    html_content <- "<div style='max-height: 300px; overflow-y: auto; font-family: sans-serif; min-width: 200px;'>"
-    html_content <- paste0(html_content, "<h4>Point Details</h4>")
-    # A point without a value in the mapped column is drawn hollow; say so
-    # rather than show an empty row.
-    if ("v" %in% names_in_row && all(is.na(data_row[["v"]]))) {
-      html_content <- paste0(html_content,
-        "<p style='margin: 0 0 6px 0; color: var(--mn-text-3); font-style: italic;'>",
-        "No measured value for the mapped variable: this point was not used in the fit.</p>")
-    }
-    # Samples sharing this location (merge_colocated): the numeric values below
-    # are their replicate means.
-    n_rep <- suppressWarnings(as.integer(data_row[[".mn_n_rep"]] %||% 1L))
-    if (isTRUE(n_rep > 1L)) {
-      html_content <- paste0(html_content,
-        "<p style='margin: 0 0 6px 0; color: var(--mn-text-3); font-style: italic;'>",
-        "Co-located samples: ", n_rep, " (values averaged)</p>")
-    }
-    html_content <- paste0(html_content, "<table style='width: 100%; border-collapse: collapse;'>")
-    
-    for(cat in names(grouped_vars)) {
-      cat_vars <- grouped_vars[[cat]]
-      html_content <- paste0(html_content, popup_group_row(cat))
-      for(v in cat_vars) {
-        html_content <- paste0(html_content, popup_value_row(v$label, find_val(as.character(v$actual))))
-      }
-    }
-
-    other_vars <- setdiff(vars_to_show, meta_actuals)
-    if(length(other_vars) > 0) {
-      html_content <- paste0(html_content, popup_group_row("Other Variables"))
-      for(ov in other_vars) {
-        html_content <- paste0(html_content, popup_value_row(ov, find_val(as.character(ov))))
-      }
-    }
-    
-    html_content <- paste0(html_content, "</table></div>")
-    return(html_content)
-  }
-
-  observeEvent(input$show_popup_settings, {
-    req(rv$mapping$vars)
-    vars_list <- rv$mapping$vars
-    cats <- unique(sapply(vars_list, function(x) x$category))
-    choices <- list()
-    for(cat in cats) {
-      cat_vars <- Filter(function(x) x$category == cat, vars_list)
-      choices[[cat]] <- setNames(sapply(cat_vars, function(x) x$actual), sapply(cat_vars, function(x) x$label))
-    }
-    
-    default_selected <- rv$pop_up_vars
-    if (is.null(default_selected)) {
-      soil_vars <- Filter(function(x) grepl("Soil|Physicochem", x$category, ignore.case = TRUE), vars_list)
-      if (length(soil_vars) > 0) {
-        default_selected <- sapply(soil_vars, function(x) x$actual)
-      } else {
-        default_selected <- sapply(vars_list, function(x) x$actual)
-      }
-    }
-    
-    showModal(modalDialog(
-      title = "Sampling Point Pop-up Settings",
-      pickerInput("popup_var_select", "Select Variables to Display in Pop-ups:", 
-                  choices = choices, 
-                  selected = default_selected, 
-                  multiple = TRUE, 
-                  options = list(`actions-box` = TRUE, `live-search` = TRUE)),
-      footer = tagList(
-        modalButton("Cancel"),
-        actionButton("confirm_popups", "Apply Settings", class = "btn-primary")
-      )
-    ))
-  })
-
-  observeEvent(input$confirm_popups, {
-    rv$pop_up_vars <- input$popup_var_select
-    removeModal()
-    showNotification("Pop-up settings updated.", type = "message")
+  # Pop-up Content and its variable chooser follow the variable list. A new
+  # table starts from the mapped variable's category; otherwise a choice is
+  # kept while the list still offers it.
+  observeEvent(rv$mapping$vars, {
+    vars <- rv$mapping$vars %||% list()
+    fresh <- isTRUE(session_state$popup_fresh)
+    session_state$popup_fresh <- FALSE
+    choices <- popup_content_choices(vars)
+    content <- if (fresh) "auto" else isolate(input$pt_popup_content)
+    updateSelectInput(session, "pt_popup_content", choices = choices,
+                      selected = if (isTRUE(content %in% unlist(choices))) content else "auto")
+    var_choices <- lapply(group_vars_by_category(vars), function(g) {
+      stats::setNames(var_actuals(g), vapply(g, function(x) as.character(x$label %||% x$actual), character(1)))
+    })
+    chosen <- if (fresh) character(0) else intersect(as.character(isolate(input$pt_popup_vars)), var_actuals(vars))
+    shinyWidgets::updatePickerInput(session, "pt_popup_vars", choices = var_choices, selected = chosen)
   })
 
   observeEvent(input$toggle_pt_style, {
@@ -274,25 +185,27 @@
     updateSelectInput(session, "pt_label_field", choices = label_choices, selected = selected_label_field)
   })
 
-  observeEvent(list(input$pt_color_by, input$pt_palette), {
-    req(input$pt_color_by)
-    if (input$pt_color_by == "none") {
-      rv$pt_style_colors <- NULL
-      return()
-    }
-    req(rv$user_data, input$pt_color_by %in% colnames(rv$user_data))
-    groups <- sort(unique(as.character(rv$user_data[[input$pt_color_by]])))
+  # Each group's colour for Color By: the palette's, with the custom colours
+  # chosen for this column and palette on top. NULL for "none".
+  pt_group_colors <- reactive({
+    by <- input$pt_color_by %||% "none"
+    ud <- rv$user_data
+    if (identical(by, "none") || is.null(ud) || !by %in% colnames(ud)) return(NULL)
     pal_name <- input$pt_palette %||% "Set1"
-    rv$pt_style_colors <- generate_group_palette(groups, pal_name)
-  }, ignoreInit = TRUE)
+    cols <- generate_group_palette(sort(unique(point_group_values(ud[[by]]))), pal_name)
+    over <- rv$pt_color_overrides[[by]][[pal_name]]
+    hit <- intersect(names(over), names(cols))
+    cols[hit] <- over[hit]
+    cols
+  })
 
   observeEvent(input$pt_custom_colors, {
-    req(rv$pt_style_colors)
-    groups <- names(rv$pt_style_colors)
+    cols <- pt_group_colors(); req(cols)
+    groups <- names(cols)
 
     color_inputs <- lapply(seq_along(groups), function(i) {
       g <- groups[i]
-      col_hex <- rv$pt_style_colors[g]
+      col_hex <- cols[[i]]
       div(style = "display: flex; align-items: center; gap: 10px; margin-bottom: 8px;",
         div(style = paste0("width: 16px; height: 16px; border-radius: 3px; background-color: ", col_hex, "; border: 1px solid var(--mn-line-2); flex-shrink: 0;")),
         tags$span(g, style = "width: 120px; font-size: 13px; font-weight: 500; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; flex-shrink: 0;"),
@@ -320,14 +233,25 @@
     ))
   })
 
+  # Custom colours are kept per column and palette (nested lists, so a single
+  # group keeps its name), and come back when Color By and Palette return to
+  # them. Only a colour changed here is kept; the other groups follow the palette.
   observeEvent(input$pt_apply_custom_colors, {
-    req(rv$pt_style_colors)
-    groups <- names(rv$pt_style_colors)
-    for (i in seq_along(groups)) {
+    cols <- pt_group_colors(); req(cols)
+    by <- input$pt_color_by; pal_name <- input$pt_palette %||% "Set1"
+    all_over <- rv$pt_color_overrides %||% list()
+    per_col <- all_over[[by]] %||% list()
+    over <- per_col[[pal_name]] %||% character(0)
+    for (i in seq_along(cols)) {
       col_val <- input[[paste0("pt_grp_col_", i)]]
-      if (!is.null(col_val) && grepl("^#[0-9A-Fa-f]{6}$", col_val)) {
-        rv$pt_style_colors[groups[i]] <- col_val
+      if (!is.null(col_val) && grepl("^#[0-9A-Fa-f]{6}$", col_val) && !identical(col_val, cols[[i]])) {
+        over[names(cols)[i]] <- col_val
       }
+    }
+    if (length(over)) {
+      per_col[[pal_name]] <- over
+      all_over[[by]] <- per_col
+      rv$pt_color_overrides <- all_over
     }
     removeModal()
     showNotification("Custom colors applied.", type = "message", duration = 3)

@@ -138,7 +138,7 @@
      sfx <- c(act = "", pre = "pre_")
      of <- function(tgt, act, pre) if (tgt == "act") act else pre
      reg <- function(id, what, type, obj) {
-       register_export_item(paste0(id, l), paste(meta$label, "-", l, "-", what), type, obj, meta$category)
+       register_export_item(paste0(id, l), paste(meta$label, "-", l, "-", what), type, obj)
      }
 
      # The per-locality Descriptive Statistics card's own frame and builder
@@ -371,6 +371,9 @@
   # the app or reported by the browser); used to re-send the selection when
   # the zone ordering rebuilds the dropdowns.
   session_state$crs_last <- list()
+  # TRUE from a data upload until the Pop-up Content choices are rebuilt: the
+  # browser still reports the previous table's choice in that flush.
+  session_state$popup_fresh <- FALSE
 
   # Bumped by every map renderLeaflet, so proxy-managed overlays (points,
   # borders, controls) are re-applied after each full re-render.
@@ -418,7 +421,6 @@
     # resolve_var_palette() falls back to the variable's default. Not run state:
     # an archive restore leaves it alone.
     palette_picks = list(),
-    pop_up_vars = NULL, # Selected variables for pop-ups
     model_summaries = list(), # RK trend summaries (summary.lm)
     rf_models = list(), # trained random forests
     gstat_objs = list(), # gstat objects for CK
@@ -433,7 +435,7 @@
     run_counter = 0L, # Incremental run counter
     run_history = list(), # Archive of previous run results and configs
     proceed_run = NULL, # Trigger for model generation after archive decision
-    pt_style_colors = NULL, # Point colour set: named vector, group value -> hex colour
+    pt_color_overrides = list(), # Custom point colours: column -> palette -> group -> hex
     auto_archive_choice = "none", # "none", "archive", or "discard"
     # TRUE between a completed OPTIMIZE ALL VARIOGRAMS and the next run: the
     # fitted curves on the Scientific Analysis tab belong to the tuning

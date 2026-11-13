@@ -2113,7 +2113,9 @@ add_map_ruler <- function(map, position = "bottomleft") {
         // behind it. Lift the control clear of whatever height the attribution
         // currently has: the basemap is switchable, so the offset is measured
         // rather than assumed, and re-measured whenever the map resizes or a
-        // layer (a new basemap) arrives with its own credit line.
+        // layer (a new basemap) arrives with its own credit line. Once per
+        // frame: the measurement forces a layout, and a layer set added point
+        // by point (a thousand markers or labels) fires layeradd for each.
         var lift = function() {
           var ctrl = el.querySelector('.leaflet-control-measure');
           if (!ctrl) return;
@@ -2123,7 +2125,12 @@ add_map_ruler <- function(map, position = "bottomleft") {
         };
         lift();
         setTimeout(lift, 300);
-        map.on('resize layeradd baselayerchange', lift);
+        var liftQueued = false;
+        map.on('resize layeradd baselayerchange', function() {
+          if (liftQueued) return;
+          liftQueued = true;
+          requestAnimationFrame(function() { liftQueued = false; lift(); });
+        });
 
         // Built as a live DOM node, not a string: the two task links are wired
         // here, so they keep working after the popup is closed and reopened.
@@ -2198,117 +2205,80 @@ add_map_ruler <- function(map, position = "bottomleft") {
 MISSING_VALUE_POINT_COLOR <- "#9AA0A6"
 MISSING_VALUE_POINT_LABEL <- "No measured value (not used in the fit)"
 
-# `value_col` names the mapped variable's column: points without a value there
-# render HOLLOW with their own legend entry, since the display set is wider
-# than the fitted set (run_regional_interpolation()).
-add_styled_points <- function(map, pts_sf, color_by = "none", custom_colors = NULL,
-                              show_labels = FALSE, label_field = "none",
-                              label_size = 11, marker_size = 3,
-                              popup_fn = NULL, legend_layer_id = NULL,
-                              value_col = NULL) {
+# Layer ids of the Map Viewer's point layers: the marker of display-set row i
+# is "<prefix><i>"; the restyle, label and pop-up paths find markers by it.
+POINT_LAYER_ID_PREFIX <- "pt_"
+RESID_POINT_ID_PREFIX <- "rp_"
+POINT_POPUP_ID <- "pt_popup"
 
-  crs_obj <- sf::st_crs(pts_sf)
-  pts_view <- if (is.na(crs_obj$epsg) || crs_obj$epsg != 4326) sf::st_transform(pts_sf, 4326) else pts_sf
-  if (nrow(pts_view) == 0) return(map)
+# The Color By group of each value: its text, NA where the cell is empty or
+# blank (a CSV reads an empty text cell as ""), so a blank is no group.
+point_group_values <- function(x) {
+  g <- as.character(x)
+  g[!is.na(g) & !nzchar(trimws(g))] <- NA_character_
+  g
+}
 
-  use_groups <- color_by != "none" && color_by %in% colnames(pts_view)
-  no_value <- if (!is.null(value_col) && value_col %in% colnames(pts_view)) {
-    is.na(pts_view[[value_col]])
-  } else rep(FALSE, nrow(pts_view))
-
-  legend_colors <- character(0)
-  legend_labels <- character(0)
-  legend_title <- NULL
-
-  if (use_groups && !is.null(custom_colors)) {
-    grp_vals <- as.character(pts_view[[color_by]])
-    groups <- sort(unique(grp_vals))
+# Per-point fill, outline and fill opacity of the sampling-point layer, and its
+# legend entries (NULL when there is nothing to list). Scalars when every point
+# looks alike. Points without a measured value (`value_col` NA) are hollow grey
+# whatever the colouring, and their legend entry comes last: the display set is
+# wider than the fitted set (run_regional_interpolation()).
+point_style_spec <- function(pts, color_by = "none", custom_colors = NULL, value_col = NULL) {
+  n <- nrow(pts)
+  legend_colors <- character(0); legend_labels <- character(0); legend_title <- NULL
+  if (!identical(color_by, "none") && color_by %in% colnames(pts) && !is.null(custom_colors)) {
+    grp <- point_group_values(pts[[color_by]])
+    groups <- sort(unique(grp))
     missing <- setdiff(groups, names(custom_colors))
-    if (length(missing) > 0) {
-      extra <- generate_group_palette(missing, "Set1")
-      custom_colors <- c(custom_colors, extra)
-    }
-    pal_fn <- leaflet::colorFactor(
-      palette = unname(custom_colors[groups]),
-      domain = groups
-    )
-    fill_colors <- pal_fn(grp_vals)
-    border_color <- "white"
-    fill_opacity <- 0.85
-    legend_colors <- unname(custom_colors[groups])
-    legend_labels <- groups
-    legend_title <- color_by
+    if (length(missing) > 0) custom_colors <- c(custom_colors, generate_group_palette(missing, "Set1"))
+    fill <- leaflet::colorFactor(palette = unname(custom_colors[groups]), domain = groups)(grp)
+    stroke <- "white"; fill_opacity <- 0.85
+    legend_colors <- unname(custom_colors[groups]); legend_labels <- groups; legend_title <- color_by
   } else {
-    fill_colors <- "cyan"
-    border_color <- "cyan"
-    fill_opacity <- 0.5
+    fill <- "cyan"; stroke <- "cyan"; fill_opacity <- 0.5
   }
-
-  # Applied last, so switching the colour-by mode cannot hide the distinction.
+  no_value <- if (!is.null(value_col) && value_col %in% colnames(pts)) is.na(pts[[value_col]]) else logical(n)
   if (any(no_value)) {
-    n <- nrow(pts_view)
-    fill_colors <- rep(fill_colors, length.out = n)
-    border_color <- rep(border_color, length.out = n)
+    fill <- rep(fill, length.out = n); stroke <- rep(stroke, length.out = n)
     fill_opacity <- rep(fill_opacity, length.out = n)
-    fill_colors[no_value] <- MISSING_VALUE_POINT_COLOR
-    border_color[no_value] <- MISSING_VALUE_POINT_COLOR
+    fill[no_value] <- MISSING_VALUE_POINT_COLOR; stroke[no_value] <- MISSING_VALUE_POINT_COLOR
     fill_opacity[no_value] <- 0
     legend_colors <- c(legend_colors, MISSING_VALUE_POINT_COLOR)
     legend_labels <- c(legend_labels, MISSING_VALUE_POINT_LABEL)
   }
+  list(fill = fill, stroke = stroke, fill_opacity = fill_opacity,
+       legend = if (length(legend_colors)) list(colors = legend_colors, labels = legend_labels, title = legend_title))
+}
 
-  if (length(legend_colors) > 0) {
-    map <- map %>% leaflet::addLegend(
-      position = "bottomleft",
-      colors = legend_colors,
-      labels = legend_labels,
-      title = legend_title,
-      opacity = 0.9,
-      layerId = legend_layer_id
-    )
-  }
+# The sampling-point legend of a style spec (point_style_spec()$legend),
+# bottom-left; NULL adds nothing.
+add_point_legend <- function(map, legend, layer_id = NULL) {
+  if (is.null(legend)) return(map)
+  leaflet::addLegend(map, position = "bottomleft", colors = legend$colors, labels = legend$labels,
+                     title = legend$title, opacity = 0.9, layerId = layer_id)
+}
 
-  popups <- NULL
-  if (!is.null(popup_fn)) {
-    df_clean <- sf::st_drop_geometry(pts_view)
-    popups <- vapply(seq_len(nrow(df_clean)), function(i) popup_fn(df_clean[i, ]), character(1))
-  }
+# Label text of each point for the Label Field `field`: two decimals for a
+# number, the text of anything else, NA (no label) where the value is missing.
+# NULL when no field is chosen or the point set lacks it.
+point_label_text <- function(pts, field) {
+  if (is.null(field) || identical(field, "none") || !field %in% colnames(pts)) return(NULL)
+  raw <- pts[[field]]
+  if (is.numeric(raw)) ifelse(is.na(raw), NA_character_, sprintf("%.2f", raw)) else as.character(raw)
+}
 
-  map <- map %>% leaflet::addCircleMarkers(
-    data = pts_view,
-    radius = marker_size,
-    color = border_color,
-    weight = 1,
-    fillColor = fill_colors,
-    fillOpacity = fill_opacity,
-    opacity = 1,
-    popup = popups,
-    group = "styled_points"
-  )
-
-  if (show_labels && label_field != "none" && label_field %in% colnames(pts_view)) {
-    raw_vals <- pts_view[[label_field]]
-    label_vals <- if (is.numeric(raw_vals)) {
-      ifelse(is.na(raw_vals), NA_character_, sprintf("%.2f", raw_vals))
-    } else {
-      as.character(raw_vals)
-    }
-    map <- map %>% leaflet::addLabelOnlyMarkers(
-      data = pts_view,
-      label = label_vals,
-      labelOptions = leaflet::labelOptions(
-        noHide = TRUE, direction = "top", textOnly = TRUE,
-        offset = c(0, -8),
-        style = list(
-          "font-size" = paste0(label_size, "px"),
-          "font-weight" = "bold",
-          "color" = "white",
-          "text-shadow" = "1px 1px 2px rgba(0,0,0,0.9), -1px -1px 2px rgba(0,0,0,0.9), 1px -1px 2px rgba(0,0,0,0.9), -1px 1px 2px rgba(0,0,0,0.9)"
-        )
-      ),
-      group = "styled_labels"
-    )
-  }
-
-  map
+# The sampling points styled by `spec` (point_style_spec() of the same rows) as
+# circle markers, with the spec's legend. Points outside WGS84 are transformed;
+# `layer_ids` names each marker for in-place restyling and pop-ups.
+add_styled_points <- function(map, pts_sf, spec, marker_size = 3, legend_layer_id = NULL,
+                              layer_ids = NULL, group = "styled_points") {
+  crs_obj <- sf::st_crs(pts_sf)
+  pts_view <- if (is.na(crs_obj$epsg) || crs_obj$epsg != 4326) sf::st_transform(pts_sf, 4326) else pts_sf
+  if (nrow(pts_view) == 0) return(map)
+  map %>%
+    add_point_legend(spec$legend, legend_layer_id) %>%
+    leaflet::addCircleMarkers(data = pts_view, radius = marker_size, color = spec$stroke, weight = 1,
+                              fillColor = spec$fill, fillOpacity = spec$fill_opacity, opacity = 1,
+                              layerId = layer_ids, group = group)
 }

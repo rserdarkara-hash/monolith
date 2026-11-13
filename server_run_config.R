@@ -8,13 +8,13 @@
   palette_of <- function(var, fallback = "YlOrRd") {
     resolve_var_palette(var, rv$mapping$vars, rv$palette_picks, fallback)
   }
-  # The variable the Color Palette picker styles: the displayed run's while it is
-  # in the variable list, else the sidebar's (before the first run, and after
-  # another dataset replaced the list).
-  palette_var <- function() {
+  # The variable the Map Viewer is about: the displayed run's while it is in the
+  # variable list, else the sidebar's (before the first run, and after another
+  # dataset replaced the list). The Color Palette picker styles it, and point
+  # pop-ups follow its category.
+  focus_var <- function() {
     shown <- rv$disp$var_id
-    listed <- vapply(rv$mapping$vars %||% list(), function(v) as.character(v$actual), character(1))
-    if (!is.null(shown) && shown %in% listed) shown else input$var_id
+    if (!is.null(shown) && shown %in% var_actuals(rv$mapping$vars %||% list())) shown else input$var_id
   }
 
   get_current_meta <- function() {
@@ -738,7 +738,7 @@
   # The picker styles the displayed run's variable once a run exists and opens
   # on its palette (palette_of()), so redraws never undo a pick.
   output$palette_ui <- renderUI({
-    vid <- palette_var()
+    vid <- focus_var()
     req(vid, rv$mapping$vars)
     # Agronomical styling supplies its own class palette, so the manual
     # colour-palette picker is irrelevant there: hidden.
@@ -757,7 +757,7 @@
   # is its redraw arriving, not a pick.
   observeEvent(input$palette_select, {
     pal <- as.character(input$palette_select)
-    vid <- palette_var()
+    vid <- focus_var()
     req(isTRUE(pal %in% dashboard_palettes), vid)
     if (identical(pal, palette_of(vid))) return()
     picks <- rv$palette_picks %||% list()

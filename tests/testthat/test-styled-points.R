@@ -1,5 +1,7 @@
-# Leaflet layer helpers (ui_plotting.R): add_styled_points(), add_base_tiles(),
-# the raster image ids the restyler retires, and point pop-up rows.
+# Leaflet layer helpers (ui_plotting.R): the sampling-point layer
+# (point_style_spec(), add_styled_points(), add_point_legend(),
+# point_label_text()), add_base_tiles(), the raster image ids the restyler
+# retires, and the point pop-ups (ui_formatting.R).
 
 # ── Fixtures ───────────────────────────────────────────────────────────────
 
@@ -25,9 +27,10 @@ make_sf_points <- function(n = 10, seed = 42) {
 # the result holds for any implementation that does not raise. These read the
 # emitted call instead. leaflet packs the path options into one argument; find
 # that by content rather than by position, which its argument order does not
-# promise. Positions 1-3 (lat, lng, radius) come from leaflet's own
-# invokeMethod signature; the lat/lng assertions below compare against the
-# transformed coordinates, so a swapped pair fails rather than passing quietly.
+# promise. Positions 1-5 (lat, lng, radius, layerId, group) and 9 (popup) come
+# from leaflet's own invokeMethod signature; the lat/lng assertions below
+# compare against the transformed coordinates, so a swapped pair fails rather
+# than passing quietly.
 
 marker_calls <- function(m) Filter(function(c) c$method == "addCircleMarkers", m$x$calls)
 marker_args <- function(m) marker_calls(m)[[1]]$args
@@ -35,19 +38,13 @@ marker_opts <- function(m) {
   hit <- Filter(function(a) is.list(a) && "fillOpacity" %in% names(a), marker_args(m))
   hit[[1]]
 }
-# addLabelOnlyMarkers is issued as an addMarkers call; the label vector is the
-# character argument with one entry per point (the only other character
-# argument is the layer group name, which is scalar).
-label_values <- function(m, n) {
-  hit <- Filter(function(c) c$method == "addMarkers", m$x$calls)
-  if (length(hit) == 0) return(NULL)
-  Filter(function(a) is.character(a) && length(a) == n, hit[[1]]$args)[[1]]
-}
 legend_calls <- function(m) Filter(function(c) c$method == "addLegend", m$x$calls)
 legend_args <- function(m, i = 1L) {
   args <- legend_calls(m)[[i]]$args
   Filter(function(a) is.list(a) && "labels" %in% names(a), args)[[1]]
 }
+# The points drawn with the style spec of the same rows, as the app draws them.
+styled_map <- function(pts, ...) add_styled_points(make_leaflet_map(), pts, point_style_spec(pts, ...))
 
 # ── What add_styled_points draws ───────────────────────────────────────────
 
@@ -58,7 +55,7 @@ test_that("add_styled_points emits the colours each mode promises", {
   custom <- c(A = "#E69F00", B = "#009E73", C = "#56B4E9")
 
   # No colouring: one cyan for every marker, half-opaque, and no legend.
-  m <- add_styled_points(make_leaflet_map(), pts)
+  m <- styled_map(pts)
   expect_identical(marker_opts(m)$fillColor, "cyan")
   expect_identical(marker_opts(m)$color, "cyan")
   expect_equal(marker_opts(m)$fillOpacity, 0.5)
@@ -66,14 +63,13 @@ test_that("add_styled_points emits the colours each mode promises", {
 
   # color_by alone is not enough - without a palette there is nothing to map
   # the groups onto, so it stays cyan and legend-free.
-  m <- add_styled_points(make_leaflet_map(), pts, color_by = "group")
+  m <- styled_map(pts, color_by = "group")
   expect_identical(marker_opts(m)$fillColor, "cyan")
   expect_length(legend_calls(m), 0L)
 
   # A complete palette: each marker carries ITS group's colour, the border
   # turns white, and the legend lists the groups in sorted order.
-  m <- add_styled_points(make_leaflet_map(), pts, color_by = "group",
-                         custom_colors = custom)
+  m <- styled_map(pts, color_by = "group", custom_colors = custom)
   expect_identical(marker_opts(m)$fillColor, unname(custom[grp]))
   expect_identical(marker_opts(m)$color, "white")
   expect_equal(marker_opts(m)$fillOpacity, 0.85)
@@ -82,8 +78,7 @@ test_that("add_styled_points emits the colours each mode promises", {
 
   # A partial palette: the named groups keep their colours and the unnamed one
   # is filled in with a distinct colour rather than dropped or recycled.
-  m <- add_styled_points(make_leaflet_map(), pts, color_by = "group",
-                         custom_colors = custom[c("A", "B")])
+  m <- styled_map(pts, color_by = "group", custom_colors = custom[c("A", "B")])
   fills <- marker_opts(m)$fillColor
   expect_identical(unique(fills[grp == "A"]), unname(custom[["A"]]))
   expect_identical(unique(fills[grp == "B"]), unname(custom[["B"]]))
@@ -93,61 +88,87 @@ test_that("add_styled_points emits the colours each mode promises", {
 
   # A colour-by column that is not in the frame falls back to the default
   # instead of erroring or colouring by something else.
-  m <- add_styled_points(make_leaflet_map(), pts, color_by = "nonexistent",
-                         custom_colors = custom)
+  m <- styled_map(pts, color_by = "nonexistent", custom_colors = custom)
   expect_identical(marker_opts(m)$fillColor, "cyan")
   expect_length(legend_calls(m), 0L)
 })
 
-test_that("add_styled_points carries geometry, size, popups and labels through", {
+test_that("add_styled_points carries geometry, size and layer ids through", {
   # Nothing to draw: no marker call is issued at all.
-  expect_length(marker_calls(add_styled_points(make_leaflet_map(), make_sf_points(6)[0, ])), 0L)
+  expect_length(marker_calls(styled_map(make_sf_points(6)[0, ])), 0L)
 
   # A projected input is transformed, not passed through - UTM eastings and
   # northings would be orders of magnitude outside either coordinate range.
   utm <- make_test_points(8)                       # EPSG:32633
   ll <- sf::st_coordinates(sf::st_transform(utm, 4326))
-  args <- marker_args(add_styled_points(make_leaflet_map(), utm, marker_size = 7))
+  args <- marker_args(add_styled_points(make_leaflet_map(), utm, point_style_spec(utm), marker_size = 7))
   expect_equal(args[[1]], unname(ll[, "Y"]), tolerance = 1e-9)   # lat
   expect_equal(args[[2]], unname(ll[, "X"]), tolerance = 1e-9)   # lng
   expect_equal(args[[3]], 7)                                     # radius
 
-  # popup_fn is applied row by row and its output reaches the popup slot.
+  # Each marker carries the id the restyle, label and pop-up paths find it by,
+  # in the group the overlay clears, and no pop-up travels with it.
   pts <- make_sf_points(4)
-  m <- add_styled_points(make_leaflet_map(), pts,
-                         popup_fn = function(row) paste("Value:", row$value))
-  expect_identical(Filter(function(a) identical(a, paste("Value:", pts$value)),
-                          marker_args(m))[[1]],
-                   paste("Value:", pts$value))
-  expect_null(label_values(add_styled_points(make_leaflet_map(), pts), nrow(pts)))
+  args <- marker_args(add_styled_points(make_leaflet_map(), pts, point_style_spec(pts),
+                                        layer_ids = paste0("pt_", 1:4)))
+  expect_identical(args[[4]], paste0("pt_", 1:4))                # layerId
+  expect_identical(args[[5]], "styled_points")                   # group
+  expect_null(args[[9]])                                         # popup
+})
 
-  # Labels are their own layer, and the field's type decides its formatting.
-  # A character column is shown verbatim...
-  labelled <- function(field) {
-    label_values(add_styled_points(make_leaflet_map(), pts, show_labels = TRUE,
-                                   label_field = field), nrow(pts))
-  }
-  expect_identical(labelled("label"), pts$label)
-  # ...a factor by its level labels, not by its integer codes...
-  expect_identical(labelled("group"), as.character(pts$group))
-  # ...and a numeric to two decimals, which is the only place that rounding
-  # happens.
-  expect_identical(labelled("value"), sprintf("%.2f", pts$value))
+test_that("point_style_spec gives an NA group leaflet's grey and every point one look when nothing differs", {
+  pts <- make_sf_points(6)
+  pts$group <- c("A", "B", NA, "A", NA, "B")
+  spec <- point_style_spec(pts, color_by = "group", custom_colors = c(A = "#111111", B = "#222222"))
+  # colorFactor()'s na.color; the legend lists the named groups only.
+  expect_identical(spec$fill[is.na(pts$group)], rep("#808080", 2))
+  expect_identical(spec$fill[!is.na(pts$group)], c("#111111", "#222222", "#111111", "#222222"))
+  expect_identical(spec$legend$labels, c("A", "B"))
+  # A blank cell (a CSV's empty text field reads as "") is no group either.
+  pts$group <- c("A", "", " ", "A", NA, "B")
+  spec <- point_style_spec(pts, color_by = "group", custom_colors = c(A = "#111111", B = "#222222"))
+  expect_identical(spec$fill[2:3], rep("#808080", 2))
+  expect_identical(spec$legend$labels, c("A", "B"))
+  expect_identical(point_group_values(c("A", "", "  ", NA)), c("A", NA, NA, NA))
 
-  # A point with no measured value carries no label text. sprintf("%.2f", NA)
-  # returns the STRING "NA", which is not is.na() and would be painted on the
-  # map beside the real readings, so the numeric branch has to guard it.
-  gapped <- pts
-  gapped$value[c(2, 4)] <- NA_real_
-  lab <- label_values(add_styled_points(make_leaflet_map(), gapped,
-                                        show_labels = TRUE, label_field = "value"),
-                      nrow(gapped))
+  # No colouring and no missing value: one look, scalars, and nothing to list.
+  spec <- point_style_spec(make_sf_points(6), value_col = "value")
+  expect_identical(spec[c("fill", "stroke", "fill_opacity")],
+                   list(fill = "cyan", stroke = "cyan", fill_opacity = 0.5))
+  expect_null(spec$legend)
+})
+
+test_that("add_point_legend draws one bottom-left legend or none", {
+  expect_length(legend_calls(add_point_legend(make_leaflet_map(), NULL, "lg")), 0L)
+  m <- add_point_legend(make_leaflet_map(),
+                        list(colors = c("#111111", "#222222"), labels = c("A", "B"), title = "group"),
+                        "styled_points_legend")
+  expect_length(legend_calls(m), 1L)
+  lg <- legend_args(m)
+  expect_identical(lg$position, "bottomleft")
+  expect_equal(lg$opacity, 0.9)
+  expect_identical(lg$layerId, "styled_points_legend")
+  expect_identical(as.character(lg$labels), c("A", "B"))
+  expect_identical(lg$title, "group")
+})
+
+test_that("point_label_text formats each field type", {
+  pts <- make_sf_points(4)
+  # A character column verbatim, a factor by its labels (not its codes), and a
+  # number to two decimals, the only place that rounding happens.
+  expect_identical(point_label_text(pts, "label"), pts$label)
+  expect_identical(point_label_text(pts, "group"), as.character(pts$group))
+  expect_identical(point_label_text(pts, "value"), sprintf("%.2f", pts$value))
+  # A missing value has no label: sprintf("%.2f", NA) is the STRING "NA", which
+  # would be painted beside the real readings.
+  pts$value[c(2, 4)] <- NA_real_
+  lab <- point_label_text(pts, "value")
   expect_true(all(is.na(lab[c(2, 4)])))
-  expect_identical(lab[-c(2, 4)], sprintf("%.2f", gapped$value[-c(2, 4)]))
-  # A field that is not there draws no label layer rather than an empty one,
-  # and neither does the "none" the control sends when labels are off.
-  expect_null(labelled("nope"))
-  expect_null(labelled("none"))
+  expect_identical(lab[-c(2, 4)], sprintf("%.2f", pts$value[-c(2, 4)]))
+  # No field, or one the point set lacks: no labels at all.
+  expect_null(point_label_text(pts, "nope"))
+  expect_null(point_label_text(pts, "none"))
+  expect_null(point_label_text(pts, NULL))
 })
 
 # ── add_base_tiles ─────────────────────────────────────────────────────────
@@ -308,7 +329,7 @@ test_that("raster_img_layer_id is the id the restyler adds and retires", {
 test_that("a point with no measured value renders hollow and names itself", {
   pts <- make_sf_points(6)
   pts$value[c(2, 5)] <- NA_real_
-  m <- add_styled_points(make_leaflet_map(), pts, value_col = "value")
+  m <- styled_map(pts, value_col = "value")
 
   opts <- marker_opts(m)
   expect_equal(opts$fillOpacity[c(2, 5)], c(0, 0))
@@ -324,20 +345,20 @@ test_that("a point with no measured value renders hollow and names itself", {
 
 test_that("a point set with no missing values gets neither treatment", {
   pts <- make_sf_points(6)
-  m <- add_styled_points(make_leaflet_map(), pts, value_col = "value")
+  m <- styled_map(pts, value_col = "value")
   expect_length(legend_calls(m), 0L)
   expect_length(marker_opts(m)$fillOpacity, 1L)   # still the scalar
   # And without value_col the helper cannot know, so nothing changes.
   pts$value[2] <- NA_real_
-  expect_length(legend_calls(add_styled_points(make_leaflet_map(), pts)), 0L)
+  expect_length(legend_calls(styled_map(pts)), 0L)
 })
 
 test_that("the distinction survives every colour-by mode", {
   pts <- make_sf_points(8)
   pts$value[3] <- NA_real_
-  m <- add_styled_points(make_leaflet_map(), pts, color_by = "group",
-                         custom_colors = c(A = "#111111", B = "#222222", C = "#333333"),
-                         value_col = "value")
+  m <- styled_map(pts, color_by = "group",
+                  custom_colors = c(A = "#111111", B = "#222222", C = "#333333"),
+                  value_col = "value")
   opts <- marker_opts(m)
   expect_equal(opts$fillOpacity[3], 0)
   expect_identical(opts$color[3], MISSING_VALUE_POINT_COLOR)
@@ -348,6 +369,76 @@ test_that("the distinction survives every colour-by mode", {
   labs <- as.character(legend_args(m)$labels)
   expect_true(all(c("A", "B", "C") %in% labs))
   expect_identical(labs[length(labs)], MISSING_VALUE_POINT_LABEL)
+})
+
+# ── Point pop-ups ──────────────────────────────────────────────────────────
+
+# Five variables in two categories, interleaved, with the first-listed category
+# sorting last, so list order and alphabetical order disagree.
+popup_test_vars <- function() {
+  lapply(list(c("a", "Soil"), c("d", "Climate"), c("b", "Soil"), c("e", "Climate"), c("c", "Soil")),
+         function(x) list(actual = x[1], label = toupper(x[1]), category = x[2]))
+}
+
+test_that("the pop-up lists what Pop-up Content picks, the mapped variable's category by default", {
+  vars <- popup_test_vars()
+  expect_identical(var_actuals(vars), c("a", "d", "b", "e", "c"))
+  groups <- group_vars_by_category(vars)
+  expect_identical(names(groups), c("Soil", "Climate"))
+  expect_identical(lapply(groups, var_actuals), list(Soil = c("a", "b", "c"), Climate = c("d", "e")))
+  listed <- function(...) var_actuals(popup_variables(vars, ...))
+
+  # "auto" follows the mapped variable: its whole category, in list order; a
+  # focus outside the list, or none, lists nothing.
+  expect_identical(listed("auto", focus_var = "b"), c("a", "b", "c"))
+  expect_identical(listed("auto", focus_var = "e"), c("d", "e"))
+  expect_length(popup_variables(vars, "auto", focus_var = "zzz"), 0L)
+  expect_length(popup_variables(vars, "auto"), 0L)
+  # A category is that category whatever is mapped; one no longer in the list,
+  # nothing.
+  expect_identical(listed("cat:Climate", focus_var = "b"), c("d", "e"))
+  expect_identical(listed("cat:Soil", focus_var = "e"), c("a", "b", "c"))
+  expect_length(popup_variables(vars, "cat:Nope"), 0L)
+  expect_length(popup_variables(vars, "cat:"), 0L)
+  # Every variable, in list order.
+  expect_identical(listed("all"), c("a", "d", "b", "e", "c"))
+  # A choice keeps the listed variables it names, in list order; none chosen is
+  # a choice of none, not a return to the default.
+  expect_identical(listed("manual", chosen = c("e", "a", "zzz"), focus_var = "b"), c("a", "e"))
+  expect_length(popup_variables(vars, "manual", chosen = character(0), focus_var = "b"), 0L)
+  expect_length(popup_variables(vars, "manual", focus_var = "b"), 0L)
+})
+
+test_that("Pop-up Content offers each category of the list, between the default and the choice", {
+  ch <- popup_content_choices(popup_test_vars())
+  expect_identical(unname(unlist(ch)), c("auto", "cat:Soil", "cat:Climate", "all", "manual"))
+  expect_identical(names(ch), c("Mapped variable's category", "Categories", "All variables", "Variables I choose"))
+  expect_identical(names(ch$Categories), c("Soil", "Climate"))
+  # One category is still a group of its own; no variable list, no group.
+  expect_identical(popup_content_choices(popup_test_vars()[c(1, 3)])$Categories, c(Soil = "cat:Soil"))
+  expect_identical(unname(unlist(popup_content_choices(list()))), c("auto", "all", "manual"))
+})
+
+test_that("point_popup_html carries the notes and one row per variable", {
+  groups <- group_vars_by_category(popup_test_vars())
+  html <- point_popup_html(data.frame(v = NA_real_, .mn_n_rep = 3L, a = 1.23456, check.names = FALSE), groups)
+  count <- function(pattern) lengths(regmatches(html, gregexpr(pattern, html, fixed = TRUE)))
+  expect_match(html, "Point Details", fixed = TRUE)
+  expect_match(html, "No measured value", fixed = TRUE)
+  expect_match(html, "Co-located samples: 3", fixed = TRUE)
+  expect_match(html, ">1.235<", fixed = TRUE)
+  expect_identical(count(">N/A<"), 4L)                            # b, c, d, e: no column
+  # One header per category, in list order, and one row per variable.
+  expect_identical(count("<td colspan='2'>"), 2L)
+  expect_lt(regexpr("Soil", html, fixed = TRUE), regexpr("Climate", html, fixed = TRUE))
+  expect_identical(count("<td style='padding: 3px;'>"), 5L)
+
+  # A measured, single sample carries neither note; no variable leaves the notes only.
+  html <- point_popup_html(data.frame(v = 5, a = 1), groups)
+  expect_false(grepl("No measured value|Co-located", html))
+  html <- point_popup_html(data.frame(v = NA_real_), list())
+  expect_match(html, "No measured value", fixed = TRUE)
+  expect_false(grepl("<tr", html, fixed = TRUE))
 })
 
 test_that("point pop-up rows escape markup in labels and values", {
