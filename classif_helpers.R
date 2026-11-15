@@ -2001,6 +2001,10 @@ classif_resolve_scope <- function(df, x_col, y_col, src_crs, proj_crs,
     poly_mode <- "ignore"
   }
 
+  # Coordinates as numbers (coord_values(): a text cell is no position), so the
+  # scope reads the rows an interpolation run reads.
+  df[[x_col]] <- coord_values(df[[x_col]])
+  df[[y_col]] <- coord_values(df[[y_col]])
   d <- df[!is.na(df[[x_col]]) & !is.na(df[[y_col]]), , drop = FALSE]
   n_input <- nrow(d)
   # remove = FALSE: the source-CRS coordinate columns travel with the points,

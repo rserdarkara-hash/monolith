@@ -508,6 +508,15 @@ validate_and_project_sf <- function(pts_sf) {
   return(pts_sf)
 }
 
+#' A coordinate column as numbers. One text cell makes a whole column text on
+#' upload: finite numbers are read back and every other cell is NA, a row
+#' without a position. Finite numeric coordinates retain their precision.
+coord_values <- function(v) {
+  out <- if (is.numeric(v)) v else suppressWarnings(as.numeric(as.character(v)))
+  out[!is.finite(out)] <- NA
+  out
+}
+
 #' The co-location key of each point: its coordinates rounded to `dp` decimals
 #' (1 cm in a metric CRS). Points sharing a key are one location.
 location_key <- function(pts_sf, dp = 2) {
@@ -685,8 +694,7 @@ locality_boundary_overlap <- function(bounds) {
 shared_boundary_features <- function(shp, items, current_crs) {
   if (is.null(shp) || length(items) < 2) return(integer(0))
   xy <- do.call(rbind, lapply(items, function(it) data.frame(
-    x = suppressWarnings(as.numeric(as.character(it$pts_data$x))),
-    y = suppressWarnings(as.numeric(as.character(it$pts_data$y))), l = it$l)))
+    x = coord_values(it$pts_data$x), y = coord_values(it$pts_data$y), l = it$l)))
   xy <- xy[is.finite(xy$x) & is.finite(xy$y), , drop = FALSE]
   if (!nrow(xy)) return(integer(0))
   pts <- validate_and_project_sf(sf::st_as_sf(xy, coords = c("x", "y"), crs = current_crs))
@@ -744,8 +752,8 @@ grid_template <- function(bbox, res, crs_wkt, snap = FALSE) {
 #' A locality's projected point sets, as run_regional_interpolation builds
 #' them. `ok = FALSE` carries the log message that ends the locality.
 .locality_points <- function(l, pts_data, current_crs, current_method, aux_vars, m_params) {
-  if (!is.numeric(pts_data$x)) pts_data$x <- as.numeric(as.character(pts_data$x))
-  if (!is.numeric(pts_data$y)) pts_data$y <- as.numeric(as.character(pts_data$y))
+  pts_data$x <- coord_values(pts_data$x)
+  pts_data$y <- coord_values(pts_data$y)
 
   # Namespaced calls throughout: shared_auto_resolution() also runs this in the
   # promise worker, where dplyr is not necessarily attached.
@@ -793,8 +801,8 @@ grid_template <- function(bbox, res, crs_wkt, snap = FALSE) {
     return(list(ok = FALSE, msg = paste0("Warning in ", l, ": Insufficient distinct sample locations after merging co-located samples (needed >= 3, got ", nrow(pts), ").")))
   }
 
-  list(ok = TRUE, pts_all = pts_all, utm_crs = sf::st_crs(pts_all)$wkt,
-       covariate_complete = covariate_complete, pts_projected = pts_projected, pts = pts)
+  list(ok = TRUE, pts_all = pts_all, covariate_complete = covariate_complete,
+       pts_projected = pts_projected, pts = pts)
 }
 
 #' A locality's boundary, as run_regional_interpolation builds it: the matching
@@ -978,7 +986,6 @@ run_regional_interpolation <- function(item, current_method, current_crs, aux_va
       return(res_out)
     }
     pts_all <- pp$pts_all
-    utm_crs <- pp$utm_crs
     covariate_complete <- pp$covariate_complete
     pts_projected <- pp$pts_projected
     pts <- pp$pts
@@ -1124,8 +1131,6 @@ run_regional_interpolation <- function(item, current_method, current_crs, aux_va
     cv_domain_xy <- tryCatch(knndm_domain_points(bound, grid_xy = cbind(grid_p$x, grid_p$y)),
                              error = function(e) NULL)
 
-    r_a <- NULL; r_p <- NULL
-
     # Per-surface point sets come BEFORE the covariate surfaces so the VIF gate
     # resolves first (a covariate it drops would otherwise be kriged over the
     # whole grid for nothing). The gate must see the frames the engines fit
@@ -1251,128 +1256,103 @@ run_regional_interpolation <- function(item, current_method, current_crs, aux_va
         }
     }
 
-    if(nrow(pts_a) >= 3) {
-        # A constant target gives a flat surface, a fallback variogram and
-        # undefined (NA) ratio metrics; name the cause on both channels (the
-        # progress panel closes when the maps are revealed).
-        if (.is_degenerate_covariate(pts_a$v)) {
-          write_warning_file(l, "act", .degenerate_target_msg)
-          res_out$log_msg <- paste0(res_out$log_msg, "
-[WARN] ", l, " (Actual): ",
-                                    .degenerate_target_msg)
+    # One surface of the locality: the engine on its point set, its CV record
+    # and its raster. `tg` is "act" (the measured values, `v`) or "pre" (the
+    # uploaded predictions, `pv`); `ck_rows` its co-kriging rows and `aux_kept`
+    # its screened covariates. Results go to res_out's `<field>_<tg>` entries
+    # (`<<-`: res_out is this run's frame). Returns the surface's raster, NULL
+    # with fewer than 3 points or without a defined surface.
+    run_surface <- function(tg, pts_s, ck_rows, aux_kept) {
+      if (is.null(pts_s) || nrow(pts_s) < 3) return(NULL)
+      col <- if (tg == "act") "v" else "pv"
+      surface <- if (tg == "act") "Actual" else "Predicted"
+      log_add <- function(...) res_out$log_msg <<- paste0(res_out$log_msg, ...)
+      put <- function(...) {
+        vals <- list(...)
+        for (nm in names(vals)) res_out[[paste0(nm, "_", tg)]] <<- vals[[nm]]
+      }
+      # A constant target gives a flat surface, a fallback variogram and
+      # undefined (NA) ratio metrics; name the cause on both channels (the
+      # progress panel closes when the maps are revealed).
+      if (.is_degenerate_covariate(pts_s[[col]])) {
+        write_warning_file(l, tg, .degenerate_target_msg)
+        log_add("\n[WARN] ", l, " (", surface, "): ", .degenerate_target_msg)
+      }
+      mp <- list(idw_p = m_params[[paste0("idw_p_", tg)]], idw_nmax = m_params$idw_nmax,
+                 cov_params = mp_cov_fallback, tps_lambda = m_params[[paste0("tps_lambda_", tg)]],
+                 pre_fit = m_params[[paste0("pre_fit_", tg)]], grid_aux = grid_aux,
+                 cv_strategy = m_params$cv_strategy, cv_repeats = m_params$cv_repeats,
+                 cv_domain_xy = cv_domain_xy, cancel_file = cancel_file_val,
+                 rfk_uncertainty = m_params$rfk_uncertainty, rf_ntree = m_params$rf_ntree,
+                 ck_nmax = m_params$ck_nmax, ck_extra = ck_rows$x, aux_kept = aux_kept,
+                 cov_data = cov_support)
+      mp <- attach_cv_plan(mp, cv_population_of(pts_s, col), tg)
+      if (!is.null(cancel_file_val) && file.exists(cancel_file_val)) stop("Model generation cancelled by user.")
+      # Unseparated, the Predicted surface takes its model from the measured
+      # values. OK: their variogram, unless a model was applied. TPS: Auto
+      # (GCV) selects lambda on the measured values of the same rows, again in
+      # every fold (a fixed lambda is already shared at dispatch). IDW: Auto
+      # (CV) selects the power on them, on all rows and in every fold (TPS
+      # carries it for its IDW fallback).
+      if (tg == "pre" && isFALSE(m_params$sep_fit)) {
+        if (current_method == "OK" && is.null(mp$pre_fit)) {
+          if (!is.null(res_out$v_fit_act)) {
+            mp$shared_fit <- res_out$v_fit_act
+            mp$vgm_col <- "v"
+          } else {
+            log_add("\n[Variogram] No Actual fit is available for ", l,
+                    "; the Predicted surface fits its own variogram.")
+          }
         }
-        lags_a <- calc_scientific_lags(pts_a)
-        mp_a <- list(idw_p = m_params$idw_p_act, idw_nmax = m_params$idw_nmax, cov_params = mp_cov_fallback, tps_lambda = m_params$tps_lambda_act, pre_fit = m_params$pre_fit_act, grid_aux = grid_aux, cv_strategy = m_params$cv_strategy, cv_repeats = m_params$cv_repeats, cv_domain_xy = cv_domain_xy, cancel_file = cancel_file_val, rfk_uncertainty = m_params$rfk_uncertainty, rf_ntree = m_params$rf_ntree, ck_nmax = m_params$ck_nmax, ck_extra = ck_a$x, aux_kept = aux_kept_a, cov_data = cov_support)
-        mp_a <- attach_cv_plan(mp_a, cv_population_of(pts_a, "v"), "act")
-        if (!is.null(cancel_file_val) && file.exists(cancel_file_val)) stop("Model generation cancelled by user.")
-        res_a_list <- apply_interpolation(pts_a, "v", current_method, grid_p, aux_vars, lags_a, mp_a, l, "act", vif_threshold)
-        res_out$cv_info_act <- cv_info_of(mp_a, res_a_list)
-        res_out$cv_design_act <- res_a_list$cv_design
-        res_out$v_emp_act <- res_a_list$v_emp; res_out$v_fit_act <- res_a_list$fit; res_out$cv_act <- res_a_list$cv_metrics; res_out$cv_obj_act <- res_a_list$cv_obj
-        res_out$cv_reps_act <- res_a_list$cv_obj_reps
-        res_out$tps_fit_act <- res_a_list$tps_fit
-        res_out$idw_fit_act <- res_a_list$idw_fit
-        # detach_model_frame(): otherwise the model's terms carry this
-        # locality's whole frame back to the main session and every archive.
-        res_out$summ_act <- detach_model_frame(res_a_list$model_summary); res_out$rf_act <- res_a_list$rf_model; res_out$gstat_act <- res_a_list$gstat_obj
-        # Covariates the mapped model used and the ones the screen removed
-        # (RK/RFK/CK only), and CK's data design, for the run configuration.
-        res_out$aux_used_act <- res_a_list$aux_used; res_out$aux_dropped_act <- res_a_list$aux_dropped
-        res_out$ck_design_act <- res_a_list$ck_design
-        res_out$log_msg <- paste0(res_out$log_msg, "\n", res_a_list$log_msg)
-        kn_a <- knndm_note(mp_a, res_a_list, pts_a, "Actual")
-        if (!is.null(kn_a)) res_out$log_msg <- paste0(res_out$log_msg, "\n", kn_a)
-        if (cov_log_msg != "") res_out$log_msg <- paste0(res_out$log_msg, "\n", cov_log_msg)
-        
-        # An all-NA res_sf (an unsolvable kriging system; gstat returns NA
-        # silently) is not a surface: name it rather than store a blank map.
-        # The column test comes first because all(is.na(NULL)) is TRUE.
-        if (!is.null(res_a_list$res_sf) &&
-            "var1.pred" %in% names(res_a_list$res_sf) &&
-            all(is.na(res_a_list$res_sf$var1.pred))) {
-            write_warning_file(l, "act", paste0(
-              "The ", current_method, " system produced no predictions for this locality ",
-              "(every grid cell is undefined). This usually means the fitted variogram is not ",
-              "a valid covariance model or the kriging matrix is singular; check the variogram ",
-              "panel for this locality."))
-            res_out$log_msg <- paste0(res_out$log_msg, "\n[WARN] ", l,
-              ": the ", current_method, " surface is entirely undefined; locality skipped.")
-        } else if(!is.null(res_a_list$res_sf)) {
-            # Only the kriging engines have a variance band: gstat::idw() (and
-            # the TPS IDW fallback) return an all-NA var1.var.
-            fields_a <- if(method_has_variance(current_method) && "var1.var" %in% colnames(res_a_list$res_sf)) c("var1.pred", "var1.var") else "var1.pred"
-            r_a <- terra::rasterize(res_a_list$res_sf, grid_r, field=fields_a) %>% terra::mask(terra::vect(bound)) %>% project_to_target(crs_sel, actual_res)
-            # terra names a single-field rasterization "last", which would
-            # become the GeoTIFF band description.
-            if (length(fields_a) == 1L) names(r_a) <- fields_a
-            res_out$r_a <- terra::wrap(r_a)
-        }
+        if (current_method == "TPS") mp$tps_gcv_col <- "v"
+        if (current_method %in% c("IDW", "TPS")) mp$idw_select_col <- "v"
+      }
+      out <- apply_interpolation(pts_s, col, current_method, grid_p, aux_vars,
+                                 calc_scientific_lags(pts_s), mp, l, tg, vif_threshold)
+      put(cv_info = cv_info_of(mp, out), cv_design = out$cv_design,
+          v_emp = out$v_emp, v_fit = out$fit, cv = out$cv_metrics, cv_obj = out$cv_obj,
+          cv_reps = out$cv_obj_reps, tps_fit = out$tps_fit, idw_fit = out$idw_fit,
+          # detach_model_frame(): otherwise the model's terms carry this
+          # locality's whole frame back to the main session and every archive.
+          summ = detach_model_frame(out$model_summary), rf = out$rf_model, gstat = out$gstat_obj,
+          # Covariates the mapped model used and the ones the screen removed
+          # (RK/RFK/CK only), and CK's data design, for the run configuration.
+          aux_used = out$aux_used, aux_dropped = out$aux_dropped, ck_design = out$ck_design)
+      log_add("\n", out$log_msg)
+      kn <- knndm_note(mp, out, pts_s, surface)
+      if (!is.null(kn)) log_add("\n", kn)
+      # The covariate surfaces serve both surfaces: their log is written once.
+      if (tg == "act" && cov_log_msg != "") log_add("\n", cov_log_msg)
+
+      if (is.null(out$res_sf)) return(NULL)
+      # An all-NA res_sf (an unsolvable kriging system; gstat returns NA
+      # silently) is not a surface: name it rather than store a blank map.
+      # The column test comes first because all(is.na(NULL)) is TRUE.
+      if ("var1.pred" %in% names(out$res_sf) && all(is.na(out$res_sf$var1.pred))) {
+        write_warning_file(l, tg, paste0(
+          "The ", current_method, " system produced no predictions for this locality ",
+          "(every grid cell is undefined). This usually means the fitted variogram is not ",
+          "a valid covariance model or the kriging matrix is singular; check the variogram ",
+          "panel for this locality."))
+        log_add("\n[WARN] ", l, ": the ", current_method, if (tg == "pre") " predicted",
+                " surface is entirely undefined; locality skipped.")
+        return(NULL)
+      }
+      # Only the kriging engines have a variance band: gstat::idw() (and the
+      # TPS IDW fallback) return an all-NA var1.var.
+      fields <- if (method_has_variance(current_method) && "var1.var" %in% colnames(out$res_sf)) {
+        c("var1.pred", "var1.var")
+      } else "var1.pred"
+      r <- terra::rasterize(out$res_sf, grid_r, field = fields) %>% terra::mask(terra::vect(bound)) %>%
+        project_to_target(crs_sel, actual_res)
+      # terra names a single-field rasterization "last", which would become the
+      # GeoTIFF band description.
+      if (length(fields) == 1L) names(r) <- fields
+      res_out[[if (tg == "act") "r_a" else "r_p"]] <<- terra::wrap(r)
+      r
     }
-    
-    if(run_pre) {
-        if(nrow(pts_p) >= 3) {
-            # Same constant-target check for the predicted surface.
-            if (.is_degenerate_covariate(pts_p$pv)) {
-              write_warning_file(l, "pre", .degenerate_target_msg)
-              res_out$log_msg <- paste0(res_out$log_msg, "
-[WARN] ", l, " (Predicted): ",
-                                        .degenerate_target_msg)
-            }
-            lags_p <- calc_scientific_lags(pts_p)
-            mp_p <- list(idw_p = m_params$idw_p_pre, idw_nmax = m_params$idw_nmax, cov_params = mp_cov_fallback, tps_lambda = m_params$tps_lambda_pre, pre_fit = m_params$pre_fit_pre, grid_aux = grid_aux, cv_strategy = m_params$cv_strategy, cv_repeats = m_params$cv_repeats, cv_domain_xy = cv_domain_xy, cancel_file = cancel_file_val, rfk_uncertainty = m_params$rfk_uncertainty, rf_ntree = m_params$rf_ntree, ck_nmax = m_params$ck_nmax, ck_extra = ck_p$x, aux_kept = aux_kept_p, cov_data = cov_support)
-            mp_p <- attach_cv_plan(mp_p, cv_population_of(pts_p, "pv"), "pre")
-            if (!is.null(cancel_file_val) && file.exists(cancel_file_val)) stop("Model generation cancelled by user.")
-            if (current_method == "OK" && isFALSE(m_params$sep_fit) && is.null(mp_p$pre_fit)) {
-              if (!is.null(res_out$v_fit_act)) {
-                mp_p$shared_fit <- res_out$v_fit_act
-                mp_p$vgm_col <- "v"
-              } else {
-                res_out$log_msg <- paste0(res_out$log_msg, "\n[Variogram] No Actual fit is available for ", l,
-                                           "; the Predicted surface fits its own variogram.")
-              }
-            }
-            # TPS unseparated: Auto (GCV) selects lambda on the MEASURED values
-            # of the same rows, again in every fold (a fixed lambda is already
-            # shared at dispatch).
-            if (current_method == "TPS" && isFALSE(m_params$sep_fit)) mp_p$tps_gcv_col <- "v"
-            # IDW unseparated: Auto (CV) selects the power on the measured
-            # values, on all rows and in every fold (TPS carries it for its IDW
-            # fallback).
-            if (current_method %in% c("IDW", "TPS") && isFALSE(m_params$sep_fit)) mp_p$idw_select_col <- "v"
-            res_p_list <- apply_interpolation(pts_p, "pv", current_method, grid_p, aux_vars, lags_p, mp_p, l, "pre", vif_threshold)
-            res_out$cv_info_pre <- cv_info_of(mp_p, res_p_list)
-            res_out$cv_design_pre <- res_p_list$cv_design
-            res_out$v_emp_pre <- res_p_list$v_emp; res_out$v_fit_pre <- res_p_list$fit; res_out$cv_pre <- res_p_list$cv_metrics; res_out$cv_obj_pre <- res_p_list$cv_obj
-            res_out$cv_reps_pre <- res_p_list$cv_obj_reps
-            res_out$tps_fit_pre <- res_p_list$tps_fit
-            res_out$idw_fit_pre <- res_p_list$idw_fit
-            res_out$summ_pre <- detach_model_frame(res_p_list$model_summary); res_out$rf_pre <- res_p_list$rf_model; res_out$gstat_pre <- res_p_list$gstat_obj
-            res_out$aux_used_pre <- res_p_list$aux_used; res_out$aux_dropped_pre <- res_p_list$aux_dropped
-            res_out$ck_design_pre <- res_p_list$ck_design
-            res_out$log_msg <- paste0(res_out$log_msg, "\n", res_p_list$log_msg)
-            kn_p <- knndm_note(mp_p, res_p_list, pts_p, "Predicted")
-            if (!is.null(kn_p)) res_out$log_msg <- paste0(res_out$log_msg, "\n", kn_p)
-            
-            # Same all-NA guard as the actual surface above.
-            if (!is.null(res_p_list$res_sf) &&
-                "var1.pred" %in% names(res_p_list$res_sf) &&
-                all(is.na(res_p_list$res_sf$var1.pred))) {
-                write_warning_file(l, "pre", paste0(
-                  "The ", current_method, " system produced no predictions for this locality ",
-                  "(every grid cell is undefined). This usually means the fitted variogram is not ",
-                  "a valid covariance model or the kriging matrix is singular; check the variogram ",
-                  "panel for this locality."))
-                res_out$log_msg <- paste0(res_out$log_msg, "\n[WARN] ", l,
-                  ": the ", current_method, " predicted surface is entirely undefined; locality skipped.")
-            } else if(!is.null(res_p_list$res_sf)) {
-                # Same method gate as the actual surface above.
-                fields_p <- if(method_has_variance(current_method) && "var1.var" %in% colnames(res_p_list$res_sf)) c("var1.pred", "var1.var") else "var1.pred"
-                r_p <- terra::rasterize(res_p_list$res_sf, grid_r, field=fields_p) %>% terra::mask(terra::vect(bound)) %>% project_to_target(crs_sel, actual_res)
-                if (length(fields_p) == 1L) names(r_p) <- fields_p
-                res_out$r_p <- terra::wrap(r_p)
-            }
-        }
-    }
+    r_a <- run_surface("act", pts_a, ck_a, aux_kept_a)
+    r_p <- if (run_pre) run_surface("pre", pts_p, ck_p, aux_kept_p)
     
     if(!is.null(r_a) && !is.null(r_p)) {
       # Difference the PREDICTION layers only: a difference of two kriging
@@ -1383,18 +1363,14 @@ run_regional_interpolation <- function(item, current_method, current_crs, aux_va
       res_out$r_res <- terra::wrap(r_res)
     }
     
-    # x/y must be filtered too: pts_data is the raw upload, and st_as_sf
-    # errors on NA coordinates, which would abort the rest of this locality
-    pts_err_raw <- pts_data %>% dplyr::filter(!is.na(x), !is.na(y), !is.na(v), !is.na(pv))
-    if(nrow(pts_err_raw) >= 3) {
-        # The raw coordinates are in current_crs and must be projected, not
-        # stamped with utm_crs.
-        pts_err <- sf::st_as_sf(pts_err_raw, coords=c("x","y"), crs=current_crs) %>%
-                   sf::st_transform(utm_crs) %>%
-                   dplyr::mutate(err = v - pv)
-        # Deliberately unlike the model point sets: co-located rows are kept
-        # (each is a real ML error) and idp is fixed at 2, so error surfaces
-        # stay comparable across methods.
+    # The ML error of every row carrying both values, at the locality's
+    # projected rows (pts_all: numeric coordinates in the working CRS; a text
+    # cell in a coordinate column is no position). Deliberately unlike the
+    # model point sets: co-located rows are kept (each is a real ML error) and
+    # idp is fixed at 2, so error surfaces stay comparable across methods.
+    pts_err <- pts_all[!is.na(pts_all$v) & !is.na(pts_all$pv), ]
+    if(nrow(pts_err) >= 3) {
+        pts_err$err <- pts_err$v - pts_err$pv
         err_mod <- gstat::idw(err ~ 1, pts_err, grid_p, nmax = m_params$idw_nmax %||% 12, idp = 2, debug.level = 0)
         r_err <- terra::rasterize(err_mod, grid_r, field="var1.pred") %>% terra::mask(terra::vect(bound)) %>% project_to_target(crs_sel, actual_res)
         res_out$r_point_err <- terra::wrap(r_err)
@@ -1799,37 +1775,21 @@ autofit_vgm_item <- function(item, current_crs) {
     if (identical(vgm_fit_status(fit), "fit_failed")) return("not fitted (stand-in Sph)")
     if (NROW(fit) < 2) "Nug" else as.character(fit$model[2])
   }
-  res_a <- list(emp = NULL, fit = NULL, mod = "FAIL", sse = "N/A")
-  sub_a_raw <- sf::st_as_sf(item$act, coords = c("x", "y"), crs = current_crs)
-  sub_a <- validate_and_project_sf(sub_a_raw)
-  sub_a <- merge_colocated(sub_a)
-
-  if (nrow(sub_a) >= 3) {
-    lags_a <- calc_scientific_lags(sub_a)
-    v_emp_a <- gstat::variogram(v ~ 1, sub_a, width = lags_a$width, cutoff = lags_a$cutoff)
-    best_f_a <- robust_vgm_fit(v_emp_a, sub_a$v)
-    res_a$emp <- v_emp_a
-    res_a$fit <- best_f_a
-    res_a$mod <- display_model(best_f_a)
-    res_a$sse <- display_sse(best_f_a)
+  # One surface's fit from its rows (x, y, v); "FAIL" without them or below
+  # three distinct locations.
+  fit_surface <- function(rows) {
+    res <- list(emp = NULL, fit = NULL, mod = "FAIL", sse = "N/A")
+    if (is.null(rows) || nrow(rows) < 3) return(res)
+    sub <- merge_colocated(validate_and_project_sf(
+      sf::st_as_sf(rows, coords = c("x", "y"), crs = current_crs)))
+    if (nrow(sub) < 3) return(res)
+    lags <- calc_scientific_lags(sub)
+    res$emp <- gstat::variogram(v ~ 1, sub, width = lags$width, cutoff = lags$cutoff)
+    res$fit <- robust_vgm_fit(res$emp, sub$v)
+    res$mod <- display_model(res$fit)
+    res$sse <- display_sse(res$fit)
+    res
   }
 
-  res_p <- list(emp = NULL, fit = NULL, mod = "FAIL", sse = "N/A")
-  if (!is.null(item$pre)) {
-    sub_p_raw <- sf::st_as_sf(item$pre, coords = c("x", "y"), crs = current_crs)
-    sub_p <- validate_and_project_sf(sub_p_raw)
-    sub_p <- merge_colocated(sub_p)
-
-    if (nrow(sub_p) >= 3) {
-      lags_p <- calc_scientific_lags(sub_p)
-      v_emp_p <- gstat::variogram(v ~ 1, sub_p, width = lags_p$width, cutoff = lags_p$cutoff)
-      best_f_p <- robust_vgm_fit(v_emp_p, sub_p$v)
-      res_p$emp <- v_emp_p
-      res_p$fit <- best_f_p
-      res_p$mod <- display_model(best_f_p)
-      res_p$sse <- display_sse(best_f_p)
-    }
-  }
-
-  list(l = item$l, act = res_a, pre = res_p)
+  list(l = item$l, act = fit_surface(item$act), pre = fit_surface(item$pre))
 }

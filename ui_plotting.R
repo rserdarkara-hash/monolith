@@ -1687,12 +1687,12 @@ compute_spatial_cross_correlogram <- function(df, var1, var2, x_col, y_col,
   }
   if (identical(var1, var2)) return(fail("Select two different variables"))
 
-  d <- na.omit(df[, unique(c(var1, var2, x_col, y_col)), drop = FALSE])
-  if (!is.numeric(d[[var1]]) || !is.numeric(d[[var2]])) return(fail("Both variables must be numeric"))
-  if (nrow(d) < 15) return(fail("Insufficient data: at least 15 complete observations are needed"))
+  if (!is.numeric(df[[var1]]) || !is.numeric(df[[var2]])) return(fail("Both variables must be numeric"))
   # Fixed internal names: a coordinate column may also be chosen as a variable.
-  work <- data.frame(.cx = d[[x_col]], .cy = d[[y_col]],
-                     .v1 = d[[var1]], .v2 = d[[var2]])
+  # Coordinates as numbers (coord_values(): a text cell is no position).
+  work <- na.omit(data.frame(.cx = coord_values(df[[x_col]]), .cy = coord_values(df[[y_col]]),
+                             .v1 = df[[var1]], .v2 = df[[var2]]))
+  if (nrow(work) < 15) return(fail("Insufficient data: at least 15 complete observations are needed"))
 
   pts <- tryCatch({
     p <- sf::st_as_sf(work, coords = c(".cx", ".cy"), crs = src_crs)

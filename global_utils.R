@@ -331,8 +331,8 @@ find_geographic_pair <- function(df, exclude = character(0)) {
   lon_i <- which(nm %in% .crs_lon_names & !(cn %in% exclude))
   lat_i <- which(nm %in% .crs_lat_names & !(cn %in% exclude))
   if (length(lon_i) == 0 || length(lat_i) == 0) return(NULL)
-  lon <- suppressWarnings(as.numeric(as.character(df[[lon_i[1]]])))
-  lat <- suppressWarnings(as.numeric(as.character(df[[lat_i[1]]])))
+  lon <- coord_values(df[[lon_i[1]]])
+  lat <- coord_values(df[[lat_i[1]]])
   ok <- is.finite(lon) & is.finite(lat)
   if (sum(ok) < 1) return(NULL)
   if (any(abs(lon[ok]) > 180) || any(abs(lat[ok]) > 90)) return(NULL)
@@ -515,8 +515,8 @@ identify_crs_from_boundary <- function(x, y, boundary, min_frac = 0.5) {
 #' `suggest = "EPSG:4326"` and the caller asks.
 identify_input_crs <- function(df, x_col, y_col, boundary = NULL) {
   if (is.null(df) || !all(c(x_col, y_col) %in% colnames(df))) return(NULL)
-  x <- suppressWarnings(as.numeric(as.character(df[[x_col]])))
-  y <- suppressWarnings(as.numeric(as.character(df[[y_col]])))
+  x <- coord_values(df[[x_col]])
+  y <- coord_values(df[[y_col]])
   ok <- is.finite(x) & is.finite(y)
   if (sum(ok) < 1) return(NULL)
 
@@ -579,8 +579,8 @@ crs_landing_position <- function(df, x_col, y_col, crs) {
   if (is.null(crs) || !nzchar(as.character(crs)[1])) return(NULL)
   if (is.null(df) || is.null(x_col) || is.null(y_col)) return(NULL)
   if (!all(c(x_col, y_col) %in% colnames(df))) return(NULL)
-  x <- suppressWarnings(as.numeric(as.character(df[[x_col]])))
-  y <- suppressWarnings(as.numeric(as.character(df[[y_col]])))
+  x <- coord_values(df[[x_col]])
+  y <- coord_values(df[[y_col]])
   ok <- is.finite(x) & is.finite(y)
   if (sum(ok) < 1) return(NULL)
   suppressWarnings(tryCatch({
@@ -952,8 +952,8 @@ crs_scale_factor <- function(crs, lon, lat, arc_deg = 0.001) {
 crs_sample_positions <- function(df, x_col, y_col, crs) {
   if (is.null(df) || is.null(x_col) || is.null(y_col)) return(NULL)
   if (!all(c(x_col, y_col) %in% colnames(df))) return(NULL)
-  x <- suppressWarnings(as.numeric(as.character(df[[x_col]])))
-  y <- suppressWarnings(as.numeric(as.character(df[[y_col]])))
+  x <- coord_values(df[[x_col]])
+  y <- coord_values(df[[y_col]])
   ok <- is.finite(x) & is.finite(y)
   if (!any(ok)) return(NULL)
   x <- x[ok]; y <- y[ok]
@@ -1090,8 +1090,8 @@ shp_boundary_overlap <- function(shp, x, y, crs) {
   if (is.null(shp) || is.na(sf::st_crs(shp))) return(NULL)
   src <- suppressWarnings(tryCatch(sf::st_crs(crs), error = function(e) NULL))
   if (is.null(src) || is.na(src)) return(NULL)
-  x <- suppressWarnings(as.numeric(as.character(x)))
-  y <- suppressWarnings(as.numeric(as.character(y)))
+  x <- coord_values(x)
+  y <- coord_values(y)
   ok <- is.finite(x) & is.finite(y)
   if (!any(ok)) return(NULL)
   tryCatch({

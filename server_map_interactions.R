@@ -14,16 +14,18 @@
     ))
   }
 
-  # One handler set per map: a newly drawn shape opens the assign-locality
-  # modal, and polygons are also kept in rv$drawn_polygons for map exports.
-  # Keys are prefixed with the map id; leaflet ids are only unique per map. A
-  # click on a sampling point opens its pop-up.
+  # One handler set per map: a newly drawn polygon or rectangle is kept in
+  # rv$drawn_polygons for map exports and opens the assign-locality modal (a
+  # marker encloses no point, so it stays an annotation). Keys are prefixed
+  # with the map id; leaflet ids are only unique per map. A click on a sampling
+  # point opens its pop-up.
   for (.map_id in overlay_map_ids) local({
     map_id <- .map_id
     poly_key <- function(feat) paste0(map_id, "_", feat$properties$`_leaflet_id`)
     observeEvent(input[[paste0(map_id, "_draw_new_feature")]], {
       feat <- input[[paste0(map_id, "_draw_new_feature")]]
-      if (feat$geometry$type %in% c("Polygon", "MultiPolygon")) rv$drawn_polygons[[poly_key(feat)]] <- feat
+      if (!isTRUE(feat$geometry$type %in% c("Polygon", "MultiPolygon"))) return()
+      rv$drawn_polygons[[poly_key(feat)]] <- feat
       handle_new_feature(feat)
     })
     observeEvent(input[[paste0(map_id, "_draw_edited_features")]], {
@@ -66,39 +68,36 @@
       return()
     }
 
-    feature <- rv$drawn_feature
-    feat_json <- jsonlite::toJSON(feature, auto_unbox = TRUE)
-    poly_sf <- sf::st_read(feat_json, quiet = TRUE)
-    sf::st_crs(poly_sf) <- 4326
+    # The uploaded rows with a position (a text cell in a coordinate column is
+    # none) that the shape covers, tested in the Input Data CRS. An error here
+    # would end the session, so a shape or CRS that cannot be compared is
+    # reported instead.
+    xs <- coord_values(rv$user_data[[rv$mapping$x]])
+    ys <- coord_values(rv$user_data[[rv$mapping$y]])
+    located <- which(is.finite(xs) & is.finite(ys))
+    inside <- tryCatch({
+      poly_sf <- sf::st_read(jsonlite::toJSON(rv$drawn_feature, auto_unbox = TRUE), quiet = TRUE)
+      sf::st_crs(poly_sf) <- 4326
+      pts_sf <- sf::st_as_sf(data.frame(x = xs[located], y = ys[located]),
+                             coords = c("x", "y"), crs = rv$mapping$crs)
+      located[lengths(sf::st_intersects(pts_sf, sf::st_transform(poly_sf, sf::st_crs(pts_sf)))) > 0]
+    }, error = function(e) {
+      showNotification(paste("The shape could not be compared with the sample positions:", conditionMessage(e)),
+                       type = "error", duration = 10)
+      NULL
+    })
 
-    df_map <- rv$user_data %>% 
-      filter(!is.na(!!sym(rv$mapping$x)) & !is.na(!!sym(rv$mapping$y)))
-    
-    pts_sf <- sf::st_as_sf(df_map, coords = c(rv$mapping$x, rv$mapping$y), crs = rv$mapping$crs)
-    poly_sf_trans <- sf::st_transform(poly_sf, sf::st_crs(pts_sf))
-    
-    intersect_idx <- sf::st_intersects(pts_sf, poly_sf_trans, sparse = FALSE)
-    
-    in_poly <- rowSums(intersect_idx) > 0
-    
-    if (any(in_poly)) {
+    if (length(inside)) {
       if (!"Assigned_Locality" %in% names(rv$user_data)) {
         rv$user_data$Assigned_Locality <- NA
       }
-      
-      valid_rows <- which(!is.na(rv$user_data[[rv$mapping$x]]) & !is.na(rv$user_data[[rv$mapping$y]]))
-      intersecting_user_rows <- valid_rows[in_poly]
-      
-      rv$user_data$Assigned_Locality[intersecting_user_rows] <- group_name
-      
-      showNotification(paste("Assigned", length(intersecting_user_rows), "points to group:", group_name), type = "message")
-      
-      current_loc <- input$map_loc
-      updateSelectInput(session, "map_loc", choices = colnames(rv$user_data), selected = current_loc)
-    } else {
+      rv$user_data$Assigned_Locality[inside] <- group_name
+      showNotification(paste("Assigned", length(inside), "points to group:", group_name), type = "message")
+      updateSelectInput(session, "map_loc", choices = colnames(rv$user_data), selected = input$map_loc)
+    } else if (!is.null(inside)) {
       showNotification("No points found within the selected area.", type = "warning")
     }
-    
+
     removeModal()
     rv$drawn_feature <- NULL
   })
@@ -129,13 +128,10 @@
                                            input$pt_popup_vars, focus_var()))
   })
 
-  # Pop-up Content and its variable chooser follow the variable list. A new
-  # table starts from the mapped variable's category; otherwise a choice is
-  # kept while the list still offers it.
-  observeEvent(rv$mapping$vars, {
-    vars <- rv$mapping$vars %||% list()
-    fresh <- isTRUE(session_state$popup_fresh)
-    session_state$popup_fresh <- FALSE
+  # Pop-up Content and its variable chooser for the variable list `vars`.
+  # `fresh` (a new table) starts from the mapped variable's category; otherwise
+  # a choice is kept while the list still offers it.
+  sync_popup_inputs <- function(vars, fresh = FALSE) {
     choices <- popup_content_choices(vars)
     content <- if (fresh) "auto" else isolate(input$pt_popup_content)
     updateSelectInput(session, "pt_popup_content", choices = choices,
@@ -145,6 +141,13 @@
     })
     chosen <- if (fresh) character(0) else intersect(as.character(isolate(input$pt_popup_vars)), var_actuals(vars))
     shinyWidgets::updatePickerInput(session, "pt_popup_vars", choices = var_choices, selected = chosen)
+  }
+  # They follow the variable list. An upload announces a new table through
+  # session_state$popup_fresh (server_data_setup.R).
+  observeEvent(rv$mapping$vars, {
+    fresh <- isTRUE(session_state$popup_fresh)
+    session_state$popup_fresh <- FALSE
+    sync_popup_inputs(rv$mapping$vars %||% list(), fresh)
   })
 
   observeEvent(input$toggle_pt_style, {

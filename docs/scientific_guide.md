@@ -40,7 +40,7 @@ The OLS tests assume independent errors with constant variance. RK kriges the re
 
 **Minimum training size.** A trend fit needs at least the number of retained covariates plus two rows (the intercept and one residual degree of freedom). With fewer, the locality's map falls back to Ordinary Kriging, and a cross-validation fold fails by name. Enough rows do not guarantee a full-rank design: collinear covariates kept with **Keep All** can still give aliased coefficients.
 
-**Fallback.** When RK, RFK or CK cannot be fitted for a locality (too few rows for the trend, no covariate left after screening, an LMC that cannot be fitted), the locality is mapped by Ordinary Kriging with its own automated variogram fit, never with an applied manual model, and the run warnings say so. The covariate surfaces RK and RFK evaluate their trend on are described in Section 1.7.
+**Fallback.** When RK, RFK or CK cannot be fitted for a locality or fails before its map is made (too few rows for the trend, no covariate left after screening, an LMC that cannot be fitted, a covariate grid with gaps), the locality is mapped by Ordinary Kriging with its own automated variogram fit, never with an applied manual model, and the run warnings say so. Its panels and cross-validation are then those of the Ordinary Kriging model alone. The covariate surfaces RK and RFK evaluate their trend on are described in Section 1.7.
 
 ### 1.3 Random Forest Kriging (RFK)
 
@@ -95,6 +95,8 @@ TPS minimises the squared fitting error plus lambda times the bending energy, th
 **Fallback to IDW.** If the spline cannot be fitted for a locality (for example a degenerate point configuration), that locality is mapped by IDW with the active IDW settings. The run log records it (`TPS failed: ... Falling back to IDW.`) and a per-locality warning is raised.
 
 ### 1.7 Sample locations and covariate surfaces
+
+A row needs finite numeric X and Y coordinates to define a position. Empty, nonnumeric and infinite coordinates are excluded before spatial modelling, classification scope and mapping.
 
 **Co-located samples.** Samples whose coordinates agree to two decimals (1 cm in a metric CRS) are one location: their numeric values are averaged over the rows that carry them, their coordinates averaged, and the smallest row id and its other values kept. For a surface, rows missing its target are removed before merging. The run log counts merged locations. The Classification Suite merges at its own scope step (Section 10.2).
 

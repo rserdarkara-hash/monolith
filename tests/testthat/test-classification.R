@@ -734,6 +734,24 @@ test_that("classif_resolve_scope filters by locality and bounds per-locality hul
   expect_false(any(lengths(sf::st_intersects(gap_pt, bnd_all)) > 0))
 })
 
+test_that("classification scope excludes non-finite and text positions", {
+  d <- make_classif_scope_df()
+  bad <- d[rep(1, 5), ]
+  bad$x <- c(Inf, -Inf, NaN, NA, bad$x[5])
+  bad$y[5] <- Inf
+  for (as_text in c(FALSE, TRUE)) {
+    raw <- rbind(d, bad)
+    if (as_text) {
+      raw$x <- as.character(raw$x)
+      raw$x[nrow(raw) - 1L] <- "not a coordinate"
+    }
+    sc <- classif_resolve_scope(raw, "x", "y", 32633, "EPSG:32633", loc_col = "loc")
+    expect_equal(sc$n_input, nrow(d))
+    expect_equal(sc$n_scoped, nrow(d))
+    expect_true(all(is.finite(sc$df$x) & is.finite(sc$df$y)))
+  }
+})
+
 test_that("classif_resolve_scope merges co-located samples into one location", {
   d <- make_classif_scope_df()
   # Decimetre coordinates, so a replicate 4 mm away shares the 1 cm key.

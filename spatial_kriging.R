@@ -823,7 +823,15 @@ rf_infinitesimal_jackknife_var <- function(pred_individual, inbag, chunk = 2000L
 .ok_fallback <- function(res, data, target_var, grid_p, lags, method_params,
                          l, prefix, engine_label, cv_label, tag_model_type = FALSE) {
   write_warning_file(l, prefix, paste0(engine_label, " failed, using Ordinary Kriging fallback."))
-  # The mapped surface uses no covariate; the screen's record (aux_dropped) stands.
+  # Nothing the failed engine fitted or scored travels with the fallback
+  # surface: a trend model, forest or LMC fitted before the failure, its CV
+  # frames, fold screen and data design. The main session reads their presence
+  # as "this engine made the map". The log and the screen's record
+  # (aux_dropped) stand; the mapped surface uses no covariate.
+  failed <- res
+  res <- init_interpolation_res()
+  res$log_msg <- failed$log_msg
+  res$aux_dropped <- failed$aux_dropped
   res$aux_used <- character(0)
   form_ok <- reformulate("1", response = target_var)
   res$v_emp <- variogram(form_ok, data, width = lags$width, cutoff = lags$cutoff)
@@ -964,7 +972,7 @@ apply_kriging_pipeline <- function(engine = c("OK", "RK", "RFK"), data, target_v
         if (nrow(data) < n_coef_rk + 1L) {
           stop(sprintf(
             paste0("RK needs at least %d points to fit %d regression coefficients; ",
-                   "this locality has %d. Use fewer covariates."),
+                   "this locality has %d. Use fewer covariates"),
             n_coef_rk + 1L, n_coef_rk, nrow(data)))
         }
         form_reg <- as.formula(paste(paste0("`", target_var, "`"), "~", paste(paste0("`", aux_vars, "`"), collapse = " + ")))
@@ -1025,7 +1033,7 @@ apply_kriging_pipeline <- function(engine = c("OK", "RK", "RFK"), data, target_v
           # a bare "missing values in newdata".
           if (anyNA(nd)) {
             stop("RFK trend prediction: the covariate grid holds missing values in ",
-                 sum(!stats::complete.cases(nd)), " of ", e - s + 1L, " grid cells.")
+                 sum(!stats::complete.cases(nd)), " of ", e - s + 1L, " grid cells")
           }
           pa <- predict(rf_mod, nd, predict.all = TRUE)
           Mb <- pa$individual

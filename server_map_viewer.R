@@ -330,12 +330,10 @@
       r_list <- as_raster_list(r_obj)
 
       if (length(r_list) > 0) {
-        vgm_target <- if (lab %in% c("actual", "Actual")) "act"
-                      else if (lab %in% c("pred", "pred_ss", "Predicted")) "pre"
-                      else NULL  # residual maps derive from both fits
-        # `of`: an RK/RFK locality that fell back to OK holds the measured
-        # values' variogram, and its bands are worded for that.
-        vgm_warn_html <- build_vgm_warning_html(rv$disp$v_fits, target = vgm_target,
+        # The surface's own fits (NULL for the residual maps, which derive from
+        # both). `of`: an RK/RFK locality that fell back to OK holds the
+        # measured values' variogram, and its bands are worded for that.
+        vgm_warn_html <- build_vgm_warning_html(rv$disp$v_fits, target = class_surface_of(lab),
                                                 engine = rv$disp$method, of = disp_vgm_of())
         if (!is.null(vgm_warn_html)) {
           # className matters: the default "info legend" class would clip the
@@ -653,15 +651,34 @@
     paste0(d$label, " - ", disp_pred_label(d), map_layer_title("pre"), disp_method_label(d))
   })
 
-  observeEvent(list(input$base_map_layer, carto_api_key()), {
-    # The only tile update path for rendered maps (draw_map isolates the
-    # choice); the CARTO key is part of those tile URLs, so it re-adds too.
+  # The base tiles of every map widget, re-added: the only tile update path for
+  # rendered maps (draw_map isolates the choice). The CARTO key is part of
+  # those tile URLs, so a new key re-adds them too.
+  refresh_base_tiles <- function() {
     for (map_id in overlay_map_ids) {
       leafletProxy(map_id) %>%
         clearTiles() %>%
         add_base_tiles(input$base_map_layer, carto_api_key())
     }
-  })
+  }
+  observeEvent(list(input$base_map_layer, carto_api_key()), refresh_base_tiles())
+
+  # WGS84 bbox of the uploaded rows with a position (all, or those the logical
+  # `rows` selects); NULL when there is none or it cannot be computed. The CRS
+  # is checked too: x/y can be mapped while the Input Data CRS is unset.
+  upload_bbox <- function(rows = NULL) {
+    ud <- rv$user_data
+    if (is.null(ud) || is.null(rv$mapping$x) || is.null(rv$mapping$y) || !isTruthy(rv$mapping$crs)) return(NULL)
+    tryCatch({
+      xs <- coord_values(ud[[rv$mapping$x]])
+      ys <- coord_values(ud[[rv$mapping$y]])
+      keep <- is.finite(xs) & is.finite(ys)
+      if (!is.null(rows)) keep <- keep & rows
+      if (!any(keep)) return(NULL)
+      st_bbox(st_transform(st_as_sf(data.frame(x = xs[keep], y = ys[keep]), coords = c("x", "y"),
+                                    crs = rv$mapping$crs), 4326))
+    }, error = function(e) NULL)
+  }
 
   # WGS84 bbox of the current run area: committed boundary when one exists,
   # else the uploaded sample points. NULL before any data is loaded.
@@ -670,19 +687,16 @@
       bb <- tryCatch(sf::st_bbox(sf::st_transform(sf::st_as_sf(rv$bound), 4326)), error = function(e) NULL)
       if (!is.null(bb)) return(bb)
     }
-    # The CRS is checked too: x/y can be mapped while the Input Data CRS is
-    # unset, and st_transform() of an NA-CRS point set errors.
-    if (!is.null(rv$user_data) && !is.null(rv$mapping$x) && !is.null(rv$mapping$y) &&
-        isTruthy(rv$mapping$crs)) {
-      return(tryCatch({
-        df_map <- rv$user_data %>%
-          dplyr::select(x = !!sym(rv$mapping$x), y = !!sym(rv$mapping$y)) %>%
-          na.omit()
-        pts <- st_as_sf(df_map, coords = c("x", "y"), crs = rv$mapping$crs) %>% st_transform(4326)
-        st_bbox(pts)
-      }, error = function(e) NULL))
-    }
-    NULL
+    upload_bbox()
+  }
+
+  # Fit map widgets to a WGS84 bbox (nothing for NULL or an empty one): by
+  # default the main map, and the comparison panels in the views that show them.
+  fit_maps_to_bbox <- function(bbox, ids = if (map_view_base() %in% c("view_comp", "view_resid")) overlay_map_ids
+                                            else "main_map") {
+    b <- as.numeric(unclass(bbox)[c("xmin", "ymin", "xmax", "ymax")])
+    if (length(b) != 4 || !all(is.finite(b))) return(invisible(NULL))
+    for (map_id in ids) leafletProxy(map_id) %>% fitBounds(b[1], b[2], b[3], b[4])
   }
 
   # Leaflet stashes layers drawn into a zero-size container until a resize, so
@@ -718,14 +732,7 @@
   # (Refresh Map Area and reveal): a widget initialised without a view never
   # loads tiles.
   fit_maps_to_data <- function() {
-    bbox <- run_area_bbox()
-    if (!is.null(bbox)) {
-      leafletProxy("main_map") %>% fitBounds(as.numeric(bbox$xmin), as.numeric(bbox$ymin), as.numeric(bbox$xmax), as.numeric(bbox$ymax))
-      if (map_view_base() %in% c("view_comp", "view_resid")) {
-        leafletProxy("comp_map_left") %>% fitBounds(as.numeric(bbox$xmin), as.numeric(bbox$ymin), as.numeric(bbox$xmax), as.numeric(bbox$ymax))
-        leafletProxy("comp_map_right") %>% fitBounds(as.numeric(bbox$xmin), as.numeric(bbox$ymin), as.numeric(bbox$xmax), as.numeric(bbox$ymax))
-      }
-    }
+    fit_maps_to_bbox(run_area_bbox())
     pump_map_resize()
   }
 
@@ -793,18 +800,7 @@
 
   observeEvent(input$refresh_map_area, {
     req(input$base_map_layer)
-    leafletProxy("main_map") %>%
-      clearTiles() %>%
-      add_base_tiles(input$base_map_layer, carto_api_key())
-
-    leafletProxy("comp_map_left") %>%
-      clearTiles() %>%
-      add_base_tiles(input$base_map_layer, carto_api_key())
-
-    leafletProxy("comp_map_right") %>%
-      clearTiles() %>%
-      add_base_tiles(input$base_map_layer, carto_api_key())
-
+    refresh_base_tiles()
     fit_maps_to_data()
   })
 
@@ -829,37 +825,17 @@
       m
     })
   })
-      output$locality_pan_ui <- renderUI({
-      req(rv$loc_names)
-      render_locality_pan_input(rv$loc_names)
-      })
+  output$locality_pan_ui <- renderUI({
+    req(rv$loc_names)
+    render_locality_pan_input(rv$loc_names)
+  })
 
-      observeEvent(input$locality_pan, {
-      req(input$locality_pan, rv$user_data, rv$mapping$x, rv$mapping$y, rv$mapping$crs)
-
-      bbox <- if (input$locality_pan == "global") {
-        df_map <- rv$user_data %>% 
-          dplyr::filter(!!sym(rv$mapping$loc) %in% rv$loc_names) %>%
-          dplyr::select(x = !!sym(rv$mapping$x), y = !!sym(rv$mapping$y)) %>% 
-          na.omit()
-        pts <- st_as_sf(df_map, coords = c("x", "y"), crs = rv$mapping$crs) %>% st_transform(4326)
-        st_bbox(pts)
-      } else {        # Filter by selected locality
-        df_map <- rv$user_data %>% 
-          dplyr::filter(!!sym(rv$mapping$loc) == input$locality_pan) %>%
-          dplyr::select(x = !!sym(rv$mapping$x), y = !!sym(rv$mapping$y)) %>% 
-          na.omit()
-        pts <- st_as_sf(df_map, coords = c("x", "y"), crs = rv$mapping$crs) %>% st_transform(4326)
-        st_bbox(pts)
-      }
-
-      leafletProxy("main_map") %>% fitBounds(as.numeric(bbox$xmin), as.numeric(bbox$ymin), as.numeric(bbox$xmax), as.numeric(bbox$ymax))
-
-      if (map_view_base() %in% c("view_comp", "view_resid")) {
-        leafletProxy("comp_map_left") %>% fitBounds(as.numeric(bbox$xmin), as.numeric(bbox$ymin), as.numeric(bbox$xmax), as.numeric(bbox$ymax))
-        leafletProxy("comp_map_right") %>% fitBounds(as.numeric(bbox$xmin), as.numeric(bbox$ymin), as.numeric(bbox$xmax), as.numeric(bbox$ymax))
-      }
-   })
+  # Pan to one locality's uploaded points, or to all the run's localities.
+  observeEvent(input$locality_pan, {
+    req(input$locality_pan, rv$user_data, rv$mapping$loc %in% colnames(rv$user_data))
+    locs <- if (input$locality_pan == "global") rv$loc_names else input$locality_pan
+    fit_maps_to_bbox(upload_bbox(rv$user_data[[rv$mapping$loc]] %in% locs))
+  })
 
    # Manual-mode slider values enter the cache key only while they draw the
    # overlay line (mirroring the plot's own condition).
@@ -916,8 +892,8 @@
          req(rv$user_data, rv$mapping$x, rv$mapping$y, rv$mapping$crs, rv$mapping$loc)
          if (is.null(src) || !src %in% colnames(rv$user_data)) NULL else {
            d <- rv$user_data[rv$user_data[[rv$mapping$loc]] %in% rv$loc_names, , drop = FALSE]
-           d <- data.frame(x = d[[rv$mapping$x]], y = d[[rv$mapping$y]], val = d[[src]],
-                           loc = d[[rv$mapping$loc]])
+           d <- data.frame(x = coord_values(d[[rv$mapping$x]]), y = coord_values(d[[rv$mapping$y]]),
+                           val = d[[src]], loc = d[[rv$mapping$loc]])
            d <- d[is.finite(d$x) & is.finite(d$y), , drop = FALSE]
            names(d)[3] <- col
            split(sf::st_as_sf(d[c("x", "y", col)], coords = c("x", "y"), crs = rv$mapping$crs), d$loc)

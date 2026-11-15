@@ -933,6 +933,121 @@ test_that("Save config and Load config restore every run-defining setting", {
   expect_identical(restored$palettes, saved$palettes)
 })
 
+test_that("a row without a numeric position is left out, and the map tools work on the others", {
+  app <- smoke_app()
+  # The config test opens a second browser tab. Leaflet's animated fits need
+  # animation frames, which Chromium suspends in a background tab.
+  app$get_chromote_session()$Page$bringToFront()
+  app$wait_for_js("!document.hidden")
+  # Two localities of 20 samples in UTM 33N with a lon/lat twin (the Input Data
+  # CRS is identified on upload). One X cell is text, which makes the whole
+  # column text on upload; three rows have no Color By group, and one extra
+  # positioned row has no locality. These paths run
+  # in observers, where an error ends the session, so they are driven here.
+  ctr <- sf::st_coordinates(sf::st_transform(
+    sf::st_sfc(sf::st_point(c(12.958, 52.466)), crs = 4326), 32633))
+  set.seed(21)
+  d <- data.frame(locality = rep(c("A", "B"), each = 20),
+                  x = ctr[1] + c(runif(20, -2000, 2000), runif(20, 4000, 8000)),
+                  y = ctr[2] + runif(40, -1500, 1500),
+                  value = runif(40, 10, 24))
+  ll <- sf::st_coordinates(sf::st_transform(
+    sf::st_as_sf(d, coords = c("x", "y"), crs = 32633), 4326))
+  d <- data.frame(d[, c("locality", "x", "y")], lon = ll[, 1], lat = ll[, 2], value = d$value,
+                  value_cve = d$value + rnorm(40, 0, 0.5), soil = rep(c("clay", "loam"), 20))
+  d$soil[c(2, 9, 30)] <- NA
+  d$x <- format(d$x, digits = 15, trim = TRUE)
+  d$x[5] <- "n/a"
+  csv <- tempfile(fileext = ".csv")
+  withr::defer(unlink(csv))
+  d$.x <- d$soil
+  utils::write.csv(rbind(d, transform(d[1, ], locality = NA_character_)), csv, row.names = FALSE)
+
+  settled <- function(js, want, timeout = 30) {
+    end <- Sys.time() + timeout
+    repeat {
+      got <- tryCatch(app$get_js(js), error = function(e) NULL)
+      if (isTRUE(all.equal(got, want)) || Sys.time() > end) return(got)
+      Sys.sleep(0.25)
+    }
+  }
+  markers <- function(map, fill = NULL) {
+    sprintf("Array.prototype.filter.call(document.querySelectorAll('#%s path.leaflet-interactive'), function (p) { return %s; }).length",
+            map, if (is.null(fill)) "true" else sprintf("p.getAttribute('fill') === '%s'", fill))
+  }
+
+  app$set_inputs(main_tabs = "tab_data")
+  app$upload_file(user_file = csv)
+  app$wait_for_idle()
+  expect_equal(app$get_value(input = "map_x"), "x")
+  expect_equal(app$get_value(input = "map_crs"), "EPSG:32633")
+  # An upload keeps the Target Mapping CRS already chosen: the previous test's
+  # zone 35 would stop the run at its unsuitable-CRS dialog for Potsdam.
+  app$run_js("Shiny.setInputValue('crs_selection', 'EPSG:32633');")
+  app$wait_for_idle()
+
+  # The mini-map draws the 39 rows with a position. Under the Map Viewer's
+  # colour set a row without a group is drawn grey, not left out.
+  expect_equal(settled(markers("setup_minimap"), 39), 39)
+  app$set_inputs(pt_color_by = "soil", pt_apply_minimap = TRUE)
+  expect_equal(settled(markers("setup_minimap", "#808080"), 3), 3)
+  expect_equal(app$get_js(markers("setup_minimap")), 39)
+  # A grouping column can have the same name as a temporary coordinate.
+  app$set_inputs(pt_color_by = ".x")
+  expect_equal(settled(markers("setup_minimap", "#808080"), 3), 3)
+  expect_equal(app$get_js(markers("setup_minimap")), 39)
+  expect_match(app$get_html("#setup_minimap .legend"), ".x", fixed = TRUE)
+  app$set_inputs(pt_apply_minimap = FALSE, pt_color_by = "none")
+  app$wait_for_idle()
+
+  # A run that maps predictions builds the point-error surface from the same
+  # rows: both localities finish, and the display set holds their 39 locations.
+  app$set_inputs(var_id = "value")
+  app$wait_for_idle()
+  app$set_inputs(value_type = "pred", method = "IDW", locality = c("A", "B"), comp_mode = FALSE)
+  app$wait_for_idle()
+  skip_if_not(run_and_reveal(app), "the run did not finish inside the smoke harness")
+  expect_false(grepl("Region(s) Failed", app$get_html("body"), fixed = TRUE))
+  expect_identical(smoke_run_state(app)$disp_method, "IDW")
+  app$set_inputs(show_points_viewer = TRUE)
+  expect_equal(settled(markers("main_map"), 39), 39)
+
+  # Pan to a locality: the map centres on that locality's points.
+  centre_lon <- "HTMLWidgets.find('#main_map').getMap().getCenter().lng"
+  within <- function(loc) {
+    r <- range(ll[d$locality == loc, 1])
+    sprintf("(function () { var c = %s; return c > %.6f && c < %.6f; })()", centre_lon, r[1], r[2])
+  }
+  app$set_inputs(locality_pan = "B")
+  expect_true(settled(within("B"), TRUE))
+  app$set_inputs(locality_pan = "A")
+  expect_true(settled(within("A"), TRUE))
+
+  # A drawn shape around locality B assigns its 20 rows to a group.
+  bb <- sapply(as.data.frame(ll[d$locality == "B", ]), range)
+  ring <- rbind(c(bb[1, 1] - 0.01, bb[1, 2] - 0.01), c(bb[2, 1] + 0.01, bb[1, 2] - 0.01),
+                c(bb[2, 1] + 0.01, bb[2, 2] + 0.01), c(bb[1, 1] - 0.01, bb[2, 2] + 0.01),
+                c(bb[1, 1] - 0.01, bb[1, 2] - 0.01))
+  feature <- list(type = "Feature", properties = list(`_leaflet_id` = 991L),
+                  geometry = list(type = "Polygon", coordinates = list(unname(ring))))
+  app$run_js(sprintf("Shiny.setInputValue('main_map_draw_new_feature', %s, {priority: 'event'});",
+                     jsonlite::toJSON(feature, auto_unbox = TRUE, digits = 12)))
+  app$wait_for_idle()
+  app$set_inputs(new_group_name = "Zone B")
+  app$click("save_group")
+  app$wait_for_idle()
+  expect_match(app$get_html("body"), "Assigned 20 points to group: Zone B", fixed = TRUE)
+  expect_true(isTRUE(app$get_js("Object.keys(document.getElementById('map_loc').selectize.options).indexOf('Assigned_Locality') >= 0")))
+
+  # The same table uploaded again is a new table: Pop-up Content starts again
+  # from the mapped variable's category although the variable list is the same.
+  app$set_inputs(show_points_viewer = FALSE, pt_popup_content = "all")
+  app$wait_for_idle()
+  app$upload_file(user_file = csv)
+  app$wait_for_idle()
+  expect_identical(settled("document.getElementById('pt_popup_content').value", "auto"), "auto")
+})
+
 # Shut the app down here rather than at suite teardown: the app process keeps
 # its multisession future workers (up to six) alive for as long as it lives,
 # and every later test file in the suite would run alongside them.

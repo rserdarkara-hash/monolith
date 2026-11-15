@@ -23,7 +23,8 @@
 
     idx <- which(sapply(rv$mapping$vars, function(x) x$actual == var))
     if (length(idx) == 0) return(NULL)
-    m <- rv$mapping$vars[[idx]]
+    # The first entry of a column listed twice (a hand-edited configuration).
+    m <- rv$mapping$vars[[idx[1]]]
 
     pred_col <- if(is_valid_col_ref(m$pred)) as.character(m$pred) else NULL
     pred_ss_col <- if(is_valid_col_ref(m$pred_ss)) as.character(m$pred_ss) else NULL
@@ -866,17 +867,10 @@
     exclude <- c(input$map_x, input$map_y, input$var_id)
     raw_choices <- num_cols[!(num_cols %in% exclude)]
     
-    vars_metadata <- rv$mapping$vars
-    choices_named <- setNames(raw_choices, sapply(raw_choices, function(v) {
-      match <- Filter(function(x) x$actual == v, vars_metadata)
-      if(length(match) > 0 && !is.null(match[[1]]$label) && match[[1]]$label != "") {
-        match[[1]]$label
-      } else {
-        v
-      }
-    }))
-    
-    pickerInput("aux_vars", "Select Predictors:", 
+    choices_named <- setNames(raw_choices, vapply(raw_choices, get_var_label, character(1),
+                                                  vars_metadata = rv$mapping$vars))
+
+    pickerInput("aux_vars", "Select Predictors:",
                 choices = choices_named, multiple = TRUE,
                 selected = isolate(restore_ui_value("aux_vars")),
                 options = list(`live-search` = TRUE, `actions-box` = TRUE))

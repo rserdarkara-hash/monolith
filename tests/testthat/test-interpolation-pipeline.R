@@ -2732,6 +2732,13 @@ test_that("autofit_vgm_item fits actual and predicted variograms per item", {
   res2 <- autofit_vgm_item(list(l = "LocB", act = df_a, pre = NULL), current_crs = 32633)
   expect_null(res2$pre$fit)
   expect_identical(res2$pre$mod, "FAIL")
+
+  # A locality without a value of the variable (no rows left) or with fewer
+  # than three locations is a FAIL for that surface, never an error: one such
+  # locality would end the optimization of all the others.
+  none <- autofit_vgm_item(list(l = "LocC", act = df_a[0, ], pre = df_p[1:2, ]), current_crs = 32633)
+  expect_identical(none$act, list(emp = NULL, fit = NULL, mod = "FAIL", sse = "N/A"))
+  expect_identical(none$pre, list(emp = NULL, fit = NULL, mod = "FAIL", sse = "N/A"))
 })
 
 test_that("interp_run_item forwards a run_params list into a full regional run", {
@@ -3212,6 +3219,61 @@ test_that("the OK fallback of a failed RK withholds a stand-in variance", {
   expect_true(all(is.finite(res$res_sf$var1.pred)))
   expect_true(all(is.na(res$res_sf$var1.var)))
   expect_true(all(is.na(res$cv_obj$var1.var)))
+})
+
+test_that("an OK fallback carries nothing the failed engine fitted or scored", {
+  # A covariate engine can fail after its trend is fitted: RFK stops on a
+  # covariate grid with holes, RK on one without the covariate. The surface is
+  # then Ordinary Kriging of the measured values, and the main session reads a
+  # stored trend model as "the trend made this map" (disp_trend_fallback()).
+  pts <- make_test_points(30)
+  grid <- make_test_grid_safe(pts, res = 250)
+  lags <- calc_scientific_lags(pts)
+  ok_fit <- robust_vgm_fit(gstat::variogram(v ~ 1, pts, width = lags$width, cutoff = lags$cutoff), pts$v)
+  ok_map <- gstat::krige(v ~ 1, pts, grid, model = ok_fit, debug.level = 0)$var1.pred
+
+  holes <- grid
+  holes$aux1 <- NA_real_
+  rfk <- suppressWarnings(apply_RFK(pts, "v", grid, lags,
+                                    list(grid_aux = holes, cv_strategy = "loocv", rf_ntree = 50), "aux1"))
+  expect_match(rfk$log_msg, "RFK failed: RFK trend prediction: the covariate grid holds missing values in",
+               fixed = TRUE)
+  expect_match(rfk$log_msg, "grid cells. Falling back to OK.", fixed = TRUE)
+  expect_null(rfk$rf_model)
+  expect_identical(rfk$aux_used, character(0))
+  expect_equal(rfk$res_sf$var1.pred, ok_map, tolerance = 1e-10)
+
+  rk <- suppressWarnings(apply_RK(pts, "v", grid, lags, list(grid_aux = grid, cv_strategy = "loocv"), "aux1"))
+  expect_match(rk$log_msg, "RK failed:", fixed = TRUE)
+  expect_null(rk$model_summary)
+  expect_equal(rk$res_sf$var1.pred, ok_map, tolerance = 1e-10)
+
+  # The shared tail itself, for CK as well: every fitted object, CV frame and
+  # design record of the failed engine is dropped; the log and the screen's
+  # record stand, and the CV is the fallback's own.
+  failed <- init_interpolation_res()
+  failed$log_msg <- "CK failed: the prediction did not run. Falling back to OK."
+  failed$gstat_obj <- "a fitted LMC"
+  failed$rf_model <- "a forest"
+  failed$model_summary <- "a trend summary"
+  failed$cv_obj_reps <- list("frames of the failed engine")
+  failed$cv_screen <- list(n_differ = 2L, n_folds = 10L)
+  failed$ck_design <- "heterotopic"
+  failed$aux_used <- "aux1"
+  failed$aux_dropped <- "aux2"
+  fb <- suppressWarnings(.ok_fallback(failed, pts, "v", grid, lags, list(cv_strategy = "loocv"),
+                                      "L", "act", engine_label = "CK", cv_label = "OK Fallback",
+                                      tag_model_type = TRUE))
+  for (field in c("gstat_obj", "rf_model", "model_summary", "cv_obj_reps", "cv_screen", "ck_design")) {
+    expect_null(fb[[field]], info = field)
+  }
+  expect_identical(fb$aux_used, character(0))
+  expect_identical(fb$aux_dropped, "aux2")
+  expect_match(fb$log_msg, "CK failed: the prediction did not run.", fixed = TRUE)
+  expect_identical(unique(fb$res_sf$model_type), "Ordinary Kriging (Fallback)")
+  expect_equal(fb$res_sf$var1.pred, ok_map, tolerance = 1e-10)
+  expect_equal(nrow(fb$cv_obj), nrow(pts))
+  expect_equal(fb$cv_metrics$n, nrow(pts))
 })
 
 test_that("CK withholds the variance when the target's variogram is the stand-in", {
@@ -4422,6 +4484,37 @@ test_that("Fixed-mode localities share one lattice, so the merged surface is not
                as.numeric(terra::values(b, na.rm = TRUE)))
 })
 
+test_that("coord_values reads a coordinate column as numbers", {
+  # A numeric column is returned as it is, digits beyond the 15 that text
+  # keeps included (pi * 1e5 does not survive as.numeric(as.character())).
+  x <- c(pi * 1e5, -0.000123, NA)
+  expect_identical(coord_values(x), x)
+  expect_identical(coord_values(1:3), 1:3)
+  # One text cell makes a column text on upload: its numbers come back, and a
+  # cell that is not a number, empty or missing is no position.
+  expect_identical(coord_values(c("512345.25", " 4.5e3", "n/a", "", NA)),
+                   c(512345.25, 4500, NA, NA, NA))
+  expect_identical(coord_values(factor(c("10.5", "x", "10.5"))), c(10.5, NA, 10.5))
+  expect_identical(coord_values(c(1, Inf, -Inf, NaN, NA)), c(1, NA, NA, NA, NA))
+  expect_identical(coord_values(c("1", "Inf", "-Inf", "NaN", "NA", "")),
+                   c(1, NA, NA, NA, NA, NA))
+  expect_identical(coord_values(factor(c("1", "Inf", "-Inf"))), c(1, NA, NA))
+})
+
+test_that("a locality excludes non-finite positions before spatial operations", {
+  d <- data.frame(x = c(500000, 500100, 500000, Inf, -Inf, 500020),
+                  y = c(4400000, 4400000, 4400100, 4400000, 4400000, NaN),
+                  v = 1:6, pv = 2:7)
+  for (as_text in c(FALSE, TRUE)) {
+    raw <- d
+    if (as_text) raw$x <- as.character(raw$x)
+    pts <- .locality_points("L", raw, 32635, "OK", character(0), list())
+    expect_true(pts$ok)
+    expect_equal(nrow(pts$pts_all), 3)
+    expect_identical(pts$pts_all$v, 1:3)
+  }
+})
+
 test_that("the point-error surface resolves an absent IDW neighbour count", {
   # gstat::idw(nmax = NULL) ends the call with "argument is of length zero".
   # The run path resolves idw_nmax before building m_params, so this only bites
@@ -4441,6 +4534,33 @@ test_that("the point-error surface resolves an absent IDW neighbour count", {
     "fixed", 60, "EPSG:32635", TRUE, "actual"))
   expect_false(is.null(res$r_point_err))
   expect_s4_class(terra::unwrap(res$r_point_err), "SpatRaster")
+
+  # The surface is gstat's IDW (p = 2) of the errors at the rows carrying both
+  # values, co-located rows kept: here every row, on the run's own grid.
+  pts <- sf::st_as_sf(transform(pts_data, err = v - pv), coords = c("x", "y"), crs = 32635)
+  r <- terra::unwrap(res$r_point_err)
+  cells <- which(!is.na(terra::values(r)[, 1]))
+  at <- sf::st_as_sf(as.data.frame(terra::xyFromCell(r, cells)), coords = c("x", "y"), crs = 32635)
+  ref <- gstat::idw(err ~ 1, pts, at, nmax = 12, idp = 2, debug.level = 0)$var1.pred
+  expect_equal(terra::values(r)[cells, 1], ref, tolerance = 1e-6)
+
+  # A text cell in a coordinate column makes the whole column text. Its row is
+  # no position: the locality maps the others, as the run's models do, and the
+  # point errors come from the same rows instead of failing the locality.
+  text_xy <- item
+  text_xy$pts_data$x <- as.character(text_xy$pts_data$x)
+  text_xy$pts_data$x[7] <- "n/a"
+  res_t <- suppressWarnings(run_regional_interpolation(
+    text_xy, "OK", 32635, character(0), NULL, "convex", "fixed", 200,
+    "fixed", 60, "EPSG:32635", TRUE, "actual"))
+  expect_no_match(res_t$log_msg, "Error in L", fixed = TRUE)
+  expect_equal(nrow(res_t$pts), n - 1L)
+  expect_false(is.null(res_t$r_a))
+  r_t <- terra::unwrap(res_t$r_point_err)
+  cells_t <- which(!is.na(terra::values(r_t)[, 1]))
+  at_t <- sf::st_as_sf(as.data.frame(terra::xyFromCell(r_t, cells_t)), coords = c("x", "y"), crs = 32635)
+  ref_t <- gstat::idw(err ~ 1, pts[-7, ], at_t, nmax = 12, idp = 2, debug.level = 0)$var1.pred
+  expect_equal(terra::values(r_t)[cells_t, 1], ref_t, tolerance = 1e-6)
 })
 
 test_that("an Auto (Per Locality) run is exported, classified and measured on its own grids", {

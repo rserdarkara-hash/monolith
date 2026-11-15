@@ -290,7 +290,8 @@
           rv$mapping$x %in% names(ud), rv$mapping$y %in% names(ud))
       eff_subset <- effective_subset(input$value_type, input$subset, names(ud))
       ud <- run_locality_rows(ud, rv$mapping$loc, loc, eff_subset)
-      d <- stats::na.omit(data.frame(x = ud[[rv$mapping$x]], y = ud[[rv$mapping$y]], v = ud[[col]]))
+      d <- stats::na.omit(data.frame(x = coord_values(ud[[rv$mapping$x]]), y = coord_values(ud[[rv$mapping$y]]),
+                                     v = ud[[col]]))
       req(nrow(d) >= 3, is.numeric(d$v))
       pts <- tryCatch(
         validate_and_project_sf(sf::st_as_sf(d, coords = c("x", "y"), crs = rv$mapping$crs)),
@@ -492,17 +493,14 @@
 
     jobs <- lapply(locs, function(l) {
       sub_df <- run_locality_rows(user_data, loc_col, l, eff_subset)
-      sub_a_raw <- sub_df %>%
-        select(x = !!sym(x_col), y = !!sym(y_col), v = !!sym(meta$actual)) %>%
-        na.omit()
-
-      sub_p_raw <- NULL
-      if (want_pre && !is.null(pred_col) && pred_col %in% colnames(user_data)) {
-        sub_p_raw <- sub_df %>%
-          select(x = !!sym(x_col), y = !!sym(y_col), v = !!sym(pred_col)) %>%
-          na.omit()
+      # A surface's rows: position (a text cell in a coordinate column is
+      # none) and value, complete.
+      rows_of <- function(col) {
+        stats::na.omit(data.frame(x = coord_values(sub_df[[x_col]]), y = coord_values(sub_df[[y_col]]),
+                                  v = sub_df[[col]]))
       }
-      list(l = l, act = sub_a_raw, pre = sub_p_raw,
+      list(l = l, act = rows_of(meta$actual),
+           pre = if (want_pre && !is.null(pred_col) && pred_col %in% colnames(user_data)) rows_of(pred_col),
            key = c(act = tuning_key(meta$actual, eff_subset), pre = tuning_key(pred_col, eff_subset)))
     })
     req(length(jobs) > 0)

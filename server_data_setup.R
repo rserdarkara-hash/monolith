@@ -68,9 +68,16 @@
         )
       }
     }
+    # A new table starts from the default Pop-up Content and the palettes'
+    # colours. The variable-list observer (chunk C) resets the content when the
+    # list changes; a table with the same variable list does not fire it, so
+    # the reset is made here.
+    if (identical(rv$mapping$vars, new_vars)) {
+      sync_popup_inputs(new_vars, fresh = TRUE)
+    } else {
+      session_state$popup_fresh <- TRUE
+    }
     rv$mapping$vars <- new_vars
-    # A new table starts from the default Pop-up Content and the palettes' colours.
-    session_state$popup_fresh <- TRUE
     rv$pt_color_overrides <- list()
 
     curr_locs <- isolate(input$locality)
@@ -812,7 +819,8 @@
     if (input$res_mode == "fixed") return()
     if (!(input$map_x %in% colnames(rv$user_data) && input$map_y %in% colnames(rv$user_data))) return()
 
-    df_raw <- rv$user_data %>% select(x = !!sym(input$map_x), y = !!sym(input$map_y), loc = !!sym(input$map_loc)) %>% na.omit()
+    df_raw <- rv$user_data %>% select(x = !!sym(input$map_x), y = !!sym(input$map_y), loc = !!sym(input$map_loc)) %>%
+      mutate(x = coord_values(x), y = coord_values(y)) %>% na.omit()
 
     # The points of the localities the next run would map, in both Auto modes.
     df <- df_raw %>% filter(loc %in% resolve_selected_localities(input$locality, df_raw, "loc"))
@@ -1054,25 +1062,32 @@
   output$setup_minimap <- renderLeaflet({
     req(rv$user_data, rv$mapping$x, rv$mapping$y, rv$mapping$crs)
 
-    # The Map Viewer's colour set, only while it is applied here.
-    apply_mini <- isTRUE(input$pt_apply_minimap)
-    color_by <- if (apply_mini) input$pt_color_by %||% "none" else "none"
+    # The Map Viewer's colour set, only while it is applied here and its column
+    # is in the table.
+    ud <- rv$user_data
+    color_by <- if (isTRUE(input$pt_apply_minimap)) input$pt_color_by %||% "none" else "none"
+    if (!color_by %in% colnames(ud)) color_by <- "none"
     loc_col <- rv$mapping$loc
-    has_loc <- !is.null(loc_col) && loc_col %in% colnames(rv$user_data)
+    has_loc <- !is.null(loc_col) && loc_col %in% colnames(ud)
 
-    needed <- c(rv$mapping$x, rv$mapping$y)
-    if (color_by != "none" && color_by %in% colnames(rv$user_data)) needed <- c(needed, color_by)
-    if (has_loc) needed <- c(needed, loc_col)
-    needed <- unique(needed)
-
-    df_map <- rv$user_data %>% dplyr::select(dplyr::all_of(needed)) %>% na.omit()
+    # Both views draw the positioned rows that name a locality. A missing
+    # Color By group is grey, as in the Map Viewer. Internal column names
+    # keep a grouping column named .x or .y from replacing the coordinates.
+    df_map <- data.frame(.x = coord_values(ud[[rv$mapping$x]]), .y = coord_values(ud[[rv$mapping$y]]))
+    keep <- is.finite(df_map$.x) & is.finite(df_map$.y)
+    if (has_loc) keep <- keep & !is.na(ud[[loc_col]])
+    if (color_by != "none") {
+      df_map$.group <- ud[[color_by]]
+    } else if (has_loc) {
+      df_map$.group <- ud[[loc_col]]
+    }
+    df_map <- df_map[keep, , drop = FALSE]
     # req(), not return(NULL): leaflet destroys the map before reading the
     # payload, so NULL wipes it and errors inside Shiny's dispatch.
     req(nrow(df_map) > 0)
 
-
     pts <- tryCatch({
-      st_as_sf(df_map, coords = c(rv$mapping$x, rv$mapping$y), crs = rv$mapping$crs) %>% st_transform(4326)
+      st_as_sf(df_map, coords = c(".x", ".y"), crs = rv$mapping$crs) %>% st_transform(4326)
     }, error = function(e) NULL)
     req(pts)
 
@@ -1082,12 +1097,13 @@
       add_base_tiles(current_tiles, carto_api_key())
 
     if (color_by != "none") {
-      m <- add_styled_points(m, pts, point_style_spec(pts, color_by, pt_group_colors()),
-                             marker_size = input$pt_marker_size %||% 3)
+      spec <- point_style_spec(pts, ".group", pt_group_colors())
+      if (!is.null(spec$legend)) spec$legend$title <- color_by
+      m <- add_styled_points(m, pts, spec, marker_size = input$pt_marker_size %||% 3)
     } else if (has_loc) {
       # Validation view: one colour per locality, so a mis-mapped coordinate
       # pair or CRS shows as points landing in the wrong group.
-      loc_vals <- as.character(pts[[loc_col]])
+      loc_vals <- as.character(pts$.group)
       groups <- sort(unique(loc_vals))
       pal <- generate_group_palette(groups, "Set1")
       m <- m %>% addCircleMarkers(radius = input$pt_marker_size %||% 3,

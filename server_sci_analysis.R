@@ -192,7 +192,7 @@
     key <- paste0(loc, "_", type)
     g <- rv$gstat_objs[[key]]
     if (is.null(g)) {
-      return(sci_placeholder("Cross-variogram is not available\n(LMC model fit failed, using Ordinary Kriging fallback.)"))
+      return(sci_placeholder("Cross-variogram is not available:\nCo-Kriging fell back to Ordinary Kriging for this locality (see the Run Log)."))
     }
     # The empirical variogram the LMC was fitted to, stored with the fit:
     # recomputing it would re-bin with gstat's defaults and, for a heterotopic

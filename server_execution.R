@@ -681,7 +681,7 @@
 
     tryCatch({
       rv$export_registry <- list()
-      rv$rast_list_act <- list(); rv$rast_list_pre <- list(); sf_list <- list(); b_list <- list()
+      rv$rast_list_act <- list(); rv$rast_list_pre <- list(); rv$rast_list_res <- list(); rv$rast_list_point_res <- list()
       rv$has_predictions <- FALSE
       # Set only when this run produces them, so cleared here.
       rv$sf <- NULL; rv$bound <- NULL
@@ -845,8 +845,6 @@
 
     update_premium_progress(50, "Fitting and predicting per locality in parallel. The interface stays responsive; you can keep working in other tabs.", step = 2)
 
-    rv$rast_list_act <- list(); rv$rast_list_pre <- list(); rv$rast_list_res <- list(); rv$rast_list_point_res <- list()
-
     main_wd <- getwd()
     progress_dir_val <- session_progress_dir
     session_id_val <- session_id
@@ -983,8 +981,10 @@
       # Repeated-CV frames per locality, pooled over the same locality set as
       # the metrics table's pooled row; LOOCV localities contribute their
       # single frame (build_cv_repeat_summary()).
-      reps_act <- list(); reps_pre <- list()
+      reps <- list(act = list(), pre = list())
       run_fits <- list(); run_emps <- list()
+      # Each locality's points and boundary, in the Target Mapping CRS.
+      sf_list <- list(); b_list <- list()
 
       grid_res_used <- list()
       for(res in res_all) {
@@ -1019,21 +1019,23 @@
           if(!is.null(res$bound)) b_list[[l]] <- res$bound
           if(!is.null(res$pts)) sf_list[[length(sf_list)+1]] <- res$pts
           
-          if(!is.null(res$v_emp_act)) run_emps[[paste0(l, "_act")]] <- res$v_emp_act
-          if(!is.null(res$v_fit_act)) run_fits[[paste0(l, "_act")]] <- res$v_fit_act
-          if(!is.null(res$cv_act)) rv$cv_metrics_act[[l]] <- res$cv_act
-          if(!is.null(res$cv_obj_act)) rv$cv_data_act[[l]] <- res$cv_obj_act
-          rv$cv_info_act[[l]] <- stamp_cv_population(res$cv_info_act, tuning_keys[["act"]])
-          rv$cv_design_act[[l]] <- res$cv_design_act
-          if(cv_repeats_val > 1) {
-            reps_act[[l]] <- res$cv_reps_act %||% Filter(Negate(is.null), list(cv_repeat_frame(res$cv_obj_act)))
+          # Each surface's variogram, CV record and fitted models.
+          for (tgt in c("act", "pre")) {
+            key <- paste0(l, "_", tgt)
+            of <- function(field) res[[paste0(field, "_", tgt)]]
+            if (!is.null(of("v_emp"))) run_emps[[key]] <- of("v_emp")
+            if (!is.null(of("v_fit"))) run_fits[[key]] <- of("v_fit")
+            if (!is.null(of("cv"))) rv[[paste0("cv_metrics_", tgt)]][[l]] <- of("cv")
+            if (!is.null(of("cv_obj"))) rv[[paste0("cv_data_", tgt)]][[l]] <- of("cv_obj")
+            rv[[paste0("cv_info_", tgt)]][[l]] <- stamp_cv_population(of("cv_info"), tuning_keys[[tgt]])
+            rv[[paste0("cv_design_", tgt)]][[l]] <- of("cv_design")
+            if (cv_repeats_val > 1) {
+              reps[[tgt]][[l]] <- of("cv_reps") %||% Filter(Negate(is.null), list(cv_repeat_frame(of("cv_obj"))))
+            }
+            if (!is.null(of("summ"))) rv$model_summaries[[key]] <- of("summ")
+            if (!is.null(of("rf"))) rv$rf_models[[key]] <- of("rf")
+            if (!is.null(of("gstat"))) rv$gstat_objs[[key]] <- of("gstat")
           }
-          if(!is.null(res$summ_act)) rv$model_summaries[[paste0(l, "_act")]] <- res$summ_act
-          if(!is.null(res$rf_act)) rv$rf_models[[paste0(l, "_act")]] <- res$rf_act
-          if(!is.null(res$gstat_act)) rv$gstat_objs[[paste0(l, "_act")]] <- res$gstat_act
-          
-          if(!is.null(res$v_emp_pre)) run_emps[[paste0(l, "_pre")]] <- res$v_emp_pre
-          if(!is.null(res$v_fit_pre)) run_fits[[paste0(l, "_pre")]] <- res$v_fit_pre
           if (current_method == "OK" && identical(tuning_revision, rv$tuning_revision %||% 0L)) {
             for (target in c("act", "pre")) {
               nm <- paste0(l, "_", target)
@@ -1048,16 +1050,7 @@
               if (!is.null(run_emps[[nm]])) rv$v_emp_list[[nm]] <- stamp_vgm(run_emps[[nm]], tuning_keys[[target]], "run")
             }
           }
-          if(!is.null(res$cv_pre)) rv$cv_metrics_pre[[l]] <- res$cv_pre
-          if(!is.null(res$cv_obj_pre)) rv$cv_data_pre[[l]] <- res$cv_obj_pre
-          rv$cv_info_pre[[l]] <- stamp_cv_population(res$cv_info_pre, tuning_keys[["pre"]])
-          rv$cv_design_pre[[l]] <- res$cv_design_pre
-          if(cv_repeats_val > 1) {
-            reps_pre[[l]] <- res$cv_reps_pre %||% Filter(Negate(is.null), list(cv_repeat_frame(res$cv_obj_pre)))
-          }
-          if(!is.null(res$summ_pre)) rv$model_summaries[[paste0(l, "_pre")]] <- res$summ_pre
-          if(!is.null(res$rf_pre)) rv$rf_models[[paste0(l, "_pre")]] <- res$rf_pre
-          if(!is.null(res$gstat_pre)) rv$gstat_objs[[paste0(l, "_pre")]] <- res$gstat_pre
+
       }
       rv$disp$v_fits <- run_fits
       rv$disp$v_emps <- run_emps
@@ -1085,9 +1078,9 @@
       if (cv_repeats_val > 1) {
         # Summarised once per run: pooling every locality's frames is too
         # costly per render.
-        rv$cv_repeats_act <- build_cv_repeat_summary(reps_act)
+        rv$cv_repeats_act <- build_cv_repeat_summary(reps$act)
         # rv$has_predictions is set later; collected frames signal a predicted run.
-        if (length(reps_pre) > 0) rv$cv_repeats_pre <- build_cv_repeat_summary(reps_pre)
+        if (length(reps$pre) > 0) rv$cv_repeats_pre <- build_cv_repeat_summary(reps$pre)
         if (is.null(rv$cv_repeats_act)) {
           rv$log <- paste0(rv$log, "\n[Repeated CV] No locality produced more than one fold realization",
                            " (leave-one-out plans and kNNDM spatial folds are deterministic); reporting single-realization metrics.")
@@ -1216,15 +1209,11 @@
                            legend = map_legend_title(meta$label, layer = "point_resid"))
     }
     
+    # The run's maps open on its boundary; the comparison panels belong to a
+    # run that mapped predictions, whatever view the menu still shows.
     if (!is.null(rv$bound)) {
-      tryCatch({
-        bbox <- sf::st_bbox(sf::st_transform(sf::st_as_sf(rv$bound), 4326))
-        leafletProxy("main_map") %>% fitBounds(as.numeric(bbox$xmin), as.numeric(bbox$ymin), as.numeric(bbox$xmax), as.numeric(bbox$ymax))
-        if (comp_mode || val_type != "actual") {
-          leafletProxy("comp_map_left") %>% fitBounds(as.numeric(bbox$xmin), as.numeric(bbox$ymin), as.numeric(bbox$xmax), as.numeric(bbox$ymax))
-          leafletProxy("comp_map_right") %>% fitBounds(as.numeric(bbox$xmin), as.numeric(bbox$ymin), as.numeric(bbox$xmax), as.numeric(bbox$ymax))
-        }
-      }, error = function(e) NULL)
+      fit_maps_to_bbox(run_area_bbox(),
+                       if (comp_mode || val_type != "actual") overlay_map_ids else "main_map")
     }
 
     # No get_current_meta() re-read: export labels use the meta captured at
