@@ -435,6 +435,8 @@
     run_counter = 0L, # Incremental run counter
     run_history = list(), # Archive of previous run results and configs
     proceed_run = NULL, # Trigger for model generation after archive decision
+    collinearity_pending = NULL, # Run-specific exclusions, diagnostics and context
+    collinearity_generation = 0L, # Reject results of superseded background checks
     pt_color_overrides = list(), # Custom point colours: column -> palette -> group -> hex
     auto_archive_choice = "none", # "none", "archive", or "discard"
     # TRUE between a completed OPTIMIZE ALL VARIOGRAMS and the next run: the

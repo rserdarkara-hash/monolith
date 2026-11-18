@@ -482,7 +482,7 @@ build_rk_trend_ui <- function(lm_sum, dt_id, raw_id) {
 
 register_expanded_modal <- function(input, output, session, btn_id, mode_id, ui_id, plot_static_id, plot_plotly_id, title_text, build_fn, radar_special = FALSE, pca_3d_special = FALSE) {
   ns <- session$ns
-  
+
   is_pca_3d <- function() {
     if (is.function(pca_3d_special)) {
       pca_3d_special()
@@ -492,14 +492,14 @@ register_expanded_modal <- function(input, output, session, btn_id, mode_id, ui_
       isTRUE(pca_3d_special)
     }
   }
-  
+
   shiny::observeEvent(input[[btn_id]], {
     mode_selector <- if (is_pca_3d()) {
       NULL
     } else {
       shiny::radioButtons(ns(mode_id), "View Mode:", choices = c("Static (High-Res)" = "static", "Interactive (Hover/Zoom)" = "interactive"), inline = TRUE)
     }
-    
+
     shiny::showModal(shiny::modalDialog(
       title = paste0("Expanded View: ", title_text), size = "l", easyClose = TRUE,
       mode_selector,
@@ -507,7 +507,7 @@ register_expanded_modal <- function(input, output, session, btn_id, mode_id, ui_
       footer = shiny::modalButton("Close")
     ))
   })
-  
+
   output[[ui_id]] <- shiny::renderUI({
     if (is_pca_3d()) {
       plotly::plotlyOutput(ns(paste0(plot_plotly_id, "_3d")), height = "700px")
@@ -519,13 +519,13 @@ register_expanded_modal <- function(input, output, session, btn_id, mode_id, ui_
       }
     }
   })
-  
+
   output[[plot_static_id]] <- shiny::renderPlot({
     p <- build_fn()
     shiny::req(p)
     p
   })
-  
+
   output[[plot_plotly_id]] <- plotly::renderPlotly({
     p <- build_fn()
     shiny::req(p)
@@ -548,14 +548,14 @@ register_expanded_modal <- function(input, output, session, btn_id, mode_id, ui_
       title <- plotly_title_html(p)
       fig <- plotly::layout(fig,
                             polar = list(radialaxis = list(visible = TRUE, range = c(0, upper))),
-                            showlegend = TRUE, 
+                            showlegend = TRUE,
                             legend = list(title = list(text = htmltools::htmlEscape(p$labels$colour %||% "Group"))),
                             title = list(text = title, x = 0.5))
       return(fig)
     }
     if (inherits(p, "ggplot")) ggplotly_smart(p) else p
   })
-  
+
   output[[paste0(plot_plotly_id, "_3d")]] <- plotly::renderPlotly({
     p <- build_fn()
     shiny::req(p)
@@ -901,9 +901,9 @@ update_premium_progress <- function(pct, message = NULL, step = NULL) {
   } else {
     paste0(pct, "%")
   }
-  
+
   shinyjs::runjs(sprintf("document.getElementById('map_progress_bar_inner').style.width = '%s';", width_val))
-  
+
   if (!is.null(message)) {
     shinyjs::html("map_progress_text", message)
   }
@@ -923,4 +923,436 @@ render_locality_pan_input <- function(loc_names) {
   selectInput("locality_pan", NULL,
               choices = choices,
               selected = "global", width = "160px", selectize = FALSE)
+}
+
+# ── The covariate check card ────────────────────────────────────────────────
+# One card per checked population: a locality in the interpolation gate, the
+# pooled scope in the Classification Suite. Every number is read from the
+# screen through collinearity_profile() (ui_formatting.R). The dialogs render
+# on the main R process, so each card is written as strings in one vectorised
+# pass: built tag by tag, twenty localities of thirty covariates took seconds.
+# Labels are escaped once (.cl_esc()); column IDs appear only as checkbox
+# values, element IDs come from the caller's input ID.
+
+# Position on the chart's fixed axis, VIF 1 to 1000 on a log scale, in percent.
+.vif_axis_pos <- function(v) 100 * log10(pmin(pmax(v, 1), 1000)) / 3
+
+.cl_esc <- function(x) htmltools::htmlEscape(as.character(x), attribute = TRUE)
+.cl_num <- function(n) {
+  s <- sprintf("%.0f", as.numeric(n))
+  big <- !is.na(n) & abs(as.numeric(n)) >= 1000
+  if (any(big)) s[big] <- prettyNum(s[big], big.mark = ",")
+  s
+}
+.cl_count <- function(n, noun) sprintf("%s %s%s", .cl_num(n), noun, if (n == 1) "" else "s")
+.cl_thr <- function(thr) sprintf("%g", thr)
+.cl_badge <- function(k) sprintf('<span class="mn-cl-step">%s</span>', k)
+.cl_signed <- function(r, digits = 2L) sub("^-", "&#8722;", sprintf("%+.*f", digits, r))
+.cl_incomplete <- function(status) !status %in% c("checked", "one_candidate", "no_candidates", "checking")
+# Near-duplicate pairs among the covariates of the VIF check.
+.cl_dup_count <- function(prof, pairs) {
+  v <- prof$rows$var
+  if (!NROW(pairs) || !length(v)) return(0L)
+  sum(pairs$near_duplicate %in% TRUE & pairs$var1 %in% v & pairs$var2 %in% v)
+}
+
+# The removal checkboxes, as checkboxGroupInput(input_id, NULL, choiceValues
+# = values, choiceNames = lapply(rows, HTML)) writes them (test-multicollinearity.R
+# compares the two), without its per-choice rendering pass.
+.cl_checkbox_group <- function(input_id, values, rows) {
+  id <- .cl_esc(input_id)
+  sprintf(paste0('<div id="%1$s" class="form-group shiny-input-checkboxgroup shiny-input-container" ',
+                 'role="group" aria-labelledby="%1$s-label"><label class="control-label shiny-label-null" ',
+                 'for="%1$s" id="%1$s-label"></label><div class="shiny-options-group">%2$s</div></div>'),
+          id, paste0('<div class="checkbox"><label><input type="checkbox" name="', id, '" value="',
+                     .cl_esc(values), '"/><span>', rows, '</span></label></div>', collapse = ""))
+}
+
+# Chart rows: one per covariate of `rv` (collinearity_profile()$rows plus a
+# `reason` column, NA for rows of the VIF check). Marks are decorative; each
+# row's title and hidden text give its values in words.
+.cl_rows <- function(rv, L, thr, has_rm, n_first, missing, plot) {
+  n <- nrow(rv)
+  name <- L(rv$var)
+  removed <- !is.na(rv$step)
+  singular <- removed & !is.finite(rv$at)
+  checked <- is.na(rv$reason)
+  f_first <- format_vif(rv$first); f_final <- format_vif(rv$final)
+  x_first <- format_vif(rv$first, exact = TRUE); x_final <- format_vif(rv$final, exact = TRUE)
+  x_at <- format_vif(rv$at, above = thr, exact = TRUE)
+  changed <- has_rm & !removed & !rv$sole & nzchar(f_first) & nzchar(f_final) & f_first != f_final
+  miss <- if (length(missing)) unname(missing[rv$var]) else rep(NA_integer_, n)
+  miss <- !is.na(miss) & miss > 0
+  n_miss <- if (length(missing)) .cl_num(unname(missing[rv$var])) else ""
+  value <- ifelse(!checked, paste0('<span class="mn-cl-reason">', rv$reason, '</span>'),
+    ifelse(removed, paste0(.cl_badge(rv$step), "<b>", ifelse(singular, "singular", format_vif(rv$at, above = thr)), "</b>"),
+      ifelse(changed, paste0('<span class="was">', f_first, '</span> &#8594; <b>', f_final, '</b>'),
+        paste0("<b>", ifelse(nzchar(f_final), f_final, f_first), "</b>"))))
+  with_all <- ifelse(nzchar(x_first), paste0("VIF ", x_first, " with ",
+    if (n_first == 2L) "both covariates" else paste("all", n_first, "covariates")), "")
+  lead <- ifelse(nzchar(with_all), paste0(with_all, "; "), "")
+  words <- ifelse(!checked, rv$reason_long,
+    ifelse(singular, paste0(lead, "removed by Auto-Drop at step ", rv$step, ", where the covariates left ",
+                            "were linearly dependent and no VIF is defined"),
+    ifelse(removed & rv$step == 1L & nzchar(with_all), paste0(with_all, "; removed by Auto-Drop at step 1"),
+    ifelse(removed, paste0(lead, "VIF ", x_at, " at step ", rv$step, ", where Auto-Drop removed it"),
+    ifelse(rv$sole, paste0(lead, "the only covariate left after Auto-Drop, so its VIF is 1 by definition"),
+    ifelse(!has_rm | !nzchar(x_final), with_all, paste0(lead, "VIF ", x_final, " after Auto-Drop")))))))
+  words <- paste0(words, ifelse(miss, paste0("; ", n_miss, " missing"), ""), ".")
+  track <- if (plot) {
+    pos <- function(v) ifelse(is.finite(v), .vif_axis_pos(v), NA_real_)
+    p1 <- if (has_rm) pos(rv$first) else rep(NA_real_, n)
+    p2 <- ifelse(removed, ifelse(singular, 100, pos(rv$at)), pos(rv$final))
+    both <- is.finite(p1) & is.finite(p2)
+    near <- both & abs(p1 - p2) < 0.3
+    paste0('<span class="mn-cl-track" aria-hidden="true"><span class="mn-cl-zone"></span><span class="mn-cl-thr"></span>',
+      ifelse(both & !near, sprintf('<span class="mn-cl-seg" style="left:%.2f%%;width:%.2f%%"></span>',
+                                   pmin(p1, p2), abs(p1 - p2)), ""),
+      ifelse(is.finite(p1) & !(removed & near), sprintf('<span class="mn-cl-dot first" style="left:%.2f%%"></span>', p1), ""),
+      ifelse(removed, sprintf('<span class="mn-cl-x%s" style="left:%.2f%%"></span>', ifelse(singular, " sing", ""), p2),
+        ifelse(is.finite(p2), sprintf('<span class="mn-cl-dot final" style="left:%.2f%%"></span>', p2), "")),
+      '</span>')
+  } else ""
+  paste0('<span class="mn-cl-row', ifelse(removed, " is-removed", ""), if (!plot) " noplot", '" title="',
+         name, ": ", words, '"><span class="mn-cl-name"><span class="t">', name, '</span>',
+         ifelse(miss, paste0('<span class="mn-cl-miss" aria-hidden="true">&#183; ', n_miss, ' missing</span>'), ""),
+         ifelse(rv$sole, '<span class="mn-cl-miss" aria-hidden="true">&#183; only one left</span>', ""),
+         '</span>', track, '<span class="mn-cl-val" aria-hidden="true">', value,
+         '</span><span class="sr-only">', words, '</span></span>')
+}
+
+# Decades and the threshold. A threshold within a third of a decade of a
+# decade (5 and 10) takes that decade's place, which keeps an unlabelled tick.
+.cl_axis <- function(thr) {
+  major <- c(1, 10, 100, 1000)
+  close <- major != thr & abs(log10(major / thr)) < 0.35
+  lab <- sort(unique(c(major[!close], thr)))
+  cls <- paste0(ifelse(lab == thr, " thr", ""), ifelse(lab == 1, " lo", ifelse(lab == 1000, " hi", "")))
+  paste0('<div class="mn-cl-axisrow" aria-hidden="true"><span class="mn-cl-cbspace"></span>',
+    '<span class="mn-cl-row"><span class="mn-cl-axlab"><span>VIF</span><span>explained by the others</span></span>',
+    '<span class="mn-cl-axis">',
+    paste0(sprintf('<span class="mn-cl-tick minor" style="left:%.3f%%"></span>', .vif_axis_pos(major[close])), collapse = ""),
+    paste0(sprintf('<span class="mn-cl-tick%s" style="left:%.3f%%"><span class="v">%s</span><span class="r2">%s</span></span>',
+                   cls, .vif_axis_pos(lab), formatC(lab, format = "fg", big.mark = ","),
+                   sprintf("%g%%", round(100 * (1 - 1 / lab), 1))), collapse = ""),
+    '</span><span></span></span></div>')
+}
+
+.cl_legend <- function(plot, has_rm, first_singular, hint) {
+  key <- function(mark, text) paste0('<span class="k">', mark, text, '</span>')
+  dot <- function(cls) sprintf('<span class="mn-cl-dot %s" aria-hidden="true"></span>', cls)
+  parts <- c(
+    if (plot && !has_rm) key(dot("final"), "VIF"),
+    if (plot && has_rm && !first_singular) key(dot("first"), "before Auto-Drop"),
+    if (plot && has_rm) key(dot("final"), "after Auto-Drop"),
+    if (plot && has_rm) key('<span class="mn-cl-x" aria-hidden="true"></span>', "removed by Auto-Drop, step number at right"),
+    if (plot && first_singular) '<span class="k hint">With every covariate included the design is singular, so the first step has no VIFs to plot.</span>',
+    if (hint) '<span class="k hint">Tick covariates to remove them yourself, then Apply removals and recheck.</span>')
+  if (!length(parts)) return("")
+  paste0('<div class="mn-cl-legend">', paste(parts, collapse = ""), '</div>')
+}
+
+# The chart of one screen: a row per removable covariate, the VIF check's
+# rows first (sorted as collinearity_profile() sorts them), then the
+# removable covariates outside it with their reason. Without `input_id` the
+# rows are read-only.
+.cl_chart <- function(screen, prof, L, removable, input_id = NULL, hint = FALSE) {
+  st <- screen$diagnostics$status %||% "not_checked"
+  vif <- prof$rows
+  vif <- if (is.null(vif)) vif else vif[vif$var %in% removable, , drop = FALSE]
+  rest <- setdiff(removable, vif$var)
+  plot <- NROW(vif) > 0
+  if (!plot && !(.cl_incomplete(st) && length(rest))) return("")
+  colloc <- screen$collocated %||% integer(0)
+  short <- rest %in% screen$dropped_collocation
+  constant <- rest %in% screen$dropped_constant
+  if (plot) vif$reason <- vif$reason_long <- NA_character_
+  rows <- rbind(
+    if (plot) vif[c("var", "first", "final", "step", "at", "sole", "reason", "reason_long")],
+    if (length(rest)) data.frame(var = rest, first = NA_real_, final = NA_real_, step = NA_integer_,
+      at = NA_real_, sole = FALSE,
+      reason = ifelse(short, paste0("co-located: ", unname(colloc[rest])), ifelse(constant, "constant here", "not checked")),
+      reason_long = ifelse(short, paste0("not in the VIF check: ", unname(colloc[rest]), " co-located samples, fewer than the ",
+                                         CK_MIN_COLLOCATED, " co-kriging needs"),
+                           ifelse(constant, "not in the VIF check: constant here", "not checked")),
+      stringsAsFactors = FALSE))
+  has_rm <- length(prof$removals) > 0
+  html <- .cl_rows(rows, L, prof$threshold, has_rm, NROW(prof$rows), prof$missing, plot)
+  group <- if (!is.null(input_id)) .cl_checkbox_group(input_id, rows$var, html) else
+    paste0('<div class="mn-cl-ro">', paste0('<div class="mn-cl-ro-row"><span class="mn-cl-cbspace"></span>',
+                                             html, '</div>', collapse = ""), '</div>')
+  paste0(
+    if (plot) paste0('<div class="mn-cl-charthead"><span>Variance inflation factor (VIF), log scale</span>',
+                     '<span class="mn-cl-key">shaded: above ', .cl_thr(prof$threshold), '</span></div>')
+    else '<div class="mn-cl-charthead"><span>Covariates</span></div>',
+    sprintf('<div class="mn-cl-chart%s" style="--cl-thr:%.3f%%">', if (is.null(input_id)) " mn-cl-readonly" else "",
+            .vif_axis_pos(prof$threshold)),
+    group, if (plot) .cl_axis(prof$threshold), '</div>',
+    .cl_legend(plot, has_rm, prof$first_singular, hint && !is.null(input_id)))
+}
+
+.cl_verdict <- function(screen, prof, L) {
+  d <- screen$diagnostics %||% list()
+  st <- d$status %||% "not_checked"
+  thr <- .cl_thr(prof$threshold)
+  if (identical(st, "checking"))
+    return('<div class="mn-cl-verdict wait">Checking covariates&#8230; The result appears here when the check completes.</div>')
+  if (.cl_incomplete(st)) {
+    reason <- if (length(d$reason)) .cl_esc(sub("[.]$", "", sub("^Warning in [^:]*: ", "", d$reason[1])))
+    why <- switch(st,
+      # The run log's refusal, continuing the sentence.
+      insufficient_rows = if (length(reason)) sub("^Insufficient", "insufficient", reason) else
+        "fewer than three locations carry every covariate",
+      failed = paste0("the check failed", if (length(reason)) paste0(" (", reason, ")")),
+      "these covariates were not checked")
+    return(paste0('<div class="mn-cl-verdict warn"><span><b>Check incomplete:</b> ', why,
+      ". This is not evidence that the covariates are independent.",
+      if (any(prof$missing > 0)) " The counts after the names show where values are missing; removing the sparsest covariate usually lets the check run.",
+      '</span></div>'))
+  }
+  if (identical(st, "one_candidate")) return('<div class="mn-cl-verdict">One covariate: a VIF needs at least two.</div>')
+  if (identical(st, "no_candidates"))
+    return('<div class="mn-cl-verdict">No numeric covariate to check here.</div>')
+  if (!NROW(prof$rows)) return(paste0('<div class="mn-cl-verdict">', if (length(screen$kept))
+    "Only one covariate varies here: a VIF needs at least two." else "Every covariate is constant here.", '</div>'))
+  if (!length(prof$removals)) {
+    # Constants and collocation exclusions have their chips; near-duplicate
+    # pairs, measured on the locations each pair shares, the staircase.
+    dup <- .cl_dup_count(prof, d$pairs)
+    after <- if (dup) {
+      sprintf(" %d pair%s %s |r| above %g on the locations where both are measured (All pairwise correlations).",
+              dup, if (dup == 1L) "" else "s", if (dup == 1L) "has" else "have", d$pairwise_threshold %||% 0.95)
+    } else if (!length(screen$dropped_constant) && !length(screen$dropped_collocation)) " Nothing to remove."
+    return(paste0('<div class="mn-cl-verdict ok"><span class="mn-cl-okmark" aria-hidden="true">&#10003;</span>',
+                  '<span>Every VIF is ', thr, ' or less.', after, '</span></div>'))
+  }
+  paste0('<div class="mn-cl-verdict act"><span>Auto-Drop removes ', length(prof$removals), ' of ', nrow(prof$rows),
+         ', one at a time, until every VIF is ', thr, ' or less:</span>',
+         .cl_pills(prof, L), '</div>')
+}
+
+.cl_pills <- function(prof, L) {
+  v <- vapply(prof$removals, `[[`, character(1), "var")
+  paste0('<span class="mn-cl-pill act" title="', L(v), '">', .cl_badge(seq_along(v)),
+         '<span class="t">', L(v), '</span></span>', collapse = "")
+}
+
+.cl_chips <- function(title, vars, L, cls = "", counts = NULL) {
+  if (!length(vars)) return("")
+  paste0('<div class="mn-cl-chips"><span>', title, '</span>',
+         paste0('<span class="mn-cl-pill', cls, '" title="', L(vars), '"><span class="t">', L(vars), '</span>',
+                if (!is.null(counts)) paste0('<span class="n">', .cl_num(counts), '</span>') else "",
+                '</span>', collapse = ""), '</div>')
+}
+
+# Chips every screen derives for itself: constants (`constant_title` words
+# them for the engine), co-kriging collocation exclusions and non-finite
+# values.
+.cl_screen_chips <- function(screen, L, constant_title) {
+  nf <- screen$diagnostics$nonfinite_by_var
+  nf <- nf[nf > 0]
+  paste0(.cl_chips(constant_title, screen$dropped_constant, L),
+         .cl_chips(sprintf("Too few co-located samples for co-kriging (fewer than %d), removed whatever you answer:",
+                           CK_MIN_COLLOCATED), screen$dropped_collocation, L),
+         .cl_chips("Non-finite values treated as missing:", names(nf), L, counts = nf))
+}
+
+# Signed correlation bars: one hue, the sign carried by direction; dotted
+# guides at the near-duplicate threshold.
+.cl_bars <- function(p, L, n_ref, pw) {
+  half <- 50 * abs(p$r)
+  dup <- p$near_duplicate %in% TRUE
+  paste0('<div class="mn-cl-corr"><span class="mn-cl-cname" title="', L(p$var), '">', L(p$var), '</span>',
+    '<span class="mn-cl-cbar" aria-hidden="true">',
+    sprintf('<span class="mn-cl-c95" style="left:%.2f%%"></span><span class="mn-cl-c95" style="left:%.2f%%"></span>',
+            50 - 50 * pw, 50 + 50 * pw),
+    '<span class="zero"></span>',
+    sprintf('<span class="fill%s" style="left:%.2f%%;width:%.2f%%"></span>', ifelse(dup, " dup", ""),
+            ifelse(p$r < 0, 50 - half, 50), half),
+    '</span><span class="mn-cl-cval">', .cl_signed(p$r),
+    ifelse(p$n != n_ref, paste0(" <small>n=", .cl_num(p$n), "</small>"), ""), '</span>',
+    ifelse(dup, '<span class="mn-cl-tag">near-duplicate</span>', "<span></span>"), '</div>', collapse = "")
+}
+
+# One collapsible block per removal, the first open: the removal's VIF and
+# what it means, the next highest VIF at that step, and the strongest pairs.
+.cl_why <- function(prof, L, pw) {
+  if (!length(prof$removals)) return("")
+  thr <- prof$threshold
+  blocks <- vapply(prof$removals, function(rm) {
+    others <- setdiff(rm$candidates, rm$var)
+    n_o <- length(others)
+    lead <- if (identical(rm$status, "singular")) {
+      sprintf(paste0("The %d covariates left at this step are linearly dependent, so no VIF is defined; ",
+                     "Auto-Drop removes the more redundant member of the most correlated pair."), length(rm$candidates))
+    } else if (n_o == 1L) {
+      paste0("VIF ", format_vif(rm$at, thr), " comes from its correlation with ", L(others),
+             " alone: VIF = 1 / (1 &#8722; r&#178;).")
+    } else {
+      paste0("VIF ", format_vif(rm$at, thr), ": the other ", n_o, " together explain ", vif_share_text(rm$at),
+             " of its variation",
+             if (!is.null(rm$bound)) paste0("; its strongest partner alone, ", L(rm$partners$var[1]),
+                                            ", explains ", share_text(rm$bound)), ".")
+    }
+    runner <- if (length(rm$runner)) paste0('<span class="mn-cl-runner">Next highest at this step: ',
+      L(names(rm$runner)), ", ", format_vif(rm$runner, thr),
+      if (rm$runner > thr) paste0(" (also above ", .cl_thr(thr), "; rechecked after this removal)"), ".</span>") else ""
+    bars <- if (NROW(rm$partners)) paste0('<div class="mn-cl-minihead">',
+      if (n_o == 1L) "Correlation" else paste("Its strongest correlations with the other", n_o), '</div>',
+      .cl_bars(rm$partners, L, rm$n_complete, pw)) else ""
+    paste0('<details class="mn-cl-why"', if (rm$step == 1L) " open", '><summary>', .cl_badge(rm$step),
+           '<span class="mn-cl-whytext"><b>', L(rm$var), '</b><span class="mn-cl-lead">', lead, '</span>',
+           runner, '</span></summary><div class="mn-cl-whybody">', bars, '</div></details>')
+  }, character(1))
+  paste0('<div class="mn-cl-whys"><div class="mn-cl-subhead">Why each removal</div>', paste(blocks, collapse = ""),
+         '<div class="mn-cl-note">Correlations are shown for context. A VIF measures redundancy with all the ',
+         'other covariates together, so a single pair need not explain it.</div></div>')
+}
+
+# Every pair of the VIF check's covariates as a staircase: row i holds its
+# correlations with covariates 1 to i - 1, then its own number, which heads
+# column i. The tint is capped at 45% so the text keeps 4.5:1 in both variants.
+# Shown with removals, or with a near-duplicate pair the VIF did not flag.
+.cl_staircase <- function(prof, pairs, L) {
+  v <- prof$rows$var
+  k <- length(v)
+  if (k < 3L || !NROW(pairs) || !(length(prof$removals) || .cl_dup_count(prof, pairs))) return("")
+  R <- matrix(NA_real_, k, k); N <- matrix(NA_integer_, k, k); D <- matrix(FALSE, k, k)
+  i1 <- match(pairs$var1, v); i2 <- match(pairs$var2, v)
+  ok <- !is.na(i1) & !is.na(i2)
+  ij <- cbind(c(i1[ok], i2[ok]), c(i2[ok], i1[ok]))
+  R[ij] <- rep(pairs$r[ok], 2L); N[ij] <- rep(as.integer(pairs$n[ok]), 2L)
+  D[ij] <- rep(pairs$near_duplicate[ok] %in% TRUE, 2L)
+  lab <- L(v)
+  step <- prof$rows$step
+  # Grid items row by row: the label, cells j < i, the row's number, blanks.
+  G <- matrix("<span></span>", k, k)
+  low <- which(lower.tri(G))
+  r <- R[low]
+  G[low] <- ifelse(is.finite(r),
+    sprintf('<span class="mn-cl-hc%s" style="--cl-a:%d%%" title="%s &#8596; %s: r = %s (n = %s)">%s</span>',
+            ifelse(D[low], " dup", ""), as.integer(round(45 * abs(r))), lab[row(G)[low]], lab[col(G)[low]],
+            .cl_signed(r, 3L), .cl_num(N[low]), sub("^-", "&#8722;", sprintf("%.2f", r))),
+    '<span class="mn-cl-hc na" title="Not estimable">&#8211;</span>')
+  diag(G) <- paste0('<span class="mn-cl-hn">', seq_len(k), '</span>')
+  rows <- paste0('<span class="mn-cl-hl', ifelse(is.na(step), "", " auto"), '" title="', lab, '">',
+                 ifelse(is.na(step), "", .cl_badge(step)), '<span class="t">', lab, '</span></span>',
+                 do.call(paste0, as.data.frame(G, stringsAsFactors = FALSE)))
+  paste0('<details class="mn-cl-allpairs"><summary>All pairwise correlations (', .cl_num(k * (k - 1) / 2),
+         ' pairs)</summary><div class="mn-cl-heatwrap"><div class="mn-cl-heat" style="--cl-k:', k, '">',
+         paste(rows, collapse = ""), '</div></div><div class="mn-cl-note">Shading grows with |r|; outlined ',
+         'cells have |r| above ', sprintf("%g", prof$pairwise_threshold %||% 0.95),
+         if (length(prof$removals)) '; numbered names are the Auto-Drop removals', '.</div></details>')
+}
+
+#' The meta line of a card: locations (and complete rows when some are not),
+#' candidates and `extra` (the surfaces, the model).
+collinearity_meta <- function(screen, n_cand, noun = "covariate", extra = NULL) {
+  d <- screen$diagnostics
+  rows <- d$n_rows
+  loc <- if (length(rows) == 1L && !is.na(rows)) paste0(.cl_count(rows, "location"),
+    if (isTRUE(d$n_complete < rows)) paste0(", ", .cl_num(d$n_complete), " complete"))
+  paste(c(loc, .cl_count(n_cand, noun), extra), collapse = " \u00b7 ")
+}
+
+#' One covariate check card. `screen` is a screen with diagnostics;
+#' `removable` the candidate IDs its checkboxes offer (`input_id`), `manual`
+#' those already removed by hand. `secondary`, `list(name, screen)`, adds a
+#' read-only section for a second surface whose screen differs; `chips` adds
+#' `list(title, vars)` rows; `caveat` a line under the chart; `hint` the
+#' tick hint in the legend. `collapsed` shows a clean card as its header and
+#' verdict, with the chart one click away.
+collinearity_card <- function(id, title, meta, screen, labels, input_id, removable,
+                              scope_note = NULL, manual = character(0), secondary = NULL,
+                              collapsed = FALSE, chips = list(), caveat = NULL,
+                              constant_title = "Constant here, removed whatever you answer:",
+                              hint = FALSE) {
+  screen <- screen %||% list(kept = character(0), diagnostics = list(status = "no_candidates"))
+  L <- function(v) .cl_esc(display_var_labels(as.character(v), labels))
+  prof <- collinearity_profile(screen)
+  prof$pairwise_threshold <- screen$diagnostics$pairwise_threshold
+  pw <- prof$pairwise_threshold %||% 0.95
+  head <- paste0('<div class="mn-cl-head"><h4 class="mn-cl-title">', .cl_esc(title), '</h4>',
+                 '<span class="mn-cl-meta">', .cl_esc(meta), '</span></div>')
+  verdict <- .cl_verdict(screen, prof, L)
+  note <- if (!is.null(scope_note)) paste0('<div class="mn-cl-scope">', .cl_esc(scope_note), '</div>') else ""
+  chip_html <- paste0(.cl_chips("Removed by you:", manual, L, " gone"),
+                      .cl_screen_chips(screen, L, constant_title),
+                      paste(vapply(chips, function(ch) .cl_chips(ch$title, ch$vars, L), character(1)), collapse = ""))
+  chart <- .cl_chart(screen, prof, L, removable, input_id, hint)
+  extra <- if (!is.null(caveat)) paste0('<div class="mn-cl-caveat">', .cl_esc(caveat), '</div>') else ""
+  sec <- if (!is.null(secondary)) {
+    s <- secondary$screen
+    sp <- collinearity_profile(s)
+    sp$pairwise_threshold <- pw
+    same <- setequal(s$dropped_vif, screen$dropped_vif) && setequal(s$dropped_constant, screen$dropped_constant)
+    rows <- s$diagnostics$n_rows
+    paste0('<details class="mn-cl-surface"><summary><b>', .cl_esc(secondary$name), ' surface</b>',
+           if (length(rows) == 1L && !is.na(rows)) paste0(" &#183; ", .cl_count(rows, "location")), " &#183; ",
+           if (.cl_incomplete(s$diagnostics$status %||% "not_checked")) "check incomplete" else
+             if (same) "same removals, its own VIFs" else "different removals",
+           '</summary>', .cl_verdict(s, sp, L), .cl_screen_chips(s, L, constant_title),
+           .cl_chart(s, sp, L, removable), .cl_why(sp, L, pw), .cl_staircase(sp, s$diagnostics$pairs, L),
+           '<div class="mn-cl-note">Your removals apply to both surfaces of this locality.</div></details>')
+  } else ""
+  stair <- .cl_staircase(prof, screen$diagnostics$pairs, L)
+  html <- if (isTRUE(collapsed)) {
+    paste0('<details class="mn-cl-card mn-cl-clean" id="', .cl_esc(id), '"><summary>', head, verdict, '</summary>',
+           note, chip_html, chart, extra, stair, sec, '</details>')
+  } else {
+    paste0('<section class="mn-cl-card" id="', .cl_esc(id), '">', head, note, verdict, chip_html, chart, extra,
+           .cl_why(prof, L, pw), stair, sec, '</section>')
+  }
+  HTML(html)
+}
+
+#' The interpolation dialog's overview of its localities: one chip per card,
+#' in card order, that scrolls to (and opens) it. `items`: list(name, target
+#' element ID, n_remove, incomplete).
+collinearity_summary_strip <- function(items) {
+  n_rm <- sum(vapply(items, function(x) x$n_remove > 0, logical(1)))
+  n_inc <- sum(vapply(items, function(x) isTRUE(x$incomplete), logical(1)))
+  chips <- vapply(items, function(x) {
+    cnt <- c(if (x$n_remove > 0) paste(x$n_remove, "to remove"), if (isTRUE(x$incomplete)) "check incomplete")
+    paste0('<button type="button" class="mn-cl-chip ',
+           if (x$n_remove > 0) "act" else if (isTRUE(x$incomplete)) "warn" else "ok",
+           '" onclick="var c=document.getElementById(\'', .cl_esc(x$target), '\');if(c){if(c.tagName===\'DETAILS\')',
+           'c.open=true;c.scrollIntoView({behavior:\'smooth\',block:\'start\'});}"><b>', .cl_esc(x$name), '</b>',
+           '<span class="cnt">', if (length(cnt)) paste(cnt, collapse = " &#183; ") else "&#10003; clean",
+           '</span></button>')
+  }, character(1))
+  HTML(paste0('<div class="mn-cl-summary"><span class="mn-cl-sumtext">', length(items),
+              ' localities checked separately &#183; ', n_rm, ' with Auto-Drop removals',
+              if (n_inc) paste0(" &#183; ", n_inc, " incomplete"), '</span>', paste(chips, collapse = ""), '</div>'))
+}
+
+#' The Classification Suite's summary under its Covariates picker: the scope
+#' `caption`, one line on the check, the Auto-Drop removals in step order, and
+#' `review_button`. `model` names the method behind the threshold.
+collinearity_inline_summary <- function(chk, labels = NULL, caption = NULL, review_button = NULL, model = NULL) {
+  d <- chk$diagnostics %||% list(status = "not_checked")
+  st <- d$status %||% "not_checked"
+  if (identical(st, "checking")) return(tags$div(class = "mn-cl-inline",
+    tags$div(class = "mn-cl-inline-line", tags$b("Covariate check:"), " checking the selected scope\u2026")))
+  L <- function(v) .cl_esc(display_var_labels(as.character(v), labels))
+  prof <- collinearity_profile(chk)
+  thr <- .cl_thr(prof$threshold)
+  n_dup <- NROW(chk$pairs)
+  line <- if (.cl_incomplete(st)) {
+    paste0("<b>Covariate check incomplete:</b> ", if (identical(st, "failed")) "the check failed" else
+      "fewer than three locations carry every covariate", ".")
+  } else if (length(prof$removals)) {
+    paste0("<b>Covariate check:</b> Auto-Drop would remove ", length(prof$removals), " of ", nrow(prof$rows),
+           " (VIF above ", thr, if (!is.null(model)) paste0(", ", .cl_esc(model)), ")")
+  } else if (NROW(prof$rows)) {
+    paste0("<b>Covariate check:</b> every VIF is ", thr, " or less",
+           if (n_dup) paste0("; ", n_dup, " near-duplicate pair", if (n_dup > 1) "s", " (|r| above ",
+                             sprintf("%g", d$pairwise_threshold %||% 0.95), ")"))
+  } else "<b>Covariate check:</b> no VIF to compute"
+  tags$div(class = "mn-cl-inline",
+    if (!is.null(caption)) tags$div(class = "mn-cl-inline-scope", caption),
+    HTML(paste0('<div class="mn-cl-inline-line">', line, '</div>',
+                if (length(prof$removals)) paste0('<div class="mn-cl-inline-names">', .cl_pills(prof, L), '</div>'),
+                .cl_chips("Constant or near-constant:", chk$dropped_constant, L))),
+    review_button)
 }

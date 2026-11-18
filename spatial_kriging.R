@@ -167,7 +167,13 @@ select_idw_power <- function(xy, v, strategy, nmax, seed = CV_FOLD_SEED, powers 
   scale_ref <- scale %||% max(abs(col))
   if (!is.finite(scale_ref) || scale_ref == 0) return(TRUE)
   s <- stats::sd(col)
-  !is.finite(s) || s <= 1e-8 * scale_ref
+  # Squared deviations can overflow or enter the subnormal range even for
+  # varying finite data. Keep ordinary arithmetic, rescaling only unsafe SDs.
+  if (!is.finite(s) || s < sqrt(.Machine$double.xmin)) {
+    own_scale <- max(abs(col))
+    return(stats::sd(col / own_scale) <= 1e-8 * (scale_ref / own_scale))
+  }
+  s <= 1e-8 * scale_ref
 }
 
 #' TRUE when trend residuals carry no usable variance, so that their variogram
@@ -181,25 +187,79 @@ select_idw_power <- function(xy, v, strategy, nmax, seed = CV_FOLD_SEED, powers 
     .is_degenerate_covariate(residuals, scale = max(abs(target)))
 }
 
+# Pearson correlations for the shared screen. Ordinary cells keep cor()'s
+# arithmetic. Extreme magnitudes leave insufficient headroom for squares and
+# products; repair those pairs on their own finite overlap, never after scaling
+# by an out-of-overlap observation. The machine-derived guard is numerical,
+# separate from the scientific near-constant and correlation thresholds.
+.collinearity_cor <- function(x, use = "everything") {
+  use <- match.arg(use, c("everything", "pairwise.complete.obs"))
+  bounds <- sqrt(sqrt(c(.Machine$double.xmin, .Machine$double.xmax)))
+  risky <- vapply(x, function(v) any(v != 0 &
+    (abs(v) < bounds[1L] | abs(v) > bounds[2L]), na.rm = TRUE), logical(1))
+  if (!any(risky)) return(stats::cor(x, use = use))
+  out <- withCallingHandlers(stats::cor(x, use = use), warning = function(w) {
+    if (grepl("standard deviation is zero", conditionMessage(w), fixed = TRUE))
+      invokeRestart("muffleWarning")
+  })
+  ij <- which(upper.tri(out, diag = TRUE) & outer(risky, risky, `|`), arr.ind = TRUE)
+  for (k in seq_len(nrow(ij))) {
+    i <- ij[k, 1L]; j <- ij[k, 2L]
+    a <- x[[i]]; b <- x[[j]]
+    shared <- is.finite(a) & is.finite(b)
+    if (use == "everything" && !all(shared)) next
+    a <- a[shared]; b <- b[shared]
+    r <- if (length(a) < 2L || length(unique(a)) < 2L || length(unique(b)) < 2L) {
+      NA_real_
+    } else stats::cor(a / max(abs(a)), b / max(abs(b)))
+    out[i, j] <- out[j, i] <- r
+  }
+  out
+}
+
 #' Covariate screen for RK/RFK/CK and the classification suite. Reports pairs
 #' with |r| > `pairwise_threshold`, drops degenerate (constant) covariates, then
 #' drops the highest-VIF covariate one at a time while any VIF exceeds
 #' `vif_threshold` (`Inf` = keep all). Returns `list(has_collinearity, pairs,
-#' kept, dropped, dropped_constant, dropped_vif)`. A pair without a finite
-#' correlation (under two shared finite rows, or no variation on them) has
-#' nothing to screen and is skipped, never read as r = 0.
-detect_multicollinearity_engine <- function(df, vars = NULL, vif_threshold = 10, pairwise_threshold = 0.95) {
+#' kept, dropped, dropped_constant, dropped_vif)`. A pair without an estimable
+#' correlation (under three shared finite rows, where r is +-1 or undefined by
+#' construction, or no variation on them) has nothing to screen and is
+#' skipped, never read as r = 0. `diagnostics = TRUE`
+#' additionally records signed pair evidence (including unestimable pairs),
+#' complete-row counts and each VIF-removal step, without changing the decision.
+#' Non-finite numeric observations are missing for both calculations.
+detect_multicollinearity_engine <- function(df, vars = NULL, vif_threshold = 10, pairwise_threshold = 0.95,
+                                          diagnostics = FALSE) {
   # sf geometry is sticky under `[ , ]` and would break the degenerate scan.
   if (inherits(df, "sf")) df <- sf::st_drop_geometry(df)
   if (is.null(vars)) {
-    df_num <- df[sapply(df, is.numeric)]
+    df_num <- df[vapply(df, is.numeric, logical(1))]
     vars <- colnames(df_num)
   } else {
-    df_num <- df[, vars, drop = FALSE]
-    df_num <- df_num[sapply(df_num, is.numeric)]
+    df_num <- df[, intersect(vars, names(df)), drop = FALSE]
+    df_num <- df_num[vapply(df_num, is.numeric, logical(1))]
     vars <- colnames(df_num)
   }
-  
+  # Infinity is no observation of a numeric quantity, just as NA/NaN is not.
+  # Normalize once so the pair report and every complete-row VIF use the same
+  # eligibility rule. The diagnostic distinguishes absent from non-finite data.
+  nonfinite <- if (isTRUE(diagnostics)) vapply(df_num,
+    function(v) sum(is.infinite(v) | is.nan(v)), integer(1)) else NULL
+  missing <- if (isTRUE(diagnostics)) vapply(df_num,
+    function(v) sum(is.na(v) & !is.nan(v)), integer(1)) else NULL
+  df_num[] <- lapply(df_num, function(v) { v[!is.finite(v)] <- NA_real_; v })
+  df <- df_num
+  n_complete <- if (isTRUE(diagnostics)) sum(stats::complete.cases(df)) else NULL
+  diag_info <- if (isTRUE(diagnostics)) list(
+    status = if (!length(vars)) "no_candidates" else if (length(vars) == 1L) {
+      if (n_complete < 3L) "insufficient_rows" else "one_candidate"
+    } else "not_checked",
+    n_rows = nrow(df), n_complete = n_complete,
+    nonfinite_by_var = nonfinite, missing_by_var = missing,
+    pairs = data.frame(var1 = character(), var2 = character(), r = numeric(), n = integer(),
+                       near_duplicate = logical(), status = character(), stringsAsFactors = FALSE),
+    steps = list(), vif_threshold = vif_threshold, pairwise_threshold = pairwise_threshold
+  ) else NULL
   kept <- vars
   dropped <- c()
   # Constant and high-VIF drops are tracked apart so callers report the reason.
@@ -215,6 +275,7 @@ detect_multicollinearity_engine <- function(df, vars = NULL, vif_threshold = 10,
 
   collinear_pairs <- data.frame(var1 = character(), var2 = character(), r = numeric(), stringsAsFactors = FALSE)
   has_collinearity <- FALSE
+  cormat <- NULL
 
   if (length(kept) >= 2) {
     df_clean <- df[, kept, drop = FALSE]
@@ -226,11 +287,14 @@ detect_multicollinearity_engine <- function(df, vars = NULL, vif_threshold = 10,
         # the threshold, nothing inverts this matrix, and a covariate measured
         # on a subset of the samples should still be screened on what it has.
         pair_data <- df_clean[, valid_vars, drop = FALSE]
-        pair_data[] <- lapply(pair_data, function(v) { v[!is.finite(v)] <- NA_real_; v })
-        cormat <- withCallingHandlers(cor(pair_data, use = "pairwise.complete.obs"),
+        cormat <- withCallingHandlers(.collinearity_cor(pair_data, use = "pairwise.complete.obs"),
           warning = function(w) {
             if (grepl("standard deviation is zero", conditionMessage(w), fixed = TRUE)) invokeRestart("muffleWarning")
           })
+        # Two shared observations give r = +-1 whatever the variables are.
+        few <- crossprod(!is.na(as.matrix(pair_data))) < 3
+        diag(few) <- FALSE
+        cormat[few] <- NA_real_
         for (i in 1:(length(valid_vars) - 1)) {
           for (j in (i + 1):length(valid_vars)) {
             r <- cormat[i, j]
@@ -248,6 +312,43 @@ detect_multicollinearity_engine <- function(df, vars = NULL, vif_threshold = 10,
       }
     }
   }
+  if (isTRUE(diagnostics) && length(vars) >= 2L) {
+    # Retain every pair as context, including an unestimable one. The legacy
+    # `pairs` field above stays near-duplicate-only (including for PCA).
+    ij <- utils::combn(seq_along(vars), 2L)
+    if (!anyNA(df)) {
+      # Every pair has the same population: reuse the correlation matrix and
+      # the column-variance scan instead of repeating two scans per pair.
+      pair_status <- if (nrow(df) < 3L) rep("insufficient_rows", ncol(ij)) else
+        ifelse(degen[ij[1L, ]] | degen[ij[2L, ]], "constant", "estimated")
+      r <- rep(NA_real_, ncol(ij))
+      estimable <- which(pair_status == "estimated")
+      if (length(estimable)) {
+        if (is.null(cormat)) cormat <- .collinearity_cor(df[, vars[!degen], drop = FALSE])
+        r[estimable] <- cormat[cbind(match(vars[ij[1L, estimable]], colnames(cormat)),
+                                     match(vars[ij[2L, estimable]], colnames(cormat)))]
+      }
+      pair_n <- rep(nrow(df), ncol(ij))
+    } else {
+      # Missingness can make a varying column constant on a pair's overlap.
+      # Keep that per-pair check, but build the output table only once.
+      pair_values <- vapply(seq_len(ncol(ij)), function(k) {
+        a <- df[[vars[ij[1L, k]]]]; b <- df[[vars[ij[2L, k]]]]
+        both <- !is.na(a) & !is.na(b)
+        n <- sum(both)
+        status <- if (n < 3L) 1L else if (
+          .is_degenerate_covariate(a[both]) || .is_degenerate_covariate(b[both])) 2L else 3L
+        r <- if (status == 3L) .collinearity_cor(data.frame(a = a[both], b = b[both]))[1L, 2L] else NA_real_
+        c(r, n, status)
+      }, numeric(3))
+      r <- pair_values[1L, ]
+      pair_n <- as.integer(pair_values[2L, ])
+      pair_status <- c("insufficient_rows", "constant", "estimated")[pair_values[3L, ]]
+    }
+    diag_info$pairs <- data.frame(var1 = vars[ij[1L, ]], var2 = vars[ij[2L, ]], r = r, n = pair_n,
+      near_duplicate = is.finite(r) & abs(r) > pairwise_threshold,
+      status = unname(pair_status), stringsAsFactors = FALSE)
+  }
   
   if (length(kept) >= 2) {
     # A zero-variance covariate (common within one locality) gives cor() NA
@@ -261,7 +362,7 @@ detect_multicollinearity_engine <- function(df, vars = NULL, vif_threshold = 10,
   }
 
   # An infinite threshold (Keep All) skips pruning, the solve() fallback included.
-  if (length(kept) >= 2 && is.finite(vif_threshold)) {
+  if (length(kept) >= 2 && (is.finite(vif_threshold) || isTRUE(diagnostics))) {
     repeat {
       if (length(kept) == 1) {
         warning("VIF Iterative Pruning: only one covariate remains. Multicollinearity is extremely high.")
@@ -269,9 +370,21 @@ detect_multicollinearity_engine <- function(df, vars = NULL, vif_threshold = 10,
       }
       if (length(kept) < 2) break
       df_clean_vif <- na.omit(df[, kept, drop = FALSE])
-      if (nrow(df_clean_vif) < 3) break
+      if (nrow(df_clean_vif) < 3) {
+        if (isTRUE(diagnostics)) {
+          diag_info$status <- "insufficient_rows"
+          diag_info$steps[[length(diag_info$steps) + 1L]] <- list(
+            candidates = kept, n_complete = nrow(df_clean_vif), status = "insufficient_rows",
+            vif = NULL, drop = character(0))
+        }
+        break
+      }
       constants <- kept[vapply(df_clean_vif, .is_degenerate_covariate, logical(1))]
       if (length(constants)) {
+        if (isTRUE(diagnostics)) diag_info$steps[[length(diag_info$steps) + 1L]] <- list(
+          candidates = kept, n_complete = nrow(df_clean_vif), status = "constant",
+          vif = NULL, drop = if (is.finite(vif_threshold)) constants else character(0))
+        if (!is.finite(vif_threshold)) break
         dropped <- c(dropped, constants)
         dropped_constant <- union(dropped_constant, constants)
         kept <- setdiff(kept, constants)
@@ -281,8 +394,10 @@ detect_multicollinearity_engine <- function(df, vars = NULL, vif_threshold = 10,
       # Complete cases (na.omit above), not pairwise: this matrix gets inverted,
       # and cells estimated on different subsamples need not form a positive
       # semi-definite matrix, which can hand solve() negative VIFs.
-      cor_mat <- cor(df_clean_vif)
+      cor_mat <- .collinearity_cor(df_clean_vif)
       vif_vals <- tryCatch({ diag(solve(cor_mat)) }, error = function(e) { NULL })
+      if (!is.null(vif_vals) && any(!is.finite(vif_vals))) vif_vals <- NULL
+      if (isTRUE(diagnostics)) diag_info$status <- "checked"
 
       if (is.null(vif_vals)) {
         cor_mat_no_diag <- cor_mat
@@ -307,12 +422,19 @@ detect_multicollinearity_engine <- function(df, vars = NULL, vif_threshold = 10,
         } else {
           sort(pair, decreasing = TRUE, method = "radix")[1]
         }
+        if (isTRUE(diagnostics)) diag_info$steps[[length(diag_info$steps) + 1L]] <- list(
+          candidates = kept, n_complete = nrow(df_clean_vif), status = "singular",
+          vif = NULL, drop = if (is.finite(vif_threshold)) var_to_drop else character(0))
+        if (!is.finite(vif_threshold)) break
         dropped <- c(dropped, var_to_drop)
         kept <- setdiff(kept, var_to_drop)
         next
       }
 
       max_vif <- max(vif_vals)
+      if (isTRUE(diagnostics)) diag_info$steps[[length(diag_info$steps) + 1L]] <- list(
+        candidates = kept, n_complete = nrow(df_clean_vif), status = "estimated", vif = vif_vals,
+        drop = if (max_vif > vif_threshold) names(vif_vals)[which.max(vif_vals)] else character(0))
       if (max_vif > vif_threshold) {
         var_to_drop <- names(vif_vals)[which.max(vif_vals)]
         dropped <- c(dropped, var_to_drop)
@@ -323,7 +445,7 @@ detect_multicollinearity_engine <- function(df, vars = NULL, vif_threshold = 10,
     }
   }
   
-  return(list(
+  result <- list(
     has_collinearity = has_collinearity,
     pairs = if (nrow(collinear_pairs) > 0) collinear_pairs else NULL,
     kept = kept,
@@ -331,16 +453,25 @@ detect_multicollinearity_engine <- function(df, vars = NULL, vif_threshold = 10,
     dropped = dropped,
     dropped_constant = dropped_constant,
     dropped_vif = setdiff(dropped, dropped_constant)
-  ))
+  )
+  if (isTRUE(diagnostics)) {
+    if (diag_info$status == "not_checked") {
+      diag_info$status <- if (length(vars) >= 2L && diag_info$n_complete < 3L) "insufficient_rows" else "checked"
+    }
+    result$diagnostics <- diag_info
+  }
+  result
 }
 
 #' detect_multicollinearity_engine() over every numeric column of `df`,
-#' returning only the kept/dropped sets.
-check_vif <- function(df, threshold = 10) {
-  res <- detect_multicollinearity_engine(df, vif_threshold = threshold)
-  return(list(kept = res$kept, dropped = res$dropped,
+#' returning the kept/dropped sets and, on request, its diagnostic evidence.
+check_vif <- function(df, threshold = 10, diagnostics = FALSE) {
+  res <- detect_multicollinearity_engine(df, vif_threshold = threshold, diagnostics = diagnostics)
+  result <- list(kept = res$kept, dropped = res$dropped,
               dropped_constant = res$dropped_constant,
-              dropped_vif = res$dropped_vif))
+              dropped_vif = res$dropped_vif)
+  if (isTRUE(diagnostics)) result$diagnostics <- res$diagnostics
+  result
 }
 
 #' The constant/VIF covariate screen in ONE place: the surface's own gate and
@@ -348,15 +479,18 @@ check_vif <- function(df, threshold = 10) {
 #' degenerate covariate is named by run_regional_interpolation() instead). The
 #' "only one covariate remains" warning is muffled: per fold it repeats what
 #' the run-log covariate line says.
-screen_covariates <- function(df, candidates, vif_threshold = 10) {
+screen_covariates <- function(df, candidates, vif_threshold = 10, diagnostics = FALSE) {
   candidates <- as.character(candidates)
   if (length(candidates) < 2) {
-    return(list(kept = candidates, dropped = character(0),
-                dropped_constant = character(0), dropped_vif = character(0)))
+    result <- list(kept = candidates, dropped = character(0),
+                   dropped_constant = character(0), dropped_vif = character(0))
+    if (isTRUE(diagnostics)) result$diagnostics <- detect_multicollinearity_engine(
+      df, vars = candidates, vif_threshold = vif_threshold, diagnostics = TRUE)$diagnostics
+    return(result)
   }
   if (inherits(df, "sf")) df <- sf::st_drop_geometry(df)
   withCallingHandlers(
-    check_vif(df[, candidates, drop = FALSE], threshold = vif_threshold),
+    check_vif(df[, candidates, drop = FALSE], threshold = vif_threshold, diagnostics = diagnostics),
     warning = function(w) {
       if (grepl("VIF Iterative Pruning", conditionMessage(w), fixed = TRUE)) {
         invokeRestart("muffleWarning")
@@ -400,7 +534,7 @@ screen_covariates <- function(df, candidates, vif_threshold = 10) {
 #' Why a surface is left without a covariate after its screen (`vif_res`),
 #' worded by cause and ending without a full stop: a constant covariate is
 #' named as constant, which no answer changes, and only a collinearity drop is
-#' something "Keep All" keeps. `consequence` completes the sentence.
+#' something "Keep remaining" keeps. `consequence` completes the sentence.
 .screen_emptied_msg <- function(vif_res, consequence) {
   cst <- vif_res$dropped_constant
   col <- vif_res$dropped_vif
@@ -412,7 +546,7 @@ screen_covariates <- function(df, candidates, vif_threshold = 10) {
   paste0("The covariate screen left no covariate for this surface",
          if (length(cause)) paste0(" (", paste(cause, collapse = "; "), ")"),
          ", so ", consequence, ". ",
-         if (length(col)) "Select other covariates, or answer \"Keep All\" in the collinearity dialog to keep the collinear ones"
+         if (length(col)) "Select other covariates, or answer \"Keep remaining\" in the collinearity dialog to keep the collinear ones"
          else "Select covariates that vary within this locality")
 }
 
@@ -438,6 +572,10 @@ krige_covariates <- function(data, grid_p, aux_vars, lags, method_params, on_var
     # so each covariate is kriged under one syntactic alias.
     d_av <- data[av]
     names(d_av)[names(d_av) == av] <- ".mn_cov"
+    # The support of this covariate consists of its finite observations. This
+    # also protects direct callers; NA/Inf must not enter variogram or IDW.
+    d_av <- d_av[is.finite(d_av$.mn_cov), , drop = FALSE]
+    if (!nrow(d_av)) stop("Covariate ", av, " has no finite observations to interpolate")
     kr_res <- tryCatch({
       # A repeated location makes the kriging system singular, and LAPACK then
       # fails or returns rounding noise depending on platform and row order, so
@@ -832,6 +970,9 @@ rf_infinitesimal_jackknife_var <- function(pred_individual, inbag, chunk = 2000L
   res <- init_interpolation_res()
   res$log_msg <- failed$log_msg
   res$aux_dropped <- failed$aux_dropped
+  res$aux_dropped_constant <- failed$aux_dropped_constant
+  res$aux_dropped_vif <- failed$aux_dropped_vif
+  res$aux_dropped_collocation <- failed$aux_dropped_collocation
   res$aux_used <- character(0)
   form_ok <- reformulate("1", response = target_var)
   res$v_emp <- variogram(form_ok, data, width = lags$width, cutoff = lags$cutoff)
@@ -936,6 +1077,8 @@ apply_kriging_pipeline <- function(engine = c("OK", "RK", "RFK"), data, target_v
       # removed (the OK fallback resets the first to none).
       res$aux_used <- aux_vars
       res$aux_dropped <- setdiff(candidates, aux_vars)
+      res$aux_dropped_constant <- vif_res$dropped_constant %||% character(0)
+      res$aux_dropped_vif <- vif_res$dropped_vif %||% character(0)
       # An empty set would fail later in as.formula() with an obscure message;
       # name the cause (the locality still takes the OK fallback).
       if (length(aux_vars) == 0) {
@@ -1107,25 +1250,42 @@ CK_MIN_COLLOCATED <- 10L
 #' The rows of one co-kriging data set that carry every covariate in
 #' `candidates`, target rows first. The covariate screen runs on them: it
 #' involves the covariates only, whether or not a row carries the target.
-.ck_screen_rows <- function(target_rows, extra_rows, candidates) {
+#' `complete = FALSE` returns the joined observations for diagnostic counts.
+.ck_screen_rows <- function(target_rows, extra_rows, candidates, complete = TRUE) {
   rows <- sf::st_drop_geometry(target_rows)[candidates]
   if (!is.null(extra_rows) && nrow(extra_rows) > 0) {
     rows <- rbind(rows, sf::st_drop_geometry(extra_rows)[candidates])
   }
-  rows[stats::complete.cases(rows), , drop = FALSE]
+  if (!isTRUE(complete)) return(rows)
+  finite <- Reduce(`&`, lapply(rows, is.finite), rep(TRUE, nrow(rows)))
+  rows[finite, , drop = FALSE]
 }
 
 #' The constant/VIF covariate screen of a co-kriging data set
 #' (screen_covariates on .ck_screen_rows). Fewer than three rows carrying every
 #' candidate hold no estimable correlation, so the candidates then pass
 #' unscreened, flagged `unscreened`.
-.ck_screen <- function(target_rows, extra_rows, candidates, vif_threshold) {
+.ck_screen <- function(target_rows, extra_rows, candidates, vif_threshold, diagnostics = FALSE) {
   scr <- .ck_screen_rows(target_rows, extra_rows, candidates)
-  if (length(candidates) > 1 && nrow(scr) < 3) {
-    return(list(kept = candidates, dropped = character(0), dropped_constant = character(0),
-                dropped_vif = character(0), unscreened = TRUE))
+  provenance <- function(result) {
+    if (isTRUE(diagnostics)) {
+      original <- .ck_screen_rows(target_rows, extra_rows, candidates, complete = FALSE)
+      result$diagnostics$n_rows <- nrow(original)
+      result$diagnostics$nonfinite_by_var <- vapply(original,
+        function(v) sum(is.infinite(v) | is.nan(v)), integer(1))
+      result$diagnostics$missing_by_var <- vapply(original,
+        function(v) sum(is.na(v) & !is.nan(v)), integer(1))
+    }
+    result
   }
-  screen_covariates(scr, candidates, vif_threshold)
+  if (length(candidates) > 1 && nrow(scr) < 3) {
+    result <- list(kept = candidates, dropped = character(0), dropped_constant = character(0),
+                   dropped_vif = character(0), unscreened = TRUE)
+    if (isTRUE(diagnostics)) result$diagnostics <- detect_multicollinearity_engine(
+      scr, vars = candidates, vif_threshold = vif_threshold, diagnostics = TRUE)$diagnostics
+    return(provenance(result))
+  }
+  provenance(screen_covariates(scr, candidates, vif_threshold, diagnostics = diagnostics))
 }
 
 #' Build and fit the co-kriging LMC from the target rows (`target_rows`) and
@@ -1380,6 +1540,9 @@ apply_CK <- function(data, target_var, grid_p, lags, method_params, aux_vars, l 
     # For the run record, as in apply_kriging_pipeline.
     res$aux_used <- kept
     res$aux_dropped <- setdiff(aux_vars, kept)
+    res$aux_dropped_constant <- vif_res$dropped_constant %||% character(0)
+    res$aux_dropped_vif <- vif_res$dropped_vif %||% character(0)
+    res$aux_dropped_collocation <- short
     # With no secondary variable gstat would quietly return OK labelled
     # Co-Kriging, so the named OK fallback takes over.
     if (length(kept) == 0) {

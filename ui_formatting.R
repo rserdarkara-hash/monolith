@@ -1450,7 +1450,7 @@ locality_run_failed <- function(res, want_pre) {
 # aux_dropped_*, RK/RFK/CK only). The screen runs on each locality's own rows,
 # so the record is kept per locality: a union would describe no fitted model.
 covariate_screen_record <- function(res_all) {
-  retained <- list(); dropped <- list(); design <- list()
+  retained <- list(); dropped <- list(); design <- list(); constant <- list(); automatic <- list(); collocation <- list()
   for (res in res_all) {
     for (tg in c("act", "pre")) {
       used <- res[[paste0("aux_used_", tg)]]
@@ -1459,6 +1459,13 @@ covariate_screen_record <- function(res_all) {
       if (is.null(retained[[res$l]])) { retained[[res$l]] <- list(); dropped[[res$l]] <- list() }
       retained[[res$l]][[surface]] <- paste(used, collapse = ", ")
       dropped[[res$l]][[surface]] <- paste(res[[paste0("aux_dropped_", tg)]], collapse = ", ")
+      # Removal sets by cause, kept as JSON arrays (I()) whatever their length.
+      if (is.null(constant[[res$l]])) {
+        constant[[res$l]] <- list(); automatic[[res$l]] <- list(); collocation[[res$l]] <- list()
+      }
+      constant[[res$l]][[surface]] <- I(res[[paste0("aux_dropped_constant_", tg)]] %||% character(0))
+      automatic[[res$l]][[surface]] <- I(res[[paste0("aux_dropped_vif_", tg)]] %||% character(0))
+      collocation[[res$l]][[surface]] <- I(res[[paste0("aux_dropped_collocation_", tg)]] %||% character(0))
       # Co-kriging's data design: "heterotopic" when locations without the
       # target contributed covariate values, "isotopic" otherwise.
       des <- res[[paste0("ck_design_", tg)]]
@@ -1468,7 +1475,8 @@ covariate_screen_record <- function(res_all) {
       }
     }
   }
-  list(retained = retained, dropped = dropped, design = design)
+  list(retained = retained, dropped = dropped, design = design, constant = constant,
+       automatic = automatic, collocation = collocation)
 }
 
 # The covariate line of the run configuration panel: what was selected and
@@ -1479,6 +1487,10 @@ covariate_record_text <- function(cfg) {
   sel <- cfg$covariates_selected
   if (is.null(sel) || is.na(sel) || !nzchar(sel)) return(NULL)
   txt <- paste0("Covariates selected: ", sel)
+  manual <- cfg$covariates_manual_exclusions
+  if (length(manual)) txt <- paste0(txt, " | manually removed: ", paste(vapply(names(manual), function(l)
+    paste0(l, ": ", paste(display_var_labels(manual[[l]], unlist(cfg$covariate_labels)), collapse = ", ")),
+    character(1)), collapse = "; "))
   flat <- function(x) unlist(lapply(names(x), function(l) {
     v <- unlist(x[[l]])
     stats::setNames(v, paste0(l, if (length(v) > 1) paste0(" (", names(v), ")") else ""))
@@ -1859,30 +1871,153 @@ locality_run_frame <- function(df, mapping, l, eff_subset = "all", actual_col = 
   out
 }
 
-#' The collinearity dialog's findings, one line per locality (per surface where
-#' a locality's two surfaces differ): the covariates the run's screen would
-#' drop as collinear, and those constant there, which are dropped whatever the
-#' answer. `screens` is locality -> surface column -> screen
-#' (locality_screen_preview()); `surfaces` maps the surface columns to their
-#' names. Returns `lines` (empty when no locality drops anything) and
-#' `any_vif`: whether any collinear drop exists, the only finding the dialog's
-#' answer changes.
-collinearity_dialog_lines <- function(screens, surfaces = c(v = "Actual")) {
-  finding <- function(s) {
-    paste(c(if (length(s$dropped_vif)) paste0("collinear: ", paste(s$dropped_vif, collapse = ", ")),
-            if (length(s$dropped_constant)) paste0("constant: ", paste(s$dropped_constant, collapse = ", "))),
-          collapse = "; ")
+#' Whether locality -> surface screens recommend a VIF removal or leave a
+#' check incomplete. Constants alone need no interpolation decision; missing
+#' diagnostic status is an incomplete check, never evidence of independence.
+collinearity_screen_flags <- function(screens) {
+  checks <- unlist(screens, recursive = FALSE, use.names = FALSE)
+  list(any_vif = any(vapply(checks, function(s) length(s$dropped_vif) > 0L, logical(1))),
+       incomplete = any(vapply(checks, function(s)
+         !(s$diagnostics$status %||% "not_checked") %in% c("checked", "one_candidate", "no_candidates"),
+         logical(1))))
+}
+
+#' The covariates a locality's run removes whatever the user answers: constant
+#' on every surface it maps, or (CK) short of co-located samples on every one.
+#' `by_surface` is surface -> screen. They are listed, never offered for
+#' removal.
+collinearity_forced_out <- function(by_surface) {
+  Reduce(intersect, lapply(by_surface, function(s)
+    union(s$dropped_constant %||% character(0), s$dropped_collocation %||% character(0))))
+}
+
+#' A VIF as the covariate check prints it: two decimals below 100, a whole
+#' number with thousands separators from 100 (`exact = TRUE` keeps two
+#' decimals). A value above `above`, the threshold, gets the decimals it needs
+#' not to print as the threshold itself. Non-finite values print empty.
+format_vif <- function(x, above = NULL, exact = FALSE) {
+  x <- as.numeric(x)
+  out <- character(length(x))
+  ok <- is.finite(x)
+  if (!any(ok)) return(out)
+  v <- x[ok]
+  d <- ifelse(!exact & v >= 100, 0L, 2L)
+  if (!is.null(above)) {
+    short <- v > above & round(v, d) <= above
+    while (any(short)) {
+      d[short] <- d[short] + 1L
+      short <- short & d < 8L & round(v, d) <= above
+    }
   }
-  lines <- unlist(lapply(names(screens), function(l) {
-    found <- vapply(names(surfaces), function(tg) finding(screens[[l]][[tg]]), character(1))
-    if (!any(nzchar(found))) return(NULL)
-    if (length(unique(found)) == 1) return(paste0(l, ": ", found[1]))
-    paste0(l, " (", surfaces[nzchar(found)], "): ", found[nzchar(found)])
-  }), use.names = FALSE)
-  list(lines = lines %||% character(0),
-       any_vif = any(vapply(screens, function(by_surface) {
-         any(vapply(by_surface, function(s) length(s$dropped_vif) > 0, logical(1)))
-       }, logical(1))))
+  s <- sprintf("%.*f", d, v)
+  big <- abs(v) >= 1000
+  if (any(big)) s[big] <- prettyNum(s[big], big.mark = ",")
+  out[ok] <- s
+  out
+}
+
+#' A share of variation at one decimal, "more than 99.9%" where one decimal
+#' would print 100.0%. vif_share_text() gives the share of a covariate's
+#' variation that the other candidates explain, R² = 1 - 1/VIF.
+share_text <- function(r2) {
+  out <- sprintf("%.1f%%", 100 * pmax(0, r2))
+  out[out == "100.0%"] <- "more than 99.9%"
+  out[!is.finite(r2)] <- ""
+  out
+}
+vif_share_text <- function(vif) share_text(1 - 1 / vif)
+
+#' What the covariate check card shows of one screen (screen_covariates() or
+#' detect_multicollinearity_engine() with diagnostics = TRUE), read from its
+#' VIF steps: nothing is refitted. `rows` has one row per candidate of the
+#' first VIF step: `first`, its VIF with every candidate (NA when that step is
+#' singular); `step` and `at`, the removal number and the VIF that triggered
+#' it (Inf for a singular step, which has no VIF); `final`, its VIF at the step
+#' that stopped the removals; `sole` for the one covariate left when the
+#' removals end there, whose VIF is 1 by definition. Each removal carries its
+#' step's candidates and complete rows, `runner` (the highest other VIF there),
+#' `partners` (its three strongest estimable correlations among those
+#' candidates) and `bound`, the strongest partner's r²: a lower bound on the
+#' removal's R² = 1 - 1/VIF when the pair was measured on the step's own rows.
+#' `missing` counts each covariate's missing and non-finite values when not
+#' every row is complete.
+collinearity_profile <- function(screen) {
+  d <- screen$diagnostics
+  thr <- screen$vif_threshold %||% d$vif_threshold %||% 10
+  missing <- NULL
+  if (!is.null(d$missing_by_var) && isTRUE(d$n_complete < d$n_rows)) {
+    missing <- d$missing_by_var
+    nf <- d$nonfinite_by_var[intersect(names(d$nonfinite_by_var), names(missing))]
+    missing[names(nf)] <- missing[names(nf)] + nf
+  }
+  out <- list(threshold = thr, rows = NULL, removals = list(), first_singular = FALSE,
+              missing = missing)
+  steps <- Filter(function(s) s$status %in% c("estimated", "singular"), d$steps %||% list())
+  if (!length(steps)) return(out)
+
+  pairs <- d$pairs
+  keep <- if (NROW(pairs)) (pairs$status %||% rep("estimated", nrow(pairs))) == "estimated" &
+    is.finite(pairs$r) else logical(0)
+  p1 <- pairs$var1[keep]; p2 <- pairs$var2[keep]; pr <- pairs$r[keep]
+  pn <- as.integer(pairs$n[keep]); pd <- pairs$near_duplicate[keep] %in% TRUE
+  partners_of <- function(v, others) {
+    hit <- which((p1 == v & p2 %in% others) | (p2 == v & p1 %in% others))
+    if (!length(hit)) return(NULL)
+    hit <- hit[order(-abs(pr[hit]))][seq_len(min(3L, length(hit)))]
+    data.frame(var = ifelse(p1[hit] == v, p2[hit], p1[hit]), r = pr[hit], n = pn[hit],
+               near_duplicate = pd[hit], stringsAsFactors = FALSE)
+  }
+  removals <- list()
+  for (s in steps) {
+    if (!length(s$drop)) next
+    v <- s$drop[[1]]
+    estimated <- identical(s$status, "estimated")
+    others <- setdiff(s$candidates, v)
+    partners <- partners_of(v, others)
+    removals[[length(removals) + 1L]] <- list(
+      var = v, step = length(removals) + 1L, status = s$status,
+      at = if (estimated) unname(s$vif[[v]]) else Inf,
+      candidates = s$candidates, n_complete = s$n_complete,
+      runner = if (estimated && length(others)) s$vif[others][which.max(s$vif[others])],
+      partners = partners,
+      bound = if (NROW(partners) && identical(partners$n[1], as.integer(s$n_complete))) partners$r[1]^2)
+  }
+
+  cands <- steps[[1]]$candidates
+  n <- length(cands)
+  first_singular <- !identical(steps[[1]]$status, "estimated")
+  first <- if (first_singular) rep(NA_real_, n) else unname(steps[[1]]$vif[cands])
+  step_no <- rep(NA_integer_, n); at <- rep(NA_real_, n)
+  if (length(removals)) {
+    j <- match(vapply(removals, `[[`, character(1), "var"), cands)
+    step_no[j] <- seq_along(removals)
+    at[j] <- vapply(removals, `[[`, numeric(1), "at")
+  }
+  final <- rep(NA_real_, n); sole <- rep(FALSE, n)
+  last <- steps[[length(steps)]]
+  if (identical(last$status, "estimated") && !length(last$drop)) {
+    final[match(names(last$vif), cands)] <- unname(last$vif)
+  } else if (length(last$drop) && length(screen$kept) == 1L && screen$kept %in% cands) {
+    final[match(screen$kept, cands)] <- 1
+    sole[match(screen$kept, cands)] <- TRUE
+  }
+  ord <- if (!first_singular) order(-first) else {
+    # No VIF with every candidate: removals first, in step order, then the
+    # rest by their VIF at the first step that estimated one.
+    later <- rep(NA_real_, n)
+    for (s in steps) if (identical(s$status, "estimated")) {
+      j <- match(names(s$vif), cands)
+      fill <- is.na(later[j])
+      later[j[fill]] <- unname(s$vif)[fill]
+    }
+    order(is.na(step_no), step_no, -later)
+  }
+  out$rows <- data.frame(var = cands, first = first, final = final, step = step_no, at = at,
+                         sole = sole, stringsAsFactors = FALSE)[ord, , drop = FALSE]
+  rownames(out$rows) <- NULL
+  out$removals <- removals
+  out$first_singular <- first_singular
+  out
 }
 
 tuning_key <- function(col, eff_subset = "all") {

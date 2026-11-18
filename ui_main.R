@@ -54,6 +54,11 @@ ui <- fluidPage(
        });
        $(document).on('shiny:value', function (e) {
          $(e.target).find('[data-toggle=\"popover\"]').popover('destroy');
+       });
+       // A dialog's icons go with it: close their popovers when it hides, or
+       // when a new dialog replaces its content (Shiny unbinds it first).
+       $(document).on('hide.bs.modal shiny:unbound', function (e) {
+         $(e.target).closest('#shiny-modal-wrapper').find('[data-toggle=\"popover\"]').popover('destroy');
        });"
     )),
     # ionRangeSlider centres edge labels on the track ends, so large values

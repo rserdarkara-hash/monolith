@@ -7,6 +7,41 @@
 # monolith_progress_dir option is unset in tests, so they go to tempdir()
 # and leave no trace in the repo.
 
+# ── Manual covariate candidates and the shared collinearity evidence ───────
+
+test_that("manual locality candidates control finite eligibility and global grid preparation", {
+  d <- data.frame(x = c(500000, 500100, 500000, 500100, 500900),
+                  y = c(4400000, 4400000, 4400100, 4400100, 4400900),
+                  v = 1:5, pv = 2:6, a = c(1:4, Inf), b = c(4:1, 9))
+  rp <- list(current_method = "RK", current_crs = 32633, aux_vars = c("a", "b"),
+             manual_exclusions = list(A = "a"), shp_bound = NULL, b_type = "convex",
+             buff_mode = "fixed", b_dist = 100, res_mode = "global", grid_res = 50)
+  expect_identical(locality_aux_vars(rp, "A"), "b")
+  expect_identical(locality_aux_vars(rp, "B"), c("a", "b"))
+  full <- .locality_points("B", d, 32633, "RK", locality_aux_vars(rp, "B"), list())
+  reduced <- .locality_points("A", d, 32633, "RK", locality_aux_vars(rp, "A"), list())
+  expect_equal(nrow(full$pts_projected), 4)
+  expect_equal(nrow(reduced$pts_projected), 5)
+  expect_true(all(is.finite(reduced$pts_projected$b)))
+  expected <- min(vapply(list(reduced, full), function(pp) {
+    xy <- sf::st_coordinates(pp$pts)
+    area <- as.numeric(sf::st_area(sf::st_convex_hull(sf::st_union(pp$pts))))
+    max(1, min(1000, 0.0791 * sqrt(area / nrow(pp$pts)), mean(FNN::get.knn(xy, k = 1)$nn.dist) / 2))
+  }, numeric(1)))
+  items <- lapply(c("A", "B"), function(l) list(l = l, pts_data = d, m_params = list()))
+  expect_equal(shared_auto_resolution(items, rp), expected)
+  # Both surfaces receive the same manually specified candidates, then select
+  # their own finite targets. A non-finite target never survives averaging.
+  d$v[1] <- -Inf
+  pp <- .locality_points("A", d, 32633, "RK", "b", list())
+  expect_equal(nrow(dedup_valid_points(pp$pts_projected, "v")), 4)
+  expect_equal(nrow(dedup_valid_points(pp$pts_projected, "pv")), 5)
+  ck <- ck_design_rows(sf::st_as_sf(d, coords = c("x", "y"), crs = 32633), "v", c("a", "b"))
+  expect_equal(nrow(ck$t), 4)
+  expect_true(all(is.finite(ck$t$v)))
+  expect_true(any(is.na(ck$t$a)))
+})
+
 # ── init_interpolation_res ─────────────────────────────────────────────────
 
 test_that("init_interpolation_res returns list with all expected names", {
@@ -1390,6 +1425,14 @@ test_that("the run record separates the two CRS and selected from used covariate
   expect_equal(rec$dropped$Kale$actual, "clay")
   expect_equal(rec$retained$Tavas, list(actual = ""))
   expect_null(rec$retained$Yorga)
+  # Removal sets by cause stay JSON arrays whatever their length.
+  causes <- covariate_screen_record(list(list(l = "A", aux_used_act = "elev", aux_dropped_act = "clay",
+    aux_dropped_vif_act = "clay", aux_dropped_constant_act = character(0))))
+  json <- jsonlite::fromJSON(run_record_json(list(vif = causes$automatic, constant = causes$constant,
+    collocation = causes$collocation)), simplifyVector = FALSE)
+  expect_identical(json$vif$A$actual, list("clay"))
+  expect_identical(json$constant$A$actual, list())
+  expect_identical(json$collocation$A$actual, list())
 
   cfg <- list(run_id = 7L, method = "RK", app_version = "9.9.9",
               input_crs = "EPSG:4326", target_crs = "EPSG:32633",
@@ -4254,8 +4297,10 @@ test_that("every pinned dispatch ships the globals its body reads", {
     src <- readLines(file.path(root, file), warn = FALSE)
     i0 <- grep("promises::future_promise({", src, fixed = TRUE)
     i1 <- grep(tail_line, src, fixed = TRUE)
-    expect_length(i0, 1L)
     expect_length(i1, 1L)
+    # A file can also dispatch its background advisory. Match the nearest
+    # preceding promise for this particular completion callback.
+    i0 <- max(i0[i0 < i1])
 
     txt <- src[i0:i1]
     txt[length(txt)] <- sub(" %...>%.*$", "", txt[length(txt)])
@@ -4296,6 +4341,8 @@ test_that("every pinned dispatch ships the globals its body reads", {
   # calls in the helper graph need the same declaration the nested
   # furrr_options makes.
   expect_identical(eval(interp$packages), c("sf", "gstat", "dplyr"))
+  check_dispatch("server_execution.R", "seed = TRUE) %...>% (function(answer) {",
+                 c("main_wd", "payload"))
 
   check_dispatch("gov_module.R",
                  "seed = TRUE) %...>% (function(res) {",
@@ -4308,6 +4355,8 @@ test_that("every pinned dispatch ships the globals its body reads", {
   check_dispatch("classif_module.R",
                  "seed = TRUE) %...>% (function(res) {",
                  "run_args", from_helpers = from_classif)
+  check_dispatch("classif_module.R", "seed = TRUE) %...>% (function(chk) {",
+                 c("screen_args", "classif_collinearity_diagnostic"), from_helpers = from_classif)
 })
 
 test_that("every pinned dispatch establishes its own parallel plan", {
@@ -4638,4 +4687,246 @@ test_that("an Auto (Per Locality) run is exported, classified and measured on it
   # The zones cover each locality's own cells: no cell of either grid is lost.
   expect_equal(sum(as.numeric(sf::st_area(z))),
                sum(n_cells * sizes[names(n_cells)]^2))
+})
+
+
+test_that("pending interpolation exclusions and modal continuations stay bound to their context", {
+  i <- seq_len(40)
+  df <- data.frame(
+    x = 500000 + c(i %% 8, i %% 8 + 100) * 40,
+    y = 4400000 + rep(i %/% 8, 2) * 40,
+    y_alt = 4400100 + rep(i %/% 8, 2) * 40,
+    Locality = rep(c("A", "B"), each = 40),
+    elev = rep(sin(i * 0.7), 2),
+    twin = c(2 * sin(i * 0.7), cos(i * 0.9)),
+    ph = 6 + rep(0.2 * sin(i * 0.7) + 0.1 * cos(i * 0.6), 2)
+  )
+  df$ph_cve <- df$ph + rep(0.1 * sin(i), 2)
+  verify <- function(ok, label) expect_true(ok, info = label)
+  # A large selection is checked in a background promise; here it resolves,
+  # with the same plain-data entry point, when the test releases it.
+  release <- list()
+  local_mocked_bindings(future_promise = function(expr, globals, ...) {
+    promises::promise(function(resolve, reject) {
+      release[[length(release) + 1L]] <<- function()
+        resolve(interpolation_collinearity_preview(globals$payload))
+    })
+  }, .package = "promises")
+
+  gate_server <- function(input, output, session) {
+    rv <- reactiveValues(
+      user_data = df,
+      mapping = list(x = "x", y = "y", loc = "Locality", crs = "EPSG:32635",
+        vars = list(list(actual = "elev", label = "Elevation"),
+                    list(actual = "twin", label = "Terrain height"))),
+      tuning_revision = 0L, idw_factors = list(), tps_lambdas = list(), shp_bound = NULL,
+      collinearity_pending = NULL, collinearity_generation = 0L,
+      proceed_vif = 0L, proceed_run = 0L, model_running = FALSE, opt_running = FALSE,
+      auto_archive_choice = "none", run_history = list(), run_counter = 1L,
+      run_config_summary = list(run_id = 1L, variable = "pH", method = "RK",
+        localities = "A, B", timestamp = Sys.time())
+    )
+    captured <- reactiveVal(list())
+    previous <- reactiveVal(FALSE)
+    long_run <- reactiveVal(FALSE)
+    session_id <- "gate_probe"
+    session_progress_dir <- tempdir()
+    get_current_meta <- function() list(actual = "ph", pred = "ph_cve", pred_ss = NULL, label = "pH")
+    displayed_run_has_results <- function() previous()
+    snapshot_display_state <- function() list(config = list(status = "complete"))
+    # Whether a dialog is open: the application's calls resolve to these. An
+    # environment, because testServer() reads plain variables as a snapshot.
+    modal <- new.env()
+    modal$open <- FALSE
+    showModal <- function(ui, ...) { modal$open <- TRUE; modal$ui <- ui; shiny::showModal(ui, ...) }
+    removeModal <- function(...) { modal$open <- FALSE; shiny::removeModal(...) }
+
+    expressions <- parse(file.path(proj_root, "server_execution.R"), keep.source = FALSE)
+    for (expr in expressions) {
+      dispatch <- is.call(expr) && identical(expr[[1L]], as.name("observeEvent")) &&
+        identical(expr[[2L]], quote(rv$proceed_run))
+      if (dispatch) {
+        statements <- as.list(expr[[3L]])[-1L]
+        stop_at <- which(vapply(statements, function(s) identical(s,
+          quote(rv$collinearity_pending$phase <- "running")), logical(1)))
+        stopifnot(length(stop_at) == 1L)
+        # Preserve every application guard up to its phase transition. Capturing
+        # replaces only the costly job body that follows that transition.
+        capture <- quote({
+          p <- rv$collinearity_pending
+          captured(c(captured(), list(list(exclusions = p$exclusions,
+            candidates = p$candidates, token = p$token, threshold = rv$active_vif_thresh))))
+          rv$model_running <- TRUE
+        })
+        expr[[3L]] <- as.call(c(list(as.name("{")), statements[seq_len(stop_at)], list(capture)))
+        eval(expr)
+        break
+      }
+      eval(expr)
+    }
+    calculate_run_estimates <- function() list(meta = get_current_meta(), n_locs = 2L,
+      n_points = nrow(rv$user_data), estimate_text = "Probe", est_time_str = "Probe",
+      is_long_run = long_run())
+  }
+
+  shiny::testServer(gate_server, {
+    session$setInputs(method = "RK", aux_vars = c("elev", "twin"), locality = c("A", "B"),
+      var_id = "ph", value_type = "actual", subset = "all", comp_mode = TRUE,
+      crs_selection = "EPSG:32635", boundary_type = "convex", buff_dist = 200,
+      buff_mode = "fixed", res_mode = "fixed", grid_res = 150,
+      cv_population = "native", cv_strategy = "auto", cv_repeat_on = FALSE,
+      cv_repeat_n = 5, sep_fit = FALSE, vgm_mode = "auto", idw_mode = "auto",
+      idw_nmax = 12, idw_p = 2, idw_p_mode = "fixed", tps_mode = "auto",
+      tps_lambda_mode = "gcv", rfk_uncertainty = "jackknife", ck_nmax = 15)
+    click <- function(id) {
+      arg <- setNames(list((isolate(input[[id]]) %||% 0L) + 1L), id)
+      do.call(session$setInputs, arg)
+    }
+    begin <- function() {
+      rv$model_running <- FALSE
+      session$setInputs(vif_remove_1 = NULL, vif_remove_2 = NULL)
+      click("run")
+      verify(identical(rv$collinearity_pending$phase, "choices"), "run opens locality choices")
+    }
+    total <- function() length(captured())
+
+    begin()
+    original <- rv$collinearity_pending
+    verify(length(original$screens$A$v$dropped_vif) == 1L &&
+      !length(original$screens$B$v$dropped_vif), "local A dependence is absent in B")
+    verify(identical(names(original$screens$A), c("v", "pv")), "comparison keeps both surface screens")
+    # One card per locality, each with its own removal input; the clean one
+    # collapsed after the one that needs a decision.
+    html <- output$vif_evidence_ui$html
+    verify(grepl('name="vif_remove_1" value="twin"', html, fixed = TRUE) &&
+      grepl('name="vif_remove_2" value="twin"', html, fixed = TRUE), "each card keeps its locality's input")
+    verify(grepl('<details class="mn-cl-card mn-cl-clean" id="vif_remove_2_card">', html, fixed = TRUE) &&
+      regexpr('id="vif_remove_1_card"', html) < regexpr('id="vif_remove_2_card"', html),
+      "the clean locality is collapsed, after the one with a removal")
+    verify(grepl("2 localities checked separately &#183; 1 with Auto-Drop removals", html, fixed = TRUE),
+      "the summary strip counts the localities")
+    verify(grepl("Actual and Predicted", html, fixed = TRUE), "identical surface screens share one chart")
+    verify(grepl("in that locality, for both surfaces, and checks the remaining", as.character(modal$ui), fixed = TRUE),
+      "two mapped surfaces: the Apply tip covers both")
+    session$setInputs(vif_remove_1 = "twin")
+    click("vif_apply_btn")
+    p <- rv$collinearity_pending
+    verify(identical(p$exclusions$A, "twin") && is.null(p$exclusions$B), "manual exclusion is local to A")
+    verify(identical(p$candidates$A, "elev") && identical(p$candidates$B, c("elev", "twin")),
+      "manual A candidates leave B unchanged")
+    verify(identical(p$screens$A$v$kept, "elev") && identical(p$screens$A$pv$kept, "elev"),
+      "both surfaces honor the same exclusion")
+    verify(identical(p$screens$B, original$screens$B), "unaffected B screen is reused")
+    verify(identical(p$phase, "choices") && total() == 0L, "recheck waits for explicit continuation")
+    session$setInputs(vif_remove_1 = NULL)
+    click("vif_reset_btn")
+    verify(!length(rv$collinearity_pending$exclusions) &&
+      identical(rv$collinearity_pending$candidates$A, c("elev", "twin")), "Reset restores original candidates")
+    session$setInputs(vif_remove_1 = "elev")
+    click("vif_apply_btn")
+    verify(identical(rv$collinearity_pending$candidates$A, "twin"), "either pair member can be retained")
+    session$setInputs(vif_remove_1 = NULL)
+    click("vif_drop_btn")
+    verify(total() == 1L && identical(captured()[[1L]]$candidates$A, "twin") &&
+      identical(captured()[[1L]]$candidates$B, c("elev", "twin")), "dispatch captures effective local candidates")
+    click("vif_drop_btn"); click("confirm_start_run"); click("archive_prev_run"); click("run")
+    verify(total() == 1L, "late and repeated callbacks do not duplicate a dispatch")
+    rv$model_running <- FALSE
+    session$setInputs(grid_res = 151)
+    click("vif_keep_btn"); click("vif_apply_btn"); click("confirm_start_run")
+    verify(total() == 1L && identical(rv$collinearity_pending$phase, "running"),
+      "completed-run callbacks cannot start a new context")
+
+    begin()
+    session$setInputs(vif_remove_1 = c("elev", "twin"))
+    click("vif_apply_btn")
+    verify(!length(rv$collinearity_pending$exclusions) && total() == 1L,
+      "forged remove-all action cannot empty a locality")
+    click("cancel_pending_run")
+    click("vif_keep_btn"); click("confirm_start_run"); click("discard_prev_run"); click("crs_gate_override_btn")
+    verify(is.null(rv$collinearity_pending) && total() == 1L, "Cancel invalidates all delayed actions")
+
+    begin()
+    old_token <- rv$collinearity_pending$token
+    replacement <- rv$user_data
+    replacement$ph <- replacement$ph + 0.3
+    rv$user_data <- replacement
+    click("vif_keep_btn")
+    verify(total() == 1L && !identical(old_token, rv$collinearity_pending$token) &&
+      identical(rv$collinearity_pending$phase, "choices"), "same-schema data replacement refreshes a stale answer")
+    old_token <- rv$collinearity_pending$token
+    rv$mapping$y <- "y_alt"
+    click("vif_drop_btn")
+    verify(total() == 1L && !identical(old_token, rv$collinearity_pending$token) &&
+      identical(rv$collinearity_pending$phase, "choices"), "coordinate mapping change refreshes a stale answer")
+
+    previous(TRUE)
+    begin()
+    click("vif_keep_btn")
+    verify(identical(rv$collinearity_pending$phase, "continuation"), "existing results open the archive gate")
+    rv$mapping$y <- "y"
+    click("archive_prev_run")
+    verify(total() == 1L && !length(rv$run_history) &&
+      identical(rv$collinearity_pending$phase, "choices"), "stale archive callback neither archives nor dispatches")
+
+    previous(FALSE); long_run(TRUE)
+    begin()
+    click("vif_keep_btn")
+    verify(identical(rv$collinearity_pending$phase, "confirm"), "long run opens the final confirmation")
+    session$setInputs(cv_strategy = "loocv")
+    click("confirm_start_run")
+    verify(total() == 1L && identical(rv$collinearity_pending$phase, "choices"),
+      "stale final confirmation refreshes the context")
+    click("vif_keep_btn")
+    click("confirm_start_run")
+    click("confirm_start_run")
+    verify(total() == 2L && is.infinite(captured()[[2L]]$threshold), "valid final confirmation dispatches Keep remaining once")
+
+    begin()
+    rv$crs_gate_state <- list(level = "block", dev = 999)
+    rv$crs_pending_token <- interpolation_gate_token()
+    rv$collinearity_pending <- NULL
+    click("crs_gate_override_btn")
+    verify(identical(rv$crs_gate_ack, crs_gate_key(input$crs_selection, 999)) &&
+      identical(rv$collinearity_pending$phase, "choices") && total() == 2L,
+      "valid CRS override resumes the shared covariate gate without dispatch")
+
+    begin()
+    rv$crs_gate_ack <- NULL
+    rv$crs_gate_state <- list(level = "block", dev = 999)
+    rv$crs_pending_token <- interpolation_gate_token()
+    rv$mapping$y <- "y_alt"
+    click("crs_gate_override_btn")
+    verify(!identical(rv$crs_gate_ack, crs_gate_key(input$crs_selection, 999)) && total() == 2L,
+      "stale CRS override does not acknowledge the old verdict")
+    click("cancel_pending_run")
+
+    # One mapped surface: the Apply tip promises no second one.
+    rv$mapping$y <- "y"
+    session$setInputs(comp_mode = FALSE)
+    begin()
+    verify(identical(names(rv$collinearity_pending$screens$A), "v") &&
+      grepl("in that locality and checks the remaining", as.character(modal$ui), fixed = TRUE) &&
+      !grepl("for both surfaces", as.character(modal$ui), fixed = TRUE), "one mapped surface: the tip names one")
+    click("cancel_pending_run")
+    session$setInputs(comp_mode = TRUE)
+
+    # Eleven localities go to the background check. Locality B's covariates
+    # are not collinear, so the clean result closes the checking dialog and
+    # the run continues without one.
+    rv$mapping$y <- "y"
+    many <- do.call(rbind, lapply(LETTERS[2:12], function(l)
+      transform(df[df$Locality == "B", ], Locality = l)))
+    rv$user_data <- many
+    session$setInputs(locality = LETTERS[2:12])
+    long_run(FALSE); rv$model_running <- FALSE
+    click("run")
+    verify(identical(rv$collinearity_pending$phase, "checking") && modal$open &&
+      total() == 2L && length(release) == 1L, "a large selection waits for its background check")
+    release[[1L]]()
+    for (k in seq_len(4)) { later::run_now(0); session$flushReact() }
+    verify(total() == 3L && !modal$open &&
+      setequal(names(captured()[[3L]]$candidates), LETTERS[2:12]),
+      "a clean background check closes its dialog and dispatches")
+  })
 })

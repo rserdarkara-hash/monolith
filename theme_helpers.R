@@ -138,10 +138,10 @@ pre.mn-error-pre {
   margin-bottom: 14px;
   padding: 0 16px !important;
   min-height: 52px;
-  display: flex; align-items: center; gap: 16px;
+  display: flex; align-items: center; gap: 16px; flex-wrap: wrap;
 }
 .mn-wordmark {
-  display: flex; align-items: center; gap: 13px;
+  display: flex; align-items: center; gap: 13px; flex-wrap: wrap;
 }
 .mn-wordmark .name {
   font-size: 15px; font-weight: 600; letter-spacing: .19em; text-transform: uppercase;
@@ -1309,6 +1309,10 @@ body.mn-hide-ruler .leaflet-control-measure { display: none !important; }
 }
 .mn-suite .row > .col-sm-3 > .form-group:last-child,
 .mn-suite .row > .col-sm-4 > .form-group:last-child { margin-bottom: 0 !important; }
+@media (max-width: 1100px) {
+  .mn-classif-layout > .col-sm-3,
+  .mn-classif-layout > .col-sm-9 { width: 100%; float: none; }
+}
 
 /* Server-rendered strips and sections. These used to carry their colours
    inline (a pale blue info strip, an amber archive panel); state colour is
@@ -1423,6 +1427,238 @@ body.mn-hide-ruler .leaflet-control-measure { display: none !important; }
 .mn-popover-panel .btn { width: 100%; margin-bottom: 6px; }
 .mn-popover-panel .btn:last-child { margin-bottom: 0; }
 .mn-popover-panel > span { display: block !important; width: 100%; }
+
+/* ==== covariate check (collinearity_card(), ui_components.R) ============ */
+/* Bootstrap 3 has no extra-large dialog; the interpolation check uses one for
+   two or more localities, so their cards can sit side by side. */
+@media (min-width: 992px) { .modal-xl { width: min(1180px, calc(100vw - 40px)); } }
+.mn-cl-body { max-height: 65vh; overflow-y: auto; }
+.mn-cl-hint { font-size: 12px; color: var(--mn-text-3); margin: 0 0 10px; }
+.mn-cl-foot-info { float: left; margin-top: 7px; }
+.mn-cl-summary { display: flex; flex-wrap: wrap; align-items: center; gap: 6px 8px; margin: 0 0 10px; }
+.mn-cl-sumtext { font-size: 12.5px; color: var(--mn-text-2); margin-right: 4px; }
+.mn-cl-chip {
+  display: inline-flex; align-items: center; gap: 6px; padding: 2px 10px;
+  border: 1px solid var(--mn-line); border-radius: 999px; background: var(--mn-surface-2);
+  font: inherit; font-size: 12px; color: var(--mn-text); cursor: pointer;
+}
+.mn-cl-chip:hover { border-color: var(--mn-line-2); }
+.mn-cl-chip.act { border-color: var(--mn-danger); }
+.mn-cl-chip.warn { border-color: var(--mn-warn); }
+.mn-cl-chip b { font-weight: 600; }
+.mn-cl-chip .cnt { font-size: 11px; color: var(--mn-text-2); }
+.mn-cl-chip.act .cnt { color: var(--mn-danger); }
+.mn-cl-chip.warn .cnt { color: var(--mn-warn); }
+.mn-cl-chip.ok .cnt { color: var(--mn-ok); }
+.mn-cl-grid {
+  display: grid; grid-template-columns: repeat(auto-fit, minmax(min(100%, 500px), 1fr));
+  gap: 14px; align-items: start;
+}
+.mn-cl-card {
+  min-width: 0; padding: 13px 16px 12px; scroll-margin-top: 8px;
+  border: 1px solid var(--mn-line); border-radius: var(--mn-radius-lg); background: var(--mn-surface);
+}
+.mn-cl-head { display: flex; flex-wrap: wrap; justify-content: space-between; align-items: baseline; gap: 2px 12px; }
+.mn-cl-title { font-size: 15px; font-weight: 600; color: var(--mn-text); margin: 0; }
+.mn-cl-meta { font-size: 11.5px; color: var(--mn-text-3); font-variant-numeric: tabular-nums; }
+.mn-cl-scope { font-size: 11.5px; color: var(--mn-text-3); margin-top: 3px; }
+.mn-cl-verdict {
+  display: flex; flex-wrap: wrap; align-items: center; gap: 6px;
+  margin: 8px 0 10px; font-size: 12.5px; color: var(--mn-text-2);
+}
+.mn-cl-verdict.warn { border-left: 3px solid var(--mn-warn); padding-left: 8px; }
+.mn-cl-verdict.warn b { color: var(--mn-warn); }
+.mn-cl-okmark { color: var(--mn-ok); font-weight: 600; }
+.mn-cl-step {
+  display: inline-flex; align-items: center; justify-content: center; flex: 0 0 auto;
+  min-width: 16px; height: 16px; padding: 0 4px; border-radius: 8px;
+  background: var(--mn-danger); color: var(--mn-surface);
+  font-size: 10px; font-weight: 600; line-height: 1; font-variant-numeric: tabular-nums;
+}
+.mn-cl-pill {
+  display: inline-flex; align-items: center; gap: 5px; max-width: 100%; padding: 1px 8px;
+  border: 1px solid var(--mn-line); border-radius: 999px; background: var(--mn-surface-2);
+  color: var(--mn-text); font-size: 12px;
+}
+.mn-cl-pill.act { padding-left: 3px; }
+.mn-cl-pill .t { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.mn-cl-pill .n { color: var(--mn-text-3); font-variant-numeric: tabular-nums; }
+.mn-cl-pill.gone .t { text-decoration: line-through; color: var(--mn-text-3); }
+.mn-cl-chips {
+  display: flex; flex-wrap: wrap; align-items: center; gap: 5px;
+  margin: -2px 0 9px; font-size: 12px; color: var(--mn-text-3);
+}
+.mn-cl-chips .mn-cl-pill { color: var(--mn-text-2); }
+/* The chart. Each row is one checkbox label: checkbox, name, track, value.
+   --cl-thr (set on .mn-cl-chart) is the threshold's position on the axis. */
+.mn-cl-charthead {
+  display: flex; justify-content: space-between; gap: 8px; margin: 2px 0 3px 21px;
+  font-size: 11.5px; font-weight: 600; color: var(--mn-text-2);
+}
+.mn-cl-key { font-weight: 400; color: var(--mn-text-3); }
+.mn-cl-chart .form-group { margin: 0; }
+/* Shiny sizes every input container at 300px and pulls an options group up
+   under its label, which this group hides. */
+.mn-cl-chart .shiny-input-container.shiny-input-checkboxgroup { width: auto; max-width: none; }
+.mn-cl-chart .shiny-input-checkboxgroup label ~ .shiny-options-group { margin-top: 0; }
+.mn-cl-chart .shiny-options-group, .mn-cl-ro { display: flex; flex-direction: column; }
+.mn-cl-chart .checkbox { margin: 0 !important; }
+.mn-cl-chart .checkbox label, .mn-cl-ro-row {
+  display: flex; align-items: center; gap: 8px; min-height: 22px;
+  padding: 0 4px 0 2px !important; border-radius: 4px; font-weight: 400;
+}
+.mn-cl-chart .checkbox label { cursor: pointer; }
+.mn-cl-chart .checkbox label:hover { background: var(--mn-surface-2); }
+.mn-cl-chart .checkbox label > span, .mn-cl-ro-row > .mn-cl-row { flex: 1 1 auto; min-width: 0; }
+.mn-cl-chart .checkbox input:checked + span {
+  border-radius: 3px; background: var(--mn-surface-2);
+  background: color-mix(in srgb, var(--mn-danger) 8%, transparent);
+}
+.mn-cl-chart .checkbox input:checked + span .mn-cl-name .t { text-decoration: line-through; color: var(--mn-text-3); }
+.mn-cl-cbspace { display: inline-block; flex: 0 0 13px; width: 13px; }
+/* The value column holds an exact-twin change such as 3,180,795 -> 2.02. */
+.mn-cl-row {
+  position: relative; display: grid; align-items: center; column-gap: 10px;
+  grid-template-columns: minmax(0, 1.2fr) minmax(0, 1.4fr) 112px;
+}
+.mn-cl-row.noplot { grid-template-columns: minmax(0, 1fr) 112px; }
+.mn-cl-name { display: flex; min-width: 0; font-size: 12.5px; color: var(--mn-text); white-space: nowrap; }
+.mn-cl-name .t { min-width: 0; overflow: hidden; text-overflow: ellipsis; }
+.mn-cl-row.is-removed .mn-cl-name .t { font-weight: 600; }
+.mn-cl-miss { flex: 0 0 auto; margin-left: .35em; font-size: 11.5px; color: var(--mn-text-3); }
+.mn-cl-val {
+  text-align: right; white-space: nowrap; font-size: 12px; color: var(--mn-text-2);
+  font-variant-numeric: tabular-nums;
+}
+.mn-cl-val b { color: var(--mn-text); font-weight: 600; }
+.mn-cl-val .was, .mn-cl-reason { color: var(--mn-text-3); }
+.mn-cl-reason { font-size: 11.5px; }
+.mn-cl-val .mn-cl-step { margin-right: 5px; vertical-align: 1px; }
+.mn-cl-track { position: relative; height: 22px; }
+.mn-cl-track::before { content: ''; position: absolute; left: 0; right: 0; top: 50%; border-top: 1px solid var(--mn-line); }
+.mn-cl-zone {
+  position: absolute; top: 0; bottom: 0; right: 0; left: var(--cl-thr);
+  background: var(--mn-surface-2); background: color-mix(in srgb, var(--mn-danger) 9%, transparent);
+}
+.mn-cl-thr { position: absolute; top: 0; bottom: 0; left: var(--cl-thr); border-left: 1px dashed var(--mn-danger); }
+.mn-cl-seg { position: absolute; top: calc(50% - 1px); height: 2px; background: var(--mn-line-2); }
+.mn-cl-dot { position: absolute; top: 50%; width: 9px; height: 9px; transform: translate(-50%, -50%); border-radius: 50%; }
+.mn-cl-dot.first { border: 1.5px solid var(--mn-text-3); background: var(--mn-surface); }
+.mn-cl-dot.final { background: var(--mn-accent); }
+.mn-cl-x { position: absolute; top: 50%; width: 11px; height: 11px; transform: translate(-50%, -50%); }
+.mn-cl-x::before, .mn-cl-x::after {
+  content: ''; position: absolute; left: 50%; top: -1px; bottom: -1px; width: 2.2px; margin-left: -1.1px;
+  border-radius: 1px; background: var(--mn-danger);
+}
+.mn-cl-x::before { transform: rotate(45deg); }
+.mn-cl-x::after { transform: rotate(-45deg); }
+.mn-cl-x.sing { transform: translate(-100%, -50%); }
+.mn-cl-axisrow { display: flex; gap: 8px; padding: 0 4px 0 2px; margin-top: 2px; }
+.mn-cl-axisrow > .mn-cl-row { flex: 1 1 auto; min-width: 0; }
+.mn-cl-axlab {
+  display: flex; flex-direction: column; align-items: flex-end; padding-top: 5px;
+  font-size: 10px; line-height: 1.3; color: var(--mn-text-3);
+}
+.mn-cl-axis { position: relative; height: 30px; border-top: 1px solid var(--mn-line-2); }
+.mn-cl-tick {
+  position: absolute; top: 0; transform: translateX(-50%); display: flex; flex-direction: column;
+  align-items: center; font-size: 10.5px; line-height: 1.3; color: var(--mn-text-2);
+  font-variant-numeric: tabular-nums; white-space: nowrap;
+}
+.mn-cl-tick::before { content: ''; width: 1px; height: 4px; margin-bottom: 1px; background: var(--mn-line-2); }
+.mn-cl-tick .r2 { font-size: 10px; color: var(--mn-text-3); }
+.mn-cl-tick.thr .v, .mn-cl-tick.thr .r2 { color: var(--mn-danger); font-weight: 600; }
+.mn-cl-tick.lo { transform: none; align-items: flex-start; }
+.mn-cl-tick.hi { transform: translateX(-100%); align-items: flex-end; }
+.mn-cl-tick.minor::before { height: 3px; }
+.mn-cl-legend {
+  display: flex; flex-wrap: wrap; align-items: center; gap: 4px 14px;
+  margin: 5px 0 2px 21px; font-size: 11px; color: var(--mn-text-3);
+}
+.mn-cl-legend .k { display: inline-flex; align-items: center; gap: 5px; }
+.mn-cl-legend .mn-cl-dot, .mn-cl-legend .mn-cl-x { position: relative; display: inline-block; top: auto; transform: none; }
+.mn-cl-legend .hint { flex-basis: 100%; }
+.mn-cl-caveat { margin: 8px 0 0 21px; font-size: 11.5px; color: var(--mn-text-2); }
+.mn-cl-surface {
+  margin-top: 10px; padding-top: 8px; border-top: 1px dashed var(--mn-line);
+  font-size: 12px; color: var(--mn-text-2);
+}
+.mn-cl-surface > summary { cursor: pointer; margin-bottom: 4px; }
+/* Why each removal, and the correlation bars: one hue, the sign carried by
+   the bar's direction; the danger role marks near-duplicates only. */
+.mn-cl-whys { margin-top: 10px; padding-top: 8px; border-top: 1px solid var(--mn-line); }
+.mn-cl-subhead { margin-bottom: 3px; font-size: 11.5px; font-weight: 600; color: var(--mn-text-2); }
+.mn-cl-why { margin: 3px 0; }
+.mn-cl-why > summary {
+  display: grid; grid-template-columns: 16px minmax(0, 1fr) 10px; align-items: start; column-gap: 7px;
+  list-style: none; cursor: pointer; font-size: 12.5px; color: var(--mn-text);
+}
+.mn-cl-why > summary::-webkit-details-marker { display: none; }
+.mn-cl-why > summary::after { content: '\\203A'; color: var(--mn-text-3); transition: transform .15s; }
+.mn-cl-why[open] > summary::after { transform: rotate(90deg); }
+.mn-cl-why > summary .mn-cl-step { margin-top: 2px; }
+.mn-cl-whytext { display: flex; flex-direction: column; gap: 1px; min-width: 0; }
+.mn-cl-whytext b { font-weight: 600; }
+.mn-cl-lead { font-size: 12px; color: var(--mn-text-2); }
+.mn-cl-runner { font-size: 11.5px; color: var(--mn-text-3); }
+.mn-cl-whybody { padding: 4px 0 6px 23px; }
+.mn-cl-minihead { margin-bottom: 2px; font-size: 11px; color: var(--mn-text-3); }
+.mn-cl-corr {
+  display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1.25fr) 64px 88px; align-items: center;
+  column-gap: 8px; min-height: 20px; font-size: 12px; color: var(--mn-text-2);
+}
+.mn-cl-cname { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.mn-cl-cbar { position: relative; height: 8px; border-radius: 4px; background: var(--mn-surface-3); }
+.mn-cl-cbar .zero { position: absolute; left: 50%; top: -3px; bottom: -3px; border-left: 1px solid var(--mn-line-2); }
+.mn-cl-c95 { position: absolute; top: -2px; bottom: -2px; border-left: 1px dotted var(--mn-danger); }
+.mn-cl-cbar .fill { position: absolute; top: 0; bottom: 0; border-radius: 4px; background: var(--mn-accent); }
+.mn-cl-cbar .fill.dup { background: var(--mn-danger); }
+.mn-cl-cval { text-align: right; white-space: nowrap; color: var(--mn-text); font-variant-numeric: tabular-nums; }
+.mn-cl-cval small { color: var(--mn-text-3); }
+.mn-cl-tag {
+  justify-self: start; padding: 0 6px; border: 1px solid var(--mn-danger); border-radius: 999px;
+  font-size: 10.5px; line-height: 1.5; color: var(--mn-danger); white-space: nowrap;
+}
+.mn-cl-note { margin-top: 4px; font-size: 11.5px; color: var(--mn-text-3); }
+/* All pairs as a staircase. Cells take the accent at --cl-a = 45% x |r| at
+   most, which keeps the text at 4.5:1 or better in both variants. */
+.mn-cl-allpairs { margin-top: 8px; font-size: 12px; color: var(--mn-text-2); }
+.mn-cl-allpairs > summary { cursor: pointer; }
+.mn-cl-heatwrap { overflow-x: auto; margin-top: 6px; }
+.mn-cl-heat {
+  display: grid; grid-template-columns: minmax(110px, 1fr) repeat(var(--cl-k), 38px); gap: 2px;
+  font-size: 10.5px; font-variant-numeric: tabular-nums;
+}
+.mn-cl-hl {
+  display: flex; align-items: center; gap: 4px; min-width: 0; padding-right: 6px;
+  font-size: 11px; color: var(--mn-text-2); white-space: nowrap;
+}
+.mn-cl-hl .t { min-width: 0; overflow: hidden; text-overflow: ellipsis; }
+.mn-cl-hl.auto .t { color: var(--mn-danger); }
+.mn-cl-hn { align-self: center; text-align: center; font-size: 10px; color: var(--mn-text-3); }
+.mn-cl-hc {
+  height: 22px; display: flex; align-items: center; justify-content: center; border-radius: 3px;
+  color: var(--mn-text); background: var(--mn-surface-2);
+  background: color-mix(in srgb, var(--mn-accent) var(--cl-a), var(--mn-surface));
+}
+.mn-cl-hc.dup { box-shadow: inset 0 0 0 2px var(--mn-danger); }
+.mn-cl-hc.na { color: var(--mn-text-3); background: var(--mn-surface-2); }
+/* A clean card: header and verdict, the chart one click away. */
+.mn-cl-clean > summary { list-style: none; cursor: pointer; }
+.mn-cl-clean > summary::-webkit-details-marker { display: none; }
+.mn-cl-clean > summary .mn-cl-verdict { margin-bottom: 0; }
+.mn-cl-clean[open] > summary .mn-cl-verdict { margin-bottom: 10px; }
+.mn-cl-clean > summary .mn-cl-meta::after {
+  content: '\\203A'; display: inline-block; margin-left: 8px; color: var(--mn-text-3); transition: transform .15s;
+}
+.mn-cl-clean[open] > summary .mn-cl-meta::after { transform: rotate(90deg); }
+/* The Classification Suite's summary under its Covariates picker. */
+.mn-cl-inline { margin-bottom: 8px; font-size: 12px; color: var(--mn-text-2); }
+.mn-cl-inline-scope { margin-bottom: 4px; font-size: 11px; color: var(--mn-text-3); }
+.mn-cl-inline-line { line-height: 1.45; color: var(--mn-text); }
+.mn-cl-inline-line b { font-weight: 600; }
+.mn-cl-inline-names { display: flex; flex-wrap: wrap; gap: 4px; margin: 6px 0 8px; }
+.mn-cl-inline .mn-cl-chips { margin: 6px 0 8px; }
 
 /* ==== utilities ========================================================= */
 .mn-num { font-family: var(--mn-mono); font-variant-numeric: tabular-nums; }

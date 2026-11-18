@@ -143,11 +143,14 @@
   # After the previous-results decision: archive the run on screen when asked
   # to, then start the run, through the estimate confirmation when it is long.
   archive_and_proceed <- function(action, est = calculate_run_estimates()) {
+    if (!identical(rv$collinearity_pending$phase, "continuation")) return()
+    if (!collinearity_context_valid()) return()
     if (action == "archive" && displayed_run_has_results()) {
       push_run_history(snapshot_display_state())
     }
 
     if (est$is_long_run) {
+      rv$collinearity_pending$phase <- "confirm"
       showModal(modalDialog(
         title = "Ready to Run Interpolation",
         tags$p("You are about to start the spatial interpolation pipeline with the following parameters:"),
@@ -161,11 +164,12 @@
         ),
         footer = tagList(
           actionButton("confirm_start_run", "Start Interpolation", class = "btn-primary", icon = icon("play")),
-          modalButton("Cancel")
+          actionButton("cancel_pending_run", "Cancel")
         ),
         size = "m", easyClose = FALSE
       ))
     } else {
+      rv$collinearity_pending$phase <- "dispatch"
       rv$proceed_run <- next_trigger(rv$proceed_run)
     }
   }
@@ -197,6 +201,7 @@
   # has been raised and control passes to its buttons.
   crs_suitability_gate <- function() {
     rv$crs_gate_state <- NULL
+    rv$crs_pending_token <- interpolation_gate_token()
     pos <- crs_sample_positions(rv$user_data, rv$mapping$x, rv$mapping$y, rv$mapping$crs)
     if (is.null(pos)) return(TRUE)
     suit <- crs_target_suitability(input$crs_selection, pos$lon, pos$lat)
@@ -221,7 +226,7 @@
       }),
       footer = tagList(
         actionButton("crs_gate_override_btn", "Use Anyway (Not Recommended)", class = "btn-warning"),
-        modalButton("Cancel")
+        actionButton("cancel_pending_run", "Cancel")
       ),
       easyClose = FALSE
     ))
@@ -256,12 +261,94 @@
     FALSE
   }
 
-  # The covariate-collinearity screen, shared by the Run handler and the CRS
-  # override. Every run asks again; the answer travels in rv$vif_choice_made,
-  # which the proceed_vif observer consumes and clears.
-  run_collinearity_gate <- function() {
+  # Numeric decisions belong to this complete analysis context. Presentation
+  # labels and map styling deliberately do not invalidate a scientific choice.
+  interpolation_gate_token <- reactive({
+    ids <- c("method", "aux_vars", "locality", "var_id", "value_type", "subset", "comp_mode",
+             "crs_selection", "boundary_type", "buff_dist", "buff_mode", "res_mode", "grid_res",
+             "cv_population", "cv_strategy", "cv_repeat_n", "cv_repeat_on", "sep_fit", "vgm_mode",
+             "idw_mode", "idw_nmax", "idw_p", "idw_p_mode", "tps_mode", "tps_lambda",
+             "tps_lambda_mode", "rfk_uncertainty", "ck_nmax")
     meta <- get_current_meta()
-    if (input$method %in% c("RK", "RFK", "CK") && length(input$aux_vars) > 1 && !is.null(meta)) {
+    rlang::hash(list(data = rv$user_data, mapping = rv$mapping[c("x", "y", "loc", "crs")],
+                    target = meta[c("actual", "pred", "pred_ss")],
+                    settings = lapply(ids, function(id) input[[id]]), boundary = rv$shp_bound,
+                    tuning = rv$tuning_revision, idw = rv$idw_factors, tps = rv$tps_lambdas))
+  })
+
+  # The gates a run passes before its covariate check, in order: both CRSs
+  # set, covariates where the method needs them, a usable Fixed IDW power or
+  # TPS lambda, then Target CRS suitability. The Run button starts here, and
+  # so does a pending run whose data or settings changed under it.
+  start_run_gates <- function() {
+    if (!crs_selection_gate()) return()
+    if (run_uses_covariates() && (is.null(input$aux_vars) || length(input$aux_vars) == 0)) {
+      showNotification(covariates_required_msg(), type = "error")
+      return()
+    }
+    if (!fixed_param_gate()) return()
+    # CRS suitability is asked FIRST: no collinearity decision for a run that
+    # will not measure correctly, and only one modal at a time.
+    if (!crs_suitability_gate()) return()
+    run_collinearity_gate()
+  }
+
+  collinearity_context_valid <- function() {
+    p <- rv$collinearity_pending
+    if (is.null(p)) return(FALSE)
+    if (identical(p$token, interpolation_gate_token())) return(TRUE)
+    removeModal()
+    rv$collinearity_pending <- NULL
+    showNotification("The run settings or data changed. Review the refreshed covariate check.", type = "message")
+    start_run_gates()
+    FALSE
+  }
+
+  # One card per locality (collinearity_card()): those that need a decision
+  # first, in selection order, then the clean ones collapsed. Card i keeps
+  # the checkbox input vif_remove_<i> whatever its position. Where a
+  # locality's two surfaces were screened on different populations, the
+  # Actual chart carries the checkboxes and the Predicted one is read-only.
+  output$vif_evidence_ui <- renderUI({
+    p <- rv$collinearity_pending
+    req(p)
+    labels <- desc_var_labels(input$aux_vars, rv$mapping$vars)
+    locs <- names(p$screens)
+    two <- length(p$surfaces) > 1L
+    cards <- lapply(seq_along(locs), function(i) {
+      l <- locs[i]
+      by_surface <- p$screens[[l]]
+      same <- all(vapply(by_surface, identical, logical(1), by_surface[[1]]))
+      flags <- collinearity_screen_flags(list(by_surface))
+      needs <- flags$any_vif || flags$incomplete
+      card_id <- paste0("vif_remove_", i, "_card")
+      list(needs = needs,
+           strip = list(name = l, target = card_id, incomplete = flags$incomplete,
+                        n_remove = length(unique(unlist(lapply(by_surface, `[[`, "dropped_vif"))))),
+           card = collinearity_card(card_id, l,
+             collinearity_meta(by_surface[[1]], length(p$candidates[[l]]),
+                               extra = if (two) (if (same) "Actual and Predicted" else "Actual")),
+             by_surface[[1]], labels, paste0("vif_remove_", i),
+             removable = setdiff(p$candidates[[l]], collinearity_forced_out(by_surface)),
+             manual = p$exclusions[[l]],
+             secondary = if (!same) list(name = "Predicted", screen = by_surface[[2]]),
+             collapsed = length(locs) > 1L && !needs && !length(p$exclusions[[l]])))
+    })
+    shown <- cards[order(!vapply(cards, `[[`, logical(1), "needs"))]
+    tagList(
+      if (length(locs) > 1L) collinearity_summary_strip(lapply(shown, `[[`, "strip")),
+      if (any(lengths(p$candidates) > 1L))
+        tags$p(class = "mn-cl-hint", "Tick covariates to remove them yourself, then Apply removals and recheck."),
+      tags$div(class = "mn-cl-grid", lapply(shown, `[[`, "card")))
+  })
+
+  run_collinearity_gate <- function(recheck = FALSE) {
+    meta <- get_current_meta()
+    token <- interpolation_gate_token()
+    pending <- rv$collinearity_pending
+    exclusions <- if (!is.null(pending) && identical(pending$token, token)) pending$exclusions else list()
+    screens <- list(); candidates <- list(); surfaces <- c(v = "Actual")
+    if (input$method %in% c("RK", "RFK", "CK") && length(input$aux_vars) > 0 && !is.null(meta)) {
        # Each selected locality is screened as the run will screen it: on its
        # own fitted point set, per surface (locality_screen_preview()). The
        # dialog opens when any of them would drop a collinear covariate, the
@@ -271,35 +358,104 @@
        pred_col <- if (identical(input$value_type, "pred_ss")) meta$pred_ss else meta$pred
        has_pre <- (isTRUE(input$comp_mode) || !identical(input$value_type, "actual")) && is_valid_col_ref(pred_col)
        surfaces <- c(v = "Actual", if (has_pre) c(pv = "Predicted"))
+       candidates <- stats::setNames(lapply(locs, function(l) setdiff(input$aux_vars, exclusions[[l]])), locs)
+       if (!is.null(pending) && identical(pending$token, token) &&
+           identical(pending$phase, "checking")) return(invisible(FALSE))
        screens <- lapply(stats::setNames(locs, locs), function(l) {
-         locality_screen_preview(
-           l, locality_run_frame(rv$user_data, rv$mapping, l, eff_subset, meta$actual, if (has_pre) pred_col),
-           rv$mapping$crs, input$method, input$aux_vars, 10, names(surfaces))
+         if (!is.null(pending) && identical(pending$token, token) &&
+             identical(pending$candidates[[l]], candidates[[l]]) && !is.null(pending$screens[[l]]))
+           return(pending$screens[[l]])
+         NULL
        })
-       found <- collinearity_dialog_lines(screens, surfaces)
-
-       if (found$any_vif) {
+       todo <- locs[vapply(screens, is.null, logical(1))]
+       payload <- list(items = lapply(todo, function(l) list(l = l, aux_vars = candidates[[l]],
+         pts_data = locality_run_frame(rv$user_data, rv$mapping, l, eff_subset,
+                                      meta$actual, if (has_pre) pred_col))),
+         current_crs = rv$mapping$crs, method = input$method, surfaces = names(surfaces))
+       work <- sum(vapply(payload$items, function(it) nrow(it$pts_data) * max(1L, length(it$aux_vars))^2, numeric(1)))
+       if (work > 2e6 || length(payload$items) > 10L ||
+           sum(vapply(payload$items, function(it) nrow(it$pts_data), integer(1))) > 10000L) {
+         rv$collinearity_generation <- rv$collinearity_generation + 1L
+         generation <- rv$collinearity_generation
+         rv$collinearity_pending <- list(token = token, exclusions = exclusions, screens = screens,
+           surfaces = surfaces, candidates = candidates, phase = "checking", generation = generation)
+         showModal(modalDialog(title = "Checking covariates",
+           tags$p("Preparing locality populations and diagnostics. The run will wait for this check."),
+           footer = actionButton("cancel_pending_run", "Cancel"), easyClose = FALSE))
+         main_wd <- getwd()
+         promises::future_promise({
+           source(file.path(main_wd, "spatial_helpers.R"), local = FALSE)
+           interpolation_collinearity_preview(payload)
+         }, globals = list(main_wd = main_wd, payload = payload),
+            packages = c("sf", "gstat", "dplyr"), seed = TRUE) %...>% (function(answer) {
+           p <- isolate(rv$collinearity_pending)
+           if (is.null(p) || !identical(p$generation, generation) ||
+               !identical(p$token, isolate(interpolation_gate_token()))) return()
+           for (l in names(answer)) p$screens[[l]] <- answer[[l]]
+           p$phase <- "ready"
+           rv$collinearity_pending <- p
+           # Close the checking dialog: the gate opens its own when the result
+           # needs an answer, and a clean result continues the run.
+           removeModal()
+           isolate(run_collinearity_gate(recheck = recheck))
+         }) %...!% (function(e) {
+           p <- isolate(rv$collinearity_pending)
+           if (is.null(p) || !identical(p$generation, generation) ||
+               !identical(p$token, isolate(interpolation_gate_token()))) return()
+           for (l in todo) p$screens[[l]] <- stats::setNames(lapply(surfaces, function(s) list(
+             kept = candidates[[l]], dropped_constant = character(0), dropped_vif = character(0),
+             diagnostics = list(status = "failed", reason = conditionMessage(e),
+                                n_rows = NA_integer_, n_complete = NA_integer_))), names(surfaces))
+           p$phase <- "ready"
+           rv$collinearity_pending <- p
+           isolate(run_collinearity_gate(recheck = TRUE))
+         })
+         return(invisible(FALSE))
+       }
+       if (length(todo)) {
+         checked <- interpolation_collinearity_preview(payload)
+         for (l in names(checked)) screens[[l]] <- checked[[l]]
+       }
+       found <- collinearity_screen_flags(screens)
+       incomplete <- found$incomplete
+       rv$collinearity_pending <- list(token = token, exclusions = exclusions, screens = screens,
+                                      surfaces = surfaces, candidates = candidates, phase = "choices")
+       if (found$any_vif || incomplete || recheck) {
+          # The answer is a rule, applied to each locality's samples and
+          # again inside every CV fold.
+          choice <- found$any_vif || incomplete
+          tip <- c(
+            "Apply removals and recheck" = paste0("removes the ticked covariates in that locality",
+              if (length(surfaces) > 1L) ", for both surfaces,", " and checks the remaining ones again. ",
+              "Keep at least one covariate in every locality; to use none, choose a different method."),
+            if (any(lengths(exclusions) > 0L)) c("Reset removals" = "restores every covariate you removed."),
+            if (choice) c(
+              "Auto-Drop remaining" = "removes the covariate with the highest VIF, one at a time, until every VIF is 10 or less. Each cross-validation training fold repeats this on its own rows, so folds can keep different covariates.",
+              "Keep remaining" = "keeps every remaining covariate, collinear ones included.")
+            else c("Continue with remaining covariates" = "runs with the remaining covariates; each cross-validation training fold still removes any VIF above 10 on its own rows."),
+            "Cross-validation measures performance conditional on the covariates you chose by hand.",
+            if (identical(input$method, "CK"))
+              sprintf("Constant covariates, and those with fewer than %d samples co-located with the target, are removed whatever you answer.", CK_MIN_COLLOCATED)
+            else "Constant covariates are removed whatever you answer.")
           showModal(modalDialog(
-            title = tags$div(style = "color: var(--mn-danger); font-weight: 600;", icon("exclamation-triangle"), "High Multicollinearity Detected"),
-            tags$p("The selected covariates are collinear (variance inflation factor above 10) within at least one selected locality. This may destabilize the spatial estimation model."),
-            tags$p(tags$b("What each locality's model would drop:")),
-            tags$ul(style = "max-height: 220px; overflow-y: auto;", lapply(found$lines, tags$li)),
-            # The answer is a rule, applied to each locality's samples and
-            # again inside every CV fold.
-            tags$p(style = "font-size: 0.9em; color: var(--mn-text-2);",
-                   "Your answer sets the rule for the collinear covariates. The map applies it to all samples of each locality; cross-validation applies it again inside every fold, using only that fold's training samples, so a fold can keep a different set. A covariate that is constant within a locality is dropped there whatever the answer."),
-            tags$p("What would you like to do?"),
+            title = "Review covariates by locality",
+            tags$div(class = "mn-cl-body", uiOutput("vif_evidence_ui")),
             footer = tagList(
-              actionButton("vif_drop_btn", "Auto-Drop and Continue", class = "btn-success"),
-              actionButton("vif_keep_btn", "Keep All (Not Recommended)", class = "btn-warning"),
-              modalButton("Cancel")
+              tags$span(class = "mn-cl-foot-info", info_tooltip("vif_gate", tip_html(tip))),
+              actionButton("vif_apply_btn", "Apply removals and recheck", disabled = TRUE),
+              if (any(lengths(exclusions) > 0L)) actionButton("vif_reset_btn", "Reset removals"),
+              actionButton("vif_drop_btn", if (choice) "Auto-Drop remaining" else "Continue with remaining covariates", class = "btn-success"),
+              if (choice) actionButton("vif_keep_btn", "Keep remaining", class = "btn-warning"),
+              actionButton("cancel_pending_run", "Cancel")
             ),
-            easyClose = FALSE
+            easyClose = FALSE, size = if (length(screens) > 1L) "xl" else "l"
           ))
           return(invisible(FALSE))
        }
     }
-
+    rv$collinearity_pending <- list(token = token, exclusions = exclusions, screens = screens,
+                                   surfaces = surfaces, candidates = candidates, phase = "approved")
+    rv$vif_choice_made <- 10
     rv$proceed_vif <- next_trigger(rv$proceed_vif)
     invisible(TRUE)
   }
@@ -307,21 +463,85 @@
   observeEvent(input$crs_gate_override_btn, {
     removeModal()
     suit <- rv$crs_gate_state
-    if (is.null(suit)) return()
+    if (is.null(suit) || !identical(suit$level, "block") || is.null(rv$crs_pending_token)) return()
+    if (!identical(rv$crs_pending_token, interpolation_gate_token())) {
+      start_run_gates()
+      return()
+    }
     rv$crs_gate_ack <- crs_gate_key(input$crs_selection, suit$dev)
+    rv$crs_pending_token <- NULL
     run_collinearity_gate()
   })
 
-  observeEvent(input$vif_drop_btn, {
+  observeEvent(input$cancel_pending_run, {
     removeModal()
-    rv$vif_choice_made <- 10
-    rv$proceed_vif <- next_trigger(rv$proceed_vif)
+    rv$collinearity_pending <- NULL
+    rv$crs_pending_token <- NULL
+    rv$crs_gate_state <- NULL
   })
 
-  observeEvent(input$vif_keep_btn, {
-    removeModal()
-    rv$vif_choice_made <- Inf
-    rv$proceed_vif <- next_trigger(rv$proceed_vif)
+  # A background check whose context changes is restarted. The token is read
+  # only while a check is pending: it hashes the uploaded data, which on every
+  # sidebar change would stall the session for large uploads.
+  observe({
+    p <- rv$collinearity_pending
+    if (is.null(p) || !identical(p$phase, "checking")) return()
+    if (identical(p$token, interpolation_gate_token())) return()
+    isolate({
+      removeModal()
+      rv$collinearity_pending <- NULL
+      start_run_gates()
+    })
+  })
+
+  # Apply needs a tick, and must leave every locality a covariate.
+  observe({
+    p <- rv$collinearity_pending
+    if (is.null(p) || !identical(p$phase, "choices")) return()
+    ticked <- lapply(seq_along(p$screens), function(i) input[[paste0("vif_remove_", i)]])
+    valid <- any(lengths(ticked) > 0L) && all(vapply(seq_along(p$screens), function(i) {
+      l <- names(p$screens)[i]
+      length(setdiff(input$aux_vars, union(p$exclusions[[l]], ticked[[i]]))) > 0
+    }, logical(1)))
+    shinyjs::toggleState("vif_apply_btn", condition = valid)
+  })
+
+  observeEvent(input$vif_apply_btn, {
+    p <- rv$collinearity_pending
+    if (!identical(p$phase, "choices")) return()
+    if (!collinearity_context_valid()) return()
+    for (i in seq_along(p$screens)) {
+      l <- names(p$screens)[i]
+      forced <- collinearity_forced_out(p$screens[[l]])
+      chosen <- intersect(setdiff(p$candidates[[l]], forced), input[[paste0("vif_remove_", i)]])
+      p$exclusions[[l]] <- union(p$exclusions[[l]], chosen)
+      if (!length(setdiff(input$aux_vars, p$exclusions[[l]]))) {
+        showNotification("Keep at least one covariate in each locality, or choose a different method.", type = "warning")
+        return()
+      }
+    }
+    rv$collinearity_pending <- p
+    run_collinearity_gate(recheck = TRUE)
+  })
+
+  observeEvent(input$vif_reset_btn, {
+    if (!identical(rv$collinearity_pending$phase, "choices")) return()
+    if (!collinearity_context_valid()) return()
+    rv$collinearity_pending$exclusions <- list()
+    run_collinearity_gate(recheck = TRUE)
+  })
+
+  # Auto-Drop (or Continue on a clean check) applies the VIF 10 rule; Keep
+  # remaining disables pruning.
+  for (.answer in c("drop", "keep")) local({
+    answer <- .answer
+    observeEvent(input[[paste0("vif_", answer, "_btn")]], {
+      if (!identical(rv$collinearity_pending$phase, "choices") || !collinearity_context_valid()) return()
+      removeModal()
+      rv$collinearity_pending$phase <- "approved"
+      rv$vif_choice_made <- if (answer == "keep") Inf else 10
+      rv$proceed_vif <- next_trigger(rv$proceed_vif)
+    })
   })
 
   observeEvent(input$run, {
@@ -338,22 +558,13 @@
     # No req() on input$locality: an empty Locality box means every locality
     # (resolve_selected_localities), and req() would drop the click silently.
     req(rv$user_data, rv$mapping$x, rv$mapping$y)
-    if (!crs_selection_gate()) return()
-
-    if (run_uses_covariates() && (is.null(input$aux_vars) || length(input$aux_vars) == 0)) {
-      showNotification(covariates_required_msg(), type = "error")
-      return()
-    }
-    if (!fixed_param_gate()) return()
-
-    # CRS suitability is asked FIRST: no collinearity decision for a run that
-    # will not measure correctly, and only one modal at a time.
-    if (!crs_suitability_gate()) return()
-
-    run_collinearity_gate()
+    rv$collinearity_pending <- NULL
+    start_run_gates()
   })
 
   observeEvent(rv$proceed_vif, {
+    if (!identical(rv$collinearity_pending$phase, "approved") || !collinearity_context_valid()) return()
+    rv$collinearity_pending$phase <- "continuation"
     vif_thresh <- if (!is.null(rv$vif_choice_made)) rv$vif_choice_made else 10
     rv$vif_choice_made <- NULL
     rv$active_vif_thresh <- vif_thresh
@@ -383,7 +594,7 @@
           footer = tagList(
             actionButton("archive_prev_run", "Archive & Continue", class = "btn-warning", icon = icon("archive")),
             actionButton("discard_prev_run", "Discard & Continue", class = "btn-danger", icon = icon("trash")),
-            modalButton("Cancel")
+            actionButton("cancel_pending_run", "Cancel")
           ),
           size = "m", easyClose = FALSE
         ))
@@ -397,6 +608,7 @@
   for (.choice in c("archive", "discard")) local({
     choice <- .choice
     observeEvent(input[[paste0(choice, "_prev_run")]], {
+      if (!identical(rv$collinearity_pending$phase, "continuation") || !collinearity_context_valid()) return()
       removeModal()
       if (isTRUE(input$auto_archive_remember)) rv$auto_archive_choice <- choice
       archive_and_proceed(choice)
@@ -404,7 +616,9 @@
   })
 
   observeEvent(input$confirm_start_run, {
+    if (!identical(rv$collinearity_pending$phase, "confirm") || !collinearity_context_valid()) return()
     removeModal()
+    rv$collinearity_pending$phase <- "dispatch"
     rv$proceed_run <- next_trigger(rv$proceed_run)
   })
 
@@ -436,6 +650,8 @@
       return()
     }
     req(rv$user_data, rv$mapping$x, rv$mapping$y)
+    if (!identical(rv$collinearity_pending$phase, "dispatch") || !collinearity_context_valid()) return()
+    rv$collinearity_pending$phase <- "running"
 
     # Re-asked here, not only at input$run: the archive/estimate confirmation
     # modal sits between the two observers.
@@ -461,7 +677,7 @@
     x_num <- suppressWarnings(as.numeric(as.character(x_vals)))
     y_num <- suppressWarnings(as.numeric(as.character(y_vals)))
     
-    valid_xy_count <- sum(!is.na(x_num) & !is.na(y_num))
+    valid_xy_count <- sum(is.finite(x_num) & is.finite(y_num))
     
     if (valid_xy_count < 3) {
       showModal(modalDialog(
@@ -483,7 +699,10 @@
     }
     if (!fixed_param_gate()) return()
     if (run_uses_covariates() && length(aux_vars) > 0) {
-      missing_vars <- setdiff(aux_vars, colnames(rv$user_data))
+      check_locs <- resolve_selected_localities(input$locality, rv$user_data, rv$mapping$loc)
+      validation_aux <- unique(unlist(lapply(check_locs, function(l)
+        setdiff(aux_vars, rv$collinearity_pending$exclusions[[l]])), use.names = FALSE))
+      missing_vars <- setdiff(validation_aux, colnames(rv$user_data))
       if (length(missing_vars) > 0) {
         showModal(modalDialog(
           title = tags$div(style = "color: var(--mn-danger); font-weight: 600;", icon("exclamation-triangle"), "Missing Covariates"),
@@ -496,9 +715,9 @@
       }
       
       non_numeric_vars <- c()
-      for (v in aux_vars) {
+      for (v in validation_aux) {
         v_vals <- suppressWarnings(as.numeric(as.character(rv$user_data[[v]])))
-        if (sum(!is.na(v_vals)) < 3) {
+        if (sum(is.finite(v_vals)) < 3) {
           non_numeric_vars <- c(non_numeric_vars, v)
         }
       }
@@ -650,8 +869,14 @@
       # The selection; what each locality used and what the screen removed is
       # filled at completion (covariates_retained / covariates_dropped).
       covariates_selected = if (run_uses_covariates()) paste(input$aux_vars, collapse = ", ") else NA,
+      # Sets stay JSON arrays (I()) whatever their length.
+      covariate_labels = if (run_uses_covariates()) as.list(desc_var_labels(input$aux_vars, rv$mapping$vars)),
+      covariates_manual_exclusions = if (run_uses_covariates())
+        lapply(rv$collinearity_pending$exclusions, I),
+      covariates_effective = if (run_uses_covariates()) stats::setNames(lapply(locs, function(l)
+        I(setdiff(input$aux_vars, rv$collinearity_pending$exclusions[[l]]))), locs),
       # The RESOLVED gate the dispatch passes into run_params: Inf records the
-      # user's "Keep All (Not Recommended)" choice in the collinearity modal.
+      # user's "Keep remaining" choice in the collinearity modal.
       vif_threshold = if (input$method %in% c("RK", "RFK", "CK")) (rv$active_vif_thresh %||% 10) else NA,
       rf_ntree = if (input$method == "RFK") rfk_ntree_val else NA,
       rfk_uncertainty = if (input$method == "RFK") (input$rfk_uncertainty %||% "jackknife") else NA,
@@ -871,6 +1096,7 @@
     run_params <- list(
       main_wd = main_wd,
       current_method = current_method, current_crs = current_crs, aux_vars = aux_vars,
+      manual_exclusions = rv$collinearity_pending$exclusions,
       shp_bound = shp_bound, shp_shared = shp_shared, b_type = b_type, buff_mode = buff_mode, b_dist = b_dist,
       res_mode = res_mode, grid_res = grid_res, crs_sel = crs_sel,
       comp_mode = comp_mode, val_type = val_type,
@@ -1060,6 +1286,9 @@
         cov_rec <- covariate_screen_record(res_all)
         rv$run_config_summary$covariates_retained <- cov_rec$retained
         rv$run_config_summary$covariates_dropped <- cov_rec$dropped
+        rv$run_config_summary$covariates_dropped_constant <- cov_rec$constant
+        rv$run_config_summary$covariates_dropped_automatic <- cov_rec$automatic
+        if (current_method == "CK") rv$run_config_summary$covariates_dropped_collocation <- cov_rec$collocation
         if (current_method == "CK") rv$run_config_summary$ck_design <- cov_rec$design
       }
       # Each locality's cell size (the Auto modes set it during the run), for

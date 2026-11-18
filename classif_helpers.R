@@ -275,16 +275,20 @@ registerS3method("tidy", "step_vif_screen", tidy.step_vif_screen, envir = asName
 registerS3method("print", "step_vif_screen", print.step_vif_screen)
 
 #' Numeric covariates the VIF screen removes on all rows of `train_df`;
-#' character(0) when no finite threshold is set (Keep All).
-.classif_screen_all_rows <- function(train_df, predictors, vif_threshold) {
+#' character(0) when no finite threshold is set (Keep remaining). With
+#' `details = TRUE`, returns separate kept/constant/VIF recommendation fields.
+.classif_screen_all_rows <- function(train_df, predictors, vif_threshold, details = FALSE) {
+  empty <- list(kept = predictors, dropped = character(0),
+                dropped_constant = character(0), dropped_vif = character(0))
   if (!(is.numeric(vif_threshold) && length(vif_threshold) == 1 && is.finite(vif_threshold))) {
-    return(character(0))
+    return(if (details) empty else empty$dropped)
   }
   num <- predictors[vapply(predictors, function(p) is.numeric(train_df[[p]]), logical(1))]
-  if (length(num) < 2) return(character(0))
-  intersect(suppressWarnings(detect_multicollinearity_engine(
+  if (length(num) < 2) return(if (details) empty else empty$dropped)
+  chk <- suppressWarnings(detect_multicollinearity_engine(
     as.data.frame(train_df[, num, drop = FALSE]), vars = num,
-    vif_threshold = vif_threshold))$dropped, num)
+    vif_threshold = vif_threshold))
+  if (details) chk else intersect(chk$dropped, num)
 }
 
 #' Covariates the fitted workflow's VIF screen removed (character(0) when the
@@ -442,12 +446,36 @@ classif_folds_to_rset <- function(train_df, fold_id, assess_df = NULL, target = 
   df
 }
 
+#' Complete model rows require finite numeric observations as well as observed
+#' categorical values. Inf is missing support, never a usable model value.
+.classif_complete_rows <- function(df, vars) {
+  if (inherits(df, "sf")) df <- sf::st_drop_geometry(df)
+  if (!length(vars)) return(rep(TRUE, nrow(df)))
+  d <- df[, vars, drop = FALSE]
+  keep <- stats::complete.cases(d)
+  for (p in vars[vapply(d, is.numeric, logical(1))]) keep <- keep & is.finite(d[[p]])
+  keep
+}
+
+#' Plain-data entry for the pooled advisory, also used by its background worker.
+classif_collinearity_diagnostic <- function(df, predictors, vif_threshold) {
+  chk <- tryCatch(
+    suppressWarnings(detect_multicollinearity_engine(df, vars = predictors,
+      vif_threshold = vif_threshold, diagnostics = TRUE)),
+    error = function(e) list(kept = predictors, dropped = character(0),
+      dropped_constant = character(0), dropped_vif = character(0),
+      diagnostics = list(status = "failed", reason = conditionMessage(e),
+                         n_rows = nrow(df), n_complete = NA_integer_)))
+  chk$vif_threshold <- vif_threshold
+  chk
+}
+
 #' Candidate covariate support outside the scored complete-case population.
 #' A row can carry a label but lack a predictor the fold later removes. Its
 #' label is never used; eligibility is decided on the fold's kept predictors.
 .classif_unscored_covariates <- function(pts_sf, target, predictors) {
   df <- as.data.frame(sf::st_drop_geometry(pts_sf))
-  scored <- stats::complete.cases(df[, c(target, predictors), drop = FALSE])
+  scored <- .classif_complete_rows(df, c(target, predictors))
   pts_sf[!scored, predictors, drop = FALSE]
 }
 
@@ -477,7 +505,7 @@ classif_folds_to_rset <- function(train_df, fold_id, assess_df = NULL, target = 
     # in assess_df for recipe bookkeeping but are never used for prediction.
     support <- keep_sf[analysis, retained, drop = FALSE]
     if (with_extra) {
-      eligible <- stats::complete.cases(sf::st_drop_geometry(extra_sf)[, retained, drop = FALSE])
+      eligible <- .classif_complete_rows(extra_sf, retained)
       extra_n[k] <- sum(eligible)
       support <- rbind(support, extra_sf[eligible, retained, drop = FALSE])
     }
@@ -810,7 +838,7 @@ run_classification_cv <- function(pts_sf, target, predictors,
   }
 
   full_df <- as.data.frame(sf::st_drop_geometry(pts_sf))
-  cc <- stats::complete.cases(full_df[, c(target, predictors), drop = FALSE])
+  cc <- .classif_complete_rows(full_df, c(target, predictors))
   keep_sf <- pts_sf[cc, ]
   train_df <- .classif_numeric_as_double(full_df[cc, c(target, predictors), drop = FALSE], predictors)
   # droplevels: classif_build_target() keeps every bin label (a break can
@@ -1366,7 +1394,7 @@ classif_permutation_importance <- function(model, train_df, target, predictors,
                                            cancel_file = NULL, progress = NULL) {
   wf <- model$workflow
   df <- as.data.frame(train_df)
-  df <- df[stats::complete.cases(df[, c(target, predictors), drop = FALSE]), , drop = FALSE]
+  df <- df[.classif_complete_rows(df, c(target, predictors)), , drop = FALSE]
   core <- .classif_with_seed(seed, {
     .classif_perm_delta(wf, df, target, predictors, n_rep = n_rep,
                         cancel_file = cancel_file, progress = progress)
@@ -1414,7 +1442,7 @@ fit_classification_model <- function(pts_sf, target, predictors,
                                      vif_threshold = NULL, domain_xy = NULL) {
   strategy <- match.arg(strategy)
   full_df <- as.data.frame(sf::st_drop_geometry(pts_sf))
-  cc <- stats::complete.cases(full_df[, c(target, predictors), drop = FALSE])
+  cc <- .classif_complete_rows(full_df, c(target, predictors))
   train_df <- .classif_numeric_as_double(full_df[cc, c(target, predictors), drop = FALSE], predictors)
   # Same droplevels contract as run_classification_cv: `model$levels` never
   # names a class the engine has no column for.
@@ -1428,7 +1456,8 @@ fit_classification_model <- function(pts_sf, target, predictors,
   }
 
   n_cls <- nlevels(train_df[[target]])
-  screened_out <- .classif_screen_all_rows(train_df, predictors, vif_threshold)
+  screen <- .classif_screen_all_rows(train_df, predictors, vif_threshold, details = TRUE)
+  screened_out <- screen$dropped
   rec <- classif_build_recipe(train_df, target, predictors, weight_col = weight_col,
                               vif_threshold = vif_threshold)
   tune_params <- .classif_effective_tune_params(method, depth, n_cls)
@@ -1479,10 +1508,18 @@ fit_classification_model <- function(pts_sf, target, predictors,
   }
 
   fitted <- .classif_with_seed(seed, parsnip::fit(wf, data = train_df))
+  fitted_recipe <- workflows::extract_recipe(fitted)
+  zero_variance_terms <- unlist(lapply(Filter(function(step) inherits(step, "step_zv"),
+    fitted_recipe$steps), function(step) step$removals), use.names = FALSE)
   list(workflow = fitted, levels = levels(train_df[[target]]),
-       # The covariates the fitted model uses (after an Auto-Drop screen).
+       # Raw inputs required by the workflow, including a column whose terms
+       # the recipe removes. Learner terms are recorded after preprocessing.
        target = target, predictors = predictors, method = method,
+       recipe_zero_variance_terms = as.character(zero_variance_terms),
+       final_model_terms = colnames(workflows::extract_mold(fitted)$predictors),
        screened_out = screened_out,
+       screened_constant = screen$dropped_constant,
+       screened_vif = screen$dropped_vif,
        # This model's own full-data tuning result, not the CV loop's selection.
        best_params = final_params,
        weights_applied = weights_applied)
@@ -1810,6 +1847,9 @@ build_classification_grid_aux <- function(pts_proj, grid_p, predictors,
     stop("Predictor column(s) not found in the training data: ",
          paste(missing_preds, collapse = ", "))
   }
+  pts_proj <- pts_proj[.classif_complete_rows(df, predictors), , drop = FALSE]
+  if (nrow(pts_proj) == 0) stop("No locations have finite, complete covariate support.")
+  df <- sf::st_drop_geometry(pts_proj)
   is_num <- vapply(predictors, function(p) is.numeric(df[[p]]), logical(1))
   num_preds <- predictors[is_num]
   cat_preds <- predictors[!is_num]
@@ -2054,6 +2094,9 @@ classif_resolve_scope <- function(df, x_col, y_col, src_crs, proj_crs,
   # One row per location. The row index travels as TEXT so the merge keeps each
   # location's first index; locality and polygon hit are read off that row.
   pts$.mn_scope_row <- as.character(seq_len(n_rows))
+  for (p in names(pts)[vapply(pts, is.numeric, logical(1))]) {
+    if (any(!is.finite(pts[[p]]))) pts[[p]][!is.finite(pts[[p]])] <- NA_real_
+  }
   pts <- merge_colocated(pts, majority = cls_cols)
   first <- as.integer(pts$.mn_scope_row)
   pts$.mn_scope_row <- NULL
@@ -2381,6 +2424,8 @@ run_classification_pipeline <- function(df, target, predictors,
                                         importance_mode = c("oof", "training"),
                                         nested = FALSE,
                                         vif_threshold = NULL,
+                                        candidate_selection = NULL,
+                                        predictor_labels = NULL,
                                         progress_dir = NULL,
                                         session_id = "classif",
                                         cancel_file = NULL) {
@@ -2395,11 +2440,17 @@ run_classification_pipeline <- function(df, target, predictors,
   report <- .classif_progress_reporter(progress_dir, session_id, make_surface)
   if (is.null(report)) report <- function(...) invisible(NULL)
   importance_mode <- match.arg(importance_mode)
+  if (is.null(candidate_selection)) {
+    candidate_selection <- list(original = predictors, manual_exclusions = character(0),
+                                effective = predictors)
+  }
   .classif_check_cancel(cancel_file)
 
   keep_cols <- unique(c(target, predictors, x_col, y_col, group_col))
   d <- df[, intersect(keep_cols, names(df)), drop = FALSE]
-  d <- d[!is.na(d[[x_col]]) & !is.na(d[[y_col]]), , drop = FALSE]
+  d[[x_col]] <- coord_values(d[[x_col]])
+  d[[y_col]] <- coord_values(d[[y_col]])
+  d <- d[is.finite(d[[x_col]]) & is.finite(d[[y_col]]), , drop = FALSE]
 
   grp <- if (!is.null(group_col) && group_col %in% names(d)) as.character(d[[group_col]]) else NULL
 
@@ -2448,6 +2499,7 @@ run_classification_pipeline <- function(df, target, predictors,
     report("cv", 1)
     out <- list(
       nn_only = TRUE,
+      candidate_selection = candidate_selection, predictor_labels = predictor_labels,
       cv_metrics = as.data.frame(cv$metrics),
       per_class = cv$per_class,
       conf_mat = cv$conf_mat$table,
@@ -2541,6 +2593,16 @@ run_classification_pipeline <- function(df, target, predictors,
   # Auto-Drop: what the final model's screen removed on all rows, and what
   # each CV fold's own screen removed on its training rows.
   out$screened_out <- model$screened_out
+  out$predictors <- model$predictors
+  out$screened_constant <- model$screened_constant
+  out$screened_vif <- model$screened_vif
+  out$candidate_selection <- c(candidate_selection, list(
+    automatic_removals = model$screened_vif,
+    constant_removals = model$screened_constant,
+    final_retained = model$predictors,
+    recipe_zero_variance_terms = model$recipe_zero_variance_terms,
+    final_model_terms = model$final_model_terms))
+  out$predictor_labels <- predictor_labels
   out$cv_fold_screen <- cv$fold_screen
   out$vif_threshold <- vif_threshold
 
@@ -2577,6 +2639,8 @@ run_classification_pipeline <- function(df, target, predictors,
       target     = target,
       levels     = levs,
       predictors = model$predictors,
+      candidate_selection = out$candidate_selection,
+      predictor_labels = predictor_labels,
       # Provenance of the covariate list above: which covariates the Auto-Drop
       # screen removed and at which VIF threshold, so a bundle whose predictor
       # list is shorter than the run's selection explains itself. NULL when no
@@ -2630,8 +2694,7 @@ run_classification_pipeline <- function(df, target, predictors,
     # read by the model, so it is not kriged. The surfaces use the rows that
     # carry every covariate the model reads (a missing target is fine here, as
     # for RK): gstat refuses a missing value in the variable it kriges.
-    cov_ok <- stats::complete.cases(
-      sf::st_drop_geometry(pts)[, model$predictors, drop = FALSE])
+    cov_ok <- .classif_complete_rows(pts, model$predictors)
     grid_aux <- build_classification_grid_aux(
       pts[cov_ok, ], gr$grid_p, model$predictors,
       cancel_file = cancel_file,

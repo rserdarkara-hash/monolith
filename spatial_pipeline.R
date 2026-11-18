@@ -621,7 +621,7 @@ replicate_merge_note <- function(l, n_rep) {
 # location comes from the rows that measured the target (as in the variogram
 # preview and the manual-tuning bounds). Returns an sf with refreshed x/y.
 dedup_valid_points <- function(pts_sf, target) {
-  pts_sf <- pts_sf[!is.na(pts_sf[[target]]), ]
+  pts_sf <- pts_sf[is.finite(pts_sf[[target]]), ]
   if (nrow(pts_sf) == 0) return(pts_sf)
   pts_sf <- merge_colocated(pts_sf)
   cc <- sf::st_coordinates(pts_sf)
@@ -635,6 +635,10 @@ dedup_valid_points <- function(pts_sf, target) {
 #' is the mean of EVERY sample there that measured it; the target keeps the
 #' mean of the samples that measured it.
 ck_design_rows <- function(pts_all, target, aux_vars) {
+  for (col in intersect(c(target, aux_vars), names(pts_all))) {
+    if (is.numeric(pts_all[[col]]) && any(!is.finite(pts_all[[col]])))
+      pts_all[[col]][!is.finite(pts_all[[col]])] <- NA_real_
+  }
   key <- location_key(pts_all)
   # A location index, merged exactly (the mean of equal integers) by both
   # merges, joins the two sets without re-deriving a coordinate key.
@@ -754,6 +758,12 @@ grid_template <- function(bbox, res, crs_wkt, snap = FALSE) {
 .locality_points <- function(l, pts_data, current_crs, current_method, aux_vars, m_params) {
   pts_data$x <- coord_values(pts_data$x)
   pts_data$y <- coord_values(pts_data$y)
+  # Remove unusable numeric observations before replicate averaging and before
+  # deciding the complete covariate population, for previews and workers alike.
+  for (col in intersect(c("v", "pv", aux_vars), names(pts_data))) {
+    if (is.numeric(pts_data[[col]]) && any(!is.finite(pts_data[[col]])))
+      pts_data[[col]][!is.finite(pts_data[[col]])] <- NA_real_
+  }
 
   # Namespaced calls throughout: shared_auto_resolution() also runs this in the
   # promise worker, where dplyr is not necessarily attached.
@@ -785,8 +795,10 @@ grid_template <- function(bbox, res, crs_wkt, snap = FALSE) {
 
   pts_projected <- if (current_method %in% c("RK", "RFK")) covariate_complete else pts_all
 
+  # The two later refusals keep both point sets, so a preview can say which
+  # covariates the lost locations lacked.
   if (nrow(pts_projected) < 3) {
-    return(list(ok = FALSE, msg = paste0("Warning in ", l, ": Insufficient data points after covariate filtering (needed >= 3, got ", nrow(pts_projected), ").")))
+    return(list(ok = FALSE, pts_all = pts_all, pts_projected = pts_projected, msg = paste0("Warning in ", l, ": Insufficient data points after covariate filtering (needed >= 3, got ", nrow(pts_projected), ").")))
   }
   # Each row's location, so that a surface's point set and the display set,
   # both merged from these rows, can be matched location by location.
@@ -798,7 +810,7 @@ grid_template <- function(bbox, res, crs_wkt, snap = FALSE) {
   # keeps NA and is styled apart on the map. `.mn_n_rep` feeds the pop-up.
   pts <- merge_colocated(pts_projected, count = TRUE)
   if(nrow(pts) < 3) {
-    return(list(ok = FALSE, msg = paste0("Warning in ", l, ": Insufficient distinct sample locations after merging co-located samples (needed >= 3, got ", nrow(pts), ").")))
+    return(list(ok = FALSE, pts_all = pts_all, pts_projected = pts_projected, msg = paste0("Warning in ", l, ": Insufficient distinct sample locations after merging co-located samples (needed >= 3, got ", nrow(pts), ").")))
   }
 
   list(ok = TRUE, pts_all = pts_all, covariate_complete = covariate_complete,
@@ -907,7 +919,7 @@ grid_template <- function(bbox, res, crs_wkt, snap = FALSE) {
 shared_auto_resolution <- function(items, run_params) {
   sizes <- vapply(items, function(item) tryCatch({
     pp <- .locality_points(item$l, item$pts_data, run_params$current_crs,
-                           run_params$current_method, run_params$aux_vars, item$m_params)
+                           run_params$current_method, locality_aux_vars(run_params, item$l), item$m_params)
     if (!isTRUE(pp$ok)) return(NA_real_)
     lb <- .locality_boundary(item$l, pp$pts, run_params$current_crs, run_params$current_method,
                              run_params$shp_bound, run_params$b_type, run_params$buff_mode,
@@ -923,32 +935,89 @@ shared_auto_resolution <- function(items, run_params) {
 #' point sets run_regional_interpolation() fits (.locality_points(), then
 #' dedup_valid_points() for RK/RFK or ck_design_rows() with the collocation
 #' minimum for CK). `targets` names the surfaces' value columns: "v", and "pv"
-#' when the run maps predictions. Returns, per target, `dropped_constant` and
-#' `dropped_vif`; a surface the run would not screen (fewer than two
-#' candidates or three points, a skipped locality) reports neither.
+#' when the run maps predictions. Returns each surface's recommendation and
+#' diagnostic evidence; skipped or unestimable populations carry a status.
+#' RK and RFK fit only the target's locations that carry every covariate, so
+#' their counts (`n_rows`, `missing_by_var`) are taken on all the target's
+#' locations when some lack a covariate, a refused locality included. A CK
+#' screen also names the covariates apply_CK() drops for too few co-located
+#' samples (`dropped_collocation`), with every covariate's co-located count
+#' (`collocated`).
 locality_screen_preview <- function(l, pts_data, current_crs, method, aux_vars,
                                     vif_threshold = 10, targets = "v") {
-  none <- list(dropped_constant = character(0), dropped_vif = character(0))
+  none <- list(kept = aux_vars, dropped_constant = character(0), dropped_vif = character(0),
+               diagnostics = list(status = "not_checked", n_rows = NA_integer_, n_complete = NA_integer_))
   out <- stats::setNames(rep(list(none), length(targets)), targets)
-  if (length(aux_vars) < 2) return(out)
   pp <- tryCatch(.locality_points(l, pts_data, current_crs, method, aux_vars, list()),
-                 error = function(e) NULL)
-  if (!isTRUE(pp$ok)) return(out)
+                 error = function(e) list(ok = FALSE, msg = conditionMessage(e)))
+  # The target's locations before RK/RFK keep the covariate-complete ones.
+  coverage <- function(tg) {
+    if (!method %in% c("RK", "RFK") || is.null(pp$pts_all)) return(NULL)
+    all <- dedup_valid_points(pp$pts_all, tg)
+    vals <- sf::st_drop_geometry(all)[intersect(aux_vars, names(all))]
+    list(n_rows = nrow(all), missing_by_var = vapply(vals, function(v) sum(is.na(v)), integer(1)))
+  }
+  if (!isTRUE(pp$ok)) {
+    for (tg in targets) {
+      out[[tg]]$diagnostics$status <- "insufficient_rows"
+      out[[tg]]$diagnostics$reason <- pp$msg
+      cov <- tryCatch({
+        cv <- coverage(tg)
+        # Complete means what RK fits: covariate-complete samples, merged.
+        if (!is.null(cv)) cv$n_complete <- nrow(dedup_valid_points(pp$pts_projected, tg))
+        cv
+      }, error = function(e) NULL)
+      if (!is.null(cov)) out[[tg]]$diagnostics[names(cov)] <- cov
+    }
+    return(out)
+  }
+  population <- function(pts, vars) {
+    if (is.null(pts)) return(NULL)
+    list(locations = location_key(pts),
+         covariates = sf::st_drop_geometry(pts)[intersect(vars, names(pts))])
+  }
   for (tg in targets) {
     scr <- tryCatch({
       if (identical(method, "CK")) {
         rows <- ck_design_rows(pp$pts_all, tg, aux_vars)
         colloc <- vapply(aux_vars, function(av) sum(!is.na(rows$t[[av]])), integer(1))
         cand <- aux_vars[colloc >= CK_MIN_COLLOCATED]
-        if (nrow(rows$t) >= 3 && length(cand) > 1) .ck_screen(rows$t, rows$x, cand, vif_threshold)
+        result <- .ck_screen(rows$t, rows$x, cand, vif_threshold, diagnostics = TRUE)
+        result$dropped_collocation <- setdiff(aux_vars, cand)
+        result$collocated <- colloc
+        result$diagnostics$population_id <- rlang::hash(list(
+          target = population(rows$t, cand), extra = population(rows$x, cand)))
+        result
       } else {
         p <- dedup_valid_points(pp$pts_projected, tg)
-        if (nrow(p) >= 3) screen_covariates(p, aux_vars, vif_threshold)
+        result <- screen_covariates(p, aux_vars, vif_threshold, diagnostics = TRUE)
+        result$diagnostics$population_id <- rlang::hash(population(p, aux_vars))
+        # The check stays on the fitted locations; the counts say what the
+        # others lacked.
+        cov <- tryCatch(coverage(tg), error = function(e) NULL)
+        if (!is.null(cov) && cov$n_rows > nrow(p)) {
+          result$diagnostics$n_rows <- cov$n_rows
+          result$diagnostics$missing_by_var <- cov$missing_by_var
+        }
+        result
       }
-    }, error = function(e) NULL)
-    if (!is.null(scr)) out[[tg]] <- scr[c("dropped_constant", "dropped_vif")]
+    }, error = function(e) {
+      ans <- none
+      ans$diagnostics <- list(status = "failed", n_rows = NA_integer_,
+                              n_complete = NA_integer_, reason = conditionMessage(e))
+      ans
+    })
+    if (!is.null(scr)) out[[tg]] <- scr
   }
   out
+}
+
+# Plain-data advisory worker; expensive CRS/model-population preparation stays
+# outside Shiny's event loop for large selections. No session globals required.
+interpolation_collinearity_preview <- function(payload) {
+  stats::setNames(lapply(payload$items, function(item) locality_screen_preview(
+    item$l, item$pts_data, payload$current_crs, payload$method, item$aux_vars,
+    10, payload$surfaces)), vapply(payload$items, `[[`, character(1), "l"))
 }
 
 #' One locality's whole run: clean, project and deduplicate the points, build
@@ -1317,7 +1386,10 @@ run_regional_interpolation <- function(item, current_method, current_crs, aux_va
           summ = detach_model_frame(out$model_summary), rf = out$rf_model, gstat = out$gstat_obj,
           # Covariates the mapped model used and the ones the screen removed
           # (RK/RFK/CK only), and CK's data design, for the run configuration.
-          aux_used = out$aux_used, aux_dropped = out$aux_dropped, ck_design = out$ck_design)
+          aux_used = out$aux_used, aux_dropped = out$aux_dropped,
+          aux_dropped_constant = out$aux_dropped_constant,
+          aux_dropped_collocation = out$aux_dropped_collocation,
+          aux_dropped_vif = out$aux_dropped_vif, ck_design = out$ck_design)
       log_add("\n", out$log_msg)
       kn <- knndm_note(mp, out, pts_s, surface)
       if (!is.null(kn)) log_add("\n", kn)
@@ -1734,6 +1806,13 @@ build_class_zone_sf <- function(r_list, params, labels = NULL,
 # worker (the "globals exceed future.globals.maxSize" failure). Top-level
 # functions are enclosed by the global environment, never serialized.
 
+# A locality's covariate candidates: the selection less the user's manual
+# exclusions there, resolved before point eligibility, boundaries, grid and
+# CV. Shared by the Auto (Global) prepass and the locality worker.
+locality_aux_vars <- function(run_params, locality) {
+  setdiff(run_params$aux_vars, run_params$manual_exclusions[[locality]] %||% character(0))
+}
+
 # Per-locality worker for the run pipeline's nested furrr map. Sources
 # spatial_helpers.R itself (nested workers are fresh processes) and forwards
 # the run parameters shipped as one plain list.
@@ -1743,7 +1822,7 @@ interp_run_item <- function(item, run_params) {
     item = item,
     current_method = run_params$current_method,
     current_crs = run_params$current_crs,
-    aux_vars = run_params$aux_vars,
+    aux_vars = locality_aux_vars(run_params, item$l),
     shp_bound = run_params$shp_bound,
     b_type = run_params$b_type,
     buff_mode = run_params$buff_mode,

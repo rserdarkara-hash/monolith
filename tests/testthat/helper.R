@@ -35,6 +35,9 @@ if (!exists(".monolith_sourced") || !isTRUE(.monolith_sourced)) {
     suppressMessages({
       source(file.path(proj_root, "monolith.R"))
     })
+    # Regular-server testServer() constructs a real shinyApp internally. Restore
+    # it now; the final on.exit() below clears the error-cleanup handlers.
+    utils::assignInNamespace("shinyApp", .real_shinyApp, "shiny")
   })
 
   setwd(old_wd)

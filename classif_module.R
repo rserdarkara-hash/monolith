@@ -63,7 +63,7 @@ classif_ui <- function(id) {
 
   shiny::tagList(
     shiny::div(style = "padding: 10px;",
-      shiny::fluidRow(
+      shiny::fluidRow(class = "mn-classif-layout",
         shiny::column(3,
           shiny::div(style = "display: flex; align-items: center; margin-bottom: 10px;",
             shiny::h4("Classification Setup", style = "margin: 0;"),
@@ -91,19 +91,6 @@ classif_ui <- function(id) {
                             "Natural (Jenks)" = "jenks"),
                 selected = "quantile", size = "sm"))
           ),
-
-          shiny::uiOutput(ns("predictors_ui")),
-          # Live multicollinearity guardrail: recomputed on the SCOPED data, so
-          # the warning reflects the localities/polygons actually being fitted.
-          shiny::uiOutput(ns("vif_note")),
-
-          shiny::checkboxInput(ns("class_weights"),
-            shiny::tags$span("Balance classes (inverse-frequency weights)",
-              info_tooltip(ns("class_weights_info"), tip_html(
-                "Weights each training sample by n / (k x class count) so rare classes contribute equally to the fit and are not drowned out by dominant ones.",
-                "Reported metrics stay unweighted. Not supported by Multinomial Logistic Regression (fits unweighted)."))),
-            value = FALSE),
-          shiny::uiOutput(ns("weights_note")),
 
           shiny::div(style = "margin: 4px 0 10px 0; padding: 8px 10px; border: 1px solid var(--mn-line); border-radius: 6px;",
             shiny::div(style = "display: flex; align-items: center; margin-bottom: 6px;",
@@ -155,6 +142,14 @@ classif_ui <- function(id) {
             shiny::uiOutput(ns("scope_note"))
           ),
 
+          shiny::checkboxInput(ns("class_weights"),
+            shiny::tags$span("Balance classes (inverse-frequency weights)",
+              info_tooltip(ns("class_weights_info"), tip_html(
+                "Weights each training sample by n / (k x class count) so rare classes contribute equally to the fit and are not drowned out by dominant ones.",
+                "Reported metrics stay unweighted. Not supported by Multinomial Logistic Regression (fits unweighted)."))),
+            value = FALSE),
+          shiny::uiOutput(ns("weights_note")),
+
           shiny::selectInput(ns("method"), "Method",
                              choices = stats::setNames(names(classif_methods()), classif_methods()),
                              selected = "rf"),
@@ -166,6 +161,12 @@ classif_ui <- function(id) {
             choices = c("Spatial (blocked)" = "spatial", "kNNDM (map-matched)" = "knndm",
                         "Standard (random k-fold)" = "standard"),
             selected = "spatial"),
+
+          shiny::uiOutput(ns("predictors_ui")),
+          # Live multicollinearity guardrail: recomputed on the SCOPED data, so
+          # the warning reflects the localities/polygons actually being fitted.
+          shiny::uiOutput(ns("vif_note")),
+
           shiny::selectInput(ns("tuning_depth"), shiny::tags$span("Hyperparameter tuning",
               info_tooltip(ns("tuning_info"), tip_html(
                 "None" = "fits sensible fixed defaults (fast, deterministic).",
@@ -345,7 +346,7 @@ classif_ui <- function(id) {
                               info = info_tooltip(ns("importance_info"), tip_html(
                                 "Permutation importance: how much the multiclass log-loss worsens when one covariate is randomly shuffled (mean of 5 shuffles).",
                                 "Scored either out-of-fold or on the final model's training rows, following the 'Feature importance scored on' setting - the axis label states which. Shares renormalise the positive importances to 100%.",
-                                "Correlated covariates split their importance between them, so read this alongside the collinearity note.")),
+                                "Correlated covariates can change importance rankings, so read this alongside the covariate check.")),
                               head_min_height = CLASSIF_CARD_HEAD_H)
                 )
               )
@@ -449,6 +450,9 @@ classif_server <- function(id, data_reactive, vars_metadata_reactive, spatial_re
   shiny::moduleServer(id, function(input, output, session) {
     ns <- session$ns
     cl_rv <- shiny::reactiveValues(res = NULL, ready = "no", vif_decision = NULL,
+                                   vif_decision_context = NULL, vif_modal_context = NULL,
+                                   predictor_update = NULL, manual_original = NULL,
+                                   manual_exclusions = character(0),
                                    modal_map = NULL, cancelling = FALSE)
 
     # ── Run progress + cancel: file-based, as in the interpolation pipeline
@@ -621,56 +625,139 @@ classif_server <- function(id, data_reactive, vars_metadata_reactive, spatial_re
     })
 
     # ── Multicollinearity guardrail (scoped) ─────────────────────────────────
-    # VIF + pairwise screening of the selected NUMERIC covariates on the points
-    # inside the CURRENT scope (detect_multicollinearity_engine(), the RK/RFK
-    # gate). Random Forest gets a stricter advisory threshold (VIF > 5):
-    # moderate collinearity splits permutation importance between correlated
-    # covariates (Strobl et al. 2008); other learners keep VIF > 10. Advisory.
+    # One pooled numeric diagnostic over the resolved classification scope.
+    # The candidate override bridges a picker update without dispatching stale IDs.
+    effective_predictors <- shiny::reactive({
+      pending <- cl_rv$predictor_update
+      if (!is.null(pending) && identical(input$predictors, pending$previous)) return(pending$selected)
+      input$predictors %||% character(0)
+    })
     active_vif_threshold <- shiny::reactive({
       if (identical(input$method, "rf")) 5 else 10
     })
-    scoped_collinearity <- shiny::reactive({
+    scoped_screen_request <- shiny::reactive({
       sc <- current_scope()
-      preds <- input$predictors
-      if (is.null(sc) || is.null(sc$df) || length(preds) < 2) return(NULL)
+      preds <- effective_predictors()
+      if (is.null(sc) || is.null(sc$df) || length(preds) == 0) return(NULL)
       num_preds <- preds[preds %in% names(sc$df)]
       num_preds <- num_preds[vapply(num_preds, function(p) is.numeric(sc$df[[p]]), logical(1))]
-      if (length(num_preds) < 2) return(NULL)
-      thr <- active_vif_threshold()
-      chk <- tryCatch(
-        suppressWarnings(detect_multicollinearity_engine(
-          sc$df[, num_preds, drop = FALSE], vars = num_preds, vif_threshold = thr)),
-        error = function(e) NULL)
-      if (!is.null(chk)) chk$vif_threshold <- thr
-      chk
+      if (length(num_preds) == 0) return(NULL)
+      list(data = sc$df[, num_preds, drop = FALSE], candidates = num_preds,
+           threshold = active_vif_threshold())
     })
+    scoped_screen_key <- shiny::reactive(rlang::hash(scoped_screen_request()))
+    screen_background <- function(request) {
+      !is.null(request) && nrow(request$data) * length(request$candidates)^2 > 2e6
+    }
+    screen_state <- shiny::reactiveValues(key = NULL, check = NULL)
+    small_scoped_collinearity <- shiny::reactive({
+      request <- scoped_screen_request()
+      if (is.null(request) || screen_background(request)) return(NULL)
+      classif_collinearity_diagnostic(request$data, request$candidates, request$threshold)
+    })
+    scoped_collinearity <- shiny::reactive({
+      request <- scoped_screen_request()
+      if (is.null(request)) return(NULL)
+      if (!screen_background(request)) return(small_scoped_collinearity())
+      if (identical(screen_state$key, scoped_screen_key()) && !is.null(screen_state$check)) return(screen_state$check)
+      list(kept = request$candidates, dropped = character(0), dropped_vif = character(0),
+           dropped_constant = character(0), vif_threshold = request$threshold,
+           diagnostics = list(status = "checking", n_rows = nrow(request$data), n_complete = NA_integer_))
+    })
+    publish_scoped_check <- function(chk, key) {
+      if (session_closed || !identical(shiny::isolate(scoped_screen_key()), key)) return(NULL)
+      screen_state$check <- chk
+      if (!is.null(shiny::isolate(cl_rv$vif_modal_context)) &&
+          identical(shiny::isolate(cl_rv$vif_modal_context), shiny::isolate(collinearity_context()))) {
+        shiny::isolate(show_collinearity_modal())
+      }
+    }
+    shiny::observeEvent(scoped_screen_key(), {
+      request <- scoped_screen_request()
+      key <- scoped_screen_key()
+      if (!screen_background(request)) return()
+      screen_state$key <- key
+      screen_state$check <- NULL
+      screen_args <- c(request, list(proj_root = getwd()))
+      promises::future_promise({
+        setwd(screen_args$proj_root)
+        source("spatial_helpers.R")
+        classif_collinearity_diagnostic(screen_args$data, screen_args$candidates, screen_args$threshold)
+      }, globals = list(screen_args = screen_args,
+                        classif_collinearity_diagnostic = classif_collinearity_diagnostic), seed = TRUE) %...>% (function(chk) {
+        publish_scoped_check(chk, key)
+      }) %...!% (function(err) {
+        chk <- list(kept = request$candidates, dropped = character(0),
+          dropped_vif = character(0), dropped_constant = character(0), vif_threshold = request$threshold,
+          diagnostics = list(status = "failed", reason = conditionMessage(err),
+                             n_rows = nrow(request$data), n_complete = NA_integer_))
+        publish_scoped_check(chk, key)
+      })
+    })
+    candidate_labels <- shiny::reactive({
+      desc_var_labels(unique(c(cl_rv$manual_original, effective_predictors())), vars_metadata_reactive())
+    })
+    # Data/mapping/polygon changes invalidate answers, even when dimensions and
+    # candidate IDs stay the same. Metadata labels do not affect this signature.
+    collinearity_base_context <- shiny::reactive({
+      rlang::hash(list(data = data_reactive(), spatial = spatial_reactive(),
+        polygons = polygons_reactive(), localities = input$scope_loc,
+        polygon_mode = input$scope_poly %||% "ignore", boundary = bset_boundary(),
+        method = input$method, threshold = active_vif_threshold(),
+        target = list(input$target_mode, input$target_cat, input$target_num,
+                      input$n_classes, input$bin_style)))
+    })
+    collinearity_context <- shiny::reactive({
+      rlang::hash(list(collinearity_base_context(), effective_predictors()))
+    })
+    # The checked scope in words: the sidebar caption lists the localities
+    # after "Selected localities:", the dialog's card title alone.
+    scope_advisory_base <- function(prefix, sep) {
+      mode <- input$scope_poly %||% "ignore"
+      ch <- scope_choices()
+      locs <- if (length(input$scope_loc)) intersect(input$scope_loc, ch) else ch
+      base <- if (identical(mode, "only")) "Polygons only (locality filter ignored)" else
+        if (is.null(ch) || setequal(locs, ch)) "All localities" else
+          paste0(prefix, paste(locs, collapse = sep))
+      if (identical(mode, "intersect")) paste(base, "within polygons") else base
+    }
+    scope_advisory_caption <- shiny::reactive({
+      sc <- current_scope()
+      if (is.null(sc)) return(NULL)
+      sprintf("%s; checked together; %s scoped locations.", scope_advisory_base("Selected localities: ", ", "),
+              format(sc$n_scoped, big.mark = ","))
+    })
+    screening_needs_choice <- function(chk) {
+      !is.null(chk) && (length(chk$dropped_vif) > 0 || length(chk$dropped_constant) > 0 ||
+        chk$diagnostics$status %in% c("failed", "insufficient_rows", "not_checked"))
+    }
+    shiny::observeEvent(collinearity_context(), {
+      if (!identical(cl_rv$vif_decision_context, collinearity_context())) cl_rv$vif_decision <- NULL
+    }, ignoreInit = TRUE)
+    shiny::observeEvent(collinearity_base_context(), {
+      cl_rv$manual_original <- NULL
+      cl_rv$manual_exclusions <- character(0)
+    }, ignoreInit = TRUE)
+    shiny::observeEvent(input$predictors, {
+      pending <- cl_rv$predictor_update
+      if (!is.null(pending) && identical(input$predictors, pending$selected)) {
+        cl_rv$predictor_update <- NULL
+      } else if (is.null(pending) || !identical(input$predictors, pending$previous)) {
+        cl_rv$predictor_update <- NULL
+        cl_rv$manual_original <- NULL
+        cl_rv$manual_exclusions <- character(0)
+      }
+    }, ignoreInit = TRUE)
 
     output$vif_note <- shiny::renderUI({
       chk <- scoped_collinearity()
-      if (is.null(chk) || length(chk$dropped) == 0) return(NULL)
-      labs_of <- function(v) paste(vapply(v, function(x) get_var_label(x, vars_metadata_reactive()),
-                                          character(1)), collapse = ", ")
-      thr <- chk$vif_threshold %||% 10
-      # Constants are dropped whatever the user chooses and are not collinear:
-      # named separately.
-      vif_vars <- chk$dropped_vif %||% chk$dropped
-      const_vars <- chk$dropped_constant %||% character(0)
-      reason <- if (thr < 10) {
-        " While often acceptable mathematically, these correlated covariates will split the Random Forest permutation importance between them, making the true drivers look weak - consider dropping them to see the real ranking."
-      } else {
-        " Redundant covariates dilute feature importance and destabilise multinomial fits."
-      }
-      shiny::tags$small(style = "color:var(--mn-warn); display:block; margin: -4px 0 8px 0;",
-        shiny::icon("exclamation-triangle"),
-        if (length(vif_vars)) {
-          sprintf(" Multicollinearity within the current scope (VIF > %s%s): %s.%s You will be asked to drop or keep them at run time.",
-                  thr, if (thr < 10) ", stricter screen for Random Forest" else "",
-                  labs_of(vif_vars), reason)
-        },
-        if (length(const_vars)) {
-          sprintf(" Constant within the current scope (no variance, so no information to learn from): %s. These are dropped by the model recipe regardless of the choice above.",
-                  labs_of(const_vars))
-        })
+      if (is.null(chk)) return(NULL)
+      finding <- length(chk$dropped) > 0 || nrow(chk$pairs %||% data.frame()) > 0 || screening_needs_choice(chk) || identical(chk$diagnostics$status, "checking")
+      if (!finding) return(NULL)
+      collinearity_inline_summary(chk, candidate_labels(), caption = scope_advisory_caption(),
+        review_button = if (screening_needs_choice(chk) || nrow(chk$pairs %||% data.frame()) > 0)
+          shiny::actionButton(ns("clvif_review"), "Review covariates", class = "btn-default btn-sm"),
+        model = if (identical(input$method, "rf")) classif_methods()[["rf"]])
     })
 
     output$weights_note <- shiny::renderUI({
@@ -751,8 +838,10 @@ classif_server <- function(id, data_reactive, vars_metadata_reactive, spatial_re
       shiny::validate(shiny::need(length(cat_cols) > 0,
         "No categorical column found. Switch to 'Bin a continuous variable'."))
       labs <- vapply(cat_cols, function(v) get_var_label(v, vars_metadata_reactive()), character(1))
+      selected <- intersect(shiny::isolate(input$target_cat), cat_cols)
       shiny::selectInput(ns("target_cat"), "Categorical target",
-                         choices = stats::setNames(cat_cols, labs))
+                          choices = stats::setNames(cat_cols, labs),
+                          selected = if (length(selected)) selected else NULL)
     })
 
     output$target_num_ui <- shiny::renderUI({
@@ -760,8 +849,10 @@ classif_server <- function(id, data_reactive, vars_metadata_reactive, spatial_re
       sp <- spatial_reactive()
       num_cols <- setdiff(names(df)[vapply(df, is.numeric, logical(1))], c(sp$x, sp$y))
       labs <- vapply(num_cols, function(v) get_var_label(v, vars_metadata_reactive()), character(1))
+      selected <- intersect(shiny::isolate(input$target_num), num_cols)
       shiny::selectInput(ns("target_num"), "Continuous variable to bin",
-                         choices = stats::setNames(num_cols, labs))
+                          choices = stats::setNames(num_cols, labs),
+                          selected = if (length(selected)) selected else NULL)
     })
 
     output$predictors_ui <- shiny::renderUI({
@@ -773,10 +864,11 @@ classif_server <- function(id, data_reactive, vars_metadata_reactive, spatial_re
       # Eligible predictors: numeric (always treated as continuous) or
       # text/factor (dummy-encoded categoricals).
       elig <- cols[vapply(cols, function(c) is.numeric(df[[c]]) || .classif_is_categorical(df[[c]]), logical(1))]
-      labs <- vapply(elig, function(v) get_var_label(v, vars_metadata_reactive()), character(1))
+      labs <- desc_var_labels(elig, vars_metadata_reactive())
       shiny::tagList(
         shinyWidgets::pickerInput(ns("predictors"), "Covariates",
-          choices = stats::setNames(elig, labs), multiple = TRUE,
+          choices = stats::setNames(elig, unname(labs)),
+          selected = intersect(shiny::isolate(effective_predictors()), elig), multiple = TRUE,
           options = list(`actions-box` = TRUE, `live-search` = TRUE)),
         if (!identical(input$target_mode, "bin")) {
           shiny::tags$small(style = "color: var(--mn-text-3); display:block; margin: -8px 0 8px 0;",
@@ -786,80 +878,161 @@ classif_server <- function(id, data_reactive, vars_metadata_reactive, spatial_re
     })
 
     # ── Run ──────────────────────────────────────────────────────────────────
-    # Dispatched through try_run() so the collinearity modal's buttons re-enter
-    # the same path; the decision holds until the covariates or scope change.
+    # One card for the pooled scope (collinearity_card()). Its checkboxes are
+    # clvif_manual; constants and categorical predictors cannot be ticked.
+    show_collinearity_modal <- function() {
+      preds <- effective_predictors()
+      chk <- scoped_collinearity()
+      cl_rv$vif_modal_context <- collinearity_context()
+      issue <- screening_needs_choice(chk)
+      checking <- identical(chk$diagnostics$status, "checking")
+      sdf <- current_scope()$df
+      numeric <- preds[vapply(preds, function(p) is.numeric(sdf[[p]]), logical(1))]
+      removable <- setdiff(numeric, chk$dropped_constant %||% character(0))
+      rf <- identical(input$method, "rf")
+      threshold <- active_vif_threshold()
+      excluded <- length(cl_rv$manual_exclusions) > 0
+      tip <- c(
+        "Apply removals and recheck" = "removes the ticked covariates from the whole scope, updates the Covariates picker and checks the remaining ones again.",
+        if (excluded) c("Reset removals" = "restores every covariate you removed."),
+        if (issue) c(
+          "Auto-Drop remaining" = sprintf("removes constant and near-constant covariates, then the covariate with the highest VIF, one at a time, until every VIF is %g or less (%s). The final model and every training split repeat this on their own rows.",
+                                          threshold, if (rf) "Random Forest; 10 for the other methods" else "5 for Random Forest"),
+          "Keep remaining" = "keeps every remaining covariate. The model recipe still removes inputs with exactly zero variance.")
+        else c("Continue with remaining covariates" = "runs with the remaining covariates, as Run does when the check is clean."),
+        "This check uses every scoped location. Under Auto-Drop the final model and the folds repeat it on their own eligible training rows, so their removals can differ slightly.",
+        "Cross-validation measures performance conditional on the covariates you chose by hand.")
+      shiny::showModal(shiny::modalDialog(
+        title = "Covariates in the Classification Scope",
+        shiny::tags$div(class = "mn-cl-body", collinearity_card(ns("clvif_card"), scope_advisory_base("", " \u00b7 "),
+          collinearity_meta(chk, length(numeric), "numeric covariate", classif_methods()[[input$method]]),
+          chk, candidate_labels(), ns("clvif_manual"), if (checking) character(0) else removable,
+          scope_note = "Checked together as one population. Removals apply to the whole scope and update the Covariates picker.",
+          manual = cl_rv$manual_exclusions,
+          chips = list(list(title = "Not part of this check (categorical):", vars = setdiff(preds, numeric))),
+          caveat = if (rf) "Correlated covariates can change importance rankings. Removing one can also change predictions.",
+          constant_title = "Constant or near-constant, removed by Auto-Drop:", hint = TRUE)),
+        footer = shiny::tagList(
+          if (!checking) shiny::tags$span(class = "mn-cl-foot-info", info_tooltip(ns("clvif"), tip_html(tip))),
+          if (!checking) shiny::actionButton(ns("clvif_apply"), "Apply removals and recheck", class = "btn-primary",
+                                             disabled = TRUE),
+          if (!checking && excluded) shiny::actionButton(ns("clvif_reset"), "Reset removals"),
+          if (!checking && issue) shiny::actionButton(ns("clvif_drop"), "Auto-Drop remaining", class = "btn-success"),
+          if (!checking && issue) shiny::actionButton(ns("clvif_keep"), "Keep remaining", class = "btn-default"),
+          if (!checking && !issue) shiny::actionButton(ns("clvif_continue"), "Continue with remaining covariates", class = "btn-success"),
+          shiny::actionButton(ns("clvif_cancel"), "Cancel")
+        ), size = "l", easyClose = FALSE
+      ))
+    }
+
+    modal_context_current <- function() {
+      if (identical(cl_rv$ready, "running")) return(FALSE)
+      if (is.null(cl_rv$vif_modal_context)) return(FALSE)
+      if (identical(scoped_collinearity()$diagnostics$status, "checking")) return(FALSE)
+      if (identical(cl_rv$vif_modal_context, collinearity_context())) return(TRUE)
+      cl_rv$vif_decision <- NULL
+      shiny::showNotification("The data or analysis scope changed. Review the refreshed covariate check.", type = "warning")
+      show_collinearity_modal()
+      FALSE
+    }
+
+    update_manual_candidates <- function(remaining) {
+      previous <- input$predictors
+      cl_rv$predictor_update <- list(previous = previous, selected = remaining)
+      cl_rv$vif_decision <- NULL
+      shinyWidgets::updatePickerInput(session, "predictors", selected = remaining)
+    }
+
+    # Decisions are accepted only for the exact numeric/scope/candidate context
+    # shown in the modal. Explicit IDs bridge the asynchronous picker update.
     try_run <- function() {
       if (identical(cl_rv$ready, "running")) return(NULL)
       df <- data_reactive(); sp <- spatial_reactive()
       shiny::req(df, sp$x, sp$y, sp$src_crs, sp$proj_crs)
       if (is.null(validate_crs(sp$proj_crs, "Invalid Target Mapping CRS", require_metric = TRUE))) return()
-
       target_src <- if (identical(input$target_mode, "bin")) input$target_num else input$target_cat
-      preds <- setdiff(input$predictors, c(target_src, sp$x, sp$y))
+      preds <- setdiff(effective_predictors(), c(target_src, sp$x, sp$y))
       if (length(preds) < 1) {
-        # A categorical target may run covariate-free (spatial 1-NN). A binned
-        # continuous target may not: its no-covariate route is interpolating
-        # the continuous variable and classifying that surface.
         if (identical(input$target_mode, "bin")) {
           shiny::showNotification("Select at least one covariate. Without covariates, interpolate the continuous variable in the Spatial Engine and classify that surface instead.", type = "error", duration = 10)
           return()
         }
         return(launch_run(character(0)))
       }
-
       chk <- scoped_collinearity()
-      flagged <- if (is.null(chk)) character(0) else intersect(chk$dropped, preds)
-      if (length(flagged) > 0 && is.null(cl_rv$vif_decision)) {
-        labs <- vapply(flagged, function(v) get_var_label(v, vars_metadata_reactive()), character(1))
-        thr <- chk$vif_threshold %||% 10
-        shiny::showModal(shiny::modalDialog(
-          title = shiny::tags$div(style = "color: var(--mn-danger); font-weight: bold;",
-            shiny::icon("exclamation-triangle"), "High Multicollinearity In Scope"),
-          shiny::tags$p(sprintf("Within the current spatial scope, some covariates are highly collinear (iterative VIF > %s). Near-duplicate covariates add no information, dilute permutation importance across the duplicates, and can destabilise the multinomial logistic fit.", thr)),
-          if (thr < 10) shiny::tags$p(
-            "Random Forest note: predictions are barely affected by keeping them, but the permutation feature importance will be artificially split between the correlated covariates, so genuinely important variables can look weak. Dropping them yields a cleaner importance ranking."),
-          shiny::tags$p(shiny::tags$b("Recommended to drop:"), paste(labs, collapse = ", ")),
-          shiny::tags$p(style = "font-size: 0.9em;",
-            "Auto-Drop reruns this screen on the training rows of every cross-validation fold and tuning resample, and on all rows for the final model, so the reported accuracy includes the screening step. A fold can therefore drop a slightly different set; the run summary lists how often each covariate was dropped."),
-          # Constants travel in the same `dropped` vector; name them for what
-          # they are rather than presenting them as a collinearity problem.
-          if (length(intersect(flagged, chk$dropped_constant %||% character(0))) > 0) {
-            shiny::tags$p(shiny::tags$b("Constant in this scope (no variance): "),
-              paste(vapply(intersect(flagged, chk$dropped_constant),
-                           function(v) get_var_label(v, vars_metadata_reactive()), character(1)),
-                    collapse = ", "),
-              " - these carry no information and are removed by the model recipe either way.")
-          },
-          footer = shiny::tagList(
-            shiny::actionButton(ns("clvif_drop"), "Auto-Drop and Continue", class = "btn-success"),
-            shiny::actionButton(ns("clvif_keep"), "Keep All (Not Recommended)", class = "btn-warning"),
-            shiny::modalButton("Cancel")
-          ),
-          easyClose = FALSE
-        ))
+      if (identical(chk$diagnostics$status, "checking")) {
+        shiny::showNotification("Checking covariates in the selected scope. Run again when the check completes.", type = "message")
         return()
       }
-      # Auto-Drop passes the threshold, not a drop list: the screen reruns on
-      # the training rows of every fit (step_vif_screen). The flagged list only
-      # guards against an empty set.
-      if (identical(cl_rv$vif_decision, "drop") && length(flagged) > 0) {
-        return(launch_run(preds, flagged, vif_threshold = chk$vif_threshold %||% 10))
+      decision <- if (identical(cl_rv$vif_decision_context, collinearity_context())) cl_rv$vif_decision else NULL
+      if (screening_needs_choice(chk) && is.null(decision)) {
+        show_collinearity_modal()
+        return()
+      }
+      if (identical(decision, "drop")) {
+        return(launch_run(preds, intersect(chk$dropped %||% character(0), preds),
+                          vif_threshold = active_vif_threshold()))
       }
       launch_run(preds)
     }
 
     shiny::observeEvent(input$run_btn, try_run())
+    shiny::observeEvent(input$clvif_review, show_collinearity_modal())
+    shiny::observeEvent(input$clvif_apply, {
+      if (!modal_context_current()) return()
+      preds <- effective_predictors()
+      selected <- intersect(input$clvif_manual, setdiff(preds, scoped_collinearity()$dropped_constant))
+      remaining <- setdiff(preds, selected)
+      if (!length(remaining)) {
+        shiny::showNotification("Keep at least one covariate here. To use spatial 1-NN with a categorical target, cancel and empty the Covariates picker explicitly. Binned continuous targets require covariates.", type = "error", duration = 12)
+        return()
+      }
+      if (is.null(cl_rv$manual_original)) cl_rv$manual_original <- preds
+      cl_rv$manual_exclusions <- setdiff(cl_rv$manual_original, remaining)
+      update_manual_candidates(remaining)
+      show_collinearity_modal()
+    })
+    shiny::observeEvent(input$clvif_reset, {
+      if (!modal_context_current()) return()
+      original <- cl_rv$manual_original
+      if (!length(original)) return()
+      cl_rv$manual_exclusions <- character(0)
+      update_manual_candidates(original)
+      show_collinearity_modal()
+    })
+    # Apply needs a tick, and must leave a covariate.
+    shiny::observeEvent(input$clvif_manual, {
+      shinyjs::toggleState("clvif_apply", condition = length(input$clvif_manual) > 0 &&
+        length(setdiff(effective_predictors(), input$clvif_manual)) > 0)
+    }, ignoreInit = TRUE, ignoreNULL = FALSE)
     shiny::observeEvent(input$clvif_drop, {
-      shiny::removeModal(); cl_rv$vif_decision <- "drop"; try_run()
+      if (!modal_context_current()) return()
+      shiny::removeModal()
+      cl_rv$vif_modal_context <- NULL
+      cl_rv$vif_decision <- "drop"
+      cl_rv$vif_decision_context <- collinearity_context()
+      try_run()
     })
     shiny::observeEvent(input$clvif_keep, {
-      shiny::removeModal(); cl_rv$vif_decision <- "keep"; try_run()
+      if (!modal_context_current()) return()
+      shiny::removeModal()
+      cl_rv$vif_modal_context <- NULL
+      cl_rv$vif_decision <- "keep"
+      cl_rv$vif_decision_context <- collinearity_context()
+      try_run()
     })
-    # Method resets the decision too: the VIF threshold is method-aware.
-    shiny::observeEvent(list(input$predictors, input$scope_loc, input$scope_poly, input$method), {
-      cl_rv$vif_decision <- NULL
-    }, ignoreInit = TRUE)
-
+    # A clean check needs no decision: the run proceeds as Run does for any
+    # clean selection, without the Auto-Drop screen.
+    shiny::observeEvent(input$clvif_continue, {
+      if (!modal_context_current()) return()
+      shiny::removeModal()
+      cl_rv$vif_modal_context <- NULL
+      try_run()
+    })
+    shiny::observeEvent(input$clvif_cancel, {
+      shiny::removeModal()
+      cl_rv$vif_modal_context <- NULL
+    })
     launch_run <- function(preds, flagged = character(0), vif_threshold = NULL) {
       sp <- spatial_reactive()
       if (length(preds) > 0 && length(setdiff(preds, flagged)) < 1) {
@@ -873,6 +1046,11 @@ classif_server <- function(id, data_reactive, vars_metadata_reactive, spatial_re
         shiny::showNotification("No data points fall inside the selected spatial scope.", type = "error"); return()
       }
       sdf <- sc$df
+      selection_v <- list(
+        original = cl_rv$manual_original %||% preds,
+        manual_exclusions = cl_rv$manual_exclusions,
+        effective = preds)
+      labels_v <- desc_var_labels(unique(c(selection_v$original, preds)), vars_metadata_reactive())
 
       pos <- crs_sample_positions(sdf, sp$x, sp$y, sp$src_crs)
       if (!is.null(pos)) {
@@ -912,7 +1090,7 @@ classif_server <- function(id, data_reactive, vars_metadata_reactive, spatial_re
       # Adequacy guardrail: warn (not block) on a thin scope, naming exactly
       # which classes fall below the 3-sample minimum so the user knows what
       # to merge, exclude, or re-bin.
-      adequacy_msg <- classif_scope_adequacy(tvec, sum(stats::complete.cases(adf)))
+      adequacy_msg <- classif_scope_adequacy(tvec, sum(.classif_complete_rows(adf, names(adf))))
       if (!is.null(adequacy_msg)) {
         shiny::showNotification(adequacy_msg, type = "warning", duration = 12)
       }
@@ -1004,6 +1182,7 @@ classif_server <- function(id, data_reactive, vars_metadata_reactive, spatial_re
           class_weights = weights_v, model_rds_path = model_path_ship,
           nested = nested_v, importance_mode = imp_mode_v,
           vif_threshold = vif_threshold,
+          candidate_selection = selection_v, predictor_labels = labels_v,
           progress_dir = progress_dir_ship, session_id = session_id_ship,
           cancel_file = cancel_file_ship
         )
@@ -1056,8 +1235,8 @@ classif_server <- function(id, data_reactive, vars_metadata_reactive, spatial_re
         cl_rv$ready <- "yes"
         if (length(res$dropped_covariates) > 0) {
           shiny::showNotification(
-            sprintf("Classification completed. The final model dropped collinear covariates: %s.",
-                    paste(res$dropped_covariates, collapse = ", ")), type = "message")
+            sprintf("Classification completed. The final model's screen removed: %s.",
+                    paste(display_var_labels(res$dropped_covariates, res$predictor_labels), collapse = ", ")), type = "message")
         } else {
           shiny::showNotification("Classification completed.", type = "message")
         }
@@ -1071,7 +1250,7 @@ classif_server <- function(id, data_reactive, vars_metadata_reactive, spatial_re
         # whose variogram was a pure nugget is flat.
         fb_notes <- classif_covariate_notes(
           res$covariate_fallback,
-          label_of = function(v) get_var_label(v, shiny::isolate(vars_metadata_reactive())),
+          label_of = function(v) display_var_labels(v, res$predictor_labels),
           flat = res$covariate_flat)
         if (length(fb_notes)) {
           shiny::showNotification(paste(fb_notes, collapse = " "), type = "warning", duration = 15)
@@ -1284,8 +1463,7 @@ classif_server <- function(id, data_reactive, vars_metadata_reactive, spatial_re
     build_importance_plot <- function() {
       res <- cl_rv$res; shiny::req(res, res$importance)
       imp <- res$importance
-      imp$label <- vapply(imp$predictor,
-                          function(v) get_var_label(v, vars_metadata_reactive()), character(1))
+      imp$label <- display_var_labels(imp$predictor, res$predictor_labels)
       imp$label <- factor(imp$label, levels = rev(imp$label))
       imp$txt <- ifelse(is.na(imp$share_pct), "", sprintf("%.1f%%", imp$share_pct))
       # The axis names the evaluation design (out-of-fold and training-row
@@ -1412,15 +1590,20 @@ classif_server <- function(id, data_reactive, vars_metadata_reactive, spatial_re
       acc <- res$cv_metrics$.estimate[res$cv_metrics$.metric == "accuracy"]
       kap <- res$cv_metrics$.estimate[res$cv_metrics$.metric == "kap"]
       drop_part <- if (length(res$dropped_covariates) > 0) {
-        sprintf(" Collinear covariates dropped by the final model: %s.", paste(res$dropped_covariates, collapse = ", "))
+        sprintf(" Covariates removed by the final model's automatic screen: %s.",
+                paste(display_var_labels(res$dropped_covariates, res$predictor_labels), collapse = ", "))
       } else ""
+      manual <- res$candidate_selection$manual_exclusions
+      if (length(manual)) drop_part <- paste0(drop_part, sprintf(
+        " Manually excluded throughout the scope: %s.",
+        paste(display_var_labels(manual, res$predictor_labels), collapse = ", ")))
       # Auto-Drop reruns the screen inside CV; say how often each covariate
       # left a fold's model, since that can differ from the final model.
       fs <- res$cv_fold_screen
       if (!is.null(fs) && nrow(fs) > 0) {
         cnt <- table(fs$covariate)
         drop_part <- paste0(drop_part, sprintf(" Inside CV each fold's screen reran on its training rows: %s.",
-          paste(sprintf("%s dropped in %d of %d folds", names(cnt), as.integer(cnt), res$n_folds), collapse = "; ")))
+          paste(sprintf("%s dropped in %d of %d folds", display_var_labels(names(cnt), res$predictor_labels), as.integer(cnt), res$n_folds), collapse = "; ")))
       }
       # A class the model never assigns is hidden by the headline accuracy (the
       # macro averages score it 0): name it once.
@@ -1435,7 +1618,7 @@ classif_server <- function(id, data_reactive, vars_metadata_reactive, spatial_re
       # of kriging, or flat from a pure-nugget variogram, in the CV folds or on
       # the map.
       fb_notes <- classif_covariate_notes(
-        res$covariate_fallback, label_of = function(v) get_var_label(v, vars_metadata_reactive()),
+        res$covariate_fallback, label_of = function(v) display_var_labels(v, res$predictor_labels),
         flat = res$covariate_flat)
       if (length(fb_notes)) drop_part <- paste(drop_part, paste(fb_notes, collapse = " "))
       # Unscored locations can support a fold after its own predictor screen.

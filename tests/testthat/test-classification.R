@@ -1,6 +1,291 @@
 # The Classification Suite: engine (classif_helpers.R) and module
 # (classif_module.R).
 
+test_that("classification target controls retain eligible selections across rerenders", {
+  d <- make_classif_scope_df(nA = 12, nB = 12)
+  d$parent <- rep(c("one", "two"), 12)
+  data <- shiny::reactiveVal(d)
+  metadata <- shiny::reactiveVal(NULL)
+  shiny::testServer(classif_server, args = list(
+    data_reactive = data, vars_metadata_reactive = metadata,
+    spatial_reactive = shiny::reactive(list(x = "x", y = "y", loc = "loc",
+      src_crs = "EPSG:32633", proj_crs = "EPSG:32633"))
+  ), {
+    selected_option <- function(control) {
+      match <- regmatches(control$html, regexec('<option value="([^"]+)" selected', control$html))[[1]]
+      if (length(match) == 2L) match[[2]] else NA_character_
+    }
+    session$setInputs(target_mode = "cat", target_cat = "parent", target_num = "slope",
+      predictors = "elev", method = "rf", boundary_type = "convex")
+    expect_identical(selected_option(output$target_cat_ui), "parent")
+    expect_identical(selected_option(output$target_num_ui), "slope")
+    context <- collinearity_context()
+    metadata(list(list(actual = "parent", label = "Parent material"),
+                  list(actual = "slope", label = "Terrain slope")))
+    session$flushReact()
+    expect_identical(selected_option(output$target_cat_ui), "parent")
+    expect_identical(selected_option(output$target_num_ui), "slope")
+    expect_identical(collinearity_context(), context)
+    changed <- d
+    changed$elev <- changed$elev + 1
+    data(changed)
+    session$flushReact()
+    expect_identical(selected_option(output$target_cat_ui), "parent")
+    expect_identical(selected_option(output$target_num_ui), "slope")
+    data(d[, setdiff(names(d), c("parent", "slope")), drop = FALSE])
+    session$flushReact()
+    expect_identical(selected_option(output$target_cat_ui), "loc")
+    expect_identical(selected_option(output$target_num_ui), "elev")
+  })
+})
+
+test_that("classification records recipe removals separately from required raw inputs", {
+  d <- make_classif_scope_df(nA = 12, nB = 12)
+  # Both classes share each elevation level, preventing separation in the
+  # full fit and in the stratified three-fold training populations.
+  d$soil <- factor(rep(c("Low", "High"), nrow(d) / 2))
+  d$elev <- rep(seq_len(nrow(d) / 2), each = 2)
+  d$flat <- 7
+  d$category <- factor(rep("only", nrow(d)))
+  predictors <- c("elev", "flat", "category")
+  fitted <- fit_classification_model(d, "soil", predictors, method = "multinom",
+    depth = "none", strategy = "standard", vif_threshold = Inf)
+  recipe <- workflows::extract_recipe(fitted$workflow)
+  zv <- Filter(function(step) inherits(step, "step_zv"), recipe$steps)
+  removed_terms <- unique(unlist(lapply(zv, function(step) step$removals), use.names = FALSE))
+  model_terms <- names(workflows::extract_mold(fitted$workflow)$predictors)
+  expect_setequal(fitted$predictors, predictors)
+  expect_setequal(fitted$recipe_zero_variance_terms, removed_terms)
+  expect_setequal(fitted$final_model_terms, model_terms)
+  expect_true("flat" %in% removed_terms)
+  expect_true(any(startsWith(removed_terms, "category_")))
+  expect_identical(model_terms, "elev")
+  expect_length(fitted$screened_constant, 0)
+  expect_length(fitted$screened_vif, 0)
+  expect_error(predict(fitted$workflow, d["elev"], type = "prob"), "flat|category")
+
+  path <- tempfile(fileext = ".rds")
+  on.exit(unlink(path), add = TRUE)
+  res <- run_classification_pipeline(d, target = "soil", predictors = predictors,
+    x_col = "x", y_col = "y", src_crs = 32633, proj_crs = "EPSG:32633",
+    method = "multinom", strategy = "standard", depth = "none", v = 3,
+    make_surface = FALSE, model_rds_path = path, vif_threshold = Inf)
+  bundle <- readRDS(path)
+  for (selection in list(res$candidate_selection, bundle$candidate_selection)) {
+    expect_setequal(selection$final_retained, predictors)
+    expect_setequal(selection$recipe_zero_variance_terms, removed_terms)
+    expect_setequal(selection$final_model_terms, model_terms)
+    expect_length(selection$constant_removals, 0)
+    expect_length(selection$automatic_removals, 0)
+  }
+  expect_setequal(bundle$predictors, predictors)
+  expect_error(predict(bundle$workflow, d["elev"], type = "prob"), "flat|category")
+  expect_equal(nrow(predict(bundle$workflow, d[predictors], type = "prob")), nrow(d))
+})
+
+test_that("classification finite eligibility excludes infinities as missing support", {
+  d <- data.frame(target = factor(c("a", "b", "a", "b")),
+                  numeric = c(1, Inf, NA, 4), category = c("x", "x", "x", NA))
+  expect_identical(.classif_complete_rows(d, c("target", "numeric", "category")),
+                   c(TRUE, FALSE, FALSE, FALSE))
+  expect_identical(.classif_complete_rows(d, character(0)), rep(TRUE, 4))
+  pts <- sf::st_as_sf(transform(d, x = 1:4, y = 1:4), coords = c("x", "y"), crs = 32633)
+  extra <- .classif_unscored_covariates(pts, "target", c("numeric", "category"))
+  expect_equal(nrow(extra), 3)
+  expect_true(is.infinite(extra$numeric[1]))
+  pts <- make_classif_points(n = 40)
+  pts$elev[1] <- Inf
+  fitted <- fit_classification_model(pts, "soil", c("elev", "slope"), method = "multinom")
+  expect_equal(nrow(workflows::extract_mold(fitted$workflow)$outcomes), 39)
+  pts$elev[1] <- NA_real_
+  reference <- fit_classification_model(pts, "soil", c("elev", "slope"), method = "multinom")
+  nd <- sf::st_drop_geometry(pts[-1, c("elev", "slope")])
+  expect_equal(predict(fitted$workflow, nd, type = "prob"),
+               predict(reference$workflow, nd, type = "prob"))
+})
+
+test_that("classification screens its independent selected scope as one pooled population", {
+  d <- make_classif_scope_df(nA = 24, nB = 24)
+  d$elev <- rep(seq(-2, 2, length.out = 24), 2)
+  d$slope <- c(cos(seq_len(24)), d$elev[25:48])
+  data <- shiny::reactiveVal(d)
+  shiny::testServer(classif_server, args = list(
+    data_reactive = data, vars_metadata_reactive = shiny::reactive(NULL),
+    spatial_reactive = shiny::reactive(list(x = "x", y = "y", loc = "loc",
+      src_crs = "EPSG:32633", proj_crs = "EPSG:32633"))
+  ), {
+    session$setInputs(target_mode = "cat", target_cat = "soil", predictors = c("elev", "slope"),
+      method = "multinom", scope_loc = "A", scope_poly = "ignore", boundary_type = "convex")
+    expect_equal(current_scope()$n_scoped, 24)
+    expect_length(scoped_collinearity()$dropped, 0)
+    session$setInputs(scope_loc = "B")
+    expect_equal(current_scope()$n_scoped, 24)
+    expect_length(scoped_collinearity()$dropped_vif, 1)
+    expect_match(scope_advisory_caption(), "Selected localities: B; checked together")
+    expect_match(output$vif_note$html, "Auto-Drop would remove 1 of 2 (VIF above 10)", fixed = TRUE)
+    expect_identical(scope_advisory_base("", " \u00b7 "), "B")
+    session$setInputs(scope_loc = c("A", "B"))
+    expect_equal(scoped_collinearity()$diagnostics$n_rows, 48)
+    expect_length(scoped_collinearity()$dropped_vif, 0)
+    expect_match(scope_advisory_caption(), "All localities")
+    session$setInputs(scope_loc = character(0))
+    expect_equal(current_scope()$n_scoped, 48)
+    expect_length(scoped_collinearity()$dropped_vif, 0)
+  })
+  html <- as.character(classif_ui("classification"))
+  expect_lt(regexpr("Spatial Scope", html)[1], regexpr("classification-predictors_ui", html)[1])
+})
+
+test_that("classification manual recheck uses explicit candidates and refuses stale modal choices", {
+  d <- make_classif_scope_df(nA = 24, nB = 24)
+  d$slope <- d$elev
+  d$parent <- rep(c("one", "two"), 24)
+  data <- shiny::reactiveVal(d)
+  metadata <- shiny::reactiveVal(list(list(actual = "elev", label = "Height"),
+                                    list(actual = "slope", label = "Height")))
+  spatial <- shiny::reactiveVal(list(x = "x", y = "y", loc = "loc",
+    src_crs = "EPSG:32633", proj_crs = "EPSG:32633"))
+  polygons <- shiny::reactiveVal(list(drawn = NULL, shp = NULL))
+  shiny::testServer(classif_server, args = list(
+    data_reactive = data, vars_metadata_reactive = metadata,
+    spatial_reactive = spatial, polygons_reactive = polygons
+  ), {
+    submitted <- list()
+    env <- environment(try_run)
+    env$launch_run <- function(...) { submitted[[length(submitted) + 1L]] <<- list(...) }
+    session$setInputs(target_mode = "cat", target_cat = "soil", predictors = c("elev", "slope", "parent"),
+      method = "rf", scope_loc = c("A", "B"), scope_poly = "ignore", boundary_type = "convex")
+    expect_identical(unname(candidate_labels()[c("elev", "slope")]), c("Height [elev]", "Height [slope]"))
+    try_run()
+    expect_length(submitted, 0)
+    session$setInputs(clvif_manual = "slope", clvif_apply = 1)
+    expect_setequal(effective_predictors(), c("elev", "parent"))
+    expect_setequal(input$predictors, c("elev", "slope", "parent"))
+    expect_identical(cl_rv$manual_exclusions, "slope")
+    expect_identical(scoped_collinearity()$diagnostics$status, "one_candidate")
+    session$setInputs(clvif_continue = 1)
+    expect_length(submitted, 1)
+    expect_setequal(submitted[[1]][[1]], c("elev", "parent"))
+    # A clean recheck launches as a clean Run does: no Auto-Drop screen.
+    expect_null(submitted[[1]]$vif_threshold)
+    clean <- list()
+    env$launch_run <- function(...) { clean[[length(clean) + 1L]] <<- list(...) }
+    try_run()
+    expect_identical(clean, submitted)
+    env$launch_run <- function(...) { submitted[[length(submitted) + 1L]] <<- list(...) }
+    expect_null(cl_rv$vif_modal_context)
+    session$setInputs(clvif_continue = 2)
+    expect_length(submitted, 1)
+    session$setInputs(predictors = c("elev", "parent"))
+    expect_identical(cl_rv$manual_exclusions, "slope")
+    show_collinearity_modal()
+    session$setInputs(clvif_reset = 1)
+    expect_setequal(effective_predictors(), c("elev", "slope", "parent"))
+    expect_length(cl_rv$manual_exclusions, 0)
+    session$setInputs(predictors = c("elev", "slope", "parent"))
+    token <- collinearity_context()
+    metadata(list(list(actual = "elev", label = "New label")))
+    session$flushReact()
+    expect_identical(collinearity_context(), token)
+    cl_rv$vif_decision <- "keep"
+    cl_rv$vif_decision_context <- token
+    changed <- d; changed$elev <- changed$elev + seq_len(nrow(changed)) / 100
+    data(changed)
+    session$flushReact()
+    expect_null(cl_rv$vif_decision)
+    session$setInputs(clvif_keep = 2)
+    expect_length(submitted, 1)
+    expect_identical(cl_rv$vif_modal_context, collinearity_context())
+    token <- collinearity_context()
+    polygons(list(drawn = NULL, shp = sf::st_sf(geometry = sf::st_sfc(sf::st_polygon(list(
+      rbind(c(450000, 5800000), c(451000, 5800000), c(451000, 5801000), c(450000, 5800000))))), crs = 32633)))
+    session$flushReact()
+    expect_false(identical(collinearity_context(), token))
+    session$setInputs(clvif_drop = 1)
+    expect_length(submitted, 1)
+    sp <- spatial(); sp$loc <- NULL; spatial(sp); session$flushReact()
+    expect_false(identical(cl_rv$vif_modal_context, collinearity_context()))
+    session$setInputs(clvif_cancel = 1)
+    session$setInputs(clvif_drop = 2)
+    expect_length(submitted, 1)
+    expect_null(cl_rv$vif_modal_context)
+  })
+})
+
+test_that("large classification checks wait and discard obsolete background results", {
+  d <- make_classif_scope_df(nA = 30, nB = 30)
+  candidates <- paste0("p", seq_len(184))
+  for (p in candidates) d[[p]] <- d$elev
+  data <- shiny::reactiveVal(d)
+  resolvers <- list()
+  shipped <- list()
+  local_mocked_bindings(future_promise = function(expr, globals, ...) {
+    shipped[[length(shipped) + 1L]] <<- globals
+    promises::promise(function(resolve, reject) {
+      resolvers[[length(resolvers) + 1L]] <<- resolve
+    })
+  }, .package = "promises")
+  shiny::testServer(classif_server, args = list(
+    data_reactive = data, vars_metadata_reactive = shiny::reactive(NULL),
+    spatial_reactive = shiny::reactive(list(x = "x", y = "y", loc = "loc",
+      src_crs = "EPSG:32633", proj_crs = "EPSG:32633"))
+  ), {
+    submitted <- list()
+    env <- environment(try_run)
+    env$launch_run <- function(...) { submitted[[length(submitted) + 1L]] <<- list(...) }
+    session$setInputs(target_mode = "cat", target_cat = "soil", predictors = candidates,
+      method = "rf", boundary_type = "convex")
+    expect_identical(scoped_collinearity()$diagnostics$status, "checking")
+    expect_true(is.data.frame(shipped[[1]]$screen_args$data))
+    expect_setequal(shipped[[1]]$screen_args$candidates, candidates)
+    try_run()
+    expect_length(submitted, 0)
+    show_collinearity_modal()
+    session$setInputs(clvif_keep = 1)
+    expect_length(submitted, 0)
+    session$setInputs(clvif_cancel = 1)
+    changed <- d; changed$p1 <- changed$p1 + 1
+    data(changed); session$flushReact()
+    expect_length(resolvers, 2)
+    checked <- list(kept = candidates, dropped = character(0), dropped_vif = character(0),
+      dropped_constant = character(0), diagnostics = list(status = "checked", n_rows = 60L, n_complete = 60L))
+    resolvers[[1]](checked)
+    for (i in seq_len(4)) { later::run_now(0); session$flushReact() }
+    expect_identical(scoped_collinearity()$diagnostics$status, "checking")
+    resolvers[[2]](checked)
+    for (i in seq_len(4)) { later::run_now(0); session$flushReact() }
+    expect_identical(scoped_collinearity()$diagnostics$status, "checked")
+    expect_null(cl_rv$vif_modal_context)
+    expect_length(submitted, 0)
+  })
+})
+
+test_that("classification removal dialog never silently switches to spatial 1-NN", {
+  d <- make_classif_scope_df(nA = 12, nB = 12)
+  shiny::testServer(classif_server, args = list(
+    data_reactive = shiny::reactive(d), vars_metadata_reactive = shiny::reactive(NULL),
+    spatial_reactive = shiny::reactive(list(x = "x", y = "y", loc = "loc",
+      src_crs = "EPSG:32633", proj_crs = "EPSG:32633"))
+  ), {
+    submitted <- list()
+    env <- environment(try_run)
+    env$launch_run <- function(...) { submitted[[length(submitted) + 1L]] <<- list(...) }
+    session$setInputs(target_mode = "cat", target_cat = "soil", predictors = "elev",
+      method = "multinom", boundary_type = "convex")
+    show_collinearity_modal()
+    session$setInputs(clvif_manual = "elev", clvif_apply = 1)
+    expect_identical(effective_predictors(), "elev")
+    expect_length(submitted, 0)
+    session$setInputs(predictors = character(0))
+    try_run()
+    expect_length(submitted, 1)
+    expect_length(submitted[[1]][[1]], 0)
+    session$setInputs(target_mode = "bin", target_num = "elev")
+    try_run()
+    expect_length(submitted, 1)
+  })
+})
+
 test_that("classification refuses non-metre targets and removes session files", {
   shiny::testServer(classif_server, args = list(
     data_reactive = shiny::reactive(data.frame(x = 1:3, y = 1:3)),
@@ -1580,7 +1865,10 @@ test_that("pipeline persists a reusable model bundle and reports lift/importance
     d, target = "soil", predictors = c("elev", "slope"),
     x_col = "x", y_col = "y", src_crs = 32633, proj_crs = "EPSG:32633",
     method = "rf", strategy = "standard", depth = "none", v = 4,
-    make_surface = FALSE, model_rds_path = rds
+    make_surface = FALSE, model_rds_path = rds,
+    candidate_selection = list(original = c("elev", "slope", "height"),
+      manual_exclusions = "height", effective = c("elev", "slope")),
+    predictor_labels = c(elev = "Elevation", slope = "Slope", height = "Terrain height")
   )
 
   # Result fields: baseline lift, importance, weight flags, CV predictions.
@@ -1598,6 +1886,10 @@ test_that("pipeline persists a reusable model bundle and reports lift/importance
   expect_true(file.exists(rds))
   b <- readRDS(rds)
   expect_setequal(b$predictors, c("elev", "slope"))
+  expect_identical(b$candidate_selection$manual_exclusions, "height")
+  expect_setequal(b$candidate_selection$original, c("elev", "slope", "height"))
+  expect_setequal(b$candidate_selection$final_retained, b$predictors)
+  expect_identical(b$predictor_labels[["height"]], "Terrain height")
   expect_equal(b$method, "rf")
   expect_equal(b$n_train, nrow(d))
   expect_true(all(c("r", "parsnip", "engine") %in% names(b$versions)))

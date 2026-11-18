@@ -1394,18 +1394,11 @@ test_that("the suitability gate is advisory at selection time and enforced at ru
   expect_false(grepl('shinyjs::hide("map_processing_overlay")', gate, fixed = TRUE))
 
   # The override mirrors the collinearity modal, and is recorded in the run
-  # config the same way "Keep All" is.
+  # config the same way "Keep remaining" is.
   expect_match(exec, 'actionButton("crs_gate_override_btn", "Use Anyway (Not Recommended)"', fixed = TRUE)
   expect_match(exec, "observeEvent(input$crs_gate_override_btn, {", fixed = TRUE)
   expect_match(exec, "rv$run_config_summary$crs_gate_override <- crs_override", fixed = TRUE)
   expect_match(exec, "rv$run_config_summary$crs_scale_factor <- ", fixed = TRUE)
-
-  # The collinearity screen is one function, called after the CRS gate from
-  # exactly two places: the Run handler and the CRS override, and it screens
-  # the localities in one place.
-  n_fixed <- function(pattern) lengths(regmatches(exec, gregexpr(pattern, exec, fixed = TRUE)))
-  expect_equal(n_fixed("    run_collinearity_gate()\n"), 2L)
-  expect_equal(n_fixed("locality_screen_preview(\n"), 1L)
 
   # Restoring an archived run must not be re-gated: it replays stored results
   # and never re-enters the pipeline.
