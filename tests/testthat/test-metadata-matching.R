@@ -1,7 +1,38 @@
 # Variable metadata: column matching, display labels, units in legend titles,
 # the subset column and the Context panel's default variable.
 
-# ── get_var_label / get_var_labels ─────────────────────────────────────────
+# ── mapping_entry / get_var_label / get_var_labels ─────────────────────────
+
+test_that("mapping_entry finds a column's entry by its exact name", {
+  vars <- list(list(label = "no column"), list(actual = "pH", label = "first"),
+               list(actual = "pH", label = "second"), list(actual = "N", label = "Nitrogen"))
+  # The first entry of a column listed twice; an entry without `actual` is
+  # never a match, whatever is asked.
+  expect_identical(mapping_entry(vars, "pH")$label, "first")
+  expect_identical(mapping_entry(vars, factor("N"))$label, "Nitrogen")
+  expect_null(mapping_entry(vars, "ph"))
+  for (none in list(NULL, NA_character_, character(0), c("pH", "N"))) {
+    expect_null(mapping_entry(vars, none))
+  }
+  expect_null(mapping_entry(NULL, "pH"))
+})
+
+test_that("a CSV variable list reads like an Excel one, whatever its separator", {
+  # The data file and the variable list share one reader (read_table_file()).
+  vl <- golden_varlist()
+  testthat::skip_if(is.null(vl), "this golden fixture ships no variable list")
+  cols <- names(golden_soil("full"))
+  dir <- withr::local_tempdir()
+  xlsx <- file.path(dir, "vars.xlsx"); comma <- file.path(dir, "vars.csv"); semi <- file.path(dir, "vars_semi.csv")
+  openxlsx::write.xlsx(vl, xlsx)
+  utils::write.csv(vl, comma, row.names = FALSE, fileEncoding = "UTF-8")
+  utils::write.table(vl, semi, sep = ";", row.names = FALSE, fileEncoding = "UTF-8")
+  ref <- match_metadata_columns(read_table_file(xlsx, "xlsx"), cols)
+  expect_gt(length(ref$vars), 0)
+  for (f in c(comma, semi)) expect_identical(match_metadata_columns(read_table_file(f, "csv"), cols), ref)
+  # A comma-only reader sees one column in the semicolon file and matches nothing.
+  expect_length(match_metadata_columns(utils::read.csv(semi), cols)$vars, 0)
+})
 
 test_that("get_var_label returns label from metadata when available", {
   metadata <- list(

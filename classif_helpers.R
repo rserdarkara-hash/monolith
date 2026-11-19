@@ -25,13 +25,6 @@ if (FALSE) {
 # notes (classif_covariate_notes) state these values.
 .CLASSIF_COV_IDW <- list(idw_p = 2, idw_nmax = 12)
 
-# ── Seed sandbox ────────────────────────────────────────────────────────────
-# Alias of with_seed() (spatial_vgm.R, sourced first by global.R and the
-# worker): seeds, runs `expr`, restores the caller's RNG state.
-.classif_with_seed <- function(seed, expr) {
-  with_seed(seed, expr)
-}
-
 # ── Method registry ─────────────────────────────────────────────────────────
 # One entry per learner: `args` are the parsnip main arguments with their fixed
 # defaults, `engine_args` engine pass-throughs, `build()` assembles the spec.
@@ -183,14 +176,13 @@ classif_tuning_params <- function(method, depth = "none") {
 }
 
 # ── Model spec ──────────────────────────────────────────────────────────────
-#' Parsnip spec for `method`: arguments in `tune_params` become tune(),
-#' `overrides` replace the remaining defaults. A two-class multinom target is
-#' fitted as logistic_reg/glm: k = 2 multinomial logistic IS binomial logistic,
-#' and parsnip's nnet wrapper emits one probability column per row, not per
-#' class, for two classes. glm is unpenalised like the multinom default, so
-#' callers clear multinom tune_params for binary targets.
-classif_build_spec <- function(method, tune_params = character(0), overrides = list(),
-                               n_classes = NULL) {
+#' Parsnip spec for `method`: arguments in `tune_params` become tune(). A
+#' two-class multinom target is fitted as logistic_reg/glm: k = 2 multinomial
+#' logistic IS binomial logistic, and parsnip's nnet wrapper emits one
+#' probability column per row, not per class, for two classes. glm is
+#' unpenalised like the multinom default, so callers clear multinom
+#' tune_params for binary targets.
+classif_build_spec <- function(method, tune_params = character(0), n_classes = NULL) {
   defs <- .classif_method_defs()
   def <- defs[[method]]
   if (is.null(def)) stop(sprintf("Unknown classification method: '%s'", method))
@@ -200,7 +192,6 @@ classif_build_spec <- function(method, tune_params = character(0), overrides = l
   }
 
   args <- def$args
-  if (length(overrides)) args[names(overrides)] <- overrides
   for (p in tune_params) {
     if (p %in% names(args)) args[[p]] <- tune::tune()
   }
@@ -349,7 +340,7 @@ classif_build_recipe <- function(train_df, target, predictors, weight_col = NULL
 classif_stratified_folds <- function(y, v, seed = 12345L) {
   y <- droplevels(as.factor(y))
   n <- length(y)
-  .classif_with_seed(seed, {
+  with_seed(seed, {
     ord <- unlist(lapply(levels(y), function(lev) {
       idx <- which(y == lev)
       idx[sample.int(length(idx))]
@@ -361,19 +352,24 @@ classif_stratified_folds <- function(y, v, seed = 12345L) {
 }
 
 #' Integer fold vector (one per row, as make_cv_folds), v clamped to the point
-#' count, seed-sandboxed. `spatial`: k-means clusters of the projected
-#' coordinates (spatialsample::spatial_clustering_cv, the interpolation
-#' engines' spatial-block convention); `standard`: classif_stratified_folds
-#' (unstratified random without a target); `knndm`: knndm_folds() matched to
-#' the grid locations `domain_xy`, with the `standard` folds as its random
-#' partition, returned whenever kNNDM does not choose spatial folds (including
-#' no domain or fewer than CV_KNNDM_MIN_N points, branch "small").
-#' attr(, "knndm") records the choice.
+#' count, seed-sandboxed. `spatial`: kmeans_block_folds() on the projected
+#' coordinates, the interpolation suite's Spatial Block kernel; with no more
+#' locations than folds (k-means cannot place the centres, branch "small") or
+#' a failed clustering ("fallback"), the `standard` folds. attr(,
+#' "spatial_folds") records the branch, the locations and the fold count asked
+#' for. `standard`: classif_stratified_folds (unstratified random without a
+#' target); `knndm`: knndm_folds() matched to the grid locations `domain_xy`,
+#' with the `standard` folds as its random partition, returned whenever kNNDM
+#' does not choose spatial folds (including no domain or fewer than
+#' CV_KNNDM_MIN_N points, branch "small"). attr(, "knndm") records the choice.
+#' Both records depend on the rows, v and the seed only, so equal calls return
+#' identical() vectors.
 classif_make_fold_id <- function(pts_sf, strategy = c("spatial", "knndm", "standard"),
                                  target = NULL, v = 10L, seed = 12345L, domain_xy = NULL) {
   strategy <- match.arg(strategy)
   n <- nrow(pts_sf)
-  v <- max(2L, min(as.integer(v), n))
+  k_asked <- as.integer(v)
+  v <- max(2L, min(k_asked, n))
   if (strategy == "standard") {
     if (is.null(target)) return(cv_random_folds(n, v, seed))
     return(classif_stratified_folds(sf::st_drop_geometry(pts_sf)[[target]], v, seed))
@@ -390,17 +386,18 @@ classif_make_fold_id <- function(pts_sf, strategy = c("spatial", "knndm", "stand
                        random_folds = rnd))
   }
 
-  .classif_with_seed(seed, {
-    sp <- spatialsample::spatial_clustering_cv(pts_sf, v = v)
-    fold_id <- rep(NA_integer_, n)
-    for (i in seq_along(sp$splits)) {
-      assess_idx <- rsample::complement(sp$splits[[i]])
-      fold_id[assess_idx] <- i
-    }
-    # Degenerate geometry can leave a point unassigned; fold it into cluster 1.
-    fold_id[is.na(fold_id)] <- 1L
-    fold_id
-  })
+  xy <- sf::st_coordinates(pts_sf)[, 1:2, drop = FALSE]
+  m <- nrow(unique(xy))
+  standard <- function(branch, k) {
+    out <- classif_make_fold_id(pts_sf, "standard", target = target, v = v, seed = seed)
+    attr(out, "spatial_folds") <- list(branch = branch, locations = m, k = k)
+    out
+  }
+  if (v >= m) return(standard("small", k_asked))
+  fold_id <- kmeans_block_folds(xy, v, seed)
+  if (isTRUE(attr(fold_id, "block_fallback"))) return(standard("fallback", v))
+  attr(fold_id, "spatial_folds") <- list(branch = "blocks", locations = m, k = v)
+  fold_id
 }
 
 #' Integer fold vector -> rsample rset over `train_df`, for
@@ -811,6 +808,34 @@ classif_per_class_accuracy <- function(pred_df, target) {
        missing = sub("^\\.pred_", "", absent))
 }
 
+#' The workflow the CV and the final fit train: the shared recipe (with the
+#' Auto-Drop screen step when `vif_threshold` is set), the method's spec with
+#' its tuning parameters as tune(), and inverse-frequency class weights where
+#' the engine takes them. Every fit (out-of-fold refits, each tuning resample)
+#' recomputes those weights from its own analysis rows, so no held-out class
+#' prevalence enters a fit. Returns the workflow, its spec, tuning parameters
+#' and weight column, and `train_df` with `.case_wt` when weights apply.
+.classif_workflow <- function(train_df, target, predictors, method, depth,
+                              class_weights, vif_threshold) {
+  weights_applied <- isTRUE(class_weights) && classif_supports_weights(method)
+  weight_col <- if (weights_applied) ".case_wt" else NULL
+  if (weights_applied) {
+    train_df$.case_wt <- hardhat::importance_weights(
+      .classif_class_weights(train_df[[target]]))
+  }
+  n_cls <- nlevels(train_df[[target]])
+  rec <- classif_build_recipe(train_df, target, predictors, weight_col = weight_col,
+                              vif_threshold = vif_threshold)
+  tune_params <- .classif_effective_tune_params(method, depth, n_cls)
+  spec <- classif_build_spec(method, tune_params = tune_params, n_classes = n_cls)
+  wf <- workflows::workflow() |>
+    workflows::add_recipe(rec) |>
+    workflows::add_model(spec)
+  if (weights_applied) wf <- workflows::add_case_weights(wf, .case_wt)
+  list(wf = wf, spec = spec, tune_params = tune_params, weights_applied = weights_applied,
+       weight_col = weight_col, train_df = train_df)
+}
+
 #' Cross-validate one method: pooled out-of-fold predictions, metrics,
 #' per-class accuracies, confusion matrix and fold vector. A tuning `depth`
 #' first selects hyperparameters by a grid over the same folds (mildly
@@ -854,25 +879,11 @@ run_classification_cv <- function(pts_sf, target, predictors,
     stop("Classification target must have at least two classes after removing missing rows.")
   }
 
-  # Inverse-frequency weights, only where the engine supports them; every fit
-  # (out-of-fold refits, each tuning resample) recomputes them from its own
-  # analysis rows, so no held-out class prevalence enters a fit.
-  weights_applied <- isTRUE(class_weights) && classif_supports_weights(method)
-  weight_col <- if (weights_applied) ".case_wt" else NULL
-  if (weights_applied) {
-    train_df$.case_wt <- hardhat::importance_weights(
-      .classif_class_weights(train_df[[target]]))
-  }
-
-  n_cls <- nlevels(train_df[[target]])
-  rec <- classif_build_recipe(train_df, target, predictors, weight_col = weight_col,
-                              vif_threshold = vif_threshold)
-  tune_params <- .classif_effective_tune_params(method, depth, n_cls)
-  spec <- classif_build_spec(method, tune_params = tune_params, n_classes = n_cls)
-  wf <- workflows::workflow() |>
-    workflows::add_recipe(rec) |>
-    workflows::add_model(spec)
-  if (weights_applied) wf <- workflows::add_case_weights(wf, .case_wt)
+  wfl <- .classif_workflow(train_df, target, predictors, method, depth, class_weights, vif_threshold)
+  train_df <- wfl$train_df
+  wf <- wfl$wf
+  tune_params <- wfl$tune_params
+  weights_applied <- wfl$weights_applied
 
   fold_id <- classif_make_fold_id(keep_sf, strategy, target = target, v = v, seed = seed,
                                   domain_xy = domain_xy)
@@ -898,7 +909,7 @@ run_classification_cv <- function(pts_sf, target, predictors,
   if (length(tune_params) > 0) {
     # One space-filling grid for every tuning pass. Finalising on the full
     # predictor frame only bounds ranges (mtry <= p) and carries no labels.
-    tune_grid_df <- .classif_with_seed(seed, {
+    tune_grid_df <- with_seed(seed, {
       pset <- hardhat::extract_parameter_set_dials(wf)
       # p counts the covariates the Auto-Drop screen keeps on all rows.
       pset <- dials::finalize(pset, x = train_df[, setdiff(predictors,
@@ -911,7 +922,7 @@ run_classification_cv <- function(pts_sf, target, predictors,
     # them (mildly optimistic); `nested = TRUE` removes this at ~inner_v x cost.
     .classif_check_cancel(cancel_file)
     report_cv(cov_share, "Tuning hyperparameters (grid search)...")
-    tuned <- .classif_with_seed(seed, {
+    tuned <- with_seed(seed, {
       tune::tune_grid(wf, resamples = rset, grid = tune_grid_df,
                       metrics = resample_metrics,
                       control = tune::control_grid(save_pred = FALSE, verbose = FALSE))
@@ -934,7 +945,7 @@ run_classification_cv <- function(pts_sf, target, predictors,
   class_gaps <- list()
   folds_seq <- sort(unique(fold_id))
   n_fold <- length(folds_seq)
-  preds <- .classif_with_seed(seed, {
+  preds <- with_seed(seed, {
     parts <- lapply(seq_along(folds_seq), function(k) {
       i <- folds_seq[k]
       .classif_check_cancel(cancel_file)
@@ -967,8 +978,11 @@ run_classification_cv <- function(pts_sf, target, predictors,
                                    metrics = resample_metrics,
                                    control = tune::control_grid(save_pred = FALSE, verbose = FALSE))
         bp_i <- tune::select_best(tuned_i, metric = "accuracy")
-        nested_params[[length(nested_params) + 1]] <<-
-          cbind(data.frame(.fold = i), as.data.frame(bp_i)[, setdiff(names(bp_i), ".config"), drop = FALSE])
+        np_i <- cbind(data.frame(.fold = i), as.data.frame(bp_i)[, setdiff(names(bp_i), ".config"), drop = FALSE])
+        # Under Spatial CV, the design of this fold's inner folds: blocks, or
+        # the Standard folds ("small", "fallback") its training rows forced.
+        if (!is.null(attr(inner_id, "spatial_folds"))) np_i$inner_folds <- attr(inner_id, "spatial_folds")$branch
+        nested_params[[length(nested_params) + 1]] <<- np_i
         fold_wf <- tune::finalize_workflow(wf, bp_i)
       }
       fit_i <- parsnip::fit(fold_wf, data = tr)
@@ -990,7 +1004,7 @@ run_classification_cv <- function(pts_sf, target, predictors,
       imp_preds <- setdiff(predictors, screened_i)
       if (isTRUE(oof_importance) && length(imp_preds)) {
         imp_parts[[length(imp_parts) + 1]] <<-
-          c(.classif_with_seed(seed + 977L + k,
+          c(with_seed(seed + 977L + k,
               .classif_perm_delta(fit_i, te, target, imp_preds,
                                   n_rep = importance_reps, cancel_file = cancel_file)),
             list(predictors = imp_preds))
@@ -1022,7 +1036,7 @@ run_classification_cv <- function(pts_sf, target, predictors,
                                        train_df[[target]], fold_id)
   preds$.pred_base <- base_cls[preds$.row]
 
-  list(
+  c(list(
     # The point set the baseline was scored on, so a 1-NN map drawn from it is
     # the surface that baseline accuracy describes.
     base_xy = unname(sf::st_coordinates(keep_sf)[, 1:2, drop = FALSE]),
@@ -1038,11 +1052,9 @@ run_classification_cv <- function(pts_sf, target, predictors,
     # NULL when every fold saw every class; otherwise one row per (fold, class)
     # the fold's training set lacked. See .classif_align_prob_cols().
     class_gaps = if (length(class_gaps)) do.call(rbind, class_gaps) else NULL,
-    predictions = preds,
-    metrics = classif_compute_metrics(preds, target),
-    per_class = classif_per_class_accuracy(preds, target),
-    conf_mat = yardstick::conf_mat(preds, truth = !!rlang::sym(target),
-                                   estimate = !!rlang::sym(".pred_class")),
+    predictions = preds),
+    # metrics, per_class, conf_mat
+    .classif_cv_scores(preds, target), list(
     best_params = best_params,
     nested = nested_active,
     # One row per outer fold: the hyperparameters that fold's inner search
@@ -1060,7 +1072,7 @@ run_classification_cv <- function(pts_sf, target, predictors,
     # support beside its analysis rows.
     covariate_extra_n = range(attr(assess_df, "extra_n")),
     weights_applied = weights_applied
-  )
+  ))
 }
 
 # ── Spatial-only baseline + covariate lift ──────────────────────────────────
@@ -1136,44 +1148,90 @@ run_classification_nn_cv <- function(pts_sf, target, strategy = c("spatial", "kn
   preds$.pred_base <- base
   if (!is.null(grp)) preds$.scope_group <- grp
 
-  list(
+  c(list(
     base_xy = xy, base_y = y,
     method = "nn", strategy = strategy,
     fold_id = fold_id, n_folds = length(unique(fold_id)),
     levels = lvl,
     class_gaps = if (length(gaps)) do.call(rbind, gaps) else NULL,
-    predictions = preds,
-    metrics = classif_compute_metrics(preds, target),
-    per_class = classif_per_class_accuracy(preds, target),
-    conf_mat = yardstick::conf_mat(preds, truth = !!rlang::sym(target),
-                                   estimate = !!rlang::sym(".pred_class")),
+    predictions = preds),
+    .classif_cv_scores(preds, target), list(
     majority_acc = max(table(y)) / length(y),
     best_params = NULL, nested = FALSE, importance = NULL, weights_applied = FALSE
-  )
+  ))
 }
 
-#' The fold design a classification run was scored under, as its badge and
-#' its Metrics CSV name it: the strategy, and for kNNDM the design it chose
-#' (`knndm`, classif_make_fold_id()'s record) - random or spatial folds, or the
-#' random folds it used without a search and why.
-classif_cv_label <- function(strategy, knndm = NULL) {
+#' The pooled out-of-fold scores of a classification CV: the metric table,
+#' per-class accuracies and the confusion matrix of `preds` (truth in column
+#' `target`, the classes in `.pred_class`).
+.classif_cv_scores <- function(preds, target) {
+  list(metrics = classif_compute_metrics(preds, target),
+       per_class = classif_per_class_accuracy(preds, target),
+       conf_mat = yardstick::conf_mat(preds, truth = !!rlang::sym(target),
+                                      estimate = !!rlang::sym(".pred_class")))
+}
+
+#' TRUE when every fold of run result `res` holds one location (leave-one-out).
+classif_cv_loo <- function(res) isTRUE(res$n_folds == res$n)
+
+#' The fold design a classification run was scored under, as its badge, its
+#' Metrics CSV and its CV Distance Match title name it: the strategy, and the
+#' design classif_make_fold_id() recorded for it (`spatial_folds`, `knndm`):
+#' spatial blocks, or the Standard folds it used and why. `loo` (every fold
+#' holds one location) names leave-one-out.
+classif_cv_label <- function(strategy, knndm = NULL, spatial_folds = NULL, loo = FALSE) {
+  random <- if (isTRUE(loo)) "LOOCV" else "Random k-fold CV"
   switch(strategy %||% "",
-    spatial = "Spatial blocked CV",
+    spatial = switch(spatial_folds$branch %||% "",
+      small    = sprintf("%s [Spatial blocks need more than %d locations]", random, as.integer(spatial_folds$k)),
+      fallback = "Random k-fold CV [Spatial blocks: clustering failed]",
+      "Spatial blocked CV"),
     knndm = switch(knndm$branch %||% "",
       random   = "kNNDM CV [random folds]",
       spatial  = "kNNDM CV [spatial folds]",
-      small    = sprintf("Random k-fold CV [kNNDM needs n ≥ %d]", CV_KNNDM_MIN_N),
+      small    = sprintf("%s [kNNDM needs n ≥ %d]", random, CV_KNNDM_MIN_N),
       none     = "Random k-fold CV [kNNDM: no prediction domain]",
       fallback = "Random k-fold CV [kNNDM: no valid spatial partition]",
       "kNNDM CV"),
-    "Random k-fold CV")
+    random)
+}
+
+#' The note under a 1-NN comparison (Covariate Lift; the covariate-free
+#' result, whose model is the 1-NN), NULL where none applies. It follows the
+#' folds the run USED. Random folds flatter 1-NN only where held-out points sit
+#' closer to their training samples than the map's cells sit to the samples:
+#' spatial blocks and kNNDM's spatial folds get no note, nor random folds
+#' kNNDM's KS gate accepted (the map predicts no farther out than the sample
+#' spacing). Random folds kNNDM kept after a search point to the CV Distance
+#' Match panel. Any other Standard folds get the conditional note: leave-one-
+#' out is named at one location per fold, and spatial blocked CV is advised
+#' only where it can run (not after a failed clustering, nor on a scope too
+#' small for blocks).
+classif_nn_fold_note <- function(strategy, knndm = NULL, spatial_folds = NULL, loo = FALSE) {
+  strategy <- strategy %||% ""
+  if (!strategy %in% c("spatial", "knndm", "standard")) return(NULL)
+  if (identical(strategy, "spatial") && !(spatial_folds$branch %||% "") %in% c("small", "fallback")) return(NULL)
+  if (identical(strategy, "knndm")) {
+    branch <- knndm$branch %||% ""
+    if (identical(branch, "spatial")) return(NULL)
+    if (identical(branch, "random")) {
+      if (isTRUE(knndm$ks_p >= KNNDM_KS_ALPHA)) return(NULL)
+      return("kNNDM kept the random folds. Their prediction distances may still differ from the map's. See CV Distance Match.")
+    }
+  }
+  near <- "nearby training samples can make 1-NN look stronger than it would in parts of the map farther from samples."
+  if (isTRUE(loo)) return(paste("Under leave-one-out,", near))
+  if (identical(strategy, "spatial")) return(paste("Under random folds,", near))
+  paste("Under random folds,", near, "Re-check under Spatial blocked CV.")
 }
 
 #' Plain-language reading of the covariate-lift result. McNemar's test is
 #' two-sided, so the direction comes from lift_abs and significance from p.
 #' `target_mode` ("cat" / "bin") decides where a significantly negative lift
-#' points the user; `strategy` adds the random-fold caveat.
-classif_lift_interpretation <- function(lift, target_mode = "cat", strategy = "spatial") {
+#' points the user; the fold design (`strategy` and its records) adds
+#' classif_nn_fold_note().
+classif_lift_interpretation <- function(lift, target_mode = "cat", strategy = "spatial",
+                                        knndm = NULL, spatial_folds = NULL, loo = FALSE) {
   p <- lift$mcnemar_p
   d <- lift$lift_abs
   msg <- if (is.na(p)) {
@@ -1190,9 +1248,8 @@ classif_lift_interpretation <- function(lift, target_mode = "cat", strategy = "s
       sprintf("McNemar %s: the covariate model is significantly LESS accurate than the spatial baseline. Consider the Spatial 1-NN map (map selector above).", p_txt)
     }
   }
-  if (identical(strategy, "standard")) {
-    msg <- paste(msg, "Random folds favour the 1-NN baseline, because each held-out point keeps its near neighbours in the training set; re-check under Spatial blocked CV.")
-  }
+  note <- classif_nn_fold_note(strategy, knndm, spatial_folds, loo)
+  if (!is.null(note)) msg <- paste(msg, note)
   msg
 }
 
@@ -1395,7 +1452,7 @@ classif_permutation_importance <- function(model, train_df, target, predictors,
   wf <- model$workflow
   df <- as.data.frame(train_df)
   df <- df[.classif_complete_rows(df, c(target, predictors)), , drop = FALSE]
-  core <- .classif_with_seed(seed, {
+  core <- with_seed(seed, {
     .classif_perm_delta(wf, df, target, predictors, n_rep = n_rep,
                         cancel_file = cancel_file, progress = progress)
   })
@@ -1448,24 +1505,13 @@ fit_classification_model <- function(pts_sf, target, predictors,
   # names a class the engine has no column for.
   train_df[[target]] <- droplevels(as.factor(train_df[[target]]))
 
-  weights_applied <- isTRUE(class_weights) && classif_supports_weights(method)
-  weight_col <- if (weights_applied) ".case_wt" else NULL
-  if (weights_applied) {
-    train_df$.case_wt <- hardhat::importance_weights(
-      .classif_class_weights(train_df[[target]]))
-  }
-
-  n_cls <- nlevels(train_df[[target]])
+  wfl <- .classif_workflow(train_df, target, predictors, method, depth, class_weights, vif_threshold)
+  train_df <- wfl$train_df
+  wf <- wfl$wf
+  tune_params <- wfl$tune_params
+  weights_applied <- wfl$weights_applied
   screen <- .classif_screen_all_rows(train_df, predictors, vif_threshold, details = TRUE)
   screened_out <- screen$dropped
-  rec <- classif_build_recipe(train_df, target, predictors, weight_col = weight_col,
-                              vif_threshold = vif_threshold)
-  tune_params <- .classif_effective_tune_params(method, depth, n_cls)
-  spec <- classif_build_spec(method, tune_params = tune_params, n_classes = n_cls)
-  wf <- workflows::workflow() |>
-    workflows::add_recipe(rec) |>
-    workflows::add_model(spec)
-  if (weights_applied) wf <- workflows::add_case_weights(wf, .case_wt)
 
   final_params <- NULL
   if (length(tune_params) > 0) {
@@ -1481,7 +1527,7 @@ fit_classification_model <- function(pts_sf, target, predictors,
                                vif_threshold = vif_threshold)
     }
     rset <- classif_folds_to_rset(train_df, fold_id, assess_df, target = target)
-    tuned <- .classif_with_seed(seed, {
+    tuned <- with_seed(seed, {
       pset <- hardhat::extract_parameter_set_dials(wf)
       # Ranges such as mtry <= p count the covariates an Auto-Drop screen keeps.
       pset <- dials::finalize(pset, x = train_df[, setdiff(predictors, screened_out), drop = FALSE])
@@ -1501,13 +1547,13 @@ fit_classification_model <- function(pts_sf, target, predictors,
   if (is.numeric(vif_threshold) && length(vif_threshold) == 1 && is.finite(vif_threshold)) {
     predictors <- setdiff(predictors, screened_out)
     wf <- workflows::workflow() |>
-      workflows::add_recipe(classif_build_recipe(train_df, target, predictors, weight_col = weight_col)) |>
-      workflows::add_model(spec)
+      workflows::add_recipe(classif_build_recipe(train_df, target, predictors, weight_col = wfl$weight_col)) |>
+      workflows::add_model(wfl$spec)
     if (weights_applied) wf <- workflows::add_case_weights(wf, .case_wt)
     if (!is.null(final_params)) wf <- tune::finalize_workflow(wf, final_params)
   }
 
-  fitted <- .classif_with_seed(seed, parsnip::fit(wf, data = train_df))
+  fitted <- with_seed(seed, parsnip::fit(wf, data = train_df))
   fitted_recipe <- workflows::extract_recipe(fitted)
   zero_variance_terms <- unlist(lapply(Filter(function(step) inherits(step, "step_zv"),
     fitted_recipe$steps), function(step) step$removals), use.names = FALSE)
@@ -2337,7 +2383,7 @@ classif_metrics_csv_df <- function(res, area = NULL, area_note = NULL) {
       "CV design",
       c(sprintf("W, this CV (%s)", u), sprintf("W, %s (%s)", d$reference, u)),
       c("W_cv", "W_random"),
-      classif_cv_label(res$strategy, res$knndm),
+      classif_cv_label(res$strategy, res$knndm, res$spatial_folds, classif_cv_loo(res)),
       c(d$W_cv, d$W_random))
   }
   # Permutation importance; the scope names the design (out-of-fold or training
@@ -2505,7 +2551,8 @@ run_classification_pipeline <- function(df, target, predictors,
       conf_mat = cv$conf_mat$table,
       best_params = NULL, nested = FALSE, nested_params = NULL,
       fold_id = cv$fold_id, n_folds = cv$n_folds,
-      knndm = attr(cv$fold_id, "knndm"), cv_design = cv_design_of(cv),
+      knndm = attr(cv$fold_id, "knndm"), spatial_folds = attr(cv$fold_id, "spatial_folds"),
+      cv_design = cv_design_of(cv),
       class_gaps = cv$class_gaps,
       method = "nn", strategy = strategy, depth = "none",
       n = length(cv$fold_id), levels = cv$levels, predictors = character(0),
@@ -2557,8 +2604,10 @@ run_classification_pipeline <- function(df, target, predictors,
     nested = isTRUE(cv$nested),
     nested_params = cv$nested_params,
     fold_id = cv$fold_id, n_folds = cv$n_folds,
-    # What a kNNDM request chose, and how closely the folds match the map.
-    knndm = attr(cv$fold_id, "knndm"), cv_design = cv_design_of(cv),
+    # The design a kNNDM or Spatial request used, and how closely the folds
+    # match the map.
+    knndm = attr(cv$fold_id, "knndm"), spatial_folds = attr(cv$fold_id, "spatial_folds"),
+    cv_design = cv_design_of(cv),
     # Classes some fold could not learn because its analysis rows held none of
     # them; NULL in the ordinary case. A CV-design caveat the module reports.
     class_gaps = cv$class_gaps,

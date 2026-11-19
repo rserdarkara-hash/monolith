@@ -253,7 +253,7 @@
         vv_scale <- get_vv_scale()
         vv_scale <- vv_scale[is.finite(vv_scale)]
         if (length(vv_scale) > 0) {
-          pal <- if(is_viridis) colorNumeric(viridis::viridis(256, option = pal_name), vv_scale, na.color = "transparent")
+          pal <- if(is_viridis) colorNumeric(viridisLite::viridis(256, option = pal_name), vv_scale, na.color = "transparent")
                  else colorNumeric(pal_name, vv_scale, na.color = "transparent")
 
           for (i in seq_along(r_list)) {
@@ -956,9 +956,7 @@
                                  extra_sub = manual_sub, manual_model = manual_model)
    }
 
-   output$vgm_plot_main <- renderCachedPlot({
-     p <- build_vgm_structure_plot("act"); req(p); p
-   }, cacheKeyExpr = {
+   output$vgm_plot_main <- cached_plot(function() build_vgm_structure_plot("act"), function() {
      loc <- input$sel_loc_stats
      # input$var_id covers the pre-run state (no rv$disp yet).
      list("vgm_main", loc, rv$results_rev, rv$disp$actual %||% input$var_id,
@@ -967,10 +965,8 @@
           if (isTRUE(sci_vgm_tuning())) rv$v_emp_list[[paste0(loc, "_act")]] else rv$disp$v_emps[[paste0(loc, "_act")]],
           if (isTRUE(sci_vgm_tuning())) rv$v_fit_list[[paste0(loc, "_act")]] else rv$disp$v_fits[[paste0(loc, "_act")]],
           vgm_manual_overlay_key("act"))
-   }, cache = "session")
-   output$vgm_plot_pred <- renderCachedPlot({
-     p <- build_vgm_structure_plot("pre"); req(p); p
-   }, cacheKeyExpr = {
+   })
+   output$vgm_plot_pred <- cached_plot(function() build_vgm_structure_plot("pre"), function() {
      loc <- input$sel_loc_stats
      list("vgm_pred", loc, rv$results_rev, rv$disp$actual %||% input$var_id,
           sci_vgm_tuning(), input$var_id,
@@ -979,4 +975,4 @@
           if (isTRUE(sci_vgm_tuning())) rv$v_emp_list[[paste0(loc, "_pre")]] else rv$disp$v_emps[[paste0(loc, "_pre")]],
           if (isTRUE(sci_vgm_tuning())) rv$v_fit_list[[paste0(loc, "_pre")]] else rv$disp$v_fits[[paste0(loc, "_pre")]],
           vgm_manual_overlay_key("pre"))
-   }, cache = "session")
+   })

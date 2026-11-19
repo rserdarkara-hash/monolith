@@ -68,6 +68,14 @@ without_partial_match_notices <- function(expr) {
 KRIGING_CV_SCHEMA <- c("row_id", "fold", "observed", "var1.pred", "var1.var",
                        "residual", "geometry")
 
+#' The fold vector a run hands perform_kriging_loocv(), for a direct call: the
+#' rows complete across the target and covariates, folded by make_cv_folds()
+#' under `strategy` with the run's seed.
+kriging_cv_folds <- function(pts, target_var, aux_vars, strategy = "auto") {
+  cc <- stats::complete.cases(sf::st_drop_geometry(pts)[, c(target_var, aux_vars), drop = FALSE])
+  make_cv_folds(sf::st_coordinates(pts[cc, ]), strategy, sum(cc), CV_FOLD_SEED)
+}
+
 # ── Synthetic data factories (no external file dependencies) ────────────────
 
 #' Create a small sf POINT dataframe for spatial tests.

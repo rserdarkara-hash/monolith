@@ -2166,6 +2166,17 @@ test_that("binned targets fall on the quantile and equal-interval definitions", 
   e <- classif_build_target(df, "bin", NULL, "ph", n_classes = 4, style = "equal")
   expect_identical(nlevels(e), 4L)
   expect_identical(as.integer(e), class_of(min(x) + (1:3) * diff(range(x)) / 4))
+
+  # No more distinct values than classes: one class per value, cut midway
+  # between neighbours and half the mean gap (7/3 here) beyond the ends.
+  low <- data.frame(v = c(1, 2, 4, 8, 8, 2))
+  for (st in c("quantile", "equal")) {
+    t4 <- classif_build_target(low, "bin", NULL, "v", n_classes = 4, style = st)
+    expect_identical(levels(t4), c("[-0.17, 1.5)", "[1.5, 3)", "[3, 6)", "[6, 9.17]"))
+    expect_identical(as.integer(t4), c(1L, 2L, 3L, 4L, 4L, 2L))
+  }
+  # A single distinct value has no classes.
+  expect_null(classif_build_target(data.frame(v = rep(3.2, 6)), "bin", NULL, "v", 4, "quantile"))
 })
 
 test_that("classif_build_target widens label precision when rounded breaks collide", {
@@ -2326,12 +2337,12 @@ test_that("the out-of-fold importance sandbox leaves the fold RNG stream untouch
 
   set.seed(99); ref <- runif(3)
   set.seed(99)
-  imp <- .classif_with_seed(1L + 977L,
+  imp <- with_seed(1L + 977L,
     .classif_perm_delta(mod$workflow, df, "soil", c("elev", "slope"), n_rep = 2L))
   expect_equal(runif(3), ref)
   # ... and the importance itself is still computed, reproducibly from the seed
   expect_length(imp$delta, 2L)
-  imp2 <- .classif_with_seed(1L + 977L,
+  imp2 <- with_seed(1L + 977L,
     .classif_perm_delta(mod$workflow, df, "soil", c("elev", "slope"), n_rep = 2L))
   expect_equal(imp2$delta, imp$delta)
 })
@@ -2953,6 +2964,163 @@ test_that("classification kNNDM folds: Standard folds where random already match
   expect_identical(classif_cv_label("knndm", attr(sp, "knndm")), "kNNDM CV [spatial folds]")
   expect_identical(classif_cv_label("spatial"), "Spatial blocked CV")
   expect_identical(classif_cv_label("standard"), "Random k-fold CV")
+})
+
+test_that("Spatial blocked CV clusters the projected coordinates with the interpolation kernel", {
+  pts <- make_classif_points(n = 60)
+  for (k in c(3L, 5L, 10L)) for (s in c(12345L, 7L)) {
+    f <- classif_make_fold_id(pts, "spatial", target = "soil", v = k, seed = s)
+    # The definition: k-means on the coordinates, k centres, 5 starts, 50
+    # iterations, under the app's seed sandbox.
+    ref <- with_seed(s, stats::kmeans(sf::st_coordinates(pts)[, 1:2], centers = k,
+                                      nstart = 5, iter.max = 50)$cluster)
+    expect_identical(as.integer(f), as.integer(ref))
+    expect_identical(attr(f, "spatial_folds"), list(branch = "blocks", locations = 60L, k = k))
+    expect_null(attr(f, "block_fallback"))
+  }
+})
+
+test_that("a failed clustering takes the Standard folds and the design says so", {
+  pts <- make_classif_points(n = 60)
+  orig <- kmeans_block_folds
+  withr::defer(assign("kmeans_block_folds", orig, envir = globalenv()))
+  assign("kmeans_block_folds", function(coords, k, seed = CV_FOLD_SEED, n = nrow(coords)) {
+    f <- rep_len(seq_len(k), n); attr(f, "block_fallback") <- TRUE; f
+  }, envir = globalenv())
+  f <- classif_make_fold_id(pts, "spatial", target = "soil", v = 5L, seed = 12345L)
+  expect_identical(as.integer(f), classif_stratified_folds(pts$soil, 5L, 12345L))
+  rec <- attr(f, "spatial_folds")
+  expect_identical(rec, list(branch = "fallback", locations = 60L, k = 5L))
+  expect_identical(classif_cv_label("spatial", spatial_folds = rec),
+                   "Random k-fold CV [Spatial blocks: clustering failed]")
+  expect_identical(classif_nn_fold_note("spatial", spatial_folds = rec),
+                   "Under random folds, nearby training samples can make 1-NN look stronger than it would in parts of the map farther from samples.")
+})
+
+test_that("a Spatial scope with no more locations than folds runs leave-one-out on the Standard folds", {
+  # Eight locations, ten folds asked; class C at one location only.
+  df <- data.frame(x = 450000 + c(0, 120, 260, 410, 530, 700, 820, 960),
+                   y = 5800000 + c(0, 300, 80, 520, 210, 640, 360, 900),
+                   soil = factor(c("A", "A", "B", "B", "A", "B", "C", "A")),
+                   elev = c(10, 12, 30, 33, 11, 31, 50, 13), slope = c(2, 3, 8, 7, 2, 9, 14, 4))
+  pts <- sf::st_as_sf(df, coords = c("x", "y"), crs = 32633)
+  f <- classif_make_fold_id(pts, "spatial", target = "soil", v = 10L, seed = 12345L)
+  expect_identical(as.integer(f), classif_stratified_folds(pts$soil, 8L, 12345L))
+  expect_identical(attr(f, "spatial_folds"), list(branch = "small", locations = 8L, k = 10L))
+  # Leave-one-out is read from the folds, not assumed from the branch: rows
+  # repeating a location (a direct call; the pipeline merges them) reach the
+  # small branch without one location per fold.
+  fr <- classif_make_fold_id(pts[rep(1:6, each = 2), ], "spatial", target = "soil", v = 10L, seed = 12345L)
+  expect_identical(attr(fr, "spatial_folds"), list(branch = "small", locations = 6L, k = 10L))
+  expect_identical(classif_cv_label("spatial", spatial_folds = attr(fr, "spatial_folds"),
+                                    loo = length(unique(fr)) == length(fr)),
+                   "Random k-fold CV [Spatial blocks need more than 10 locations]")
+
+  res <- suppressWarnings(run_classification_pipeline(
+    df, target = "soil", predictors = c("elev", "slope"), x_col = "x", y_col = "y",
+    src_crs = 32633, proj_crs = "EPSG:32633", method = "rf", strategy = "spatial",
+    depth = "none", v = 10L, make_surface = FALSE))
+  expect_identical(res$n_folds, 8L)
+  expect_identical(res$spatial_folds, attr(res$fold_id, "spatial_folds"))
+  label <- classif_cv_label(res$strategy, res$knndm, res$spatial_folds, classif_cv_loo(res))
+  expect_identical(label, "LOOCV [Spatial blocks need more than 10 locations]")
+  expect_false(is.null(res$cv_design))
+  csv <- classif_metrics_csv_df(res)
+  expect_true(all(csv$estimator[csv$scope == "CV design"] == label))
+  txt <- classif_lift_interpretation(res$lift, "cat", res$strategy, res$knndm, res$spatial_folds,
+                                     classif_cv_loo(res))
+  expect_match(txt, "Under leave-one-out, nearby training samples can make 1-NN look stronger", fixed = TRUE)
+  expect_false(grepl("Spatial blocked CV", txt, fixed = TRUE))
+  # The fold holding C's one location trains without C.
+  expect_true("C" %in% res$class_gaps$class)
+  # Standard and kNNDM runs of such a scope name leave-one-out too.
+  expect_identical(classif_cv_label("standard", loo = TRUE), "LOOCV")
+  expect_identical(classif_cv_label("knndm", list(branch = "small"), loo = TRUE), "LOOCV [kNNDM needs n ≥ 30]")
+})
+
+test_that("nested Spatial CV tunes on Standard inner folds where blocks cannot form, and says so", {
+  # Six locations: leave-one-out outer folds, each training on five locations,
+  # too few for five inner blocks.
+  df <- data.frame(x = 450000 + c(0, 150, 330, 470, 640, 800),
+                   y = 5800000 + c(0, 410, 120, 560, 230, 690),
+                   soil = factor(c("A", "B", "A", "B", "A", "B")),
+                   elev = c(10, 30, 12, 33, 11, 31), slope = c(2, 8, 3, 7, 2, 9))
+  res <- suppressWarnings(run_classification_pipeline(
+    df, target = "soil", predictors = c("elev", "slope"), x_col = "x", y_col = "y",
+    src_crs = 32633, proj_crs = "EPSG:32633", method = "rf", strategy = "spatial",
+    depth = "light", nested = TRUE, v = 10L, make_surface = FALSE))
+  expect_true(res$nested)
+  expect_identical(res$nested_params$inner_folds, rep("small", 6))
+  shiny::testServer(classif_server, args = list(
+    data_reactive = shiny::reactive(NULL), vars_metadata_reactive = shiny::reactive(NULL),
+    spatial_reactive = shiny::reactive(NULL)
+  ), {
+    cl_rv$res <- res
+    session$flushReact()
+    expect_match(output$run_summary$html,
+                 "Nested CV: 6 of 6 outer folds tuned on Standard (random) inner folds", fixed = TRUE)
+  })
+})
+
+test_that("the 1-NN fold note follows the folds a run used", {
+  near <- "nearby training samples can make 1-NN look stronger than it would in parts of the map farther from samples."
+  rnd <- paste("Under random folds,", near)
+  advise <- paste(rnd, "Re-check under Spatial blocked CV.")
+  loo <- paste("Under leave-one-out,", near)
+  search <- "kNNDM kept the random folds. Their prediction distances may still differ from the map's. See CV Distance Match."
+  kn <- function(branch, ks_p = NA_real_) list(branch = branch, ks_p = ks_p)
+  sp <- function(branch) list(branch = branch, locations = 8L, k = 10L)
+  # Spatial blocks (recorded or not) and kNNDM's spatial folds: no note.
+  expect_null(classif_nn_fold_note("spatial", spatial_folds = sp("blocks")))
+  expect_null(classif_nn_fold_note("spatial"))
+  expect_null(classif_nn_fold_note("knndm", kn("spatial")))
+  # kNNDM's random folds: none through the KS gate, the panel after a search.
+  expect_null(classif_nn_fold_note("knndm", kn("random", 0.2)))
+  expect_identical(classif_nn_fold_note("knndm", kn("random", 0.01)), search)
+  # One location per fold: leave-one-out named, no advice.
+  expect_identical(classif_nn_fold_note("spatial", spatial_folds = sp("small"), loo = TRUE), loo)
+  expect_identical(classif_nn_fold_note("standard", loo = TRUE), loo)
+  expect_identical(classif_nn_fold_note("knndm", kn("small"), loo = TRUE), loo)
+  # A failed clustering: no advice the same data could follow.
+  expect_identical(classif_nn_fold_note("spatial", spatial_folds = sp("fallback")), rnd)
+  # Every other Standard fold design advises spatial blocks.
+  expect_identical(classif_nn_fold_note("standard"), advise)
+  for (b in c("small", "none", "fallback")) expect_identical(classif_nn_fold_note("knndm", kn(b)), advise)
+  expect_null(classif_nn_fold_note(NULL))
+
+  # The covariate-free result carries the lift reading's note.
+  shiny::testServer(classif_server, args = list(
+    data_reactive = shiny::reactive(NULL), vars_metadata_reactive = shiny::reactive(NULL),
+    spatial_reactive = shiny::reactive(NULL)
+  ), {
+    base <- list(nn_only = TRUE, majority_acc = 0.4, n_folds = 10L, n = 60L,
+                 cv_metrics = data.frame(.metric = c("accuracy", "kap"), .estimate = c(0.7, 0.5)),
+                 conf_mat = table(Prediction = c("A", "B"), Truth = c("A", "B")))
+    lift <- list(mcnemar_p = 0.2, lift_abs = 0.01)
+    for (case in list(list(strategy = "standard"), list(strategy = "knndm", knndm = kn("random", 0.01)))) {
+      cl_rv$res <- c(base, case)
+      session$flushReact()
+      note <- classif_nn_fold_note(case$strategy, case$knndm)
+      expect_match(output$lift_ui$html, htmltools::htmlEscape(note), fixed = TRUE)
+      expect_match(classif_lift_interpretation(lift, "cat", case$strategy, case$knndm), note, fixed = TRUE)
+    }
+  })
+})
+
+test_that("a tuned Spatial run repeats its folds, parameters and class map", {
+  pts <- make_classif_points(n = 60)
+  d <- cbind(sf::st_drop_geometry(pts), sf::st_coordinates(pts))
+  run <- function(path) suppressWarnings(run_classification_pipeline(
+    d, target = "soil", predictors = c("elev", "slope"), x_col = "X", y_col = "Y",
+    src_crs = 32633, proj_crs = "EPSG:32633", method = "rf", strategy = "spatial",
+    depth = "light", v = 5L, grid_res = 200, make_surface = TRUE, model_rds_path = path))
+  paths <- c(tempfile(fileext = ".rds"), tempfile(fileext = ".rds"))
+  withr::defer(unlink(paths))
+  a <- run(paths[1]); b <- run(paths[2])
+  expect_identical(a$fold_id, b$fold_id)
+  expect_identical(a$best_params, b$best_params)
+  expect_identical(readRDS(paths[1])$best_params, readRDS(paths[2])$best_params)
+  expect_identical(a$surface_df$.pred_class, b$surface_df$.pred_class)
 })
 
 test_that("kNNDM reaches the outer, nested and final-fit folds of a classification run", {

@@ -32,9 +32,30 @@ gov_summary_df <- function(res, labels = NULL) {
   out
 }
 
+# The four plot cards of a result, in two rows of two: the key names the
+# expand ids (gov_expand_<key>_btn, gov_<key>_expand_mode, ...), `kind` is
+# gov_create_plot()'s plot type.
+GOV_PLOT_CARDS <- list(
+  list(key = "imp", title = "Global Importance", aria = "Expand global importance plot",
+       plot_id = "gov_plot_importance", kind = "importance"),
+  list(key = "inta", title = "SHAP Dependence (Marginal)", aria = "Expand SHAP dependence plot",
+       plot_id = "gov_plot_interaction_a", kind = "interaction_a"),
+  list(key = "eff", title = "Functional Effect", aria = "Expand functional effect plot",
+       plot_id = "gov_plot_effect", kind = "effect"),
+  list(key = "intb", title = "Feature vs Target Scatterplot", aria = "Expand feature versus target plot",
+       plot_id = "gov_plot_interaction_b", kind = "interaction_b")
+)
+
 gov_factors_ui <- function(id) {
   ns <- shiny::NS(id)
-  
+  cards <- lapply(GOV_PLOT_CARDS, function(card) {
+    shiny::column(6,
+      shiny::h4(card$title),
+      shiny::div(style = "position: relative;",
+        expand_overlay_btn(ns(paste0("gov_expand_", card$key, "_btn")), card$aria),
+        shiny::plotOutput(ns(card$plot_id), height = "300px")))
+  })
+
   shiny::tagList(
     shiny::div(style = "padding: 10px;",
       shiny::fluidRow(
@@ -81,39 +102,9 @@ gov_factors_ui <- function(id) {
           
           shiny::conditionalPanel(
             condition = sprintf("output['%s'] == 'yes'", ns("gov_ready")),
-            shiny::fluidRow(
-              shiny::column(6, 
-                shiny::h4("Global Importance"),
-                shiny::div(style = "position: relative;",
-                  shiny::tags$button(id = ns("gov_expand_imp_btn"), type = "button", class = "btn btn-default action-button expand-icon-btn", title = "Expand plot", "aria-label" = "Expand global importance plot", shiny::icon("expand")),
-                  shiny::plotOutput(ns("gov_plot_importance"), height = "300px")
-                )
-              ),
-              shiny::column(6, 
-                shiny::h4("SHAP Dependence (Marginal)"),
-                shiny::div(style = "position: relative;",
-                  shiny::tags$button(id = ns("gov_expand_inta_btn"), type = "button", class = "btn btn-default action-button expand-icon-btn", title = "Expand plot", "aria-label" = "Expand SHAP dependence plot", shiny::icon("expand")),
-                  shiny::plotOutput(ns("gov_plot_interaction_a"), height = "300px")
-                )
-              )
-            ),
+            shiny::fluidRow(cards[[1]], cards[[2]]),
             shiny::hr(),
-            shiny::fluidRow(
-              shiny::column(6, 
-                shiny::h4("Functional Effect"),
-                shiny::div(style = "position: relative;",
-                  shiny::tags$button(id = ns("gov_expand_eff_btn"), type = "button", class = "btn btn-default action-button expand-icon-btn", title = "Expand plot", "aria-label" = "Expand functional effect plot", shiny::icon("expand")),
-                  shiny::plotOutput(ns("gov_plot_effect"), height = "300px")
-                )
-              ),
-              shiny::column(6, 
-                shiny::h4("Feature vs Target Scatterplot"),
-                shiny::div(style = "position: relative;",
-                  shiny::tags$button(id = ns("gov_expand_intb_btn"), type = "button", class = "btn btn-default action-button expand-icon-btn", title = "Expand plot", "aria-label" = "Expand feature versus target plot", shiny::icon("expand")),
-                  shiny::plotOutput(ns("gov_plot_interaction_b"), height = "300px")
-                )
-              )
-            ),
+            shiny::fluidRow(cards[[3]], cards[[4]]),
             shiny::hr(),
             sci_table(ns("gov_summary_table"), "Tabular Data Metrics", title_tag = shiny::h4,
               content = shiny::tagList(
@@ -145,7 +136,7 @@ gov_factors_server <- function(id, data_reactive, rows_reactive, vars_metadata_r
       stats::setNames(cols, lab(cols))
     })
 
-    gov_rv <- shiny::reactiveValues(res = NULL, ready = "no", cancelling = FALSE)
+    gov_rv <- shiny::reactiveValues(res = NULL, ready = "no")
 
     # Cooperative cancellation through a session-scoped flag file (the run
     # lives in a future worker), as in the classification module.
@@ -160,13 +151,11 @@ gov_factors_server <- function(id, data_reactive, rows_reactive, vars_metadata_r
       shinyjs::hide("gov_running_panel")
       shinyjs::show("gov_idle_content")
       shinyjs::enable("gov_cancel_btn")
-      gov_rv$cancelling <- FALSE
     }
 
     shiny::observeEvent(input$gov_cancel_btn, {
       if (!identical(gov_rv$ready, "running")) return(NULL)
       tryCatch(file.create(gov_cancel_file), error = function(e) NULL)
-      gov_rv$cancelling <- TRUE
       shinyjs::disable("gov_cancel_btn")
       shiny::showNotification(
         "Cancelling after the current step finishes...", type = "warning", duration = 4)
@@ -220,7 +209,6 @@ gov_factors_server <- function(id, data_reactive, rows_reactive, vars_metadata_r
       if (file.exists(gov_cancel_file)) {
         tryCatch(file.remove(gov_cancel_file), error = function(e) NULL)
       }
-      gov_rv$cancelling <- FALSE
       shinyjs::enable("gov_cancel_btn")
 
       shinyjs::disable("gov_run_btn")
@@ -383,26 +371,28 @@ gov_factors_server <- function(id, data_reactive, rows_reactive, vars_metadata_r
       }
     }
     
-    output$gov_plot_importance <- shiny::renderPlot({
-      shiny::req(gov_rv$res)
-      gov_create_plot("importance", expanded = FALSE)
+    # Each card's plot and its expand modal (the expanded build is larger).
+    # Fields are bound here: the modal reads its title only when first opened.
+    for (.card in GOV_PLOT_CARDS) local({
+      kind <- .card$kind
+      key <- .card$key
+      title <- .card$title
+      output[[.card$plot_id]] <- shiny::renderPlot({
+        shiny::req(gov_rv$res)
+        gov_create_plot(kind, expanded = FALSE)
+      })
+      register_expanded_modal(
+        input, output, session,
+        btn_id = paste0("gov_expand_", key, "_btn"),
+        mode_id = paste0("gov_", key, "_expand_mode"),
+        ui_id = paste0("gov_", key, "_expanded_ui"),
+        plot_static_id = paste0("gov_plot_", key, "_exp"),
+        plot_plotly_id = paste0("gov_plot_", key, "_exp_plotly"),
+        title_text = title,
+        build_fn = function() { shiny::req(gov_rv$res); gov_create_plot(kind, expanded = TRUE) }
+      )
     })
-    
-    output$gov_plot_interaction_a <- shiny::renderPlot({
-      shiny::req(gov_rv$res)
-      gov_create_plot("interaction_a", expanded = FALSE)
-    })
-    
-    output$gov_plot_effect <- shiny::renderPlot({
-      shiny::req(gov_rv$res)
-      gov_create_plot("effect", expanded = FALSE)
-    })
-    
-    output$gov_plot_interaction_b <- shiny::renderPlot({
-      shiny::req(gov_rv$res)
-      gov_create_plot("interaction_b", expanded = FALSE)
-    })
-    
+
     output$gov_summary_table <- DT::renderDataTable({
       shiny::req(gov_rv$res)
       df <- gov_summary_df(gov_rv$res, display_labels())
@@ -412,55 +402,5 @@ gov_factors_server <- function(id, data_reactive, rows_reactive, vars_metadata_r
                                        columnDefs = sig_render_defs(df, c("Value", GOV_SCALED_COL))),
                     rownames = FALSE)
     })
-    
-    gov_build_imp_plot <- function() { shiny::req(gov_rv$res); gov_create_plot("importance", expanded = TRUE) }
-    gov_build_inta_plot <- function() { shiny::req(gov_rv$res); gov_create_plot("interaction_a", expanded = TRUE) }
-    gov_build_eff_plot <- function() { shiny::req(gov_rv$res); gov_create_plot("effect", expanded = TRUE) }
-    gov_build_intb_plot <- function() { shiny::req(gov_rv$res); gov_create_plot("interaction_b", expanded = TRUE) }
-    
-    register_expanded_modal(
-      input, output, session,
-      btn_id = "gov_expand_imp_btn",
-      mode_id = "gov_imp_expand_mode",
-      ui_id = "gov_imp_expanded_ui",
-      plot_static_id = "gov_plot_imp_exp",
-      plot_plotly_id = "gov_plot_imp_exp_plotly",
-      title_text = "Global Importance",
-      build_fn = gov_build_imp_plot
-    )
-    
-    register_expanded_modal(
-      input, output, session,
-      btn_id = "gov_expand_inta_btn",
-      mode_id = "gov_inta_expand_mode",
-      ui_id = "gov_inta_expanded_ui",
-      plot_static_id = "gov_plot_inta_exp",
-      plot_plotly_id = "gov_plot_inta_exp_plotly",
-      title_text = "SHAP Dependence (Marginal)",
-      build_fn = gov_build_inta_plot
-    )
-    
-    register_expanded_modal(
-      input, output, session,
-      btn_id = "gov_expand_eff_btn",
-      mode_id = "gov_eff_expand_mode",
-      ui_id = "gov_eff_expanded_ui",
-      plot_static_id = "gov_plot_eff_exp",
-      plot_plotly_id = "gov_plot_eff_exp_plotly",
-      title_text = "Functional Effect",
-      build_fn = gov_build_eff_plot
-    )
-    
-    register_expanded_modal(
-      input, output, session,
-      btn_id = "gov_expand_intb_btn",
-      mode_id = "gov_intb_expand_mode",
-      ui_id = "gov_intb_expanded_ui",
-      plot_static_id = "gov_plot_intb_exp",
-      plot_plotly_id = "gov_plot_intb_exp_plotly",
-      title_text = "Feature vs Target Scatterplot",
-      build_fn = gov_build_intb_plot
-    )
-    
   })
 }

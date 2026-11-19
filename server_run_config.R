@@ -21,10 +21,8 @@
     var <- input$var_id
     if (is.null(var) || var == "" || is.null(rv$mapping$vars)) return(NULL)
 
-    idx <- which(sapply(rv$mapping$vars, function(x) x$actual == var))
-    if (length(idx) == 0) return(NULL)
-    # The first entry of a column listed twice (a hand-edited configuration).
-    m <- rv$mapping$vars[[idx[1]]]
+    m <- mapping_entry(rv$mapping$vars, var)
+    if (is.null(m)) return(NULL)
 
     pred_col <- if(is_valid_col_ref(m$pred)) as.character(m$pred) else NULL
     pred_ss_col <- if(is_valid_col_ref(m$pred_ss)) as.character(m$pred_ss) else NULL
@@ -93,9 +91,8 @@
   observeEvent(list(input$var_id, rv$mapping$vars), {
     var <- input$var_id
     if (is.null(var) || var == "" || is.null(rv$mapping$vars)) return(NULL)
-    idx <- which(sapply(rv$mapping$vars, function(x) x$actual == var))
-    if (length(idx) == 0) return(NULL)
-    m <- rv$mapping$vars[[idx[1]]]
+    m <- mapping_entry(rv$mapping$vars, var)
+    if (is.null(m)) return(NULL)
 
     has_col <- is_valid_col_ref
     choices <- c("Actual values" = "actual")
@@ -332,7 +329,7 @@
     } else {
       is_viridis <- meta$palette == "viridis"
       colors <- if (is_viridis) {
-        viridis::viridis(n_c_actual, option = meta$palette)
+        viridisLite::viridis(n_c_actual, option = meta$palette)
       } else {
         colorRampPalette(RColorBrewer::brewer.pal(min(8, max(3, n_c_actual)), meta$palette))(n_c_actual)
       }
@@ -520,11 +517,9 @@
       if (length(vin$vars)) vars <- vin$vars
     }
     vars_now <- vars %||% rv$mapping$vars
-    find_var <- function(id) Find(function(v) identical(as.character(v$actual), as.character(id)), vars_now)
-
     # The variable decides its category, so the two cannot disagree.
     var_v <- one(cfg$var_id)
-    var_e <- if (!is.null(var_v)) find_var(var_v)
+    var_e <- if (!is.null(var_v)) mapping_entry(vars_now, var_v)
     if (!is.null(var_v) && is.null(var_e)) skip("variable %s (not in the variable list)", var_v)
     cat_v <- if (!is.null(var_e)) as.character(var_e$category) else one(cfg$var_category)
     cats <- unique(vapply(vars_now, function(v) as.character(v$category %||% ""), character(1)))
@@ -533,7 +528,7 @@
       cat_v <- NULL
     }
 
-    ve <- var_e %||% find_var(input$var_id)
+    ve <- var_e %||% mapping_entry(vars_now, input$var_id)
     has_pred <- !is.null(ve) && is_valid_col_ref(ve$pred)
     has_ss <- !is.null(ve) && is_valid_col_ref(ve$pred_ss)
     vt <- one(cfg$value_type)
@@ -744,7 +739,7 @@
     # Agronomical styling supplies its own class palette, so the manual
     # colour-palette picker is irrelevant there: hidden.
     if (isTruthy(input$color_style) && input$color_style == "agro") return(NULL)
-    if (!any(vapply(rv$mapping$vars, function(x) identical(x$actual, vid), logical(1)))) return(NULL)
+    if (is.null(mapping_entry(rv$mapping$vars, vid))) return(NULL)
     choices <- palette_choices_precomputed
     pickerInput("palette_select", "Color Palette",
                 choices = choices,
@@ -928,8 +923,8 @@
     df <- ranks$results
     df$Label <- get_var_labels(df$Variable, rv$mapping$vars)
     df$Category <- vapply(df$Variable, function(v) {
-      m <- Filter(function(x) identical(x$actual, v), rv$mapping$vars)
-      if (length(m) && isTruthy(m[[1]]$category)) m[[1]]$category else "Uploaded Data"
+      category <- mapping_entry(rv$mapping$vars, v)$category
+      if (isTruthy(category)) as.character(category) else "Uploaded Data"
     }, character(1))
     df
   })

@@ -42,6 +42,12 @@ next_trigger <- function(x) {
   if (is.numeric(x) && length(x) == 1 && is.finite(x)) as.integer(x) + 1L else 1L
 }
 
+# The interpolation CV strategies by input value, named as the sidebar offers
+# them (ui_sidebar.R marks Auto as the default) and the run configuration
+# records them. resolve_cv_plan() names the design a fold plan actually ran.
+CV_STRATEGY_NAMES <- c(auto = "Auto", knndm = "kNNDM (Map-Matched)",
+                       loocv = "Standard LOOCV", block = "Spatial Block CV")
+
 # Identity of one CV experiment: target key, scored rows and their folds.
 # Equal ids mean the same samples in the same folds, so metrics are comparable.
 # Ids are written as integers (as.character(1e5) is "1e+05").
@@ -133,7 +139,6 @@ monolith_history_file <- function() {
 #' @param dpi Device resolution; vector devices (pdf, svg) take 72.
 #' @param expr Write to perform, evaluated once with the option in force.
 with_showtext_dpi <- function(dpi, expr) {
-  if (!requireNamespace("showtext", quietly = TRUE)) return(force(expr))
   old <- showtext::showtext_opts(dpi = dpi)
   on.exit(showtext::showtext_opts(old), add = TRUE)
   force(expr)
@@ -250,6 +255,13 @@ estimate_run_duration <- function(loc_sample_counts, method, comp_mode, cores) {
   ))
 }
 
+#' An uploaded table, the data file and the variable list alike: a CSV through
+#' data.table::fread() (separator detected, a UTF-8 byte-order mark dropped,
+#' headers kept verbatim) as a data.frame, XLS/XLSX through readxl (a tibble).
+read_table_file <- function(path, ext) {
+  if (identical(tolower(ext), "csv")) as.data.frame(data.table::fread(path)) else readxl::read_excel(path)
+}
+
 
 #' Validate a CRS for sf and terra; NULL (with a notification) when invalid.
 #'
@@ -282,6 +294,13 @@ validate_crs <- function(crs_selection, error_prefix = "Invalid CRS provided", d
   })
 }
 
+#' A list of sf objects in the CRS of its first element, names kept: rbind()
+#' refuses to bind layers whose CRSs differ.
+align_crs <- function(x) {
+  target <- sf::st_crs(x[[1]])
+  lapply(x, function(s) if (sf::st_crs(s) != target) sf::st_transform(s, target) else s)
+}
+
 # ── Input-CRS identification ───────────────────────────────────────────────
 # Bare projected coordinates do not carry their CRS (one easting/northing is
 # valid in all 60 UTM zones), so the input CRS is identified only from evidence
@@ -306,6 +325,20 @@ crs_chosen_by_user <- function(value, auto = character(0), stale = NULL) {
   if (length(v) != 1 || is.na(v) || !nzchar(v)) return(FALSE)
   if (identical(v, stale %||% "")) return(FALSE)
   !(v %in% auto)
+}
+
+#' The mapped X/Y columns of `df` as numbers (coord_values()), at full length so
+#' they stay aligned with its rows (companion lon/lat columns are filtered with
+#' them), and `ok`, the rows where both are finite. NULL when a column is
+#' missing or no pair is finite.
+.finite_xy <- function(df, x_col, y_col) {
+  if (is.null(df) || is.null(x_col) || is.null(y_col)) return(NULL)
+  if (!all(c(x_col, y_col) %in% colnames(df))) return(NULL)
+  x <- coord_values(df[[x_col]])
+  y <- coord_values(df[[y_col]])
+  ok <- is.finite(x) & is.finite(y)
+  if (!any(ok)) return(NULL)
+  list(x = x, y = y, ok = ok)
 }
 
 #' Format a WGS84 position for a human: "12.958°E, 52.466°N".
@@ -362,7 +395,7 @@ crs_zone_candidates <- function(lon) {
 crs_collapse_candidates <- function(x, y, cands, tol_m = 5, pos = NULL) {
   as_pt <- function(lon, lat) {
     if (!isTRUE(is.finite(lon)) || !isTRUE(is.finite(lat))) return(NULL)
-    sf::st_as_sf(data.frame(.x = lon, .y = lat), coords = c(".x", ".y"), crs = 4326)
+    xy_points(lon, lat, 4326)
   }
   cen <- if (!is.null(pos)) {
     lapply(seq_along(cands), function(i) as_pt(pos$lon[i], pos$lat[i]))
@@ -370,8 +403,7 @@ crs_collapse_candidates <- function(x, y, cands, tol_m = 5, pos = NULL) {
     lapply(cands, function(e) suppressWarnings(tryCatch({
       src <- sf::st_crs(e)
       if (is.na(src)) return(NULL)
-      sf::st_transform(sf::st_as_sf(data.frame(.x = mean(x), .y = mean(y)),
-                                    coords = c(".x", ".y"), crs = src), 4326)
+      sf::st_transform(xy_points(mean(x), mean(y), src), 4326)
     }, error = function(e) NULL)))
   }
   keep <- integer(0)
@@ -401,9 +433,8 @@ crs_candidate_residual <- function(x, y, lon, lat, epsg) {
   suppressWarnings(tryCatch({
     src <- sf::st_crs(epsg)
     if (is.na(src)) return(NA_real_)
-    p <- sf::st_transform(
-      sf::st_as_sf(data.frame(.x = x, .y = y), coords = c(".x", ".y"), crs = src), 4326)
-    ref <- sf::st_as_sf(data.frame(.x = lon, .y = lat), coords = c(".x", ".y"), crs = 4326)
+    p <- sf::st_transform(xy_points(x, y, src), 4326)
+    ref <- xy_points(lon, lat, 4326)
     d <- as.numeric(sf::st_distance(p, ref, by_element = TRUE))
     if (all(is.finite(d))) max(d) else NA_real_
   }, error = function(e) NA_real_))
@@ -465,8 +496,7 @@ identify_crs_from_boundary <- function(x, y, boundary, min_frac = 0.5) {
   frac <- vapply(cands, function(e) suppressWarnings(tryCatch({
     src <- sf::st_crs(e)
     if (is.na(src)) return(NA_real_)
-    p <- sf::st_transform(
-      sf::st_as_sf(data.frame(.x = x, .y = y), coords = c(".x", ".y"), crs = src), 4326)
+    p <- sf::st_transform(xy_points(x, y, src), 4326)
     mean(lengths(sf::st_intersects(p, target)) > 0)
   }, error = function(e) NA_real_)), numeric(1))
 
@@ -514,11 +544,9 @@ identify_crs_from_boundary <- function(x, y, boundary, min_frac = 0.5) {
 #' half the points read as degrees; otherwise it returns `crs = NULL` with
 #' `suggest = "EPSG:4326"` and the caller asks.
 identify_input_crs <- function(df, x_col, y_col, boundary = NULL) {
-  if (is.null(df) || !all(c(x_col, y_col) %in% colnames(df))) return(NULL)
-  x <- coord_values(df[[x_col]])
-  y <- coord_values(df[[y_col]])
-  ok <- is.finite(x) & is.finite(y)
-  if (sum(ok) < 1) return(NULL)
+  xy <- .finite_xy(df, x_col, y_col)
+  if (is.null(xy)) return(NULL)
+  x <- xy$x; y <- xy$y; ok <- xy$ok
 
   if (all(abs(x[ok]) <= 180) && all(abs(y[ok]) <= 90)) {
     datum_note <- " If they were recorded on another geographic datum (for example ED50), set that CRS instead."
@@ -531,7 +559,7 @@ identify_input_crs <- function(df, x_col, y_col, boundary = NULL) {
     tg <- .crs_boundary_target(boundary)
     if (!is.null(tg)) {
       frac <- suppressWarnings(tryCatch({
-        p <- sf::st_as_sf(data.frame(.x = x[ok], .y = y[ok]), coords = c(".x", ".y"), crs = 4326)
+        p <- xy_points(x[ok], y[ok], 4326)
         mean(lengths(sf::st_intersects(p, tg$target)) > 0)
       }, error = function(e) NA_real_))
       if (is.finite(frac) && frac >= 0.5) {
@@ -577,18 +605,12 @@ identify_input_crs <- function(df, x_col, y_col, boundary = NULL) {
 #' computable): the readout that makes a wrong zone obvious.
 crs_landing_position <- function(df, x_col, y_col, crs) {
   if (is.null(crs) || !nzchar(as.character(crs)[1])) return(NULL)
-  if (is.null(df) || is.null(x_col) || is.null(y_col)) return(NULL)
-  if (!all(c(x_col, y_col) %in% colnames(df))) return(NULL)
-  x <- coord_values(df[[x_col]])
-  y <- coord_values(df[[y_col]])
-  ok <- is.finite(x) & is.finite(y)
-  if (sum(ok) < 1) return(NULL)
+  fx <- .finite_xy(df, x_col, y_col)
+  if (is.null(fx)) return(NULL)
   suppressWarnings(tryCatch({
     co <- sf::st_crs(crs)
     if (is.na(co)) return(NULL)
-    p <- sf::st_transform(
-      sf::st_as_sf(data.frame(.x = mean(x[ok]), .y = mean(y[ok])),
-                   coords = c(".x", ".y"), crs = co), 4326)
+    p <- sf::st_transform(xy_points(mean(fx$x[fx$ok]), mean(fx$y[fx$ok]), co), 4326)
     xy <- sf::st_coordinates(p)
     if (!all(is.finite(xy))) return(NULL)
     lon <- unname(xy[1, 1]); lat <- unname(xy[1, 2])
@@ -602,7 +624,7 @@ crs_landing_position <- function(df, x_col, y_col, crs) {
 # (shipped with sf): ~5,330 non-deprecated EPSG projected CRSs with their
 # area-of-use boxes, read once (~0.3 s) and cached. Containment runs first as
 # plain arithmetic, so only the 15-50 survivors are transformed. Entry points
-# return NULL instead of erroring; without proj.db or RSQLite the shortlist
+# return NULL instead of erroring; when proj.db cannot be read, the shortlist
 # falls back to crs_zone_candidates().
 
 .crs_registry_cache <- new.env(parent = emptyenv())
@@ -639,14 +661,10 @@ crs_registry_path <- function() {
 #'   row per declared extent; `descr` lists the countries covered (what the
 #'   free-text filter searches). NULL when unreadable. Cached for the session,
 #'   a failure included.
-crs_registry <- function(refresh = FALSE) {
-  if (!refresh) {
-    if (!is.null(.crs_registry_cache$reg)) return(.crs_registry_cache$reg)
-    if (isTRUE(.crs_registry_cache$failed)) return(NULL)
-  }
+crs_registry <- function() {
+  if (!is.null(.crs_registry_cache$reg)) return(.crs_registry_cache$reg)
+  if (isTRUE(.crs_registry_cache$failed)) return(NULL)
   reg <- tryCatch({
-    if (!requireNamespace("DBI", quietly = TRUE) ||
-        !requireNamespace("RSQLite", quietly = TRUE)) stop("DBI/RSQLite unavailable")
     db <- crs_registry_path()
     if (is.null(db)) stop("proj.db not found on the PROJ search path")
     con <- DBI::dbConnect(RSQLite::SQLite(), db, flags = RSQLite::SQLITE_RO)
@@ -918,14 +936,12 @@ crs_scale_factor <- function(crs, lon, lat, arc_deg = 0.001) {
   g_mer <- M * rad
 
   h <- arc_deg / 2
-  pts <- data.frame(
-    .x = c(lon - h, lon + h, lon, lon),
-    .y = c(lat, lat, lat - h, lat + h))
+  ends_lon <- c(lon - h, lon + h, lon, lon)
+  ends_lat <- c(lat, lat, lat - h, lat + h)
   xy <- suppressWarnings(tryCatch(
-    sf::st_coordinates(sf::st_transform(
-      sf::st_as_sf(pts, coords = c(".x", ".y"), crs = 4326), co)),
+    sf::st_coordinates(sf::st_transform(xy_points(ends_lon, ends_lat, 4326), co)),
     error = function(e) NULL))
-  if (is.null(xy) || nrow(xy) != nrow(pts)) return(NULL)
+  if (is.null(xy) || nrow(xy) != length(ends_lon)) return(NULL)
 
   n <- length(lon)
   i <- seq_len(n)
@@ -950,13 +966,9 @@ crs_scale_factor <- function(crs, lon, lat, arc_deg = 0.001) {
 #'
 #' @param crs The INPUT Data CRS (converts the file's coordinates to degrees).
 crs_sample_positions <- function(df, x_col, y_col, crs) {
-  if (is.null(df) || is.null(x_col) || is.null(y_col)) return(NULL)
-  if (!all(c(x_col, y_col) %in% colnames(df))) return(NULL)
-  x <- coord_values(df[[x_col]])
-  y <- coord_values(df[[y_col]])
-  ok <- is.finite(x) & is.finite(y)
-  if (!any(ok)) return(NULL)
-  x <- x[ok]; y <- y[ok]
+  fx <- .finite_xy(df, x_col, y_col)
+  if (is.null(fx)) return(NULL)
+  x <- fx$x[fx$ok]; y <- fx$y[fx$ok]
 
   cand <- unique(rbind(
     c(mean(x), mean(y)),
@@ -1102,8 +1114,7 @@ shp_boundary_overlap <- function(shp, x, y, crs) {
     # draws polygon edges as geodesics); geographic data is tested in 4326.
     frame <- if (isTRUE(sf::st_is_longlat(src))) sf::st_crs(4326) else src
     poly <- sf::st_union(sf::st_transform(sf::st_make_valid(poly), frame))
-    pts <- sf::st_transform(sf::st_as_sf(data.frame(.x = x[ok], .y = y[ok]),
-                                         coords = c(".x", ".y"), crs = src), frame)
+    pts <- sf::st_transform(xy_points(x[ok], y[ok], src), frame)
     inside <- sum(lengths(sf::st_intersects(pts, poly)) > 0)
     dist_km <- if (inside == 0)
       as.numeric(units::set_units(sf::st_distance(sf::st_union(pts), poly), "km")) else 0
@@ -1173,7 +1184,7 @@ palette_choices_precomputed <- (function() {
   pals <- dashboard_palettes
   labels <- sapply(pals, function(p) {
     cols <- if (p == "viridis") {
-      viridis::viridis(5)
+      viridisLite::viridis(5)
     } else {
       info <- RColorBrewer::brewer.pal.info
       max_cols <- if (p %in% rownames(info)) info[p, "maxcolors"] else 5
@@ -1200,8 +1211,7 @@ resolve_var_palette <- function(var, vars, picks = list(), fallback = "YlOrRd") 
   }
   var <- as.character(var %||% NA_character_)[1]
   if (is.na(var) || !nzchar(var)) return(offered(fallback) %||% "YlOrRd")
-  entry <- Find(function(v) identical(as.character(v$actual), var), vars %||% list())
-  offered(picks[[var]]) %||% offered(entry$palette) %||% offered(fallback) %||% "YlOrRd"
+  offered(picks[[var]]) %||% offered(mapping_entry(vars, var)$palette) %||% offered(fallback) %||% "YlOrRd"
 }
 
 styler_fields <- list(

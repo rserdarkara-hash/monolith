@@ -32,7 +32,7 @@ vgm_weighted_sse <- function(v_emp, model) {
 
 # ── RNG sandbox ─────────────────────────────────────────────────────────────
 # The app's one seeding convention, used by every helper that draws random
-# numbers and by classif_helpers.R's .classif_with_seed; defined in the first
+# numbers, the Classification Suite's included; defined in the first
 # fragment so every later fragment and worker sees it. The caller's
 # .Random.seed is restored on exit, or removed when it had none. `expr` is a
 # promise evaluated in the caller's frame, so assignments and return() behave

@@ -65,33 +65,11 @@
         # calls.
         worker_fn <- match.fun("autofit_vgm_item")
 
-        nested_cl <- NULL
-        old_mc_cores <- getOption("mc.cores")
-        tryCatch(
-          {
-            # No `nbrOfWorkers() == 1L` clause: the plan reset above makes it
-            # true by construction.
-            if (nested_workers >= 2L) {
-              # PSOCK workers report mc.cores = 1; set it before spawning, or
-              # parallelly's worker-count guard misfires.
-              options(mc.cores = nested_workers)
-              nested_cl <- parallelly::makeClusterPSOCK(nested_workers)
-              future::plan(future::cluster, workers = nested_cl)
-            }
-            furrr::future_map(jobs, worker_fn, current_crs = current_crs,
-                              .options = furrr::furrr_options(seed = 12345, packages = c("sf", "gstat")))
-          },
-          finally = {
-            options(mc.cores = old_mc_cores)
-            # Stop the cluster FIRST, and let neither step's failure cancel the
-            # other: a failed plan switch must not leave the session on a dead
-            # cluster.
-            if (!is.null(nested_cl)) {
-              tryCatch(parallel::stopCluster(nested_cl), error = function(e) NULL)
-            }
-            tryCatch(future::plan(future::sequential), error = function(e) NULL)
-          }
-        )
+        # No `nbrOfWorkers() == 1L` clause: the plan reset above makes it true
+        # by construction; the cluster goes before the worker is reused.
+        with_nested_cluster(nested_workers,
+          furrr::future_map(jobs, worker_fn, current_crs = current_crs,
+                            .options = furrr::furrr_options(seed = 12345, packages = c("sf", "gstat"))))
       },
       seed = 12345
     )
@@ -370,103 +348,83 @@
   # shows a mode plus value, prefilled from the locality's value, else the
   # all-localities setting. An NA is an invalid Fixed all-localities value (the
   # run refuses it), so it prefills the mode only.
-  observeEvent(
-    list(input$idw_mode, input$idw_m_loc, input$comp_mode, input$idw_m_target,
-         input$sep_fit, input$value_type, input$var_id, input$subset),
-    {
-      req(input$idw_mode == "manual", input$idw_m_loc)
-      loc <- input$idw_m_loc
-      target <- manual_param_target(input$comp_mode, input$value_type, input$idw_m_target, input$sep_fit)
-      val <- get_regional_param("IDW", loc, target,
-                                default = idw_param_value(input$idw_p_mode, input$idw_p),
-                                key = current_tuning_keys()[[target]])
-      mode <- if (is.na(val)) input$idw_p_mode else param_value_mode("IDW", val)
-      updateRadioButtons(session, "idw_m_mode", selected = mode)
-      if (identical(mode, "fixed") && !is.na(val)) updateNumericInput(session, "idw_m_p", value = val)
-    }
+  # Each panel's input ids: the method's mode, the locality and surface picks,
+  # the all-localities mode and value, the panel's own mode and value, Apply,
+  # and the note; `store` is the rv field, `encode` the engine encoding.
+  PARAM_PANELS <- list(
+    IDW = list(mode = "idw_mode", loc = "idw_m_loc", target = "idw_m_target",
+               global_mode = "idw_p_mode", global_value = "idw_p",
+               own_mode = "idw_m_mode", own_value = "idw_m_p", apply = "apply_idw_manual",
+               note = "idw_m_note", store = "idw_factors", what = "IDW power",
+               encode = idw_param_value, fixed_ok = idw_fixed_ok, fallback = 2,
+               invalid = sprintf("A fixed IDW power must be a number from 0 (equal weights) to %d; nothing was stored.",
+                                 IDW_MAX_FINITE_POWER),
+               no_value = "Fixed p, which has no valid value yet (the run will not start)"),
+    TPS = list(mode = "tps_mode", loc = "tps_m_loc", target = "tps_m_target",
+               global_mode = "tps_lambda_mode", global_value = "tps_lambda",
+               own_mode = "tps_m_mode", own_value = "tps_m_lambda", apply = "apply_tps_manual",
+               note = "tps_m_note", store = "tps_lambdas", what = "TPS λ",
+               encode = tps_param_value, fixed_ok = tps_fixed_ok, fallback = NULL,
+               invalid = "A fixed λ must be a number above 0 (Exact is λ = 0); nothing was stored.",
+               no_value = "Fixed λ, which has no valid value yet (the run will not start)")
   )
 
-  observeEvent(input$apply_idw_manual, {
-    req(input$idw_mode == "manual", input$idw_m_loc)
-    loc <- input$idw_m_loc
-    target <- manual_param_target(input$comp_mode, input$value_type, input$idw_m_target, input$sep_fit)
-    key <- current_tuning_keys()[[target]]
-    req(!is.na(key))
-    if (identical(input$idw_m_mode, "fixed") && !idw_fixed_ok(input$idw_m_p)) {
-      showNotification(sprintf("A fixed IDW power must be a number from 0 (equal weights) to %d; nothing was stored.",
-                               IDW_MAX_FINITE_POWER), type = "error")
-      return()
-    }
-    val <- idw_param_value(input$idw_m_mode, input$idw_m_p)
-    set_regional_param("IDW", loc, target, val, key)
-    showNotification(paste0("IDW power for ", loc, " (", target, ": ", key, "): ",
-                            param_setting_text("IDW", val), "."), type = "message")
-  })
+  register_param_panel <- function(type, p) {
+    force(type); force(p)
+    panel_target <- function() manual_param_target(input$comp_mode, input$value_type, input[[p$target]], input$sep_fit)
 
-  observeEvent(
-    list(input$tps_mode, input$tps_m_loc, input$comp_mode, input$tps_m_target,
-         input$sep_fit, input$value_type, input$var_id, input$subset),
-    {
-      req(input$tps_mode == "manual", input$tps_m_loc)
-      loc <- input$tps_m_loc
-      target <- manual_param_target(input$comp_mode, input$value_type, input$tps_m_target, input$sep_fit)
-      val <- get_regional_param("TPS", loc, target,
-                                default = tps_param_value(input$tps_lambda_mode, input$tps_lambda),
-                                key = current_tuning_keys()[[target]])
-      mode <- if (is.na(val)) input$tps_lambda_mode else param_value_mode("TPS", val)
-      updateRadioButtons(session, "tps_m_mode", selected = mode)
-      if (identical(mode, "fixed") && !is.na(val)) updateNumericInput(session, "tps_m_lambda", value = val)
-    }
-  )
+    observeEvent(
+      list(input[[p$mode]], input[[p$loc]], input$comp_mode, input[[p$target]],
+           input$sep_fit, input$value_type, input$var_id, input$subset),
+      {
+        req(input[[p$mode]] == "manual", input[[p$loc]])
+        target <- panel_target()
+        val <- get_regional_param(type, input[[p$loc]], target,
+                                  default = p$encode(input[[p$global_mode]], input[[p$global_value]]),
+                                  key = current_tuning_keys()[[target]])
+        mode <- if (is.na(val)) input[[p$global_mode]] else param_value_mode(type, val)
+        updateRadioButtons(session, p$own_mode, selected = mode)
+        if (identical(mode, "fixed") && !is.na(val)) updateNumericInput(session, p$own_value, value = val)
+      }
+    )
 
-  observeEvent(input$apply_tps_manual, {
-    req(input$tps_mode == "manual", input$tps_m_loc)
-    loc <- input$tps_m_loc
-    target <- manual_param_target(input$comp_mode, input$value_type, input$tps_m_target, input$sep_fit)
-    key <- current_tuning_keys()[[target]]
-    req(!is.na(key))
-    if (identical(input$tps_m_mode, "fixed") && !tps_fixed_ok(input$tps_m_lambda)) {
-      showNotification("A fixed λ must be a number above 0 (Exact is λ = 0); nothing was stored.", type = "error")
-      return()
-    }
-    val <- tps_param_value(input$tps_m_mode, input$tps_m_lambda)
-    set_regional_param("TPS", loc, target, val, key)
-    showNotification(paste0("TPS λ for ", loc, " (", target, ": ", key, "): ",
-                            param_setting_text("TPS", val), "."), type = "message")
-  })
+    observeEvent(input[[p$apply]], {
+      req(input[[p$mode]] == "manual", input[[p$loc]])
+      loc <- input[[p$loc]]
+      target <- panel_target()
+      key <- current_tuning_keys()[[target]]
+      req(!is.na(key))
+      if (identical(input[[p$own_mode]], "fixed") && !p$fixed_ok(input[[p$own_value]])) {
+        showNotification(p$invalid, type = "error")
+        return()
+      }
+      val <- p$encode(input[[p$own_mode]], input[[p$own_value]])
+      set_regional_param(type, loc, target, val, key)
+      showNotification(paste0(p$what, " for ", loc, " (", target, ": ", key, "): ",
+                              param_setting_text(type, val), "."), type = "message")
+    })
 
-  # The note under a Per locality panel (per_locality_note()): which localities
-  # have their own value and what the others run with (the hidden
-  # all-localities setting the controls start from), so a prefilled control is
-  # not read as stored.
-  per_locality_note_ui <- function(type, store, target_switch, selected, global_text) {
-    req(rv$user_data)
-    target <- manual_param_target(input$comp_mode, input$value_type, target_switch, input$sep_fit)
-    locs <- resolve_selected_localities(input$locality, rv$user_data, rv$mapping$loc)
-    req(length(locs) > 0)
-    lines <- per_locality_note(type, store, target, locs, current_tuning_keys()[[target]],
-                               global_text, selected)
-    tags$small(style = "display: block; color: var(--mn-text-3); margin: 0 0 8px 0;",
-               HTML(paste(htmltools::htmlEscape(lines), collapse = "<br>")))
+    # The note under the panel (per_locality_note()): which localities have
+    # their own value and what the others run with (the hidden all-localities
+    # setting the controls start from), so a prefilled control is not read as
+    # stored.
+    output[[p$note]] <- renderUI({
+      req(identical(input[[p$mode]], "manual"), rv$user_data)
+      global <- if (identical(input[[p$global_mode]], "fixed") && !p$fixed_ok(input[[p$global_value]])) {
+        p$no_value
+      } else {
+        param_setting_text(type, p$encode(input[[p$global_mode]], input[[p$global_value]]) %||% p$fallback)
+      }
+      target <- panel_target()
+      locs <- resolve_selected_localities(input$locality, rv$user_data, rv$mapping$loc)
+      req(length(locs) > 0)
+      lines <- per_locality_note(type, rv[[p$store]], target, locs, current_tuning_keys()[[target]],
+                                 global, input[[p$loc]])
+      tags$small(style = "display: block; color: var(--mn-text-3); margin: 0 0 8px 0;",
+                 HTML(paste(htmltools::htmlEscape(lines), collapse = "<br>")))
+    })
   }
-  output$idw_m_note <- renderUI({
-    req(identical(input$idw_mode, "manual"))
-    global <- if (identical(input$idw_p_mode, "fixed") && !idw_fixed_ok(input$idw_p)) {
-      "Fixed p, which has no valid value yet (the run will not start)"
-    } else {
-      param_setting_text("IDW", idw_param_value(input$idw_p_mode, input$idw_p) %||% 2)
-    }
-    per_locality_note_ui("IDW", rv$idw_factors, input$idw_m_target, input$idw_m_loc, global)
-  })
-  output$tps_m_note <- renderUI({
-    req(identical(input$tps_mode, "manual"))
-    global <- if (identical(input$tps_lambda_mode, "fixed") && !tps_fixed_ok(input$tps_lambda)) {
-      "Fixed λ, which has no valid value yet (the run will not start)"
-    } else {
-      param_setting_text("TPS", tps_param_value(input$tps_lambda_mode, input$tps_lambda))
-    }
-    per_locality_note_ui("TPS", rv$tps_lambdas, input$tps_m_target, input$tps_m_loc, global)
-  })
+  for (.type in names(PARAM_PANELS)) register_param_panel(.type, PARAM_PANELS[[.type]])
 
   observeEvent(input$auto_fit, {
     req(rv$user_data, rv$mapping$x, rv$mapping$y, rv$mapping$crs)

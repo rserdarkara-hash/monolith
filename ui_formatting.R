@@ -1371,13 +1371,21 @@ rk_fit_stats_df <- function(lm_sum) {
   )
 }
 
-#' The display label of column `v`: the label of the variable-list entry whose
-#' `actual` is that column, else the column name. Every `actual` is a column
-#' name of the table, so only the same name is the same variable; a looser
-#' match would hand the column another column's label.
+#' The variable-list entry whose `actual` is column `actual` (the first, for a
+#' column a hand-edited configuration lists twice), or NULL. Every `actual` is
+#' a column name of the table, so only the same name is the same variable.
+mapping_entry <- function(vars, actual) {
+  if (length(actual) != 1 || is.na(actual)) return(NULL)
+  actual <- as.character(actual)
+  Find(function(x) identical(as.character(x$actual), actual), vars %||% list())
+}
+
+#' The display label of column `v`: the label of its variable-list entry
+#' (mapping_entry()), else the column name; a looser match would hand the
+#' column another column's label.
 get_var_label <- function(v, vars_metadata) {
   if (is.null(v) || is.na(v) || v == "") return(v)
-  entry <- Find(function(x) identical(as.character(x$actual), as.character(v)), vars_metadata %||% list())
+  entry <- mapping_entry(vars_metadata, v)
   lab <- entry$label
   if (length(lab) == 1 && !is.na(lab) && nzchar(lab)) as.character(lab) else v
 }
@@ -1479,6 +1487,14 @@ covariate_screen_record <- function(res_all) {
        automatic = automatic, collocation = collocation)
 }
 
+# One " | Label: value" part of the run configuration panel; "" for a field
+# the run did not record (an archive from an older session asserts nothing),
+# an NA, or one `when` leaves out.
+cfg_part <- function(value, label, fmt = identity, when = TRUE) {
+  if (length(value) != 1 || is.na(value) || !isTRUE(when)) return("")
+  paste0(" | ", label, ": ", fmt(value))
+}
+
 # The covariate line of the run configuration panel: what was selected and
 # what the fitted models used. One statement when every locality and surface
 # kept the same set, otherwise one per locality and surface. A model that used
@@ -1530,9 +1546,8 @@ default_var_pick <- function(vars, category = NULL) {
 # the chosen partition on both sources; CVE and Actual use all scoped rows.
 rank_auxiliary_correlations <- function(data, mapping, variable, value_type = "actual",
                                        source = "predictions", localities = NULL, subset = "all") {
-  meta <- Filter(function(m) identical(m$actual, variable), mapping$vars)
-  if (length(meta) == 0) stop("Target variable is not mapped.")
-  meta <- meta[[1]]
+  meta <- mapping_entry(mapping$vars, variable)
+  if (is.null(meta)) stop("Target variable is not mapped.")
   predicted <- value_type %in% c("pred", "pred_ss", "resid") && source == "predictions"
   target <- if (predicted) {
     if (value_type == "pred_ss") meta$pred_ss else meta$pred
@@ -1785,7 +1800,6 @@ desc_group_fit_stats <- function(df, x_var, y_var, fit, groups,
         fv <- stats::fitted(mod)
         c(r2 = stats::cor(fv + stats::residuals(mod), fv)^2, p = NA_real_)
       } else if (fit == "gam") {
-        if (!requireNamespace("mgcv", quietly = TRUE)) return(none)
         s <- summary(mgcv::gam(form_gam, data = sub_df))
         c(r2 = s$r.sq, p = s$s.table[1, "p-value"])
       } else none

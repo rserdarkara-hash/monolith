@@ -6,9 +6,26 @@
 # (classif_surface_to_rasters()).
 
 # ── Target factor construction ──────────────────────────────────────────────
+# Quantile (type 7) or equal-interval breaks of finite values `x`; with no
+# more distinct values than classes, one class per value, cut midway between
+# neighbours and half the mean gap beyond the ends.
+.classif_simple_breaks <- function(x, n, style) {
+  u <- sort(unique(x))
+  if (length(u) < 2) return(u)
+  if (length(u) <= n) {
+    d <- diff(u)
+    return(c(u[1] - mean(d) / 2, u[-length(u)] + d / 2, u[length(u)] + mean(d) / 2))
+  }
+  if (identical(style, "quantile")) {
+    stats::quantile(x, seq(0, 1, length.out = n + 1), type = 7, names = FALSE)
+  } else {
+    seq(min(x), max(x), length.out = n + 1)
+  }
+}
+
 # `cat` mode uses a categorical column verbatim; `bin` mode discretises a
-# numeric column into ordered classes (classInt quantile or equal-interval
-# breaks, or exact Jenks) with right = FALSE, as the app's agronomic classes:
+# numeric column into ordered classes (quantile or equal-interval breaks, or
+# exact Jenks) with right = FALSE, as the app's agronomic classes:
 # [low, high), the top interval also holding the maximum ([low, high]).
 classif_build_target <- function(df, mode, cat_col, num_col, n_classes = 4,
                                  style = "quantile") {
@@ -20,7 +37,7 @@ classif_build_target <- function(df, mode, cat_col, num_col, n_classes = 4,
       if (length(xf) == 0) return(NULL)
       c(min(xf), natural_breaks(xf, n_classes), max(xf))
     } else {
-      suppressMessages(classInt::classIntervals(xf, n = n_classes, style = style))$brks
+      .classif_simple_breaks(xf, n_classes, style)
     }
     brks <- unique(brks)
     if (length(brks) < 3) return(NULL)
@@ -44,6 +61,17 @@ classif_build_target <- function(df, mode, cat_col, num_col, n_classes = 4,
   } else {
     factor(as.character(df[[cat_col]]))
   }
+}
+
+# The Model / Accuracy / Kappa table of the covariate-lift panel: one row per
+# list(model, accuracy, kappa), each score to three decimals, NA as "-".
+acc_kappa_table <- function(rows) {
+  fmt <- function(x) ifelse(is.na(x), "-", sprintf("%.3f", x))
+  shiny::tags$table(class = "table table-condensed", style = "margin-bottom: 6px;",
+    shiny::tags$thead(shiny::tags$tr(
+      shiny::tags$th("Model"), shiny::tags$th("Accuracy"), shiny::tags$th("Kappa"))),
+    shiny::tags$tbody(lapply(rows, function(r) shiny::tags$tr(
+      shiny::tags$td(r[[1]]), shiny::tags$td(fmt(r[[2]])), shiny::tags$td(fmt(r[[3]]))))))
 }
 
 # Columns eligible as a categorical target or predictor: character/factor
@@ -155,7 +183,7 @@ classif_ui <- function(id) {
                              selected = "rf"),
           shiny::radioButtons(ns("cv_strategy"), shiny::tags$span("Cross-validation",
               info_tooltip(ns("cv_strategy_info"), tip_html(
-                "Spatial (blocked)" = "clusters nearby points into folds, so accuracy reflects prediction away from the sampled clusters, into unsampled areas.",
+                "Spatial (blocked)" = "clusters nearby points into folds, so accuracy reflects prediction away from the sampled clusters, into unsampled areas. With no more locations than folds (10 or fewer), or points that cannot be clustered, it uses the Standard folds.",
                 "kNNDM (map-matched)" = "forms folds whose held-out points are about as far from their training points as the prediction grid is from the samples (Linnenbrink et al. 2024): class-stratified random folds when the samples cover the scope evenly, spatially grouped folds when they are clustered or the scope reaches beyond them, so the reported accuracy is that of this map over this scope. Below 30 points it uses Standard folds.",
                 "Standard (random k-fold)" = "estimates accuracy within the sampled area; with a clustered sample it overstates accuracy in the gaps between clusters."))),
             choices = c("Spatial (blocked)" = "spatial", "kNNDM (map-matched)" = "knndm",
@@ -1195,7 +1223,7 @@ classif_server <- function(id, data_reactive, vars_metadata_reactive, spatial_re
           library(sf); library(terra); library(gstat); library(fields)
           library(spdep); library(FNN); library(concaveman); library(dplyr)
           library(recipes); library(parsnip); library(workflows); library(tune)
-          library(rsample); library(dials); library(yardstick); library(spatialsample); library(hardhat)
+          library(rsample); library(dials); library(yardstick); library(hardhat)
         })
         # Source the helpers in-worker, as the interpolation workers do.
         source("spatial_helpers.R"); source("classif_helpers.R")
@@ -1206,7 +1234,7 @@ classif_server <- function(id, data_reactive, vars_metadata_reactive, spatial_re
         do.call(run_classification_pipeline, run_args$pipeline)
       }, globals = list(run_args = run_args),
          # seed = TRUE: a parallel-safe L'Ecuyer stream (avoids future's RNG
-         # warning); every RNG step runs under .classif_with_seed(), so results
+         # warning); every RNG step runs under with_seed(), so results
          # are reproducible either way.
          seed = TRUE) %...>% (function(res) {
         run_in_flight <<- FALSE
@@ -1387,7 +1415,7 @@ classif_server <- function(id, data_reactive, vars_metadata_reactive, spatial_re
     # ── Performance outputs ──────────────────────────────────────────────────
     output$cv_badge <- shiny::renderUI({
       res <- cl_rv$res; shiny::req(res)
-      lbl <- classif_cv_label(res$strategy, res$knndm)
+      lbl <- classif_cv_label(res$strategy, res$knndm, res$spatial_folds, classif_cv_loo(res))
       scope_part <- if (is.null(res$scope_label)) "" else sprintf(" | scope: %s", res$scope_label)
       wt_part <- if (isTRUE(res$weights_applied)) {
         " | class-weighted"
@@ -1403,27 +1431,22 @@ classif_server <- function(id, data_reactive, vars_metadata_reactive, spatial_re
                 lbl, res$n_folds, res$n, model_part, scope_part, wt_part))
     })
 
-    # Covariate-free run: the 1-NN model against the no-information rate.
+    # Covariate-free run: the 1-NN model against the no-information rate, with
+    # the 1-NN fold note of the folds used (classif_nn_fold_note()).
     nn_only_baseline_ui <- function(res) {
       m <- res$cv_metrics
       acc <- m$.estimate[m$.metric == "accuracy"][1]
       kap <- m$.estimate[m$.metric == "kap"][1]
-      fmt <- function(x) ifelse(is.na(x), "-", sprintf("%.3f", x))
+      note <- classif_nn_fold_note(res$strategy, res$knndm, res$spatial_folds, classif_cv_loo(res))
       shiny::tagList(
-        shiny::tags$table(class = "table table-condensed", style = "margin-bottom: 6px;",
-          shiny::tags$thead(shiny::tags$tr(
-            shiny::tags$th("Model"), shiny::tags$th("Accuracy"), shiny::tags$th("Kappa"))),
-          shiny::tags$tbody(
-            shiny::tags$tr(shiny::tags$td("Spatial 1-NN (no covariates)"),
-                           shiny::tags$td(fmt(acc)), shiny::tags$td(fmt(kap))),
-            shiny::tags$tr(shiny::tags$td("Majority class (no information)"),
-                           shiny::tags$td(fmt(res$majority_acc)), shiny::tags$td("0.000")))),
+        acc_kappa_table(list(
+          list("Spatial 1-NN (no covariates)", acc, kap),
+          list("Majority class (no information)", res$majority_acc, 0))),
         shiny::tags$p(style = "font-size: 0.88em;",
           sprintf("Spatial position alone is %s the no-information rate by %.1f accuracy points on these folds. Kappa corrects for chance agreement, so read it before the accuracy when classes are imbalanced. No covariate lift is computed: this run has no covariates.",
                   if (acc >= res$majority_acc) "above" else "BELOW",
                   100 * abs(acc - res$majority_acc)),
-          if (identical(res$strategy, "standard"))
-            " Random folds favour nearest-neighbour assignment, because each held-out point keeps its near neighbours in the training set; re-check under Spatial blocked CV.")
+          if (!is.null(note)) paste0(" ", note))
       )
     }
 
@@ -1433,25 +1456,18 @@ classif_server <- function(id, data_reactive, vars_metadata_reactive, spatial_re
       if (isTRUE(res$nn_only)) return(nn_only_baseline_ui(res))
       shiny::req(res$lift)
       lf <- res$lift
-      fmt <- function(x) ifelse(is.na(x), "-", sprintf("%.3f", x))
-      p_lbl <- classif_lift_interpretation(lf, res$target_mode %||% "cat", res$strategy)
+      p_lbl <- classif_lift_interpretation(lf, res$target_mode %||% "cat", res$strategy,
+                                           res$knndm, res$spatial_folds, classif_cv_loo(res))
       dir_word <- if (lf$lift_abs >= 0) "improved" else "REDUCED"
       shiny::tagList(
-        shiny::tags$table(class = "table table-condensed", style = "margin-bottom: 6px;",
-          shiny::tags$thead(shiny::tags$tr(
-            shiny::tags$th("Model"), shiny::tags$th("Accuracy"), shiny::tags$th("Kappa"))),
-          shiny::tags$tbody(
-            shiny::tags$tr(shiny::tags$td("Covariate model"),
-                           shiny::tags$td(fmt(lf$model_acc)), shiny::tags$td(fmt(lf$model_kap))),
-            shiny::tags$tr(shiny::tags$td("Spatial baseline (1-NN, no covariates)"),
-                           shiny::tags$td(fmt(lf$baseline_acc)), shiny::tags$td(fmt(lf$baseline_kap))),
-            shiny::tags$tr(shiny::tags$td("Majority class (no information)",
-                             info_tooltip(ns("majority_info"), tip_html(
-                               "The accuracy achieved by always predicting the most frequent class in the scoped data - the 'no-information rate'. It is the floor any useful model must clearly exceed; with imbalanced classes it can be high even though the strategy has learnt nothing.",
-                               "Cohen's kappa corrects for exactly this, which is why this row scores kappa = 0 by construction."))),
-                           shiny::tags$td(fmt(lf$majority_acc)), shiny::tags$td("0.000"))
-          )
-        ),
+        acc_kappa_table(list(
+          list("Covariate model", lf$model_acc, lf$model_kap),
+          list("Spatial baseline (1-NN, no covariates)", lf$baseline_acc, lf$baseline_kap),
+          list(shiny::tagList("Majority class (no information)",
+                              info_tooltip(ns("majority_info"), tip_html(
+                                "The accuracy achieved by always predicting the most frequent class in the scoped data - the 'no-information rate'. It is the floor any useful model must clearly exceed; with imbalanced classes it can be high even though the strategy has learnt nothing.",
+                                "Cohen's kappa corrects for exactly this, which is why this row scores kappa = 0 by construction."))),
+               lf$majority_acc, 0))),
         shiny::tags$p(style = "font-size: 0.88em;",
           sprintf("Covariates %s out-of-fold accuracy by %.1f points (%.3f vs %.3f) relative to using spatial position alone, on identical folds. %s",
                   dir_word, 100 * abs(lf$lift_abs), lf$model_acc, lf$baseline_acc, p_lbl))
@@ -1494,15 +1510,15 @@ classif_server <- function(id, data_reactive, vars_metadata_reactive, spatial_re
       if (is.null(res$cv_design)) {
         return(sci_placeholder("No distance record: no map locations could be drawn inside the scope boundary."))
       }
-      build_cv_distance_plot(res$cv_design,
-                             title = paste("CV Distance Match:", classif_cv_label(res$strategy, res$knndm)))
+      build_cv_distance_plot(res$cv_design, title = paste(
+        "CV Distance Match:", classif_cv_label(res$strategy, res$knndm, res$spatial_folds, classif_cv_loo(res))))
     }
     output$cv_distance_plot <- shiny::renderCachedPlot({
       build_cv_distance_cls()
     }, cacheKeyExpr = {
       res <- cl_rv$res; shiny::req(res)
       list(res$run_id, "cv_distance")
-    })
+    }, cache = "session")
     shiny::observeEvent(input$cv_distance_expand_btn, {
       shiny::showModal(shiny::modalDialog(
         title = "Expanded View: CV Distance Match", size = "l", easyClose = TRUE,
@@ -1604,6 +1620,15 @@ classif_server <- function(id, data_reactive, vars_metadata_reactive, spatial_re
         cnt <- table(fs$covariate)
         drop_part <- paste0(drop_part, sprintf(" Inside CV each fold's screen reran on its training rows: %s.",
           paste(sprintf("%s dropped in %d of %d folds", display_var_labels(names(cnt), res$predictor_labels), as.integer(cnt), res$n_folds), collapse = "; ")))
+      }
+      # Spatial nested CV: outer folds whose training locations were too few,
+      # or could not be clustered, for inner blocks tuned on the Standard folds.
+      inner <- res$nested_params$inner_folds
+      n_std <- sum(inner %in% c("small", "fallback"))
+      if (n_std > 0) {
+        drop_part <- paste0(drop_part, sprintf(
+          " Nested CV: %d of %d outer folds tuned on Standard (random) inner folds, because their training locations could not form spatial blocks.",
+          n_std, length(inner)))
       }
       # A class the model never assigns is hidden by the headline accuracy (the
       # macro averages score it 0): name it once.
@@ -1847,15 +1872,15 @@ classif_server <- function(id, data_reactive, vars_metadata_reactive, spatial_re
         })
     }, res = 96)
 
-    # Cached plots keyed on the run token (+ class for the prob map), so
-    # resizes and revisits skip the slow geom_spatraster re-render.
+    # Cached per session, keyed on the run token (+ class for the prob map),
+    # so resizes and revisits skip the slow geom_spatraster re-render.
     output$class_map <- shiny::renderCachedPlot({
       plot_class_map(get_rasters())
     }, cacheKeyExpr = {
       res <- cl_rv$res; shiny::req(res, res$surface_df)
       list(res$run_id, conf_thresh_d(), isTRUE(input$map_adorn), isTRUE(input$map_points),
            show_nn())
-    })
+    }, cache = "session")
 
     output$entropy_map <- shiny::renderCachedPlot({
       plot_entropy_map(get_rasters())
@@ -1863,7 +1888,7 @@ classif_server <- function(id, data_reactive, vars_metadata_reactive, spatial_re
       res <- cl_rv$res; shiny::req(res, res$surface_df)
       list(res$run_id, isTRUE(input$map_adorn), isTRUE(input$map_points),
            isTRUE(input$map_stretch), show_nn())
-    })
+    }, cache = "session")
 
     output$prob_class_ui <- shiny::renderUI({
       res <- cl_rv$res; shiny::req(res)
@@ -1880,7 +1905,7 @@ classif_server <- function(id, data_reactive, vars_metadata_reactive, spatial_re
       res <- cl_rv$res; shiny::req(res, res$surface_df, input$prob_class)
       list(res$run_id, input$prob_class, isTRUE(input$map_adorn), isTRUE(input$map_points),
            isTRUE(input$map_stretch), show_nn())
-    })
+    }, cache = "session")
 
     # ── Downloads ────────────────────────────────────────────────────────────
     # Float rasters (probability, entropy) stay full-precision FLT4S; the class

@@ -35,67 +35,44 @@
     }
   }
 
-  # RK linear-trend panels: fit-statistic chips and coefficient table, with the
-  # raw summary.lm print behind a details element (or alone when the stored
-  # object is not a summary.lm).
-  output$model_summary_ui_act <- renderUI({
-    loc <- input$sel_loc_stats; req(loc)
-    if (loc == "Total (Combined)") {
-      return(sci_ui_note("Linear trend summaries are computed per locality. Please select a specific locality from the analysis filter list above to view details."))
-    }
-    summary_obj <- rv$model_summaries[[paste0(loc, "_act")]]
-    if (is.null(summary_obj)) return(sci_ui_note(trend_missing_msg(loc, "linear trend summary")))
-    build_rk_trend_ui(summary_obj, "rk_coef_dt_act", "summ_act_static") %||%
-      tagList(verbatimTextOutput("summ_act_static"))
-  })
-  output$model_summary_ui_pre <- renderUI({
-    loc <- input$sel_loc_stats; req(loc)
-    if (loc == "Total (Combined)") {
-      return(sci_ui_note("Linear trend summaries are computed per locality. Please select a specific locality from the analysis filter list above to view details."))
-    }
-    summary_obj <- rv$model_summaries[[paste0(loc, "_pre")]]
-    if (is.null(summary_obj)) return(sci_ui_note(trend_missing_msg(loc, "linear trend summary")))
-    build_rk_trend_ui(summary_obj, "rk_coef_dt_pre", "summ_pre_static") %||%
-      tagList(verbatimTextOutput("summ_pre_static"))
-  })
+  # RK linear-trend panels, one set per surface: fit-statistic chips and
+  # coefficient table, with the raw summary.lm print behind a details element
+  # (or alone when the stored object is not a summary.lm).
+  for (.tgt in c("act", "pre")) local({
+    tgt <- .tgt
+    dt_id <- paste0("rk_coef_dt_", tgt)
+    print_id <- paste0("summ_", tgt, "_static")
+    trend_summary <- function(loc) rv$model_summaries[[paste0(loc, "_", tgt)]]
 
-  output$rk_coef_dt_act <- DT::renderDataTable({
-    loc <- input$sel_loc_stats
-    req(loc, loc != "Total (Combined)")
-    summary_obj <- rv$model_summaries[[paste0(loc, "_act")]]
+    output[[paste0("model_summary_ui_", tgt)]] <- renderUI({
+      loc <- input$sel_loc_stats; req(loc)
+      if (loc == "Total (Combined)") {
+        return(sci_ui_note("Linear trend summaries are computed per locality. Please select a specific locality from the analysis filter list above to view details."))
+      }
+      summary_obj <- trend_summary(loc)
+      if (is.null(summary_obj)) return(sci_ui_note(trend_missing_msg(loc, "linear trend summary")))
+      build_rk_trend_ui(summary_obj, dt_id, print_id) %||% tagList(verbatimTextOutput(print_id))
+    })
+
     # Always shiny::validate()/need(): jsonlite, attached after shiny, masks
     # the bare name.
-    shiny::validate(shiny::need(summary_obj, trend_missing_msg(loc, "coefficient table")))
-    df <- rk_coef_table(summary_obj, sci_vars_meta())
-    shiny::validate(shiny::need(df, "The stored trend model carries no estimable coefficients."))
-    sci_dt(df)
-  })
+    output[[dt_id]] <- DT::renderDataTable({
+      loc <- input$sel_loc_stats
+      req(loc, loc != "Total (Combined)")
+      summary_obj <- trend_summary(loc)
+      shiny::validate(shiny::need(summary_obj, trend_missing_msg(loc, "coefficient table")))
+      df <- rk_coef_table(summary_obj, sci_vars_meta())
+      shiny::validate(shiny::need(df, "The stored trend model carries no estimable coefficients."))
+      sci_dt(df)
+    })
 
-  output$rk_coef_dt_pre <- DT::renderDataTable({
-    loc <- input$sel_loc_stats
-    req(loc, loc != "Total (Combined)")
-    summary_obj <- rv$model_summaries[[paste0(loc, "_pre")]]
-    shiny::validate(shiny::need(summary_obj, trend_missing_msg(loc, "coefficient table")))
-    df <- rk_coef_table(summary_obj, sci_vars_meta())
-    shiny::validate(shiny::need(df, "The stored trend model carries no estimable coefficients."))
-    sci_dt(df)
-  })
-
-
-  output$summ_act_static <- renderPrint({
-    loc <- input$sel_loc_stats
-    req(loc, loc != "Total (Combined)")
-    summary_obj <- rv$model_summaries[[paste0(loc, "_act")]]
-    shiny::validate(shiny::need(summary_obj, trend_missing_msg(loc, "linear trend summary")))
-    summary_obj
-  })
-
-  output$summ_pre_static <- renderPrint({
-    loc <- input$sel_loc_stats
-    req(loc, loc != "Total (Combined)")
-    summary_obj <- rv$model_summaries[[paste0(loc, "_pre")]]
-    shiny::validate(shiny::need(summary_obj, trend_missing_msg(loc, "linear trend summary")))
-    summary_obj
+    output[[print_id]] <- renderPrint({
+      loc <- input$sel_loc_stats
+      req(loc, loc != "Total (Combined)")
+      summary_obj <- trend_summary(loc)
+      shiny::validate(shiny::need(summary_obj, trend_missing_msg(loc, "linear trend summary")))
+      summary_obj
+    })
   })
 
   build_rf_imp_diag <- function(target) {
@@ -111,20 +88,16 @@
                              sci_vars_meta())
   }
 
-  output$rf_importance_plot_act <- renderCachedPlot({
-    p <- build_rf_imp_diag("act"); req(p); p
-  }, cacheKeyExpr = {
-    # is.null() stands in for the model object itself (too heavy to hash);
-    # rv$results_rev separates runs, the null flag catches the dispatch reset.
-    loc <- input$sel_loc_stats
-    list("rf_imp_act", loc, rv$results_rev, input$sci_name_mode, is.null(rv$rf_models[[paste0(loc, "_act")]]))
-  }, cache = "session")
-  output$rf_importance_plot_pre <- renderCachedPlot({
-    p <- build_rf_imp_diag("pre"); req(p); p
-  }, cacheKeyExpr = {
-    loc <- input$sel_loc_stats
-    list("rf_imp_pre", loc, rv$results_rev, input$sci_name_mode, is.null(rv$rf_models[[paste0(loc, "_pre")]]))
-  }, cache = "session")
+  # is.null() stands in for the model object itself (too heavy to hash);
+  # rv$results_rev separates runs, the null flag catches the dispatch reset.
+  for (.tgt in c("act", "pre")) local({
+    tgt <- .tgt
+    output[[paste0("rf_importance_plot_", tgt)]] <- cached_plot(function() build_rf_imp_diag(tgt), function() {
+      loc <- input$sel_loc_stats
+      list(paste0("rf_imp_", tgt), loc, rv$results_rev, input$sci_name_mode,
+           is.null(rv$rf_models[[paste0(loc, "_", tgt)]]))
+    })
+  })
 
   build_internal_vgm_diag <- function(type) {
     loc <- input$sel_loc_stats; req(loc)
@@ -169,20 +142,15 @@
     }
   }
 
-  render_internal_vgm_plot <- function(type) {
-    renderCachedPlot({
-      p <- build_internal_vgm_diag(type); req(p); p
-    }, cacheKeyExpr = {
+  # One pair for RK and RFK (ui_main_tabs.R shows it under either method).
+  for (.tgt in c("act", "pre")) local({
+    tgt <- .tgt
+    output[[paste0("trend_internal_vgm_", tgt)]] <- cached_plot(function() build_internal_vgm_diag(tgt), function() {
       loc <- input$sel_loc_stats
-      list("internal_vgm", type, loc, rv$results_rev,
-           rv$disp$v_emps[[paste0(loc, "_", type)]], rv$disp$v_fits[[paste0(loc, "_", type)]])
-    }, cache = "session")
-  }
-
-  output$rk_internal_vgm_act  <- render_internal_vgm_plot("act")
-  output$rk_internal_vgm_pre  <- render_internal_vgm_plot("pre")
-  output$rfk_internal_vgm_act <- render_internal_vgm_plot("act")
-  output$rfk_internal_vgm_pre <- render_internal_vgm_plot("pre")
+      list("internal_vgm", tgt, loc, rv$results_rev,
+           rv$disp$v_emps[[paste0(loc, "_", tgt)]], rv$disp$v_fits[[paste0(loc, "_", tgt)]])
+    })
+  })
 
   build_ck_diag <- function(type) {
     loc <- input$sel_loc_stats; req(loc)
@@ -211,17 +179,16 @@
     build_ck_variogram_ggplot(rel$vm, rel$model, paste("Cross-Variogram", paste0(title_suffix, ":"), loc))
   }
 
-  render_ck_variogram_plot <- function(type) {
-    renderCachedPlot({
-      p <- build_ck_diag(type); req(p); p
-    }, cacheKeyExpr = {
-      loc <- input$sel_loc_stats
-      list("ck_vgm", type, loc, rv$results_rev, input$sci_name_mode, is.null(rv$gstat_objs[[paste0(loc, "_", type)]]))
-    }, cache = "session")
-  }
-
-  output$ck_variogram_plot_act <- render_ck_variogram_plot("act")
-  output$ck_variogram_plot_pred <- render_ck_variogram_plot("pre")
+  # The Predicted card's id ends in "_pred", the key's surface in "pre".
+  for (.tgt in c("act", "pre")) local({
+    tgt <- .tgt
+    output[[if (tgt == "act") "ck_variogram_plot_act" else "ck_variogram_plot_pred"]] <-
+      cached_plot(function() build_ck_diag(tgt), function() {
+        loc <- input$sel_loc_stats
+        list("ck_vgm", tgt, loc, rv$results_rev, input$sci_name_mode,
+             is.null(rv$gstat_objs[[paste0(loc, "_", tgt)]]))
+      })
+  })
 
   # The table and its arithmetic are vgm_params_table_df() (ui_formatting.R),
   # shared with the export; sci_dt(NULL) is the empty state. The tuning store
@@ -277,17 +244,16 @@
     tryCatch(build_idw_power_plot(run_fit_record("idw_fit_", target), loc, target),
              error = function(e) sci_placeholder(paste("Power Plot Error:\n", e$message), size = 4))
   }
-  selection_plot <- function(id, build) {
-    renderCachedPlot({
-      p <- build(); req(p); p
-    }, cacheKeyExpr = {
+  for (.tgt in c("act", "pre")) local({
+    tgt <- .tgt
+    selection_key <- function(id) function() {
       list(id, input$sel_loc_stats, rv$results_rev, rv$disp$method, rv$disp$regional_params)
-    }, cache = "session")
-  }
-  output$tps_gcv_plot_act <- selection_plot("tps_gcv_act", function() build_tps_gcv_diag("act"))
-  output$tps_gcv_plot_pre <- selection_plot("tps_gcv_pre", function() build_tps_gcv_diag("pre"))
-  output$idw_power_plot_act <- selection_plot("idw_power_act", function() build_idw_power_diag("act"))
-  output$idw_power_plot_pre <- selection_plot("idw_power_pre", function() build_idw_power_diag("pre"))
+    }
+    output[[paste0("tps_gcv_plot_", tgt)]] <- cached_plot(function() build_tps_gcv_diag(tgt),
+                                                          selection_key(paste0("tps_gcv_", tgt)))
+    output[[paste0("idw_power_plot_", tgt)]] <- cached_plot(function() build_idw_power_diag(tgt),
+                                                            selection_key(paste0("idw_power_", tgt)))
+  })
 
   # CV Distance Match: the displayed run's own distance record for the
   # selected locality (every strategy, every engine), with a Predicted facet
@@ -300,11 +266,9 @@
       Predicted = if (isTRUE(rv$has_predictions)) rv$cv_design_pre[[loc]]))
     build_cv_distance_plot(if (length(designs)) designs, title = paste("CV Distance Match:", loc))
   }
-  output$cv_distance_plot <- renderCachedPlot({
-    p <- build_cv_distance_diag(); req(p); p
-  }, cacheKeyExpr = {
+  output$cv_distance_plot <- cached_plot(build_cv_distance_diag, function() {
     list("cv_distance", input$sel_loc_stats, rv$results_rev, isTRUE(rv$has_predictions))
-  }, cache = "session")
+  })
 
   build_obs_pred_diag <- function(target) {
     data_list <- if (target == "act") rv$cv_data_act else rv$cv_data_pre
@@ -318,23 +282,23 @@
     build_obs_pred_plot(df, title = title)
   }
 
-  output$obs_pred_plot_act <- renderCachedPlot({
-    p <- build_obs_pred_diag("act"); req(p); p
-  }, cacheKeyExpr = {
-    list("obs_pred_act", input$sel_loc_stats, rv$results_rev, names(rv$cv_data_act))
-  }, cache = "session")
-
   build_resid_vgm_act <- build_resid_vgm_diag(reactive(rv$cv_data_act), "")
   build_resid_vgm_pre <- build_resid_vgm_diag(reactive(rv$cv_data_pre), "(Predicted Map)")
-  output$resid_vgm_plot_act <- render_resid_plot(reactive(rv$cv_data_act), "", build_resid_vgm_act)
-
-  output$obs_pred_plot_pre <- renderCachedPlot({
-    p <- build_obs_pred_diag("pre"); req(p); p
-  }, cacheKeyExpr = {
-    list("obs_pred_pre", input$sel_loc_stats, rv$results_rev, names(rv$cv_data_pre))
-  }, cache = "session")
-
-  output$resid_vgm_plot_pre <- render_resid_plot(reactive(rv$cv_data_pre), "(Predicted Map)", build_resid_vgm_pre)
+  # CV data change at run completion (rv$results_rev); names() also
+  # invalidates when the lists are reset at dispatch, so a running model shows
+  # a blank panel.
+  for (.tgt in c("act", "pre")) local({
+    tgt <- .tgt
+    cv_names <- function() names(rv[[paste0("cv_data_", tgt)]])
+    output[[paste0("obs_pred_plot_", tgt)]] <- cached_plot(function() build_obs_pred_diag(tgt), function() {
+      list(paste0("obs_pred_", tgt), input$sel_loc_stats, rv$results_rev, cv_names())
+    })
+    output[[paste0("resid_vgm_plot_", tgt)]] <- cached_plot(
+      if (tgt == "act") build_resid_vgm_act else build_resid_vgm_pre, function() {
+        list("resid_vgm", if (tgt == "act") "" else "(Predicted Map)", input$sel_loc_stats,
+             rv$results_rev, cv_names())
+      })
+  })
 
 
   # ── Directional variogram (anisotropy diagnostic) ────────────────────────
@@ -419,12 +383,10 @@
                                 "the engines remain omnidirectional."), cap$note), collapse = "\n"))
   }
 
-  output$directional_vgm_plot <- renderCachedPlot({
-    p <- build_directional_vgm_diag(); req(p); p
-  }, cacheKeyExpr = {
+  output$directional_vgm_plot <- cached_plot(build_directional_vgm_diag, function() {
     list("dir_vgm", input$sel_loc_stats, input$dir_vgm_target, input$dir_vgm_source,
          rv$results_rev, is.null(rv$sf), if (is.null(rv$sf)) 0L else nrow(rv$sf))
-  }, cache = "session")
+  })
 
   # "Uploaded predictions" is offered by the same rule that gates the Validation
   # Diagnostics (Predicted) block, so the two cannot disagree about whether the
@@ -456,10 +418,8 @@
   register_sci_plot("directional_vgm_plot", "Directional Variogram (Anisotropy Check)", build_directional_vgm_diag)
   register_sci_plot("vgm_plot_main", "Actual Data Structure", function() build_vgm_structure_plot("act"))
   register_sci_plot("vgm_plot_pred", "Predicted Data Structure", function() build_vgm_structure_plot("pre"))
-  register_sci_plot("rk_internal_vgm_act", "Internal Residual Variogram (Actual)", function() build_internal_vgm_diag("act"))
-  register_sci_plot("rk_internal_vgm_pre", "Internal Residual Variogram (Predicted)", function() build_internal_vgm_diag("pre"))
-  register_sci_plot("rfk_internal_vgm_act", "Internal Residual Variogram (Actual)", function() build_internal_vgm_diag("act"))
-  register_sci_plot("rfk_internal_vgm_pre", "Internal Residual Variogram (Predicted)", function() build_internal_vgm_diag("pre"))
+  register_sci_plot("trend_internal_vgm_act", "Internal Residual Variogram (Actual)", function() build_internal_vgm_diag("act"))
+  register_sci_plot("trend_internal_vgm_pre", "Internal Residual Variogram (Predicted)", function() build_internal_vgm_diag("pre"))
   register_sci_plot("rf_importance_plot_act", "RF Variable Importance (Actual)", function() build_rf_imp_diag("act"))
   register_sci_plot("rf_importance_plot_pre", "RF Variable Importance (Predicted)", function() build_rf_imp_diag("pre"))
   register_sci_plot("ck_variogram_plot_act", "Cross-Variogram (Actual)", function() build_ck_diag("act"))

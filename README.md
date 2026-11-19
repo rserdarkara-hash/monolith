@@ -103,7 +103,7 @@ The sidebar configures the **next** run: a completed run keeps the context it wa
 
 * **Variogram fitting:** Auto-Fit tries three standard models (spherical, exponential, Matérn) and keeps the one that matches the data best (the lowest weighted least-squares error). It follows fixed rules and needs no starting guesses. In tests, tiny rounding differences, a different order of the distance classes or a change of distance unit never changed a fit; only a fit on the edge of one of its rules, such as a near-exact tie between two models, could come out differently on another computer. When the data cannot pin down the nugget, the app reports the interval of nugget values that fit equally well (not a confidence interval). A model whose range reaches beyond the sampled distances is still used, with its range and sill marked as uncertain. If no eligible model fits better than a flat line, the result is a pure nugget and the map shows the sample mean; this does not mean the field has no spatial structure.
 
-* **Multicollinearity gate (shared across modules):** Before a Regression Kriging, Random Forest Kriging or Co-Kriging run, a VIF screen checks each selected locality. When VIF exceeds 10, the dialog charts each covariate's VIF before and after Auto-Drop and explains each removal, with manual removal and recheck, Auto-Drop, Keep and Cancel. Manual removals apply to both surfaces in that locality. The Classification Suite checks its selected spatial scope together (VIF > 5 for Random Forest, VIF > 10 otherwise), with one common covariate selection. Interpolation repeats the screen on each cross-validation fold's training samples unless you keep the remaining covariates; the Classification Suite does so under Auto-Drop. Pair correlations above |r| = 0.95 are identified separately; they do not add an automatic removal rule. Before a PCA, pairs above |r| = 0.95 are named because a near-duplicate pair weights one direction twice in the components; the PCA runs once you remove one of each pair or confirm the selection.
+* **Multicollinearity gate (shared across modules):** Before a Regression Kriging, Random Forest Kriging or Co-Kriging run, a VIF screen checks each selected locality. When VIF exceeds 10, the dialog charts each covariate's VIF before and after Auto-Drop and explains each removal, with manual removal and recheck, Auto-Drop, Keep and Cancel. Manual removals apply to both surfaces in that locality. The Classification Suite checks its selected spatial scope together (VIF > 5 for Random Forest, VIF > 10 otherwise), with one common covariate selection. Interpolation repeats the screen on each cross-validation fold's training samples unless you keep the remaining covariates; the Classification Suite does so under Auto-Drop. Pair correlations above |r| = 0.95 are identified separately. Before a PCA, pairs above |r| = 0.95 are named because a near-duplicate pair weights one direction twice in the components; the PCA runs once you remove one of each pair or confirm the selection.
 
 * **Cross-validation that says what it measures:** LOOCV and random folds keep each held-out point's neighbours in the training data, as the map does. They estimate the accuracy of interpolation within the sampled area: approximately without bias for a simple random sample (Wadoux et al. 2021), conservatively for a regular grid, where a held-out point is a full grid spacing from its neighbours. Spatial Block CV (k-means folds) holds out contiguous regions and estimates accuracy away from the sampled clusters, the question of transfer to unsampled ground (Roberts et al. 2017; Ploton et al. 2020). kNNDM matches the folds to the map's own prediction distances inside its boundary (Linnenbrink et al. 2024): random folds where they already match, spatially grouped folds where the map predicts farther from the samples. kNNDM and Spatial Block CV fall back to LOOCV below 30 samples, and the CV Distance Match panel shows how closely any design's folds match the map. Classification uses spatially aware resampling, and synthetic oversampling (SMOTE) is deliberately not offered, because fabricated points would break the spatial-CV leakage guarantee and invent autocorrelation structure.
 
@@ -252,7 +252,7 @@ Two equally valid ways to obtain Monolith:
 
 ### 3. Package Dependencies
 
-Monolith depends on **64 packages** for its spatial engine, statistical analytics, and user interface, all pinned in `renv.lock`: 63 from CRAN, and [leaflet.extras](https://github.com/bhaskarvk/leaflet.extras) from GitHub at a pinned commit. At startup `global.R` names any missing package and installs nothing without your confirmation. There are two routes:
+Monolith depends on **61 packages** for its spatial engine, statistical analytics, and user interface, all pinned in `renv.lock`: 60 from CRAN, and [leaflet.extras](https://github.com/bhaskarvk/leaflet.extras) from GitHub at a pinned commit. At startup `global.R` names any missing package and installs nothing without your confirmation. There are two routes:
 
 *   **To use the app:** the current CRAN releases, which the startup prompt offers to install (`install.packages()`). They arrive as pre-built binaries in a few minutes and need no compiler.
 *   **To reproduce recorded test values:** `renv::restore()`, which installs the exact versions in `renv.lock` (see [below](#reproducible-installation-with-renv-optional)). The pinned versions matter for reproducing the test baselines of [Testing and Reproducibility](#testing-and-reproducibility), or those you record from your own data ([Freezing your own dataset as the reference](#freezing-your-own-dataset-as-the-reference)), not for analysing data.
@@ -262,11 +262,11 @@ The full dependency suite, grouped by function:
 | Category | Packages |
 |---|---|
 | **Core App / UI** | `shiny`, `shinyjs`, `shinyWidgets`, `shinyFiles`, `shinycssloaders`, `DT` |
-| **Spatial / GIS** | `sf`, `terra`, `tidyterra`, `leaflet`, `leaflet.extras`, `ggspatial`, `fields`, `classInt`, `Ckmeans.1d.dp`, `gstat`, `concaveman`, `spdep`, `FNN` |
+| **Spatial / GIS** | `sf`, `terra`, `tidyterra`, `leaflet`, `leaflet.extras`, `ggspatial`, `fields`, `Ckmeans.1d.dp`, `gstat`, `concaveman`, `spdep`, `FNN` |
 | **Data Wrangling & I/O** | `dplyr`, `tidyr`, `data.table`, `jsonlite`, `readxl`, `openxlsx`, `officer`, `zip`, `fs` |
-| **Visualization & Theming** | `ggplot2`, `plotly`, `RColorBrewer`, `viridis`, `patchwork`, `showtext`, `scales`, `commonmark` |
+| **Visualization & Theming** | `ggplot2`, `plotly`, `RColorBrewer`, `patchwork`, `showtext`, `scales`, `commonmark` |
 | **Statistics & Machine Learning** | `randomForest`, `DALEX`, `yardstick`, `agricolae`, `mgcv`, `nortest` |
-| **Classification (tidymodels)** | `parsnip`, `recipes`, `workflows`, `tune`, `rsample`, `dials`, `spatialsample`, `hardhat`, `ranger`, `xgboost`, `nnet` |
+| **Classification (tidymodels)** | `parsnip`, `recipes`, `workflows`, `tune`, `rsample`, `dials`, `hardhat`, `ranger`, `xgboost`, `nnet` |
 | **Parallelization / Async** | `future`, `furrr`, `promises` |
 | **CRS catalogue** | `DBI`, `RSQLite` |
 | **Called directly, not attached** | `parallelly`, `units`, `rlang`, `htmltools`, `tibble`, `viridisLite` |
@@ -293,15 +293,14 @@ Newer CRAN releases are expected to work; if you encounter an inconsistency, mat
 | `leaflet.extras` | 2.0.1.9000 | `Ckmeans.1d.dp` | 4.3.6 | `showtext` | 0.9-8 |
 | `ggspatial` | 1.1.10 | `plotly` | 4.12.1 | `scales` | 1.4.0 |
 | `fields` | 17.3 | `RColorBrewer` | 1.1-3 | `commonmark` | 2.0.0 |
-| `classInt` | 0.4-11 | `viridis` | 0.6.5 | `DBI` | 1.3.0 |
+| `htmltools` | 0.5.9 | `viridisLite` | 0.4.3 | `DBI` | 1.3.0 |
 | `gstat` | 2.1-6 | `concaveman` | 1.2.0 | `spdep` | 1.4-2 |
 | `FNN` | 1.1.4.1 | `parsnip` | 1.6.0 | `recipes` | 1.4.0 |
 | `workflows` | 1.3.0 | `tune` | 2.1.0 | `rsample` | 1.3.2 |
-| `dials` | 1.4.4 | `spatialsample` | 0.6.1 | `hardhat` | 1.4.3 |
+| `dials` | 1.4.4 | `tibble` | 3.3.1 | `hardhat` | 1.4.3 |
 | `ranger` | 0.18.0 | `xgboost` | 3.2.1.1 | `nnet` | 7.3-21 |
 | `RSQLite` | 3.53.3 | `parallelly` | 1.48.0 | `units` | 1.0-1 |
-| `rlang` | 1.3.0 | `htmltools` | 0.5.9 | `tibble` | 3.3.1 |
-| `viridisLite` | 0.4.3 |  |  |  |  |
+| `rlang` | 1.3.0 |  |  |  |  |
 
 **Runtime environment:** R 4.5.2 (ucrt) · GDAL 3.12.1 · GEOS 3.14.1 · PROJ 9.7.1 · Windows 11. The CI runs the suite on Windows and Ubuntu 24.04.
 
@@ -417,7 +416,7 @@ Detailed guides live in the [docs/](docs/) directory and open inside the app fro
 
 ## Testing and Reproducibility
 
-Monolith ships with a `testthat` suite of 9,248 assertions across 36 test files, covering the interpolation pipeline, cross-validation metrics, variogram fitting, the classification engine, the descriptive, correlation and PCA plot builders, metadata matching and the Governing Factors module. Where a quantity has an external or closed-form reference, the tests assert against that rather than against the app's own output:
+Monolith ships with a `testthat` suite of 9,349 assertions across 36 test files, covering the interpolation pipeline, cross-validation metrics, variogram fitting, the classification engine, the descriptive, correlation and PCA plot builders, metadata matching and the Governing Factors module. Where a quantity has an external or closed-form reference, the tests assert against that rather than against the app's own output:
 
 *   IDW against the hand-written Shepard sum; Ordinary Kriging against its exactness and pure-nugget closed forms; RK and RFK against the trend-plus-kriged-residual decomposition.
 *   VIF against `1/(1 - R²)` from an actual regression; Moran's I against a hand-built weight matrix; Lin's CCC against a value computed independently with `DescTools`.
@@ -432,7 +431,7 @@ GitHub Actions runs the suite on every push to `main` and every pull request, ag
 Rscript tests/testthat.R
 ```
 
-A full run takes about half an hour: the harness sources the whole application (all 64 packages) and fits the spatial models. Scientific accuracy is treated as the project's primary invariant; changes that alter numeric results are gated on these tests.
+A full run takes about half an hour: the harness sources the whole application (all 61 packages) and fits the spatial models. Scientific accuracy is treated as the project's primary invariant; changes that alter numeric results are gated on these tests.
 
 ### Freezing your own dataset as the reference
 

@@ -22,30 +22,33 @@
   # at 35N. A documented fact about one shipped file, not a coordinate guess.
   SAMPLE_CRS <- "EPSG:32635"
 
-  observeEvent(input$user_file, {
-    req(input$user_file)
-    ext <- tools::file_ext(input$user_file$name)
-    
+  # An uploaded data file or variable list (`what`): its type and size
+  # checked, then read by read_table_file(); NULL, with the reason as a
+  # notification, when it cannot be used.
+  checked_upload <- function(file, what = c("data", "metadata")) {
+    meta <- identical(match.arg(what), "metadata")
+    ext <- tools::file_ext(file$name)
     if (!(tolower(ext) %in% c("csv", "xls", "xlsx"))) {
-      showNotification("Invalid file type. Only CSV, XLS, and XLSX are supported.", type = "error")
-      return()
+      showNotification(paste(if (meta) "Invalid metadata file type." else "Invalid file type.",
+                             "Only CSV, XLS, and XLSX are supported."), type = "error")
+      return(NULL)
     }
-    
-    fsize <- file.info(input$user_file$datapath)$size
+    fsize <- file.info(file$datapath)$size
     if (!is.null(fsize) && fsize > 30 * 1024 * 1024) {
-      showNotification("File size exceeds 30MB limit.", type = "error")
-      return()
+      showNotification(if (meta) "Metadata file size exceeds 30MB limit." else "File size exceeds 30MB limit.",
+                       type = "error")
+      return(NULL)
     }
-    
-    df <- tryCatch({
-      if (tolower(ext) == "csv") as.data.frame(data.table::fread(input$user_file$datapath))
-      else if (tolower(ext) %in% c("xls", "xlsx")) readxl::read_excel(input$user_file$datapath)
-      else NULL
-    }, error = function(e) { 
-      showNotification(paste("Error reading file:", e$message), type = "error")
+    tryCatch(read_table_file(file$datapath, ext), error = function(e) {
+      showNotification(paste(if (meta) "Could not read the metadata file:" else "Error reading file:",
+                             conditionMessage(e)), type = "error")
       NULL
     })
-    
+  }
+
+  observeEvent(input$user_file, {
+    req(input$user_file)
+    df <- checked_upload(input$user_file, "data")
     req(df); rv$user_data <- df
     
     cols <- colnames(df)
@@ -888,27 +891,7 @@
       showNotification("Upload your dataset first - the variable list is matched against its column names.", type = "warning")
       return()
     }
-    ext <- tools::file_ext(input$meta_file$name)
-    
-    if (!(tolower(ext) %in% c("csv", "xls", "xlsx"))) {
-      showNotification("Invalid metadata file type. Only CSV, XLS, and XLSX are supported.", type = "error")
-      return()
-    }
-    
-    fsize <- file.info(input$meta_file$datapath)$size
-    if (!is.null(fsize) && fsize > 30 * 1024 * 1024) {
-      showNotification("Metadata file size exceeds 30MB limit.", type = "error")
-      return()
-    }
-    
-    m_df <- tryCatch({
-      if (tolower(ext) == "csv") read.csv(input$meta_file$datapath)
-      else readxl::read_excel(input$meta_file$datapath)
-    }, error = function(e) {
-      showNotification(paste("Could not read the metadata file:", conditionMessage(e)), type = "error")
-      NULL
-    })
-
+    m_df <- checked_upload(input$meta_file, "metadata")
     req(m_df)
     matched <- match_metadata_columns(m_df, colnames(rv$user_data))
     n_var <- length(matched$vars)
@@ -946,7 +929,7 @@
 
     # The stored value of a field, NULL where there is none.
     get_map_val <- function(target, field) {
-      val <- Find(function(x) identical(as.character(x$actual), target), rv$mapping$vars)[[field]]
+      val <- mapping_entry(rv$mapping$vars, target)[[field]]
       if (length(val) == 1 && !is.na(val)) val
     }
 
@@ -1087,7 +1070,9 @@
     req(nrow(df_map) > 0)
 
     pts <- tryCatch({
-      st_as_sf(df_map, coords = c(".x", ".y"), crs = rv$mapping$crs) %>% st_transform(4326)
+      p <- xy_points(df_map$.x, df_map$.y, rv$mapping$crs)
+      p$.group <- df_map$.group
+      st_transform(p, 4326)
     }, error = function(e) NULL)
     req(pts)
 

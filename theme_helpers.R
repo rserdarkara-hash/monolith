@@ -103,7 +103,7 @@ body {
   line-height: 1.55;
   -webkit-font-smoothing: antialiased;
 }
-body, h1, h2, h3, h4, h5, h6, .well, select, input, button, textarea, table, .nav-tabs, .btn {
+h1, h2, h3, h4, h5, h6, .well, select, input, button, textarea, table, .nav-tabs, .btn {
   font-family: var(--mn-sans);
 }
 h1, h2, h3, h4, h5, h6 { color: var(--mn-text); font-weight: 600; letter-spacing: -.005em; }
@@ -112,7 +112,7 @@ h4 { font-size: 14px; } h5 { font-size: 12.5px; } h6 { font-size: 12px; }
 a { color: var(--mn-accent); text-decoration: none; }
 a:hover, a:focus { color: var(--mn-accent-hover); text-decoration: underline; }
 hr { border-top: 1px solid var(--mn-line); margin: 14px 0; }
-code, pre, .mn-mono { font-family: var(--mn-mono); }
+code, pre { font-family: var(--mn-mono); }
 /* Bootstrap ships these three with fixed light colours. */
 code { color: var(--mn-text); background-color: var(--mn-surface-3); }
 pre {
@@ -441,7 +441,11 @@ details.sidebar-section > summary + * { margin-top: 6px; }
 .btn[disabled], .btn.disabled { opacity: .4; box-shadow: none; }
 .btn-pill { border-radius: 999px !important; font-weight: 500; letter-spacing: 0; }
 .btn-pill:hover, .btn-pill:focus { box-shadow: none; transform: none; }
-.expand-icon-btn { width: 30px; height: 30px; padding: 0 !important; }
+.expand-icon-btn {
+  position: absolute; top: 10px; right: 10px; z-index: 100;
+  width: 30px; height: 30px; padding: 0 !important;
+}
+.expand-icon-btn > * { margin: 0 !important; padding: 0 !important; }
 
 /* segmented controls (shinyWidgets radioGroupButtons) */
 .btn-group-container-sw .radiobtn > label,
@@ -778,7 +782,7 @@ input[type='checkbox'], input[type='radio'] { accent-color: var(--mn-accent); }
 }
 
 /* ==== cards and panels ================================================== */
-.custom-box, .sci-card {
+.sci-card {
   background-color: var(--mn-surface) !important;
   color: var(--mn-text) !important;
   border: 1px solid var(--mn-line) !important;

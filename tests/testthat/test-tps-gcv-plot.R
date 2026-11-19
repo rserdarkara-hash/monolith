@@ -3,7 +3,27 @@
 # run's own fit record (res$tps_fit / res$idw_fit, committed to
 # rv$disp$regional_params); every state without a curve must say why in the
 # panel, never leave it blank. build_regional_params_df reports what each
-# surface ran with, never the live tuning store.
+# surface ran with, never the live tuning store. These panels, like every
+# Scientific Analysis plot card, render through cached_plot() (server_setup.R).
+
+test_that("two plot cards with the same cache key keep their own images", {
+  # Every card renders one shared expression, so Shiny's cache hint cannot
+  # tell two cards apart: only the key can. The helper is read from the chunk
+  # that ships it.
+  root <- normalizePath(file.path(testthat::test_path(), "..", ".."), mustWork = TRUE)
+  chunk <- as.list(parse(file.path(root, "server_setup.R"), keep.source = FALSE))
+  def <- Filter(function(e) is.call(e) && identical(e[[1]], as.name("<-")) &&
+                  identical(e[[2]], as.name("cached_plot")), chunk)
+  expect_length(def, 1L)
+  shiny::testServer(function(input, output, session) {
+    eval(def[[1]])
+    output$card_a <- cached_plot(function() sci_placeholder("card a"), function() list("same key"))
+    output$card_b <- cached_plot(function() ggplot2::ggplot() + ggplot2::annotate("point", x = 1:3, y = 3:1),
+                                 function() list("same key"))
+  }, {
+    expect_false(identical(output$card_a$src, output$card_b$src))
+  })
+})
 
 make_gcv_df <- function() {
   data.frame(lambda = 10^seq(-6, 0, length.out = 8), gcv = (1:8) / 8)

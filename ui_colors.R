@@ -56,7 +56,7 @@ desc_palette_choices <- list(
 
 desc_palette_colors <- function(pal, n) {
   if (pal %in% c("viridis", "cividis", "plasma", "magma", "inferno", "turbo")) {
-    return(viridis::viridis(n, option = pal))
+    return(viridisLite::viridis(n, option = pal))
   }
   base <- if (identical(pal, "okabe")) {
     unname(grDevices::palette.colors(9, palette = "Okabe-Ito"))

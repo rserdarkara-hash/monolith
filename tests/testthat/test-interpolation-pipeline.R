@@ -1449,6 +1449,14 @@ test_that("the run record separates the two CRS and selected from used covariate
   cfg_same$covariates_dropped <- same$dropped
   expect_match(covariate_record_text(cfg_same), "used: elev | removed by the screen: clay", fixed = TRUE)
 
+  # The panel's settings parts: an unrecorded, NA or left-out field adds nothing.
+  expect_identical(cfg_part(500L, "RF trees"), " | RF trees: 500")
+  expect_identical(cfg_part(NULL, "RF trees"), "")
+  expect_identical(cfg_part(NA, "Model refit"), "")
+  expect_identical(cfg_part(1L, "Repeated CV", when = 1L > 1), "")
+  expect_identical(cfg_part(Inf, "Collinearity gate", function(v) if (is.finite(v)) "x" else "Keep all"),
+                   " | Collinearity gate: Keep all")
+
   # Written and read back, the record keeps both CRS fields and the per-
   # locality covariate lists; the kriging engines consume no IDW power or TPS
   # lambda, so none is written for them.
@@ -3797,12 +3805,11 @@ test_that("strict_buffer_gap quantifies a buffer below half the cell diagonal", 
 })
 
 test_that("strict_buffer_message speaks only for an incoherent pair", {
-  msg <- strict_buffer_message(175, 350, label = "Yorga")
-  expect_match(msg, "^Yorga: Point buffer [(]")
+  msg <- strict_buffer_message(175, 350)
+  expect_match(msg, "^Point buffer [(]")
   expect_match(msg, "248 m or more")   # ceiling(350 / sqrt(2))
   expect_match(msg, "247 m or less")   # floor(175 * sqrt(2))
   expect_match(msg, "21%")             # 100 * (1 - pi/4)
-  expect_false(grepl(": ", strict_buffer_message(175, 350), fixed = TRUE))
 
   # Just inside the threshold the loss is a genuine fraction of a percent;
   # rounding it to "0%" would contradict the warning carrying it.
@@ -4372,9 +4379,8 @@ test_that("every pinned dispatch establishes its own parallel plan", {
               "classif_module.R")) {
     src <- readLines(file.path(root, f), warn = FALSE)
     i_src <- grep("source(\"spatial_helpers.R\"", src, fixed = TRUE)
-    # A bare statement, not the tryCatch()-wrapped reset in the teardown: the
-    # teardown tidies up after this task, the reset protects this task from the
-    # last one.
+    # A bare statement in the body: with_nested_cluster()'s teardown tidies up
+    # after this task, the reset protects this task from the last one.
     i_plan <- grep("^\\s*future::plan\\(future::sequential\\)\\s*$", src)
     expect_gte(length(i_src), 1L)
     expect_true(any(i_plan > i_src[1]), info = paste(f, "- no plan reset after the source()"))

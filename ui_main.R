@@ -17,12 +17,6 @@ ui <- fluidPage(
     tags$style(HTML(monolith_theme_css())),
     # Map ruler sizing (map_ruler_css(), ui_components.R).
     tags$style(HTML(map_ruler_css())),
-    # Positioning only - the button's own box is styled with the other icon
-    # buttons in monolith_theme_css().
-    tags$style(HTML(
-      ".expand-icon-btn { position: absolute; top: 10px; right: 10px; z-index: 100; }
-       .expand-icon-btn > * { margin: 0 !important; padding: 0 !important; }"
-    )),
     # Sidebar sections remember their open state in localStorage; the resize
     # trigger re-renders outputs hidden inside a section when it opens.
     tags$script(HTML("

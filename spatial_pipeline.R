@@ -105,20 +105,19 @@ strict_buffer_gap <- function(buffer, res) {
 }
 
 # Plain-text advisory for an incoherent buffer/resolution pair, NULL when fine.
-# `label` prefixes the locality/scope. A corrective size below `res_floor` (the
-# smallest cell the calling suite allows: 1 for interpolation, 5 for
-# classification) is left out, since the user cannot act on it.
-strict_buffer_message <- function(buffer, res, label = NULL, res_floor = 5) {
+# A corrective size below `res_floor` (the smallest cell the calling suite
+# allows: 1 for interpolation, 5 for classification) is left out, since the
+# user cannot act on it.
+strict_buffer_message <- function(buffer, res, res_floor = 5) {
   g <- strict_buffer_gap(buffer, res)
   if (is.null(g) || !g$short) return(NULL)
   res_arm <- if (floor(g$req_res) < res_floor) "" else sprintf(
     ", or lower the resolution to %s m or less", format(floor(g$req_res), trim = TRUE))
   sprintf(paste0(
-    "%sPoint buffer (%s m) is smaller than half the diagonal of a ",
+    "Point buffer (%s m) is smaller than half the diagonal of a ",
     "%s m grid cell (%s m). Cells are kept only when their centre falls inside ",
     "the buffer, so %s of isolated samples will have no mapped cell beneath ",
     "them. Raise the buffer to %s m or more%s."),
-    if (is.null(label) || !nzchar(label)) "" else paste0(label, ": "),
     format(round(g$buffer, 1), trim = TRUE),
     format(round(g$res, 1), trim = TRUE),
     format(round(g$req_buffer, 1), trim = TRUE),
@@ -127,6 +126,28 @@ strict_buffer_message <- function(buffer, res, label = NULL, res_floor = 5) {
     if (g$fraction < 0.01) "under 1%" else sprintf("up to %.0f%%", 100 * g$fraction),
     format(ceiling(g$req_buffer), trim = TRUE),
     res_arm)
+}
+
+#' Evaluate `expr` on a fresh PSOCK cluster of `n_workers` (>= 2); below that,
+#' evaluate it as is, touching neither the plan nor mc.cores. mc.cores is set
+#' before spawning (a PSOCK worker reports 1, and parallelly's worker-count
+#' guard would misfire) and restored; the owned cluster is stopped BEFORE the
+#' previous plan returns, and a failure of either teardown step does not skip
+#' the other.
+with_nested_cluster <- function(n_workers, expr) {
+  if (!isTRUE(n_workers >= 2L)) return(expr)
+  old_mc <- getOption("mc.cores")
+  old_plan <- future::plan()
+  cl <- NULL
+  on.exit({
+    options(mc.cores = old_mc)
+    if (!is.null(cl)) tryCatch(parallel::stopCluster(cl), error = function(e) NULL)
+    tryCatch(future::plan(old_plan), error = function(e) NULL)
+  }, add = TRUE)
+  options(mc.cores = n_workers)
+  cl <- parallelly::makeClusterPSOCK(n_workers)
+  future::plan(future::cluster, workers = cl)
+  expr
 }
 
 # Per-observation worker of the Governing Factors SHAP loop. TOP-LEVEL (like
@@ -166,10 +187,7 @@ compute_governing_factors <- function(df, target_col, predictors, rf_ntree = 100
   }
   check_cancel()
 
-  # Everything that draws runs under with_seed(). The cluster-teardown
-  # on.exit() below belongs to THIS function's frame (the block is a promise
-  # evaluated here), so the cluster is torn down at exit, after the RNG state
-  # is restored.
+  # Everything that draws runs under with_seed().
   with_seed(12345, {
     # Matrix interface: the formula method's make.names() fails on names such
     # as "Total N (%)".
@@ -212,32 +230,19 @@ compute_governing_factors <- function(df, target_col, predictors, rf_ntree = 100
     # worker the nested plan is sequential, so escalate only for large enough
     # workloads; seed = TRUE gives each observation its own L'Ecuyer stream, so
     # results are identical under any plan. A PSOCK worker sees one core, so
-    # the main session passes `cores_hint`. The cluster is torn down on exit and
-    # mc.cores restored for the reused worker.
+    # the main session passes `cores_hint`. The cluster lives for the map only.
     if (is.null(cores_hint)) {
       cores_hint <- tryCatch(as.integer(parallelly::availableCores()), error = function(e) 1L)
     }
     n_shap_workers <- min(max(0L, cores_hint - 1L), 8L)
-    if (length(sample_idx) >= 50 && n_shap_workers >= 2L && future::nbrOfWorkers() == 1L) {
-      old_mc_cores <- getOption("mc.cores")
-      old_plan <- future::plan()
-      shap_cl <- NULL
-      on.exit({
-        options(mc.cores = old_mc_cores)
-        if (!is.null(shap_cl)) {
-          tryCatch(future::plan(old_plan), finally = parallel::stopCluster(shap_cl))
-        }
-      }, add = TRUE)
-      options(mc.cores = n_shap_workers)
-      shap_cl <- parallelly::makeClusterPSOCK(n_shap_workers)
-      future::plan(future::cluster, workers = shap_cl)
-    }
+    escalate <- length(sample_idx) >= 50 && n_shap_workers >= 2L && future::nbrOfWorkers() == 1L
     # gov_shap_item() takes plain data only; the predictor columns are subset
     # once, without the target.
     shap_nd <- df_clean[, predictors, drop = FALSE]
-    shap_list <- furrr::future_map(sample_idx, gov_shap_item,
-      explainer = explainer_rf, newdata = shap_nd, cancel_path = cancel_file,
-      .options = furrr::furrr_options(seed = TRUE, packages = c("DALEX", "randomForest")))
+    shap_list <- with_nested_cluster(if (escalate) n_shap_workers else 0L,
+      furrr::future_map(sample_idx, gov_shap_item,
+        explainer = explainer_rf, newdata = shap_nd, cancel_path = cancel_file,
+        .options = furrr::furrr_options(seed = TRUE, packages = c("DALEX", "randomForest"))))
     shap_df <- do.call(rbind, shap_list)
     check_cancel()
 
@@ -517,6 +522,11 @@ coord_values <- function(v) {
   out
 }
 
+#' sf POINTs at (x, y) in `crs`, with no attribute column.
+xy_points <- function(x, y, crs) {
+  sf::st_as_sf(data.frame(.x = x, .y = y), coords = c(".x", ".y"), crs = crs)
+}
+
 #' The co-location key of each point: its coordinates rounded to `dp` decimals
 #' (1 cm in a metric CRS). Points sharing a key are one location.
 location_key <- function(pts_sf, dp = 2) {
@@ -597,9 +607,8 @@ merge_colocated <- function(pts_sf, dp = 2, count = FALSE, majority = character(
       out[[col]] <- if (is.factor(x)) factor(val, levels = levels(x), ordered = is.ordered(x)) else val
     }
   }
-  sf::st_geometry(out) <- sf::st_geometry(sf::st_as_sf(
-    data.frame(.x = grp_mean(cc[, 1]), .y = grp_mean(cc[, 2])),
-    coords = c(".x", ".y"), crs = sf::st_crs(pts_sf)))
+  sf::st_geometry(out) <- sf::st_geometry(
+    xy_points(grp_mean(cc[, 1]), grp_mean(cc[, 2]), sf::st_crs(pts_sf)))
   if (count) out$.mn_n_rep <- n_rep
   attr(out, "merged") <- c(groups = sum(n_rep > 1L), rows = sum(n_rep[n_rep > 1L]))
   if (length(majority)) attr(out, "majority_ties") <- ties

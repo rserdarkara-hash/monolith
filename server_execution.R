@@ -1,8 +1,8 @@
 # server_execution.R (chunk G, sourced with local = TRUE inside server): run
 # estimates, archive/CRS/VIF gates and the future_promise interpolation run.
 # CRITICAL: run_params is built from reactives BEFORE the future_promise
-# block; no rv$*/input$* inside the future, and the nested
-# parallelly::makeClusterPSOCK topology stays as-is.
+# block; no rv$*/input$* inside the future, and the nested PSOCK topology
+# (with_nested_cluster(), spatial_pipeline.R) stays as-is.
 
   # ── Run warnings ──────────────────────────────────────────────────────────
   # The one reader of the workers' `warn_` files: what the live poller shows is
@@ -181,7 +181,7 @@
     if (isTruthy(rv$mapping$crs) && isTruthy(input$crs_selection)) return(TRUE)
     missing <- if (!isTruthy(rv$mapping$crs)) "Input Data CRS" else "Target Mapping CRS"
     showModal(modalDialog(
-      title = tags$div(style = "color: var(--mn-danger); font-weight: 600;", icon("exclamation-triangle"), paste(missing, "Not Set")),
+      title = danger_title(paste(missing, "Not Set")),
       tags$p(paste0("Set the ", missing, " on the Data Setup tab before running. Neither selector has a default: the Input Data CRS is the one your X/Y columns were recorded in and cannot be inferred from the coordinates alone, and the Target Mapping CRS is the one every exported raster and shapefile is written in.")),
       tags$p("Check the position printed under the mini-map once the Input Data CRS is selected: if it is not your study area, the CRS is wrong."),
       easyClose = TRUE,
@@ -209,8 +209,7 @@
     if (!identical(suit$level, "block")) return(TRUE)
     if (identical(rv$crs_gate_ack, crs_gate_key(input$crs_selection, suit$dev))) return(TRUE)
     showModal(modalDialog(
-      title = tags$div(style = "color: var(--mn-danger); font-weight: 600;",
-                       icon("exclamation-triangle"), suit$title),
+      title = danger_title(suit$title),
       tags$p(suit$msg),
       lapply(suit$detail, tags$p),
       # Name the CRS that IS right, here too, for a user who skipped the Data
@@ -544,17 +543,23 @@
     })
   })
 
-  observeEvent(input$run, {
+  # TRUE, with the reason as a notification, while a run or an optimization is
+  # in progress. Cross-feature guard (mirrors run_autofit_async()): both spawn
+  # cores - 1 workers.
+  run_busy <- function() {
     if (isTRUE(rv$model_running)) {
       showNotification("A model run is already in progress.", type = "warning")
-      return()
+      return(TRUE)
     }
-    # Cross-feature guard (mirrors run_autofit_async()): both spawn cores - 1
-    # workers.
     if (isTRUE(rv$opt_running)) {
       showNotification("An optimization is running; start the interpolation after it finishes.", type = "warning")
-      return()
+      return(TRUE)
     }
+    FALSE
+  }
+
+  observeEvent(input$run, {
+    if (run_busy()) return()
     # No req() on input$locality: an empty Locality box means every locality
     # (resolve_selected_localities), and req() would drop the click silently.
     req(rv$user_data, rv$mapping$x, rv$mapping$y)
@@ -639,16 +644,9 @@
   # confirmation, then flips rv$proceed_run; this observer validates, builds
   # the per-locality point sets and dispatches the future_promise pipeline.
   observeEvent(rv$proceed_run, {
-    if (isTRUE(rv$model_running)) {
-      showNotification("A model run is already in progress.", type = "warning")
-      return()
-    }
     # Re-checked here: an optimizer can start while the confirmation modal is
     # open.
-    if (isTRUE(rv$opt_running)) {
-      showNotification("An optimization is running; start the interpolation after it finishes.", type = "warning")
-      return()
-    }
+    if (run_busy()) return()
     req(rv$user_data, rv$mapping$x, rv$mapping$y)
     if (!identical(rv$collinearity_pending$phase, "dispatch") || !collinearity_context_valid()) return()
     rv$collinearity_pending$phase <- "running"
@@ -664,7 +662,7 @@
     
     if (is.null(x_col_name) || is.null(y_col_name) || !(x_col_name %in% colnames(rv$user_data)) || !(y_col_name %in% colnames(rv$user_data))) {
       showModal(modalDialog(
-        title = tags$div(style = "color: var(--mn-danger); font-weight: 600;", icon("exclamation-triangle"), "Coordinate Mapping Error"),
+        title = danger_title("Coordinate Mapping Error"),
         tags$p("The selected coordinate columns (X, Y) do not exist in the dataset. Please verify your variable mapping in the setup tab."),
         easyClose = TRUE,
         footer = modalButton("Dismiss")
@@ -681,7 +679,7 @@
     
     if (valid_xy_count < 3) {
       showModal(modalDialog(
-        title = tags$div(style = "color: var(--mn-danger); font-weight: 600;", icon("exclamation-triangle"), "Invalid Coordinate Data"),
+        title = danger_title("Invalid Coordinate Data"),
         tags$p("The selected coordinate columns (X, Y) do not contain sufficient valid numeric values."),
         tags$p(paste0("Total rows with valid numeric coordinates: ", valid_xy_count, " (minimum 3 required).")),
         tags$p("Please verify that your selected coordinate columns are strictly numeric and contain no missing values (NAs) or text."),
@@ -705,7 +703,7 @@
       missing_vars <- setdiff(validation_aux, colnames(rv$user_data))
       if (length(missing_vars) > 0) {
         showModal(modalDialog(
-          title = tags$div(style = "color: var(--mn-danger); font-weight: 600;", icon("exclamation-triangle"), "Missing Covariates"),
+          title = danger_title("Missing Covariates"),
           tags$p("The following selected covariates do not exist in the dataset:"),
           tags$pre(class = "mn-error-pre", paste(missing_vars, collapse = ", ")),
           easyClose = TRUE,
@@ -724,7 +722,7 @@
       
       if (length(non_numeric_vars) > 0) {
         showModal(modalDialog(
-          title = tags$div(style = "color: var(--mn-danger); font-weight: 600;", icon("exclamation-triangle"), "Non-Numeric Covariates"),
+          title = danger_title("Non-Numeric Covariates"),
           tags$p("The following selected covariates do not contain sufficient valid numeric values (minimum 3 required):"),
           tags$pre(class = "mn-error-pre", paste(non_numeric_vars, collapse = ", ")),
           easyClose = TRUE,
@@ -1126,37 +1124,19 @@
         run_params$shared_res <- shared_auto_resolution(df_list, run_params)
       }
 
-      nested_cl <- NULL
-      old_mc_cores <- getOption("mc.cores")
-      tryCatch({
-        # No `nbrOfWorkers() == 1L` clause: the plan reset above makes it true.
-        if (nested_workers >= 2L) {
-          # PSOCK workers report mc.cores = 1; set it before spawning, or
-          # parallelly's worker-count guard misfires. An owned cluster (not
-          # plan(multisession)) guarantees a clean teardown below.
-          options(mc.cores = nested_workers)
-          nested_cl <- parallelly::makeClusterPSOCK(nested_workers)
-          future::plan(future::cluster, workers = nested_cl)
-        }
-        # interp_run_item() is TOP-LEVEL, so furrr ships a lean function; run
-        # parameters travel as one plain-data argument.
+      # An owned cluster (not plan(multisession)) guarantees a clean teardown:
+      # with_nested_cluster() returns the reused worker to the sequential plan
+      # set above. No `nbrOfWorkers() == 1L` clause: that reset makes it true.
+      # interp_run_item() is TOP-LEVEL, so furrr ships a lean function; run
+      # parameters travel as one plain-data argument.
+      with_nested_cluster(nested_workers,
         furrr::future_map(df_list, interp_run_item, run_params = run_params,
           .options = furrr::furrr_options(
             seed = 12345,
             # packages used UNQUALIFIED in the helper call graph; namespaced
             # calls (terra::, FNN::, randomForest::, ...) need no attaching
             packages = c("sf", "gstat", "dplyr")
-          ))
-      }, finally = {
-        # Restore the reused promise worker to single-threaded state: stop the
-        # cluster FIRST and swallow both errors (a failed plan switch must not
-        # leave it on a dead cluster).
-        options(mc.cores = old_mc_cores)
-        if (!is.null(nested_cl)) {
-          tryCatch(parallel::stopCluster(nested_cl), error = function(e) NULL)
-        }
-        tryCatch(future::plan(future::sequential), error = function(e) NULL)
-      })
+          )))
     }, globals = list(main_wd = main_wd, run_params = run_params,
                       df_list = df_list, nested_workers = nested_workers),
        packages = c("sf", "gstat", "dplyr"),
@@ -1318,8 +1298,7 @@
 
       if (length(failed_regions) > 0) {
         showModal(modalDialog(
-          title = tags$div(style = "color: var(--mn-danger); font-weight: 600;", icon("exclamation-circle"),
-                           sprintf("%d Region(s) Failed", length(failed_regions))),
+          title = danger_title(sprintf("%d Region(s) Failed", length(failed_regions)), icon = "exclamation-circle"),
           tags$p("An error occurred during modeling of the following localities:"),
           lapply(names(failed_regions), function(l) {
             tagList(
@@ -1378,17 +1357,9 @@
                             legend = map_legend_title(meta$label, meta$unit))
     }
 
-    if(length(sf_list) > 0) {
-      target_crs <- sf::st_crs(sf_list[[1]])
-      sf_list_aligned <- lapply(sf_list, function(x) {
-        if (sf::st_crs(x) != target_crs) {
-          sf::st_transform(x, target_crs)
-        } else {
-          x
-        }
-      })
-      rv$sf <- do.call(rbind, sf_list_aligned)
-    }
+    # The points bind by locality name (row names carry it); the boundaries
+    # below are unioned.
+    if(length(sf_list) > 0) rv$sf <- do.call(rbind, align_crs(sf_list))
     valid_bounds <- Filter(function(x) !is.null(x) && inherits(x, "sf"), b_list)
     rv$bound_overlap_m2 <- c(
       act = tryCatch(locality_boundary_overlap(b_list[names(rv$rast_list_act)]), error = function(e) NA_real_),
@@ -1410,17 +1381,7 @@
       rv$disp$mergeable <- lattice && apart && !shared
       rv$log <- paste0(rv$log, "\n", grid_export_note(lattice, apart, rv$run_config_summary$resolution, shared))
     }
-    if(length(valid_bounds) > 0) {
-      target_crs_b <- sf::st_crs(valid_bounds[[1]])
-      b_list_aligned <- lapply(valid_bounds, function(x) {
-        if (sf::st_crs(x) != target_crs_b) {
-          sf::st_transform(x, target_crs_b)
-        } else {
-          x
-        }
-      })
-      rv$bound <- do.call(rbind, unname(b_list_aligned)) %>% sf::st_union()
-    }
+    if(length(valid_bounds) > 0) rv$bound <- do.call(rbind, unname(align_crs(valid_bounds))) %>% sf::st_union()
     rv$loc_names <- names(rv$rast_list_act)
     # This run supersedes any standalone variogram preview: the curves on the
     # Scientific Analysis tab now belong to a run again.
@@ -1566,7 +1527,7 @@
         rv$model_running <- FALSE
         persist_run_warnings()
         showModal(modalDialog(
-          title = tags$div(style = "color: var(--mn-danger); font-weight: 600;", icon("exclamation-triangle"), "Results Assembly Failed"),
+          title = danger_title("Results Assembly Failed"),
           tags$p("The parallel interpolation finished, but an error occurred while assembling the results (collecting the surfaces, building tables, or registering exports) in the main session:"),
           tags$pre(class = "mn-error-pre", conditionMessage(e)),
           tags$p(style = "margin-top: 15px;", "The model outputs themselves are not in question. Any surfaces already assembled can be revealed, but maps, tables and the export registry may be incomplete for this run."),
@@ -1591,7 +1552,7 @@
         shinyjs::html("map_processing_title", "Interpolation Failed")
         shinyjs::html("map_progress_text", "An error occurred during parallel modeling. Please check the error message and click 'Run Interpolation' to try again.")
         showModal(modalDialog(
-          title = tags$div(style = "color: var(--mn-danger); font-weight: 600;", icon("exclamation-triangle"), "Parallel Interpolation Failed"),
+          title = danger_title("Parallel Interpolation Failed"),
           tags$p("An error occurred while executing the parallel interpolation algorithms:"),
           tags$pre(class = "mn-error-pre", err$message),
           tags$p(style = "margin-top: 15px; font-weight: bold;", "Recommended Troubleshooting Steps:"),

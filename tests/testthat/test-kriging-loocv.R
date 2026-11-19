@@ -3,14 +3,16 @@
 
 test_that("perform_kriging_loocv returns NULL for fewer than 3 points", {
   pts <- make_test_points(2)
-  result <- perform_kriging_loocv(pts, "v", "aux1", model_type = "lm")
+  result <- perform_kriging_loocv(pts, "v", "aux1", model_type = "lm",
+                                  folds = kriging_cv_folds(pts, "v", "aux1"))
   expect_null(result)
 })
 
 test_that("lm and rf kriging CV return a complete common schema", {
   pts <- make_test_points(12)
   for (engine in c("lm", "rf")) {
-    cv <- suppressWarnings(perform_kriging_loocv(pts, "v", "aux1", model_type = engine, rf_ntree = 50))
+    cv <- suppressWarnings(perform_kriging_loocv(pts, "v", "aux1", model_type = engine, rf_ntree = 50,
+                                                 folds = kriging_cv_folds(pts, "v", "aux1")))
     expect_s3_class(cv, "sf")
     expect_identical(names(cv), c("row_id", "fold", "observed", "var1.pred", "var1.var", "residual", "geometry"))
     expect_equal(nrow(cv), nrow(pts))
@@ -26,7 +28,8 @@ test_that("every RK and RFK fold reports the state of its residual variogram", {
   # it if the fold reports it.
   pts <- make_test_points(12)
   for (engine in c("lm", "rf")) {
-    cv <- suppressWarnings(perform_kriging_loocv(pts, "v", "aux1", model_type = engine, rf_ntree = 50))
+    cv <- suppressWarnings(perform_kriging_loocv(pts, "v", "aux1", model_type = engine, rf_ntree = 50,
+                                                 folds = kriging_cv_folds(pts, "v", "aux1")))
     st <- .cv_fold_statuses(cv)
     expect_length(st, length(unique(cv$fold)))
     expect_true(all(st %in% VGM_FIT_STATUSES))
@@ -40,7 +43,8 @@ test_that("an RK or RFK fold whose covariate kriging failed is named in the run 
   # back to IDW where that fails (krige_covariates), as the map does for its
   # grid; the fold records it and the run log counts the folds per covariate.
   pts <- make_test_points(12)
-  cv0 <- suppressWarnings(perform_kriging_loocv(pts, "v", "aux1", model_type = "lm"))
+  cv0 <- suppressWarnings(perform_kriging_loocv(pts, "v", "aux1", model_type = "lm",
+                                                folds = kriging_cv_folds(pts, "v", "aux1")))
   expect_true(all(vapply(attr(cv0, "cv_fold_meta"), function(m) !length(m$cov_fallback), logical(1))))
   expect_false(grepl("came from IDW", safe_run_cv(init_interpolation_res(), cv0, "RK")$log_msg,
                      fixed = TRUE))
@@ -56,7 +60,8 @@ test_that("an RK or RFK fold whose covariate kriging failed is named in the run 
     r
   }, envir = globalenv())
   for (engine in c("lm", "rf")) {
-    cv <- suppressWarnings(perform_kriging_loocv(pts, "v", "aux1", model_type = engine, rf_ntree = 50))
+    cv <- suppressWarnings(perform_kriging_loocv(pts, "v", "aux1", model_type = engine, rf_ntree = 50,
+                                                 folds = kriging_cv_folds(pts, "v", "aux1")))
     meta <- attr(cv, "cv_fold_meta")
     expect_length(meta, length(unique(cv$fold)))
     expect_true(all(vapply(meta, function(m) identical(m$cov_fallback, "aux1"), logical(1))))
@@ -81,7 +86,8 @@ test_that("an RK or RFK fold whose covariate was kriged flat is named in the run
     kc
   }, envir = globalenv())
   for (engine in c("lm", "rf")) {
-    cv <- suppressWarnings(perform_kriging_loocv(pts, "v", "aux1", model_type = engine, rf_ntree = 50))
+    cv <- suppressWarnings(perform_kriging_loocv(pts, "v", "aux1", model_type = engine, rf_ntree = 50,
+                                                 folds = kriging_cv_folds(pts, "v", "aux1")))
     meta <- attr(cv, "cv_fold_meta")
     expect_true(all(vapply(meta, function(m) identical(m$cov_flat, "aux1"), logical(1))))
     expect_match(safe_run_cv(init_interpolation_res(), cv, "RK")$log_msg,
@@ -93,7 +99,8 @@ test_that("an RK or RFK fold whose covariate was kriged flat is named in the run
   # Unmocked, aux1 is independent noise, so some folds' training rows fit it a
   # pure nugget and others do not, and the note counts those folds only.
   assign("krige_covariates", original, envir = globalenv())
-  cv0 <- suppressWarnings(perform_kriging_loocv(pts, "v", "aux1", model_type = "lm"))
+  cv0 <- suppressWarnings(perform_kriging_loocv(pts, "v", "aux1", model_type = "lm",
+                                                folds = kriging_cv_folds(pts, "v", "aux1")))
   meta0 <- attr(cv0, "cv_fold_meta")
   n_flat <- sum(vapply(meta0, function(m) identical(m$cov_flat, "aux1"), logical(1)))
   expect_gt(n_flat, 0L)                                                        # the premises
@@ -119,13 +126,13 @@ test_that("perform_kriging_loocv refuses a rank-deficient trend instead of retur
 
   # LOOCV leaves 7 training rows for 7 coefficients: no residual df.
   expect_error(
-    perform_kriging_loocv(pts, "v", aux, model_type = "lm", cv_strategy = "loocv"),
+    perform_kriging_loocv(pts, "v", aux, model_type = "lm", folds = kriging_cv_folds(pts, "v", aux, "loocv")),
     "regression coefficients")
 
   # randomForest has no rank requirement, so the guard must not fire for RFK.
   # (suppressWarnings: randomForest's own seq(along=) partial-match notice.)
   rf_res <- suppressWarnings(tryCatch(
-    perform_kriging_loocv(pts, "v", aux, model_type = "rf", cv_strategy = "loocv"),
+    perform_kriging_loocv(pts, "v", aux, model_type = "rf", folds = kriging_cv_folds(pts, "v", aux, "loocv")),
     error = function(e) e))
   expect_false(inherits(rf_res, "error") &&
                  grepl("regression coefficients", conditionMessage(rf_res)))
@@ -134,7 +141,8 @@ test_that("perform_kriging_loocv refuses a rank-deficient trend instead of retur
 test_that("a comfortably-specified lm passes the rank guard", {
   pts <- make_test_points(30)
   res <- tryCatch(
-    perform_kriging_loocv(pts, "v", c("aux1", "aux2"), model_type = "lm", cv_strategy = "loocv"),
+    perform_kriging_loocv(pts, "v", c("aux1", "aux2"), model_type = "lm",
+                          folds = kriging_cv_folds(pts, "v", c("aux1", "aux2"), "loocv")),
     error = function(e) e)
   expect_false(inherits(res, "error") &&
                  grepl("regression coefficients", conditionMessage(res)))
@@ -153,9 +161,9 @@ test_that("RK and RFK holdout predictions do not use the held-out covariate", {
 
   for (type in c("lm", "rf")) {
     cv <- suppressWarnings(perform_kriging_loocv(
-      pts, "v", "aux1", model_type = type, cv_strategy = "loocv", rf_ntree = 50))
+      pts, "v", "aux1", model_type = type, folds = kriging_cv_folds(pts, "v", "aux1", "loocv"), rf_ntree = 50))
     cv_changed <- suppressWarnings(perform_kriging_loocv(
-      changed, "v", "aux1", model_type = type, cv_strategy = "loocv", rf_ntree = 50))
+      changed, "v", "aux1", model_type = type, folds = kriging_cv_folds(changed, "v", "aux1", "loocv"), rf_ntree = 50))
     expect_true(is.finite(cv$var1.pred[1]))
     expect_true(is.finite(cv_changed$var1.pred[1]))
     expect_equal(cv_changed$var1.pred[1], cv$var1.pred[1], tolerance = 1e-8)
@@ -252,7 +260,8 @@ test_that("each RFK fold draws its forest from its own seed", {
   raised$v[n] <- raised$v[n] + 10 * sd(pts$v)
 
   cv_of <- function(p) suppressWarnings(perform_kriging_loocv(
-    p, "v", c("aux1", "aux2"), model_type = "rf", cv_strategy = "loocv", rf_ntree = 100))
+    p, "v", c("aux1", "aux2"), model_type = "rf", rf_ntree = 100,
+    folds = kriging_cv_folds(p, "v", c("aux1", "aux2"), "loocv")))
   base <- cv_of(pts); moved <- cv_of(raised)
   expect_true(is.finite(base$var1.pred[n]))
   expect_equal(moved$var1.pred[n], base$var1.pred[n], tolerance = 1e-8)
@@ -328,7 +337,8 @@ test_that("a fold kriges its held-out covariates from the map's covariate locati
 test_that("the covariate support hands a fold nothing about the values it is scored on", {
   s <- make_covariate_dense(n_cov = 120, n_t = 30)
   loo <- function(t, cov, type = "lm") suppressWarnings(perform_kriging_loocv(
-    t, "v", "ec", model_type = type, rf_ntree = 50, cv_strategy = "loocv", cov_data = cov))
+    t, "v", "ec", model_type = type, rf_ntree = 50, folds = kriging_cv_folds(t, "v", "ec", "loocv"),
+    cov_data = cov))
   for (type in c("lm", "rf")) {
     base <- loo(s$t, s$cov, type)
     # The held-out location's own covariate, wherever it is stored.
@@ -350,7 +360,7 @@ test_that("the covariate support hands a fold nothing about the values it is sco
   for (type in c("lm", "rf")) {
     expect_identical(loo(s$t, all_t, type)$var1.pred,
                      suppressWarnings(perform_kriging_loocv(s$t, "v", "ec", model_type = type, rf_ntree = 50,
-                                                            cv_strategy = "loocv"))$var1.pred)
+                                                            folds = kriging_cv_folds(s$t, "v", "ec", "loocv")))$var1.pred)
   }
 })
 
@@ -382,7 +392,8 @@ test_that("a held-out location leaves the covariate support whole, co-located sa
                                        d_min = min(sf::st_distance(data, grid_p)))
     original(data, grid_p, ...)
   }, envir = globalenv())
-  cv <- suppressWarnings(perform_kriging_loocv(t, "v", "ec", model_type = "lm", cv_strategy = "loocv", cov_data = pp$pts))
+  cv <- suppressWarnings(perform_kriging_loocv(t, "v", "ec", model_type = "lm",
+                                               folds = kriging_cv_folds(t, "v", "ec", "loocv"), cov_data = pp$pts))
   expect_length(seen, 25L)
   expect_false(t[[LOC_ID_COL]][i] %in% seen[[i]]$ids)
   expect_length(seen[[i]]$ids, 79L)

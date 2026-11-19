@@ -44,8 +44,16 @@
     r_proj
   }
 
+  # A plot card's render: its builder, cached per session on key(). Every card
+  # shares this expression, which is all Shiny's cache hint holds, so the key
+  # leads with the card's own output name: no card can read another's image.
+  cached_plot <- function(build, key) {
+    renderCachedPlot({ p <- build(); req(p); p },
+                     cacheKeyExpr = list(getCurrentOutputInfo()$name, key()), cache = "session")
+  }
+
   # Builder of the CV residual variogram plots, shared by the cached in-page
-  # renderer (render_resid_plot()) and register_sci_plot() (expand, PNG).
+  # render (cached_plot()) and register_sci_plot() (expand, PNG).
   build_resid_vgm_diag <- function(cv_data_reactive, title_suffix = "") {
     # A locality's scored CV residuals as sf (NULL otherwise): engines return
     # CV objects as sf in the projected CRS, and the NA residuals of a failed
@@ -97,18 +105,6 @@
         sci_placeholder(paste("Residual variogram error:\n", e$message), size = 4)
       })
     }
-  }
-
-  render_resid_plot <- function(cv_data_reactive, title_suffix, build_fn) {
-    renderCachedPlot({
-      p <- build_fn(); req(p); p
-    }, cacheKeyExpr = {
-      # CV data change at run completion (rv$results_rev); names() also
-      # invalidates when the lists are reset at dispatch, so a running model
-      # shows a blank panel.
-      list("resid_vgm", title_suffix, input$sel_loc_stats, rv$results_rev,
-           names(cv_data_reactive()))
-    }, cache = "session")
   }
 
   # RK/RFK krige trend residuals; where a locality's trend step failed, the OK
@@ -294,17 +290,12 @@
     # variograms to tune, so the Predicted Data Structure card shows.
     prerun_pre_vgm <- is.null(d) && any(grepl("_pre$", names(rv$v_emp_list)))
     shinyjs::toggle(id = "predicted_data_structure_ui", condition = has_interp || prerun_pre_vgm)
-    shinyjs::toggle(id = "rk_pred_ui", condition = has_interp)
-    shinyjs::toggle(id = "rk_internal_vgm_pre_ui", condition = has_interp)
-    shinyjs::toggle(id = "rfk_pred_ui", condition = has_interp)
-    shinyjs::toggle(id = "rfk_internal_vgm_pre_ui", condition = has_interp)
-    shinyjs::toggle(id = "ck_pred_ui", condition = has_interp)
-    shinyjs::toggle(id = "tps_pred_ui", condition = has_interp)
-    shinyjs::toggle(id = "idw_pred_ui", condition = has_interp)
+    for (id in c("rk_pred_ui", "rfk_pred_ui", "trend_internal_vgm_pre_ui", "ck_pred_ui",
+                 "tps_pred_ui", "idw_pred_ui", "validation_diagnostics_pre_ui",
+                 "loc_pred_col", "area_total_pred_col")) {
+      shinyjs::toggle(id = id, condition = has_interp)
+    }
     shinyjs::toggle(id = "validation_diagnostics_act_ui", condition = length(rv$cv_data_act) > 0)
-    shinyjs::toggle(id = "validation_diagnostics_pre_ui", condition = has_interp)
-    shinyjs::toggle(id = "loc_pred_col", condition = has_interp)
-    shinyjs::toggle(id = "area_total_pred_col", condition = has_interp)
     
     # Uploaded-prediction statistics only when the DISPLAYED run mapped a
     # prediction side and its variable has a prediction column (NA, not NULL,
@@ -314,30 +305,27 @@
     shinyjs::toggle(id = "prediction_performance_ui", condition = has_upl_pred)
   }, ignoreNULL = FALSE)
 
+  # The confirmed coordinate mapping both modules measure ground distance with
+  # (the Spatial Cross-Correlogram bins point pairs by it). "" (neither CRS
+  # selector has a default) reaches them as NULL, the value their guards test.
+  spatial_ctx <- reactive(list(
+    x = rv$mapping$x, y = rv$mapping$y,
+    src_crs = rv$mapping$crs,
+    proj_crs = if (isTruthy(input$crs_selection)) input$crs_selection else NULL
+  ))
+
   desc_exploratory_server(
     id = "exploratory",
     data_reactive = reactive(rv$user_data),
     vars_metadata_reactive = reactive(rv$mapping$vars),
-    # Coordinate mapping for the Spatial Cross-Correlogram (same contract as
-    # classif_server): it bins point pairs by projected ground distance.
-    spatial_reactive = reactive(list(
-      x = rv$mapping$x, y = rv$mapping$y,
-      # "" (neither selector has a default) has to reach the modules as NULL:
-      # that is the value their guards test for.
-      src_crs = rv$mapping$crs, proj_crs = if (isTruthy(input$crs_selection)) input$crs_selection else NULL
-    ))
+    spatial_reactive = spatial_ctx
   )
 
   classif_server(
     id = "classification",
     data_reactive = reactive(rv$user_data),
     vars_metadata_reactive = reactive(rv$mapping$vars),
-    spatial_reactive = reactive(list(
-      x = rv$mapping$x, y = rv$mapping$y,
-      src_crs = rv$mapping$crs,
-      proj_crs = if (isTruthy(input$crs_selection)) input$crs_selection else NULL,
-      loc = rv$mapping$loc
-    )),
+    spatial_reactive = reactive(c(spatial_ctx(), list(loc = rv$mapping$loc))),
     # Polygons (drawn + uploaded) enable the polygon scope. get_drawn_sf() is
     # defined in a later chunk; reactives resolve it at evaluation time. The
     # interpolation sidebar never affects classification runs.

@@ -81,17 +81,23 @@ ui_sidebar_panel <- sidebarPanel(width = 3,
                 "Smaller values assume local stationarity and are faster; larger values approach a global neighbourhood. Default 15. See Scientific Guide Section 1.4.")))), min = 5, max = 60, value = 15, step = 1),
               helpText(HTML("<em style='color: var(--mn-text-3); font-size: 0.9em; font-style: normal;'>The neighbourhood is a modelling choice, not just a speed setting: it controls how local the stationarity assumption is.</em>"))
             ),
-            shinyWidgets::radioGroupButtons("cv_strategy",
-              HTML(paste0("Cross-Validation Strategy", info_tooltip("cv_strategy_info", tip_html(
-                "How held-out folds are formed for the reported performance metrics. It does not change the interpolated map, except that IDW Auto (CV) selects its power under this strategy. Folds are reproducible (fixed seed 12345).",
-                "Auto (Default)" = "LOOCV for n ≤ 50, seeded random 10-fold above. LOOCV and random folds estimate the accuracy of interpolation within the sampled domain, approximately without bias for a simple random sample and conservatively for a regular grid, where a held-out point is a full grid spacing from its neighbours.",
-                "kNNDM (Map-Matched)" = "builds 10 folds so that each held-out sample is about as far from its training samples as the map's cells are from the samples (Linnenbrink et al. 2024). It adapts to how the data were sampled: evenly spread samples get ordinary random folds, while clustered samples, transects, or a boundary that reaches beyond the samples get spatially grouped folds. The metrics then describe the error of this map over this boundary, without having to choose between random folds (optimistic for clustered samples) and blocks (pessimistic for evenly spread ones). It is deterministic, costs about the same as 10-fold CV, and uses LOOCV below n = 30.",
-                "Standard LOOCV" = "leave-one-out at any sample size. The most expensive, because OK, CK, RK and RFK refit their model in every fold: on a 355-sample locality with two covariates, roughly 50 s (OK), 100 s (CK), 110 s (RK) and 135 s (RFK).",
-                "Spatial Block CV" = "10 spatially clustered (k-means) folds that hold out contiguous regions, so it estimates accuracy away from the sampled clusters (transfer to unsampled areas), which is pessimistic for a map within the sampled field. Below n = 30 it degrades to LOOCV. At 10 folds the refit costs about half a second per locality (OK), 1.3 s (CK) and 0.4 s (RK/RFK).",
-                "The <b>CV Distance Match</b> panel shows how closely any strategy's folds match the map. Scientific Guide Section 5.")))),
-              choices = c("Auto (Default)" = "auto", "kNNDM (Map-Matched)" = "knndm",
-                          "Standard LOOCV" = "loocv", "Spatial Block CV" = "block"),
-              selected = "auto", size = "sm", direction = "vertical", justified = TRUE),
+            # The strategies under their CV_STRATEGY_NAMES (global_utils.R), the
+            # run configuration's names; each description is keyed by its value.
+            local({
+              lab <- replace(CV_STRATEGY_NAMES, "auto", "Auto (Default)")
+              desc <- c(
+                auto = "LOOCV for n ≤ 50, seeded random 10-fold above. LOOCV and random folds estimate the accuracy of interpolation within the sampled domain, approximately without bias for a simple random sample and conservatively for a regular grid, where a held-out point is a full grid spacing from its neighbours.",
+                knndm = "builds 10 folds so that each held-out sample is about as far from its training samples as the map's cells are from the samples (Linnenbrink et al. 2024). It adapts to how the data were sampled: evenly spread samples get ordinary random folds, while clustered samples, transects, or a boundary that reaches beyond the samples get spatially grouped folds. The metrics then describe the error of this map over this boundary, without having to choose between random folds (optimistic for clustered samples) and blocks (pessimistic for evenly spread ones). It is deterministic, costs about the same as 10-fold CV, and uses LOOCV below n = 30.",
+                loocv = "leave-one-out at any sample size. The most expensive, because OK, CK, RK and RFK refit their model in every fold: on a 355-sample locality with two covariates, roughly 50 s (OK), 100 s (CK), 110 s (RK) and 135 s (RFK).",
+                block = "10 spatially clustered (k-means) folds that hold out contiguous regions, so it estimates accuracy away from the sampled clusters (transfer to unsampled areas), which is pessimistic for a map within the sampled field. Below n = 30 it degrades to LOOCV. At 10 folds the refit costs about half a second per locality (OK), 1.3 s (CK) and 0.4 s (RK/RFK).")
+              shinyWidgets::radioGroupButtons("cv_strategy",
+                HTML(paste0("Cross-Validation Strategy", info_tooltip("cv_strategy_info", tip_html(
+                  "How held-out folds are formed for the reported performance metrics. It does not change the interpolated map, except that IDW Auto (CV) selects its power under this strategy. Folds are reproducible (fixed seed 12345).",
+                  stats::setNames(desc[names(lab)], lab),
+                  "The <b>CV Distance Match</b> panel shows how closely any strategy's folds match the map. Scientific Guide Section 5.")))),
+                choices = stats::setNames(names(lab), lab),
+                selected = "auto", size = "sm", direction = "vertical", justified = TRUE)
+            }),
 
             conditionalPanel(condition = "['OK', 'RK', 'RFK', 'CK'].includes(input.method)",
               helpText(HTML("<em style='color: var(--mn-text-3); font-size: 0.9em; font-style: normal;'>Each fold refits the model from its own training samples. Scientific Guide §5.</em>"))

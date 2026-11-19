@@ -142,6 +142,24 @@ test_that("a failed SHAP cluster start restores mc.cores", {
   .package = "parallelly")
 })
 
+test_that("with_nested_cluster runs on its own cluster and hands the worker back", {
+  withr::local_options(mc.cores = 1L)
+  expect_true(inherits(future::plan(), "sequential"))
+  # Below two workers neither the plan nor mc.cores is touched.
+  expect_equal(with_nested_cluster(1L, future::nbrOfWorkers()), 1)
+  expect_identical(with_nested_cluster(0L, getOption("mc.cores")), 1L)
+  # Two workers: the expression runs on them with mc.cores set, and the plan
+  # and mc.cores are back afterwards, after an error too.
+  seen <- with_nested_cluster(2L, list(workers = future::nbrOfWorkers(), mc = getOption("mc.cores")))
+  expect_equal(seen$workers, 2)
+  expect_identical(seen$mc, 2L)
+  expect_identical(getOption("mc.cores"), 1L)
+  expect_true(inherits(future::plan(), "sequential"))
+  expect_error(with_nested_cluster(2L, stop("inside the map")), "inside the map")
+  expect_identical(getOption("mc.cores"), 1L)
+  expect_true(inherits(future::plan(), "sequential"))
+})
+
 test_that("compute_governing_factors aborts when the cancel flag is set", {
   df <- make_test_df(60)
   preds <- c("b", "c", "d")

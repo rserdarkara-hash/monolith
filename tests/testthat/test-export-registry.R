@@ -25,7 +25,7 @@ test_that("registry keys never merge two items, and Quick Export selects its own
     # Three ids that sanitise alike keep three entries.
     ids <- paste0("table_stats_loc_", c("Field-1", "Field 1", "Field_1"))
     keys <- vapply(ids, function(id) {
-      register_export_item(id, id, "table", data.frame(a = 1), var_label = "Total N")
+      register_export_item(id, id, "table", data.frame(a = 1))
     }, character(1), USE.NAMES = FALSE)
     expect_identical(keys, safe_key(ids))
     expect_length(unique(keys), 3L)
@@ -80,7 +80,7 @@ test_that("a GeoTIFF export is one file on one lattice and one file per locality
     source(file.path(proj_root, "server_export.R"), local = TRUE)
   }, {
     key <- register_export_item("map_actual", "Soil pH - Actual Map - Ordinary Kriging", "map",
-                                rv$rast_list_act, var_label = "Soil pH", surface = "act")
+                                rv$rast_list_act, surface = "act")
     item <- rv$export_registry[[key]]
     expect_false(gtiff_single(item))
     expect_identical(export_ext_for(item, "gtiff"), "zip")
@@ -156,7 +156,7 @@ test_that("a GeoTIFF export is one file on one lattice and one file per locality
     }
 
     # A table has no raster form whatever the format asked for.
-    tab_key <- register_export_item("t", "t", "table", data.frame(a = 1), var_label = "x")
+    tab_key <- register_export_item("t", "t", "table", data.frame(a = 1))
     expect_identical(export_ext_for(rv$export_registry[[tab_key]], "gtiff"), "xlsx")
   })
 })

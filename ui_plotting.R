@@ -862,7 +862,7 @@ generate_base_plot <- function(item, input, agro_params = NULL, palette = "YlOrR
         lvls <- data.frame(value = 1:agro_params$n_c, category = labels_to_use)
         a_cols <- agro_params$colors
         if (isTruthy(input$styler_high_contrast)) {
-            a_cols <- viridis::viridis(agro_params$n_c)
+            a_cols <- viridisLite::viridis(agro_params$n_c)
         }
         # The legend is the full class scheme, as in the Map Viewer: every class
         # (show.legend = TRUE keeps absent ones, ggplot2 >= 3.5) and no "NA"
@@ -1052,12 +1052,12 @@ get_stat_letters <- function(df, var_name, group_col, test_type) {
     formula_str <- paste0("`", var_name, "` ~ `", group_col, "`")
     aov_res <- aov(as.formula(formula_str), data = df_proc)
     
-    if (test_type == "tukey" && n_groups > 2 && requireNamespace("agricolae", quietly = TRUE)) {
+    if (test_type == "tukey" && n_groups > 2) {
       res <- agricolae::HSD.test(aov_res, group_col, console = FALSE)
       df_let <- data.frame(group = rownames(res$groups), letter = as.character(res$groups$groups))
       colnames(df_let)[1] <- group_col
       return(df_let)
-    } else if (test_type == "duncan" && n_groups > 2 && requireNamespace("agricolae", quietly = TRUE)) {
+    } else if (test_type == "duncan" && n_groups > 2) {
       # Duncan's MRT controls only the comparison-wise error rate (the
       # family-wise rate grows toward 1 with k); offered for older agronomy
       # literature, labelled "(liberal)". Tukey's HSD is the conservative default.
@@ -1065,7 +1065,7 @@ get_stat_letters <- function(df, var_name, group_col, test_type) {
       df_let <- data.frame(group = rownames(res$groups), letter = as.character(res$groups$groups))
       colnames(df_let)[1] <- group_col
       return(df_let)
-    } else if (test_type == "kruskal" && requireNamespace("agricolae", quietly = TRUE)) {
+    } else if (test_type == "kruskal") {
       # BH-adjusted pairwise comparisons, consistent with the correlation
       # table's BH policy.
       res <- agricolae::kruskal(df_proc[[var_name]], df_proc[[group_col]], p.adj = "BH", console = FALSE)
@@ -1426,18 +1426,12 @@ generate_advanced_plot <- function(df, vars, group_col = NULL, plot_type = "qq",
           else if(xyz_fit == "loess") mod <- loess(var3_safe ~ var1_safe * var2_safe, data=df_safe, span=0.7)
           else if(xyz_fit == "polynomial") mod <- lm(var3_safe ~ poly(var1_safe,2) + poly(var2_safe,2), data=df_safe)
           else if(xyz_fit == "gam") {
-            if(requireNamespace("mgcv", quietly=TRUE)) {
-              mod <- mgcv::gam(var3_safe ~ s(var1_safe) + s(var2_safe), data=df_safe)
-            } else {
-              mod <- lm(var3_safe ~ var1_safe + var2_safe, data=df_safe)
-            }
+            mod <- mgcv::gam(var3_safe ~ s(var1_safe) + s(var2_safe), data=df_safe)
           } else if(xyz_fit == "tps") {
-            if(requireNamespace("fields", quietly=TRUE)) {
-              # give.warnings = FALSE: fields' console note on a GCV minimum
-              # at an end of its grid reaches no one in the app.
-              mod <- fields::Tps(df_safe[,c("var1_safe","var2_safe")], df_safe[["var3_safe"]],
-                                 give.warnings = FALSE)
-            }
+            # give.warnings = FALSE: fields' console note on a GCV minimum
+            # at an end of its grid reaches no one in the app.
+            mod <- fields::Tps(df_safe[,c("var1_safe","var2_safe")], df_safe[["var3_safe"]],
+                               give.warnings = FALSE)
           }
         }, silent=TRUE)
         
@@ -1498,23 +1492,23 @@ align_cormat <- function(cormat, vars) {
   cormat[vars, vars, drop = FALSE]
 }
 
-constant_var_plot <- function() {
-  sci_placeholder("A selected variable is constant;\ncorrelation is undefined for it.")
+#' The matrix the heatmap, network and correlogram draw: `cormat` (the summary
+#' table's) or the correlations of the rows complete across `vars`, aligned to
+#' `vars`. A placeholder plot instead below two variables or three complete
+#' rows, or for a constant variable, whose NA correlations would break hclust
+#' and the network's threshold test and vanish from the correlogram unsaid.
+.corr_input <- function(df, vars, method, cormat) {
+  if (length(vars) < 2) return(sci_placeholder("Need >=2 variables"))
+  df_clean <- na.omit(df[, vars, drop = FALSE])
+  if (nrow(df_clean) < 3) return(sci_placeholder("Insufficient data"))
+  cormat <- align_cormat(cormat %||% cor(df_clean, method = method), vars)
+  if (anyNA(cormat)) return(sci_placeholder("A selected variable is constant;\ncorrelation is undefined for it."))
+  cormat
 }
 
 generate_correlation_heatmap <- function(df, vars, method = "pearson", cormat = NULL, labels = NULL) {
-
-  if (length(vars) < 2) return(sci_placeholder("Need >=2 variables"))
-  
-  df_clean <- na.omit(df[, vars, drop=FALSE])
-  if (nrow(df_clean) < 3) return(sci_placeholder("Insufficient data"))
-  
-  if (is.null(cormat)) {
-    cormat <- cor(df_clean, method = method)
-  }
-  cormat <- align_cormat(cormat, vars)
-  # A constant variable gives NA correlations, which would break hclust.
-  if (anyNA(cormat)) return(constant_var_plot())
+  cormat <- .corr_input(df, vars, method, cormat)
+  if (inherits(cormat, "ggplot")) return(cormat)
 
   distmat <- as.dist(1 - abs(cormat))
   hc <- hclust(distmat)
@@ -1538,18 +1532,8 @@ generate_correlation_heatmap <- function(df, vars, method = "pearson", cormat = 
 }
 
 generate_correlation_network <- function(df, vars, threshold = 0.3, method = "pearson", cormat = NULL, labels = NULL) {
-
-  if (length(vars) < 2) return(sci_placeholder("Need >=2 variables"))
-  
-  df_clean <- na.omit(df[, vars, drop=FALSE])
-  if (nrow(df_clean) < 3) return(sci_placeholder("Insufficient data"))
-  
-  if (is.null(cormat)) {
-    cormat <- cor(df_clean, method = method)
-  }
-  cormat <- align_cormat(cormat, vars)
-  # An NA correlation (constant variable) would abort the threshold test.
-  if (anyNA(cormat)) return(constant_var_plot())
+  cormat <- .corr_input(df, vars, method, cormat)
+  if (inherits(cormat, "ggplot")) return(cormat)
 
   n <- length(vars)
   angles <- seq(0, 2*pi, length.out = n + 1)[1:n]
@@ -1627,19 +1611,8 @@ generate_partial_correlation <- function(df, vars, control_vars = NULL, method =
 }
 
 generate_correlogram <- function(df, vars, method = "pearson", cormat = NULL, labels = NULL) {
-
-  if (length(vars) < 2) return(sci_placeholder("Need >=2 variables"))
-  
-  df_clean <- na.omit(df[, vars, drop=FALSE])
-  if (nrow(df_clean) < 3) return(sci_placeholder("Insufficient data"))
-  
-  if (is.null(cormat)) {
-    cormat <- cor(df_clean, method = method)
-  }
-  cormat <- align_cormat(cormat, vars)
-  # Same guard as the heatmap and network: a constant variable's NA cells
-  # would otherwise vanish from the plot without a word.
-  if (anyNA(cormat)) return(constant_var_plot())
+  cormat <- .corr_input(df, vars, method, cormat)
+  if (inherits(cormat, "ggplot")) return(cormat)
 
   cormat_df <- melt_cormat(cormat, "Corr")
   

@@ -370,17 +370,16 @@ ui_main_tabs <- mainPanel(width = 9,
                             ),
                             conditionalPanel(condition = "output.sci_diag_method == 'RK'",
                                h4("Linear Trend Performance (Actual)"), uiOutput("model_summary_ui_act"),
-                               div(id = "rk_pred_ui", h4("Linear Trend Performance (Predicted)"), uiOutput("model_summary_ui_pre")),
-                               hr(),
-                               sci_plot_card("rk_internal_vgm_act", "Internal Residual Variogram (Actual)", info = pooled_vgm_info("rk_int_vgm_act")),
-                               div(id = "rk_internal_vgm_pre_ui", sci_plot_card("rk_internal_vgm_pre", "Internal Residual Variogram (Predicted)", info = pooled_vgm_info("rk_int_vgm_pre")))
+                               div(id = "rk_pred_ui", h4("Linear Trend Performance (Predicted)"), uiOutput("model_summary_ui_pre"))
                              ),
                             conditionalPanel(condition = "output.sci_diag_method == 'RFK'",
                                sci_plot_card("rf_importance_plot_act", "RF Variable Importance (Actual)"),
-                               div(id = "rfk_pred_ui", sci_plot_card("rf_importance_plot_pre", "RF Variable Importance (Predicted)")),
+                               div(id = "rfk_pred_ui", sci_plot_card("rf_importance_plot_pre", "RF Variable Importance (Predicted)"))
+                             ),
+                            conditionalPanel(condition = "output.sci_diag_method == 'RK' || output.sci_diag_method == 'RFK'",
                                hr(),
-                               sci_plot_card("rfk_internal_vgm_act", "Internal Residual Variogram (Actual)", info = pooled_vgm_info("rfk_int_vgm_act")),
-                               div(id = "rfk_internal_vgm_pre_ui", sci_plot_card("rfk_internal_vgm_pre", "Internal Residual Variogram (Predicted)", info = pooled_vgm_info("rfk_int_vgm_pre")))
+                               sci_plot_card("trend_internal_vgm_act", "Internal Residual Variogram (Actual)", info = pooled_vgm_info("trend_int_vgm_act")),
+                               div(id = "trend_internal_vgm_pre_ui", sci_plot_card("trend_internal_vgm_pre", "Internal Residual Variogram (Predicted)", info = pooled_vgm_info("trend_int_vgm_pre")))
                              ),
                             conditionalPanel(condition = "output.sci_diag_method == 'CK'",
                                sci_plot_card("ck_variogram_plot_act", "Cross-Variogram (Actual)"),

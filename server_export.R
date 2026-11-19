@@ -4,17 +4,14 @@
   # Returns the item's registry key (safe_key() of `id`), which a caller that
   # selects the item must use.
   register_export_item <- function(id, label, type, obj, kind = "value",
-                                   var_label = NULL, legend = NULL, derived = NULL,
-                                   surface = NULL) {
+                                   legend = NULL, derived = NULL, surface = NULL) {
     # `derived` items carry no payload of their own: export_item_obj()
     # (global_utils.R) rebuilds them from a raster the registry already holds.
     req(!is.null(obj) || !is.null(derived))
     clean_id <- safe_key(id)
     # The variable label that opens every registry label, so a batch workbook
-    # can drop that prefix from sheet names; defaults to the displayed run's.
-    if (is.null(var_label)) {
-      var_label <- tryCatch(isolate(get_display_meta()$label), error = function(e) NULL)
-    }
+    # can drop that prefix from sheet names: the displayed run's.
+    var_label <- tryCatch(isolate(get_display_meta()$label), error = function(e) NULL)
 
     new_item <- list(
       id = clean_id,
@@ -88,27 +85,26 @@
       tags$br(),
       tags$span(paste0(
         # An absent field (an archive from an older session) asserts nothing.
-        if (!is.null(cfg$cv_strategy)) paste0("CV strategy: ", switch(cfg$cv_strategy,
-                                                                     "loocv" = "Standard LOOCV",
-                                                                     "knndm" = "kNNDM (map-matched)",
-                                                                     "block" = "Spatial Block CV",
-                                                                     "Auto")) else "CV strategy: not recorded",
-        if (!is.null(cfg$cv_repeats) && !is.na(cfg$cv_repeats) && cfg$cv_repeats > 1) paste0(" | Repeated CV: ", cfg$cv_repeats, " fold realizations") else "",
+        if (!is.null(cfg$cv_strategy)) paste0("CV strategy: ", CV_STRATEGY_NAMES[[
+          match(cfg$cv_strategy, names(CV_STRATEGY_NAMES), nomatch = 1L)]]) else "CV strategy: not recorded",
+        cfg_part(cfg$cv_repeats, "Repeated CV", function(v) paste(v, "fold realizations"),
+                 when = cfg$cv_repeats > 1),
         # What the metrics were measured on and what each fold re-estimated.
-        if (!is.null(cfg$cv_population) && !is.na(cfg$cv_population)) paste0(" | CV population: ", cfg$cv_population) else "",
-        if (!is.null(cfg$cv_refit) && !is.na(cfg$cv_refit)) paste0(" | Model refit: ", cfg$cv_refit) else "",
-        if (!is.null(cfg$cv_covariate_screen) && !is.na(cfg$cv_covariate_screen)) paste0(" | Covariate screen: ", cfg$cv_covariate_screen) else "",
-        if (!is.null(cfg$sep_fit) && !is.na(cfg$sep_fit)) paste0(" | Fit Actual/Predicted separately: ", if (isTRUE(cfg$sep_fit)) "yes" else "no") else "",
-        if (!is.null(cfg$vif_threshold) && !is.na(cfg$vif_threshold)) paste0(" | Collinearity gate: ", if (is.finite(cfg$vif_threshold)) paste0("VIF > ", cfg$vif_threshold, " dropped") else "Keep all (user override)") else "",
+        cfg_part(cfg$cv_population, "CV population"),
+        cfg_part(cfg$cv_refit, "Model refit"),
+        cfg_part(cfg$cv_covariate_screen, "Covariate screen"),
+        cfg_part(cfg$sep_fit, "Fit Actual/Predicted separately", function(v) if (isTRUE(v)) "yes" else "no"),
+        cfg_part(cfg$vif_threshold, "Collinearity gate",
+                 function(v) if (is.finite(v)) paste0("VIF > ", v, " dropped") else "Keep all (user override)"),
         # Printed only when the CRS distorts distances enough to matter, so a
         # well-chosen CRS adds no noise and an overridden one leaves a trace.
-        if (!is.null(cfg$crs_scale_factor) && !is.na(cfg$crs_scale_factor) &&
-            abs(cfg$crs_scale_factor - 1) > 0.001)
-          paste0(" | CRS scale factor: k = ", format(round(cfg$crs_scale_factor, 6), nsmall = 6),
-                 if (isTRUE(cfg$crs_gate_override)) " (user override)" else "") else "",
-        if (!is.null(cfg$rf_ntree) && !is.na(cfg$rf_ntree)) paste0(" | RF trees: ", cfg$rf_ntree) else "",
-        if (!is.null(cfg$rfk_uncertainty) && !is.na(cfg$rfk_uncertainty)) paste0(" | RFK uncertainty: ", cfg$rfk_uncertainty) else "",
-        if (!is.null(cfg$ck_nmax) && !is.na(cfg$ck_nmax)) paste0(" | CK nmax: ", cfg$ck_nmax) else ""
+        cfg_part(cfg$crs_scale_factor, "CRS scale factor",
+                 function(v) paste0("k = ", format(round(v, 6), nsmall = 6),
+                                    if (isTRUE(cfg$crs_gate_override)) " (user override)" else ""),
+                 when = abs(cfg$crs_scale_factor - 1) > 0.001),
+        cfg_part(cfg$rf_ntree, "RF trees"),
+        cfg_part(cfg$rfk_uncertainty, "RFK uncertainty"),
+        cfg_part(cfg$ck_nmax, "CK nmax")
       )),
       if (!is.null(cfg$method_params) && nzchar(cfg$method_params)) tagList(tags$br(), tags$span(cfg$method_params))
     )

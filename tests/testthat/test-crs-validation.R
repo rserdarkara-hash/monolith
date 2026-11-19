@@ -41,6 +41,17 @@ test_that("validate_crs EPSG:32633 returns a projected CRS", {
   expect_false(sf::st_is_longlat(result))
 })
 
+test_that("align_crs puts every layer in the first one's CRS and keeps the names", {
+  geo <- sf::st_as_sf(data.frame(x = c(12.95, 12.96), y = c(52.46, 52.47)), coords = c("x", "y"), crs = 4326)
+  utm <- sf::st_transform(geo, 32633)
+  out <- align_crs(list(A = utm, B = geo, C = utm))
+  expect_identical(names(out), c("A", "B", "C"))
+  for (l in out) expect_equal(sf::st_crs(l), sf::st_crs(32633))
+  expect_identical(out$C, utm)
+  expect_equal(sf::st_coordinates(out$B), sf::st_coordinates(utm), tolerance = 1e-6)
+  expect_identical(nrow(do.call(rbind, out)), 6L)
+})
+
 # ── Metric axis units (Target Mapping CRS) ─────────────────────────────────
 # Every distance the app accepts or prints is stated in metres while the
 # engines work on the CRS's own axis units. That identity has to be enforced,
@@ -952,7 +963,7 @@ test_that("Tier 3 reports no answer rather than a wrong one", {
 
 test_that("Tier 3 degrades to the zone family when the catalogue is unavailable", {
   fx <- make_utm33_fixture()
-  # Exactly the state a build without proj.db or without RSQLite lands in.
+  # Exactly the state a build without proj.db lands in.
   saved_reg <- .crs_registry_cache$reg
   saved_failed <- .crs_registry_cache$failed
   on.exit({

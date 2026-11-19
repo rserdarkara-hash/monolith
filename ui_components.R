@@ -480,6 +480,18 @@ build_rk_trend_ui <- function(lm_sum, dt_id, raw_id) {
   )
 }
 
+# The title of a modal that stops or fails a run.
+danger_title <- function(text, icon = "exclamation-triangle") {
+  shiny::tags$div(style = "color: var(--mn-danger); font-weight: 600;", shiny::icon(icon), text)
+}
+
+# The expand button over the top-right corner of a module's plot (its parent
+# div is position: relative); register_expanded_modal() wires the modal to it.
+expand_overlay_btn <- function(id, aria) {
+  shiny::tags$button(id = id, type = "button", class = "btn btn-default action-button expand-icon-btn",
+                     title = "Expand plot", "aria-label" = aria, shiny::icon("expand"))
+}
+
 register_expanded_modal <- function(input, output, session, btn_id, mode_id, ui_id, plot_static_id, plot_plotly_id, title_text, build_fn, radar_special = FALSE, pca_3d_special = FALSE) {
   ns <- session$ns
 

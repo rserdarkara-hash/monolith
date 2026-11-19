@@ -157,7 +157,7 @@ desc_exploratory_ui <- function(id) {
                 ),
                 shiny::column(9,
                   shiny::div(style = "position: relative;",
-                      shiny::tags$button(id = ns("desc_expand_plot_btn"), type = "button", class = "btn btn-default action-button expand-icon-btn", title = "Expand plot", "aria-label" = "Expand descriptive plot", shiny::icon("expand")),
+                      expand_overlay_btn(ns("desc_expand_plot_btn"), "Expand descriptive plot"),
                       shiny::plotOutput(ns("desc_main_plot"), height = "500px")
                   ),
                   shiny::hr(),
@@ -181,7 +181,7 @@ desc_exploratory_ui <- function(id) {
                 ),
                 shiny::column(9,
                   shiny::div(style = "position: relative;",
-                      shiny::tags$button(id = ns("corr_expand_plot_btn"), type = "button", class = "btn btn-default action-button expand-icon-btn", title = "Expand plot", "aria-label" = "Expand correlation plot", shiny::icon("expand")),
+                      expand_overlay_btn(ns("corr_expand_plot_btn"), "Expand correlation plot"),
                       shiny::plotOutput(ns("corr_main_plot"), height = "500px")
                   ),
                   shiny::hr(),
@@ -199,7 +199,7 @@ desc_exploratory_ui <- function(id) {
                   shiny::actionButton(ns("run_pca_btn"), "Run PCA", class="btn-primary btn-block"),
                   shiny::hr(),
                   shiny::conditionalPanel(
-                    condition = sprintf("input['%s'] == 'yes'", ns("pca_ready_flag")),
+                    condition = sprintf("output['%s'] == 'yes'", ns("pca_ready")),
                     shiny::selectInput(ns("pca_plot_type"), "Plot Type",
                       choices = c("Scree Plot" = "scree",
                                   "Biplot (2D)" = "biplot",
@@ -215,12 +215,12 @@ desc_exploratory_ui <- function(id) {
                 shiny::column(9,
                   shiny::uiOutput(ns("pca_collinearity_warning_ui")),
                   shiny::div(style = "position: relative;",
-                      shiny::tags$button(id = ns("pca_expand_plot_btn"), type = "button", class = "btn btn-default action-button expand-icon-btn", title = "Expand plot", "aria-label" = "Expand PCA plot", shiny::icon("expand")),
+                      expand_overlay_btn(ns("pca_expand_plot_btn"), "Expand PCA plot"),
                       shiny::uiOutput(ns("pca_main_plot_container"))
                   ),
                   shiny::hr(),
                   shiny::conditionalPanel(
-                    condition = sprintf("input['%s'] == 'yes'", ns("pca_ready_flag")),
+                    condition = sprintf("output['%s'] == 'yes'", ns("pca_ready")),
                     sci_table(ns("pca_summary_table"), "PCA Results", title_tag = shiny::h4)
                   )
                 )
@@ -230,8 +230,7 @@ desc_exploratory_ui <- function(id) {
           shiny::tabPanel("Governing Factors",
             gov_factors_ui(ns("gov"))
           )
-        ),
-        shiny::conditionalPanel("false", shiny::textInput(ns("pca_ready_flag"), "", value = "no"))
+        )
     )
   )
 }
@@ -882,9 +881,12 @@ desc_exploratory_server <- function(id, data_reactive, vars_metadata_reactive,
     # guard: the advisory findings of check_collinearity() awaiting the user's
     # answer; refusal: why the PCA was not run; dropped_constant: the columns
     # the fitted PCA left out for having no variance.
-    pca_rv <- shiny::reactiveValues(res = NULL, data = NULL, cols = NULL, groups = NULL,
+    pca_rv <- shiny::reactiveValues(res = NULL, groups = NULL,
                                     guard = NULL, refusal = NULL, dropped_constant = NULL,
                                     scaled = TRUE)
+    # Shows the plot controls and the results table once a PCA is fitted.
+    output$pca_ready <- shiny::reactive(if (is.null(pca_rv$res)) "no" else "yes")
+    shiny::outputOptions(output, "pca_ready", suspendWhenHidden = FALSE)
 
     # One path for Run PCA and for continuing past the guard (desc_pca_fit()).
     run_pca <- function(df) {
@@ -899,7 +901,6 @@ desc_exploratory_server <- function(id, data_reactive, vars_metadata_reactive,
       pca_rv$dropped_constant <- fit$dropped_constant
       if (!is.null(fit$refusal)) {
         pca_rv$res <- NULL
-        shiny::updateTextInput(session, "pca_ready_flag", value = "no")
         return(invisible(NULL))
       }
       if (fit$dropped > 0) {
@@ -907,10 +908,7 @@ desc_exploratory_server <- function(id, data_reactive, vars_metadata_reactive,
       }
       pca_rv$res <- fit$res
       pca_rv$scaled <- isTRUE(input$pca_scale)
-      pca_rv$data <- fit$data
-      pca_rv$cols <- colnames(fit$data)
       pca_rv$groups <- if ("group_id" %in% colnames(df)) df$group_id[fit$keep] else NULL
-      shiny::updateTextInput(session, "pca_ready_flag", value = "yes")
     }
 
     shiny::observeEvent(input$run_pca_btn, {
@@ -920,7 +918,6 @@ desc_exploratory_server <- function(id, data_reactive, vars_metadata_reactive,
       pca_rv$res <- NULL
       pca_rv$guard <- NULL
       pca_rv$refusal <- NULL
-      shiny::updateTextInput(session, "pca_ready_flag", value = "no")
       complete <- stats::complete.cases(df[, input$pca_vars, drop = FALSE])
       if (sum(complete) < 5L || length(input$pca_vars) < 3L) {
         pca_rv$refusal <- if (length(input$pca_vars) < 3L) "Select at least 3 variables for PCA." else sprintf(
@@ -934,7 +931,6 @@ desc_exploratory_server <- function(id, data_reactive, vars_metadata_reactive,
         pca_rv$guard <- col_check
         pca_rv$refusal <- NULL
         pca_rv$res <- NULL
-        shiny::updateTextInput(session, "pca_ready_flag", value = "no")
       } else {
         run_pca(df)
       }

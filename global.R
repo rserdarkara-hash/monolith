@@ -8,22 +8,23 @@ if (getRversion() < "4.5.0") {
 required_packages <- c(
   "shiny", "shinyjs", "shinyWidgets", "shinyFiles", "shinycssloaders", "DT",
   "sf", "terra", "tidyterra", "leaflet", "leaflet.extras", "ggspatial", "fields",
-  "classInt", "gstat", "concaveman", "spdep", "FNN",
+  "gstat", "concaveman", "spdep", "FNN",
   # Exact Jenks breaks (natural_breaks(), spatial_pipeline.R); called via ::.
   "Ckmeans.1d.dp",
   "dplyr", "tidyr", "jsonlite", "readxl", "openxlsx", "officer", "zip",
-  "ggplot2", "plotly", "RColorBrewer", "viridis",
+  "ggplot2", "plotly", "RColorBrewer",
   "patchwork", "showtext", "scales", "commonmark",
   "randomForest", "DALEX", "yardstick", "agricolae", "mgcv",
   "parsnip", "recipes", "workflows", "tune", "rsample", "dials",
-  "spatialsample", "hardhat", "ranger", "xgboost", "nnet",
+  "hardhat", "ranger", "xgboost", "nnet",
   "future", "furrr", "promises", "nortest", "data.table", "fs",
   # Read PROJ's proj.db for the CRS candidate shortlist (crs_registry());
-  # called via ::. Without them the shortlist falls back to crs_zone_candidates().
+  # called via ::. When proj.db cannot be read, the shortlist falls back to
+  # crs_zone_candidates().
   "DBI", "RSQLite",
   # Installed by other packages but called directly via ::, so a missing copy
   # is named here: parallelly (nested clusters), units, rlang, htmltools,
-  # tibble and viridisLite (Classification Suite).
+  # tibble (Classification Suite) and viridisLite (every viridis palette).
   "parallelly", "units", "rlang", "htmltools", "tibble", "viridisLite"
 )
 
@@ -90,7 +91,6 @@ library(leaflet)
 library(leaflet.extras)
 library(ggspatial)
 library(fields)
-library(classInt)
 library(gstat)
 library(concaveman)
 library(spdep)
@@ -107,7 +107,6 @@ library(zip)
 library(ggplot2)
 library(plotly)
 library(RColorBrewer)
-library(viridis)
 library(patchwork)
 library(showtext)
 library(scales)
@@ -128,7 +127,6 @@ library(workflows)
 library(tune)
 library(rsample)
 library(dials)
-library(spatialsample)
 library(hardhat)
 
 library(future)

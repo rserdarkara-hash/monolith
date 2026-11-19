@@ -489,21 +489,28 @@ make_cv_folds <- function(coords, strategy = "auto", n = NULL, seed = CV_FOLD_SE
     loocv = seq_len(n),
     random_kfold = cv_random_folds(n, plan$k, seed),
     knndm = knndm_folds(coords, domain_xy, plan$k, KNNDM_MAXP, seed),
-    block = with_seed(seed, {
-      folds <- tryCatch({
-        cm <- as.matrix(coords)[, 1:2, drop = FALSE]
-        km <- stats::kmeans(cm, centers = plan$k, nstart = 5, iter.max = 50)
-        as.integer(km$cluster)
-      }, error = function(e) NULL)
-      # Degenerate geometry can make k-means fail or collapse: fall back to a
-      # seeded random k-fold, flagged so it is never reported as Spatial Block.
-      # The draw continues the k-means stream, so it is not cv_random_folds().
-      if (is.null(folds) || length(unique(folds)) < 2) {
-        folds <- sample(rep(seq_len(plan$k), length.out = n))
-        attr(folds, "block_fallback") <- TRUE
-      }
-      folds
-    }))
+    block = kmeans_block_folds(coords, plan$k, seed, n))
+}
+
+# Spatial blocks, the one kernel of both suites (interpolation's Spatial Block
+# CV, the Classification Suite's Spatial blocked CV): k-means on the projected
+# coordinates, k centres, 5 starts, 50 iterations, under with_seed(seed).
+# Degenerate geometry can make k-means fail or collapse: then a seeded random
+# k-fold, flagged attr(, "block_fallback") so it is never reported as spatial
+# blocks. The draw continues the k-means stream, so it is not cv_random_folds().
+kmeans_block_folds <- function(coords, k, seed = CV_FOLD_SEED, n = nrow(coords)) {
+  with_seed(seed, {
+    folds <- tryCatch({
+      cm <- as.matrix(coords)[, 1:2, drop = FALSE]
+      km <- stats::kmeans(cm, centers = k, nstart = 5, iter.max = 50)
+      as.integer(km$cluster)
+    }, error = function(e) NULL)
+    if (is.null(folds) || length(unique(folds)) < 2) {
+      folds <- sample(rep(seq_len(k), length.out = n))
+      attr(folds, "block_fallback") <- TRUE
+    }
+    folds
+  })
 }
 
 # ── kNNDM (k-fold nearest-neighbour distance matching) ──────────────────────
@@ -1004,16 +1011,14 @@ build_cv_repeat_summary <- function(reps_by_loc) {
 #' values it is scored on. Without `cov_data` (a direct call) the training
 #' rows are the support.
 #'
-#' `folds` / `row_id` come from the run's CV plan; with `folds = NULL` they
-#' are built from `cv_strategy`, `fold_seed` and `cv_domain_xy`. Returns the
-#' common kriging CV schema (`var1.var` NA) with attr(, "cov_support") =
-#' c(n, extra): the support's locations and how many of them carry no target;
-#' NULL below 3 complete-case rows.
+#' `folds` (one per complete-case row) and `row_id` come from the run's CV
+#' plan. Returns the common kriging CV schema (`var1.var` NA) with
+#' attr(, "cov_support") = c(n, extra): the support's locations and how many of
+#' them carry no target; NULL below 3 complete-case rows.
 perform_kriging_loocv <- function(pts, target_var, aux_vars, model_type = c("lm", "rf"), rf_ntree = 200,
-                                  cv_strategy = "auto", fold_seed = CV_FOLD_SEED, cov_params = list(),
-                                  folds = NULL, row_id = NULL, cancel_file = NULL, progress = NULL,
-                                  candidates = NULL, vif_threshold = 10, cv_domain_xy = NULL,
-                                  cov_data = NULL) {
+                                  cov_params = list(), folds = NULL, row_id = NULL,
+                                  cancel_file = NULL, progress = NULL,
+                                  candidates = NULL, vif_threshold = 10, cov_data = NULL) {
   model_type <- match.arg(model_type)
   candidates <- candidates %||% aux_vars
   pts <- pts[complete.cases(sf::st_drop_geometry(pts)[, c(target_var, aux_vars), drop=FALSE]), ]
@@ -1026,11 +1031,10 @@ perform_kriging_loocv <- function(pts, target_var, aux_vars, model_type = c("lm"
     }
   }
 
-  # `fold_seed` moves only under repeated CV; per-fold model draws are seeded
-  # from the fold label, so a repeat varies the partition only.
-  if (is.null(folds)) {
-    folds <- make_cv_folds(sf::st_coordinates(pts), cv_strategy, n, fold_seed, cv_domain_xy)
-  } else if (length(folds) != n) {
+  # Per-fold model draws are seeded from the fold label, so a repeat of the
+  # run's CV varies the partition only.
+  if (is.null(folds)) stop("perform_kriging_loocv() needs the run's fold vector (`folds`).")
+  if (length(folds) != n) {
     stop("The CV fold vector has ", length(folds), " entries for ", n, " complete-case samples.")
   }
   if (is.null(row_id)) {

@@ -615,7 +615,7 @@ test_that("a picked palette stays with its variable through runs, styling switch
     session$setInputs(color_style = "bin")
     expect_identical(selected(output$palette_ui$html), "viridis")
     expect_identical(build_classification_params(c(200, 300))$colors,
-                     viridis::viridis(3, option = "viridis"))
+                     viridisLite::viridis(3, option = "viridis"))
 
     # K on screen, pH chosen for the next run: a pick restyles K now and is
     # what pH's run starts with.
