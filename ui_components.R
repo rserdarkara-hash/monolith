@@ -826,6 +826,46 @@ point_layer_js <- function() {
 "
 }
 
+# The Warnings box's method for the Map Viewer's leaflet widgets, mounted once
+# in ui_main.R's head and called by add_map_warnings() right after the box.
+# Keep pointer events within the box. Its close button hides every box and
+# moves focus to Overlays, where the Warnings checkbox shows the boxes again.
+map_warnings_js <- function() {
+  "
+(function () {
+  function install() {
+    var LW = window.LeafletWidget;
+    if (!LW || !LW.methods) return false;
+    if (LW.methods.mnWireWarnings) return true;
+    LW.methods.mnWireWarnings = function () {
+      var boxes = this.getContainer().querySelectorAll('.mn-warn-control');
+      for (var i = 0; i < boxes.length; i++) {
+        var ctrl = boxes[i];
+        if (ctrl._mnWired) continue;
+        ctrl._mnWired = true;
+        L.DomEvent.disableClickPropagation(ctrl);
+        L.DomEvent.disableScrollPropagation(ctrl);
+        var btn = ctrl.querySelector('.mn-warn-close');
+        if (btn) L.DomEvent.on(btn, 'click', function (e) {
+          L.DomEvent.stop(e);
+          var cb = document.getElementById('show_map_warnings');
+          if (cb && this === document.activeElement) {
+            var overlays = cb.closest('.mn-popover');
+            if (overlays) overlays.querySelector('summary').focus({preventScroll: true});
+          }
+          document.body.classList.add('mn-hide-map-warnings');
+          if (cb && cb.checked) { cb.checked = false; jQuery(cb).trigger('change'); }
+        });
+      }
+    };
+    return true;
+  }
+  install();
+  if (window.jQuery) jQuery(install);
+})();
+"
+}
+
 # The three markers a result table can print in place of a number, and the one
 # sentence each needs under every table that uses it; table_footnote() emits
 # only the markers a table used.

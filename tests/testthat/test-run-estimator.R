@@ -40,6 +40,7 @@ test_that("a cold-start estimate is labelled rough and a history-fitted one is n
 
   cold <- estimate_run_duration(c(100), "OK", comp_mode = FALSE, cores = 4)
   expect_match(cold$est_time_str, "(rough estimate)", fixed = TRUE)
+  cold_mixed <- estimate_run_duration(c(100, 200), "OK", comp_mode = FALSE, cores = 4)
 
   write.csv(
     data.frame(
@@ -58,6 +59,8 @@ test_that("a cold-start estimate is labelled rough and a history-fitted one is n
 
   warm <- estimate_run_duration(c(100), "OK", comp_mode = FALSE, cores = 4)
   expect_false(grepl("rough estimate", warm$est_time_str, fixed = TRUE))
+  expect_no_warning(mixed <- estimate_run_duration(c(100, 200), "OK", comp_mode = FALSE, cores = 4))
+  expect_identical(mixed, cold_mixed)
 })
 
 test_that("estimate_run_duration returns list with expected names", {

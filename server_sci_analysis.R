@@ -130,10 +130,9 @@
           "No fitted variogram is stored for \"%s\" %s.\nThe locality failed before the variogram step; ",
           "see the Run Log on this tab."), loc, tolower(title_suffix)), size = 4))
       }
-      # A locality whose trend step failed stored the OK fallback's variogram
-      # of the measured values (disp_trend_fallback), not a residual variogram.
-      ttl <- if (disp_trend_fallback(paste0(loc, "_", type))) {
-        paste("Variogram of Measured Values - Ordinary Kriging Fallback", paste0(title_suffix, ":"), loc)
+      # The fallback fits the target on that surface (measured or uploaded).
+      ttl <- if (disp_engine_fallback(paste0(loc, "_", type))) {
+        paste("Variogram of Target Values - Ordinary Kriging Fallback", paste0(title_suffix, ":"), loc)
       } else {
         paste("Internal Residual Variogram", paste0(title_suffix, ":"), loc)
       }
@@ -214,17 +213,17 @@
     }
   })
   # A named locality's transposed table has no "Variogram Of" column: the note
-  # names a column that holds the OK fallback's variogram of measured values.
+  # names a column that holds the OK fallback's variogram of target values.
   output$vgm_params_note <- renderUI({
     loc <- input$sel_loc_stats
     req(loc, !identical(loc, "Total (Combined)"), !isTRUE(sci_vgm_tuning()))
-    keys <- intersect(paste0(loc, c("_act", "_pre")), names(rv$disp$v_fits))
-    fb <- keys[disp_trend_fallback(keys)]
+    of <- disp_vgm_of()
+    fb <- intersect(paste0(loc, c("_act", "_pre")), names(of)[of == VGM_OF_FALLBACK])
     if (!length(fb)) return(NULL)
     cols <- ifelse(grepl("_act$", fb), "Actual", "Predicted")
     tags$div(class = "mn-table-note", sprintf(paste0(
-      "%s: the %s trend model of this locality was not fitted, so the Ordinary Kriging fallback ",
-      "kriged the measured values and this is their variogram, not a residual variogram. ",
+      "%s used an Ordinary Kriging fallback after the %s model failed. ",
+      "The parameters describe a variogram of the surface's target values. ",
       "The Run Log names the cause."), paste(cols, collapse = " and "), rv$disp$method))
   })
   # The smoothing / power selection panels read the displayed run's own fit

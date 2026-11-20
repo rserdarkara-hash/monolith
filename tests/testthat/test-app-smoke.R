@@ -683,7 +683,7 @@ test_that("restoring an archived run brings back its maps, metrics and record to
           "the IDW run of the previous test did not complete")
 
   # A second run with another engine, archiving the first when asked.
-  app$set_inputs(method = "OK")
+  app$set_inputs(method = "OK", show_map_warnings = FALSE)
   app$wait_for_idle()
   skip_if_not(run_and_reveal(app, prev = "archive"),
               "the second run did not finish inside the smoke harness")
@@ -691,13 +691,14 @@ test_that("restoring an archived run brings back its maps, metrics and record to
   expect_equal(second$method, "OK")
   expect_false(identical(second$rast_hash, first$rast_hash))
   expect_equal(second$history, "IDW")
+  expect_true(app$get_value(input = "show_map_warnings"))
   # The palette picked before the previous run is still the variable's.
   expect_identical(app$get_value(input = "palette_select"), "viridis")
 
   # Restoring the IDW run brings back its record, its surface and its metrics
   # together, and the OK run goes into the archive in its place. The archive
   # panel renders only while its tab is open.
-  app$set_inputs(main_tabs = "tab_export")
+  app$set_inputs(main_tabs = "tab_export", show_map_warnings = FALSE)
   app$wait_for_idle()
   app$click(paste0("restore_run_", first$run_id))
   app$wait_for_idle()
@@ -709,6 +710,7 @@ test_that("restoring an archived run brings back its maps, metrics and record to
   expect_equal(back$rmse, first$rmse)
   expect_match(back$map_label, get_method_label("IDW"), fixed = TRUE)
   expect_equal(back$history, "OK")
+  expect_true(app$get_value(input = "show_map_warnings"))
   expect_equal(as.character(app$get_value(output = "disp_method")), "IDW")
   # A palette is not run state: the restored run is drawn in the variable's pick.
   expect_identical(app$get_value(input = "palette_select"), "viridis")

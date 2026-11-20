@@ -228,8 +228,10 @@ test_that("one chevron serves every closed control", {
                 ".bootstrap-select > .dropdown-toggle .caret")) {
     expect_match(css, sel, fixed = TRUE, info = sel)
   }
+  # The map's Warnings box opens with the same mark.
+  expect_match(css, ".mn-warn-chevron {", fixed = TRUE)
   expect_equal(
-    length(regmatches(css, gregexpr("var(--mn-chevron)", css, fixed = TRUE))[[1]]), 3
+    length(regmatches(css, gregexpr("var(--mn-chevron)", css, fixed = TRUE))[[1]]), 4
   )
   # Every chevron sits the same distance from its right edge as the text does
   # from the left, and the open state rotates the one mark rather than
@@ -451,9 +453,11 @@ test_that("info popovers set every choice and point on a paragraph of its own", 
   }
 })
 
-test_that("every variogram banner band is painted with tokens", {
-  # The banner is drawn over the map in both variants, so every band is painted
-  # with tokens. One fit per band, so no band can be added without a token.
+test_that("the Warnings box is styled by the theme alone, in tokens", {
+  # The box is drawn over the map in both variants. Its markup carries no
+  # style of its own, so its colours are the theme's rules, which the token
+  # test holds to var(--mn-*). One fit per condition, so no condition can
+  # bring an inline colour back.
   fb <- robust_vgm_fit(NULL, c(1, 2, 3))   # the stand-in of a failed fit
   pure <- function(cause) {
     f <- gstat::vgm(0.4, "Nug", 0)
@@ -476,24 +480,34 @@ test_that("every variogram banner band is painted with tokens", {
                                       E_act = ru, F_act = sm))
   expect_match(html, "Variogram fit failed", fixed = TRUE)
   expect_match(html, "No spatial structure detected", fixed = TRUE)
-  expect_match(html, "Pure nugget used for", fixed = TRUE)
+  expect_match(html, "Pure nugget used", fixed = TRUE)
   expect_match(html, "Nugget not identified", fixed = TRUE)
   expect_match(html, "Variogram range not resolved", fixed = TRUE)
   expect_match(html, "Range at the search limit", fixed = TRUE)
   expect_match(html, "Sill not observed", fixed = TRUE)
   expect_match(html, "nugget below 5% of the sill", fixed = TRUE)
-  # The residual-scale bands an RK or RFK run words separately.
+  # The residual-scale conditions an RK or RFK run words separately, and the
+  # fallback to Ordinary Kriging.
   res_html <- build_vgm_warning_html(list(B_act = pure("no_structure"), C_act = pure("zero_nugget_rule"),
-                                          E_act = ru), engine = "RK")
+                                          E_act = ru, G_act = manual_vgm(1, "Sph", 300, 0.3)),
+                                     engine = "RK", fallback = "G_act")
   expect_match(res_html, "No residual spatial structure detected by the variogram fit", fixed = TRUE)
   expect_match(res_html, "Pure nugget used for the trend residuals", fixed = TRUE)
   expect_match(res_html, "Residual variogram still rising", fixed = TRUE)
-  html <- paste(html, res_html)
+  expect_match(res_html, "Ordinary Kriging used instead of Regression Kriging", fixed = TRUE)
+  expect_no_match(paste(html, res_html), "style=", fixed = TRUE)
 
-  colours <- regmatches(html, gregexpr("color[[:space:]]*:[[:space:]]*[^;']+", html))[[1]]
-  expect_gt(length(colours), 0)
-  expect_true(all(grepl("var(--mn-", colours, fixed = TRUE)),
-              info = paste(colours[!grepl("var(--mn-", colours, fixed = TRUE)], collapse = " | "))
+  # Severity is each entry's bar and the collapsed line's triangle, in the
+  # state tokens; the text keeps the text tokens.
+  css <- monolith_theme_css()
+  expect_match(css, ".mn-warn-item { padding: 7px 10px 8px 9px; border-left: 3px solid var(--mn-warn); }", fixed = TRUE)
+  expect_match(css, ".mn-warn-item.mn-sev-danger { border-left-color: var(--mn-danger); }", fixed = TRUE)
+  expect_match(css, ".mn-warn-box.mn-sev-danger .mn-warn-icon { background: var(--mn-danger); }", fixed = TRUE)
+  expect_match(css, "font: 11.5px/16px var(--mn-sans); color: var(--mn-text-2);", fixed = TRUE)
+  # Open, the box keeps the measure and the height cap it has always had:
+  # 300px wide, a list that scrolls rather than outgrowing the map.
+  expect_match(css, ".leaflet .mn-warn-box:has(.mn-warn-details[open]) { width: 300px; }", fixed = TRUE)
+  expect_match(css, "max-height: 352px; overflow-y: auto;", fixed = TRUE)
 })
 
 # ── variant switching ─────────────────────────────────────────────────────

@@ -3275,8 +3275,9 @@ test_that("the OK fallback of a failed RK withholds a stand-in variance", {
 test_that("an OK fallback carries nothing the failed engine fitted or scored", {
   # A covariate engine can fail after its trend is fitted: RFK stops on a
   # covariate grid with holes, RK on one without the covariate. The surface is
-  # then Ordinary Kriging of the measured values, and the main session reads a
-  # stored trend model as "the trend made this map" (disp_trend_fallback()).
+  # then Ordinary Kriging of the measured values, and the main session reads the
+  # engine's stored model (trend, forest or LMC) as "this engine made the map"
+  # (disp_engine_fallback()).
   pts <- make_test_points(30)
   grid <- make_test_grid_safe(pts, res = 250)
   lags <- calc_scientific_lags(pts)

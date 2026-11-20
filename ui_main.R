@@ -118,6 +118,8 @@ ui <- fluidPage(
     tags$script(HTML(format_sig_js())),
     # Point-layer methods of the Map Viewer's leaflet widgets (point_layer_js()).
     tags$script(HTML(point_layer_js())),
+    # The Warnings box's wiring on those widgets (map_warnings_js()).
+    tags$script(HTML(map_warnings_js())),
     # Copy-a-table-to-the-clipboard (copy_table_js()).
     tags$script(HTML(copy_table_js()))
   ),

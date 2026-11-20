@@ -84,7 +84,8 @@ monolith_theme_css <- function() {
   --mn-control-h: 32px;
   /* One disclosure mark for every closed control -- native <select>, selectize
      and bootstrap-select all draw this instead of the three different
-     triangles their own stylesheets ship. */
+     triangles their own stylesheets ship, and the map's Warnings box draws it
+     too. */
   --mn-chevron: url('data:image/svg+xml,%3Csvg xmlns=%22http://www.w3.org/2000/svg%22 viewBox=%220 0 16 16%22%3E%3Cpath d=%22M4 6.2 8 10.2 12 6.2%22 fill=%22none%22 stroke=%22%2359616D%22 stroke-width=%221.6%22 stroke-linecap=%22round%22 stroke-linejoin=%22round%22/%3E%3C/svg%3E');
   color-scheme: var(--mn-scheme);
 }
@@ -1260,20 +1261,67 @@ table.dataTable tbody tr.odd { background-color: var(--mn-surface-2) !important;
 body.mn-show-legend-title .mn-legend-title { display: inline; }
 body.mn-show-legend-title .leaflet .info.legend > div:first-child:has(.mn-legend-title) { display: block; }
 
-/* The variogram-quality banner. addControl() defaults to the className
-   'info legend', which put this box under the legend rule above: capped at
-   190px and overflow:hidden, so a multi-band message became a column tall
-   enough to outgrow the map, and anything past the cap was cut off with no
-   indication. It is given its own control class instead (see
-   server_map_viewer.R) and sized here: a readable measure, and a height cap
-   that scrolls rather than clips. The shortest map carrying it is the 600px
-   comparison pane, so the cap always leaves the map visible. The font and the
-   shadow are the legend's, which is what this box inherited before it had a
-   class of its own. */
-.vgm-fallback-warn {
-  box-sizing: border-box; width: 300px; max-height: 380px; overflow-y: auto;
-  font: 11.5px/16px var(--mn-sans); box-shadow: var(--mn-shadow);
+/* The bottom-left Warnings box grows to 300px on wide maps. The scrollable
+   list leaves part of each 600px comparison map visible. */
+.leaflet .leaflet-bottom.leaflet-left:has(> .mn-warn-control) { width: 100%; }
+.leaflet .mn-warn-control { max-width: calc(100% - 20px); }
+.leaflet .mn-warn-box {
+  position: relative; box-sizing: border-box; max-width: min(300px, 100%); overflow-wrap: anywhere;
+  font: 11.5px/16px var(--mn-sans); color: var(--mn-text-2);
+  background: var(--mn-surface); border: 1px solid var(--mn-line);
+  border-radius: var(--mn-radius); box-shadow: var(--mn-shadow);
 }
+.leaflet .mn-warn-box:has(.mn-warn-details[open]) { width: 300px; }
+.mn-warn-head {
+  display: flex; align-items: center; gap: 6px; padding: 5px 30px 5px 9px;
+  list-style: none; cursor: pointer; user-select: none;
+  font-weight: 600; color: var(--mn-text);
+}
+.mn-warn-head::-webkit-details-marker { display: none; }
+.mn-warn-head:focus-visible { outline: 2px solid var(--mn-accent); outline-offset: -2px; border-radius: var(--mn-radius); }
+.mn-warn-icon {
+  flex: 0 0 auto; width: 13px; height: 12px;
+  background: var(--mn-warn); clip-path: polygon(50% 0, 100% 100%, 0 100%);
+}
+.mn-warn-box.mn-sev-danger .mn-warn-icon { background: var(--mn-danger); }
+.mn-warn-count {
+  min-width: 17px; padding: 0 5px; border-radius: 8px; text-align: center;
+  font: 600 10.5px/15px var(--mn-mono); color: var(--mn-text-2); background: var(--mn-surface-3);
+}
+/* The box opens upward from its corner: the chevron points up while closed. */
+.mn-warn-chevron {
+  width: 12px; height: 12px; background: var(--mn-chevron) center / contain no-repeat;
+  transform: rotate(180deg); transition: transform .15s;
+}
+.mn-warn-details[open] .mn-warn-chevron { transform: none; }
+.mn-warn-list {
+  list-style: none; margin: 0; padding: 0; max-height: 352px; overflow-y: auto;
+  overscroll-behavior: contain; border-top: 1px solid var(--mn-line);
+}
+.mn-warn-list:focus-visible { outline: 2px solid var(--mn-accent); outline-offset: -2px; }
+.mn-warn-item { padding: 7px 10px 8px 9px; border-left: 3px solid var(--mn-warn); }
+.mn-warn-item.mn-sev-danger { border-left-color: var(--mn-danger); }
+.mn-warn-item + .mn-warn-item { border-top: 1px solid var(--mn-line); }
+.mn-warn-item-title, .mn-warn-sub-title { font-weight: 600; color: var(--mn-text); }
+.mn-warn-locs { display: flex; flex-wrap: wrap; gap: 3px 4px; margin: 3px 0 4px; }
+.mn-warn-loc {
+  display: inline-block; max-width: 100%; padding: 0 6px; overflow-wrap: anywhere;
+  border: 1px solid var(--mn-line-2); border-radius: 9px;
+  background: var(--mn-surface-2); color: var(--mn-text); font-weight: 500;
+}
+.mn-warn-loc-note { color: var(--mn-text-3); font-weight: 400; }
+.mn-warn-text { margin: 0; }
+.mn-warn-sub { list-style: none; margin: 6px 0 0; padding: 0 0 0 9px; border-left: 1px solid var(--mn-line-2); }
+.mn-warn-sub > li + li { margin-top: 6px; }
+.mn-warn-close {
+  position: absolute; top: 3px; right: 4px; width: 20px; height: 20px; padding: 0;
+  border: 0; border-radius: var(--mn-radius); background: none; cursor: pointer;
+  color: var(--mn-text-3); font-size: 16px; line-height: 20px;
+}
+.mn-warn-close:hover { color: var(--mn-text); background: var(--mn-surface-2); }
+.mn-warn-close:focus-visible { outline: 2px solid var(--mn-accent); }
+/* Overlays > Warnings, which the close button unticks. */
+body.mn-hide-map-warnings .mn-warn-control { display: none !important; }
 
 /* Leaflet's own controls: built into the widget, so the Overlays checkboxes
    that hide them do it from here rather than by re-rendering three maps. */

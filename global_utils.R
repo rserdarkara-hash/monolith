@@ -206,17 +206,15 @@ estimate_run_duration <- function(loc_sample_counts, method, comp_mode, cores) {
   if (is_history_based) {
     # A record is the time its locality took on a worker that ran beside
     # cores_used - 1 others; as a lone worker's time it is that share of it.
-    # A log missing either column falls back to the cold-start formula.
-    fit <- tryCatch({
+    # Use the cold-start formula if a requested sample count is not estimable
+    # from the fit, for example when every historical count is the same.
+    preds <- tryCatch({
       history_data$lone_sec <- history_data$locality_sec * share(history_data$cores_used)
-      lm(lone_sec ~ n_samples, data = history_data)
+      fit <- lm(lone_sec ~ n_samples, data = history_data)
+      predict(fit, newdata = data.frame(n_samples = loc_sample_counts), rankdeficient = "NA")
     }, error = function(e) NULL)
-    if (!is.null(fit)) {
-      preds <- predict(fit, newdata = data.frame(n_samples = loc_sample_counts))
-      loc_times_sec <- pmax(5, preds)
-    } else {
-      is_history_based <- FALSE
-    }
+    is_history_based <- !is.null(preds) && all(is.finite(preds))
+    if (is_history_based) loc_times_sec <- pmax(5, preds)
   }
   
   if (!is_history_based) {
@@ -240,7 +238,7 @@ estimate_run_duration <- function(loc_sample_counts, method, comp_mode, cores) {
   } else {
     paste(round(est_time_sec / 60, 1), "minutes")
   }
-  # Fewer than 5 matching history records: the cold-start formula is a guess.
+  # The cold-start formula gives a rough estimate without a usable history fit.
   if (!is_history_based) est_time_str <- paste0(est_time_str, " (rough estimate)")
 
   estimate_text <- paste0("~", n_models, " locality model(s), ~", est_time_str, " estimated.\n\n* Note: This time estimate is calibrated based on a below-average hardware benchmark. Actual execution time on modern or cloud hardware will likely be significantly faster.")

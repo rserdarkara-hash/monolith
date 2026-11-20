@@ -950,7 +950,7 @@ stats_table_vectors <- function(df, meta, loc_col, localities = NULL) {
 # `max_lag`/`sill_resolved` (a sill reached beyond the longest lag is
 # model-extrapolated), the equally-fitting set's Structural Dependency (%) and
 # practical-range intervals with `nugget_identified`, and `range_at_ceiling`
-# (the range is a bound at the search limit).
+# (the search limit bounds the equally fitting range interval).
 vgm_params_row <- function(f) {
   out <- list(model = NA_character_, kappa = NA_real_, nugget = NA_real_,
               sill = NA_real_, range = NA_real_, practical_range = NA_real_,
@@ -1002,8 +1002,8 @@ vgm_pct_interval <- function(x) {
 
 # One-line plot subtitle of a variogram model from vgm_params_row(): what it is
 # (fit, heuristic stand-in, applied manual model), family (with a Matern's
-# kappa), nugget, partial sill, range a and practical range, flagged at the
-# search limit or model-extrapolated beyond the longest lag, and the nugget
+# kappa), nugget, partial sill, range a and practical range, with a flag if
+# equally fitting ranges reach the limit or the sill is extrapolated, and the nugget
 # interval when the data do not identify it. NULL for no model.
 vgm_fit_subtitle <- function(fit) {
   p <- vgm_params_row(fit)
@@ -1019,7 +1019,7 @@ vgm_fit_subtitle <- function(fit) {
   paste0(lead, p$model, if (!is.na(p$kappa)) paste0(", kappa = ", format_sig(p$kappa)),
          " (Nugget: ", format_sig(p$nugget), ", Partial Sill: ", format_sig(p$sill - p$nugget),
          ", Range (a): ", format_sig(p$range), ", Practical Range: ", format_sig(p$practical_range),
-         if (isTRUE(p$range_at_ceiling)) " at the search limit",
+         if (isTRUE(p$range_at_ceiling)) " (equally fitting ranges reach the search limit)",
          if (identical(p$sill_resolved, FALSE)) {
            paste0(", model-extrapolated beyond the longest lag ", format_sig(p$max_lag))
          },
@@ -1069,8 +1069,8 @@ VGM_DEGENERATE_NOTE <- paste(
   } else sdep_txt
   range_notes <- c(if (unresolved) qualifier,
                    if (isTRUE(p$range_at_ceiling)) {
-                     paste0("At the search limit (", VGM_RANGE_CEILING_MULT,
-                            " x the longest lag): a bound, not an estimate.")
+                     paste0("The interval of equally fitting ranges reaches the search limit (",
+                            VGM_RANGE_CEILING_MULT, " x the longest lag).")
                    },
                    if (unidentified) {
                      paste0("Practical ranges from ", chr(p$range_interval[1]), " to ",
@@ -1092,7 +1092,7 @@ vgm_params_title <- function(method) {
 
 # What a residual-kriging fit describes, per vgm_params_export_df's `of`.
 VGM_OF_RESIDUALS <- "Residuals"
-VGM_OF_FALLBACK <- "Measured values (OK fallback)"
+VGM_OF_FALLBACK <- "Target values (OK fallback)"
 
 # The Variogram Parameters card. "Total (Combined)" lists every fitted
 # locality/target (vgm_params_export_df(), with `of`); a named locality is

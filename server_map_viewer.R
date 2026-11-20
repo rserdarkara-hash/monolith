@@ -330,16 +330,16 @@
       r_list <- as_raster_list(r_obj)
 
       if (length(r_list) > 0) {
-        # The surface's own fits (NULL for the residual maps, which derive from
-        # both). `of`: an RK/RFK locality that fell back to OK holds the
-        # measured values' variogram, and its bands are worded for that.
-        vgm_warn_html <- build_vgm_warning_html(rv$disp$v_fits, target = class_surface_of(lab),
-                                                engine = rv$disp$method, of = disp_vgm_of())
-        if (!is.null(vgm_warn_html)) {
-          # className matters: the default "info legend" class would clip the
-          # banner under the legend's 190px overflow rule.
-          m <- m %>% addControl(html = vgm_warn_html, position = "bottomleft",
-                                className = "vgm-warn-control leaflet-control")
+        fits <- rv$disp$v_fits
+        # A diagnostic fit can survive a skipped raster. Restrict warnings to
+        # this map's localities, including only paired rasters for residuals.
+        fits <- fits[sub("_(act|pre)$", "", names(fits)) %in% names(r_list)]
+        if (length(fits)) {
+          of <- disp_vgm_of(fits)
+          fb <- if (is.null(of)) disp_engine_fallback(names(fits)) else of == VGM_OF_FALLBACK
+          m <- add_map_warnings(m, build_vgm_warning_html(fits, target = class_surface_of(lab),
+                                                          engine = rv$disp$method, of = of,
+                                                          fallback = names(fb)[fb]))
         }
         # Styling reads are isolated so a styling tick invalidates only the
         # proxy restyler.
@@ -523,6 +523,15 @@
     shinyjs::toggleClass(selector = "body", class = "mn-show-legend-title",
                          condition = isTRUE(input$show_legend_title))
   })
+  # The Warnings boxes (add_map_warnings()), whose close button unticks this
+  # checkbox. A run that lands, or an archived run put back on screen, ticks it
+  # again: its warnings are new, and hiding the last run's does not hide them.
+  observe({
+    shinyjs::toggleClass(selector = "body", class = "mn-hide-map-warnings",
+                         condition = isFALSE(input$show_map_warnings))
+  })
+  observeEvent(rv$results_rev, updateCheckboxInput(session, "show_map_warnings", value = TRUE),
+               ignoreInit = TRUE)
 
   # Ruler readout, one observer per map (`local()` captures each id). Not
   # keyed on map_overlay_rev: it answers a gesture. The reply goes to the

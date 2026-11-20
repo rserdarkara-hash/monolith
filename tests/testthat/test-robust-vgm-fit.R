@@ -705,7 +705,7 @@ test_that("the resolution window is judged on the PRACTICAL range, per family", 
   expect_gt(split, 0L)   # the premise
 })
 
-# ── The map banner, worded for the engine that fitted the variogram ─────────
+# ── The map's Warnings box, worded for the engine that fitted the variogram ──
 
 # A hand-built pure-nugget fit with the diagnostics the auto-fit records.
 mock_pure_nugget <- function(cause = "no_structure", trend = FALSE) {
@@ -718,79 +718,100 @@ mock_pure_nugget <- function(cause = "no_structure", trend = FALSE) {
                                      target_degenerate = FALSE)
   f
 }
+# Reading the entries of vgm_warning_items(): their titles, the entry or
+# sub-entry with a title, its localities' names, and all their words.
+warn_titles <- function(items) vapply(items, `[[`, character(1), "title")
+warn_entry <- function(items, title) items[[match(title, warn_titles(items))]]
+warn_sub <- function(items, title) {
+  subs <- unlist(lapply(items, `[[`, "sub"), recursive = FALSE)
+  subs[[match(title, vapply(subs, `[[`, character(1), "title"))]]
+}
+warn_locs <- function(entry) vapply(entry$locs, `[[`, character(1), "name")
+warn_text <- function(items) {
+  paste(unlist(lapply(items, function(i) c(i$title, i$text, unlist(lapply(i$sub, `[`, c("title", "text")))))),
+        collapse = " ")
+}
 
-test_that("build_vgm_warning_html returns NULL when nothing is flagged", {
+test_that("the Warnings box is absent when nothing is flagged", {
+  expect_length(vgm_warning_items(list(A_act = make_mock_vgm())), 0)
   expect_null(build_vgm_warning_html(list(A_act = make_mock_vgm())))
   expect_null(build_vgm_warning_html(list()))
 })
 
-test_that("build_vgm_warning_html renders the red failure band and the amber pure-nugget band", {
+test_that("a failed fit is a red entry and a pure nugget an amber one, each naming its localities", {
   f_fb <- robust_vgm_fit(NULL, c(1, 2, 3))   # the stand-in of a failed fit
-  html <- build_vgm_warning_html(list(LocA_act = f_fb, LocB_pre = mock_pure_nugget(),
-                                      LocC_act = make_mock_vgm()))
-  expect_match(html, "LocA (actual)", fixed = TRUE)
-  expect_match(html, "LocB (predicted)", fixed = TRUE)
-  expect_match(html, "default spherical variogram model", fixed = TRUE)
-  # The stand-in's variance is withheld, and the band says so.
-  expect_match(html, "no standard error or variance is reported", fixed = TRUE)
-  expect_match(html, "No spatial structure detected in the variogram", fixed = TRUE)
-  expect_no_match(html, "LocC", fixed = TRUE)
-  # Each band alone leaves the other out.
-  expect_no_match(build_vgm_warning_html(list(L1_act = f_fb)), "var(--mn-warn)", fixed = TRUE)
-  expect_no_match(build_vgm_warning_html(list(L1_act = mock_pure_nugget())), "Variogram fit failed",
-                  fixed = TRUE)
+  items <- vgm_warning_items(list(LocA_act = f_fb, LocB_pre = mock_pure_nugget(),
+                                  LocC_act = make_mock_vgm()))
+  expect_identical(warn_titles(items), c("Variogram fit failed", "No spatial structure detected in the variogram"))
+  expect_identical(vapply(items, `[[`, character(1), "sev"), c("danger", "warn"))
+  # With both surfaces in one box, each locality names its surface.
+  expect_identical(items[[1]]$locs[[1]][c("name", "surface")], list(name = "LocA", surface = "actual"))
+  expect_identical(items[[2]]$locs[[1]][c("name", "surface")], list(name = "LocB", surface = "predicted"))
+  expect_false("LocC" %in% unlist(lapply(items, warn_locs)))
+  expect_match(items[[1]]$text, "default spherical variogram model", fixed = TRUE)
+  # The stand-in's variance is withheld, and the entry says so.
+  expect_match(items[[1]]$text, "no standard error or variance is reported", fixed = TRUE)
+  # Each condition alone leaves the other out.
+  expect_identical(vapply(vgm_warning_items(list(L1_act = f_fb)), `[[`, character(1), "sev"), "danger")
+  expect_identical(warn_titles(vgm_warning_items(list(L1_act = mock_pure_nugget()))),
+                   "No spatial structure detected in the variogram")
 })
 
-test_that("build_vgm_warning_html filters by target and strips the suffix", {
+test_that("the Warnings box follows its map's surface and names localities without the suffix", {
   f_fb <- robust_vgm_fit(NULL, c(1, 2, 3))   # the stand-in of a failed fit
   fits <- list(LocA_act = f_fb, LocB_pre = mock_pure_nugget())
 
+  act <- vgm_warning_items(fits, target = "act")
+  expect_identical(warn_titles(act), "Variogram fit failed")
+  expect_identical(warn_locs(act[[1]]), "LocA")
+  # One surface per map: the surface goes without saying.
+  expect_null(act[[1]]$locs[[1]]$surface)
   html_act <- build_vgm_warning_html(fits, target = "act")
-  expect_match(html_act, "LocA", fixed = TRUE)
   expect_no_match(html_act, "LocA_act", fixed = TRUE)
   expect_no_match(html_act, "LocB", fixed = TRUE)
 
-  html_pre <- build_vgm_warning_html(fits, target = "pre")
-  expect_match(html_pre, "LocB", fixed = TRUE)
-  expect_no_match(html_pre, "LocA", fixed = TRUE)
+  pre <- vgm_warning_items(fits, target = "pre")
+  expect_identical(warn_titles(pre), "No spatial structure detected in the variogram")
+  expect_identical(warn_locs(pre[[1]]), "LocB")
 
   # NULL when the only flagged fits belong to the other target
   expect_null(build_vgm_warning_html(list(LocA_act = f_fb), target = "pre"))
 })
 
-test_that("build_vgm_warning_html flags a Gaussian or Matern model with a small nugget", {
-  html <- build_vgm_warning_html(list(LocA_act = manual_vgm(1, "Gau", 300, 0.02),
-                                      LocB_act = manual_vgm(1, "Gau", 300, 0.2),
-                                      LocC_act = manual_vgm(1, "Exp", 300, 0)))
-  expect_match(html, "nugget below 5% of the sill for: LocA (actual)", fixed = TRUE)
-  expect_no_match(html, "LocB", fixed = TRUE)
-  expect_no_match(html, "LocC", fixed = TRUE)
-  expect_no_match(html, "No spatial structure", fixed = TRUE)
+test_that("a Gaussian or Matern model with a small nugget gets its own entry", {
+  items <- vgm_warning_items(list(LocA_act = manual_vgm(1, "Gau", 300, 0.02),
+                                  LocB_act = manual_vgm(1, "Gau", 300, 0.2),
+                                  LocC_act = manual_vgm(1, "Exp", 300, 0)))
+  expect_identical(warn_titles(items), "Gaussian or Matérn variogram with a nugget below 5% of the sill")
+  expect_identical(warn_locs(items[[1]]), "LocA")
   expect_null(build_vgm_warning_html(list(LocB_act = manual_vgm(1, "Mat", 300, 0.2))))
 })
 
-test_that("an out-of-window fit gets its own band, not the failure band", {
+test_that("an out-of-window fit gets its own entry, not the failure entry", {
   f <- gstat::vgm(psill = 2, model = "Exp", range = 300, nugget = 0.5) # practical 900
   attr(f, "vgm_diagnostics") <- list(status = "range_unresolved", practical_range = 900,
                                      max_lag = 700, sill_resolved = FALSE,
                                      range_side = "beyond", trend_suspected = FALSE,
                                      target_degenerate = FALSE)
-  html <- build_vgm_warning_html(list(LocA_act = f))
-  expect_match(html, "Variogram range not resolved", fixed = TRUE)
-  expect_match(html, "Practical range extends beyond sampled lag support for: LocA (actual)", fixed = TRUE)
-  expect_no_match(html, "Variogram fit failed", fixed = TRUE)
-  expect_no_match(html, "search limit", fixed = TRUE)
+  items <- vgm_warning_items(list(LocA_act = f))
+  expect_identical(warn_titles(items), "Variogram range not resolved within the empirical lag window")
+  # The sub-conditions name the localities; the entry itself names none.
+  expect_length(items[[1]]$locs, 0)
+  expect_identical(vapply(items[[1]]$sub, `[[`, character(1), "title"),
+                   "Practical range extends beyond sampled lag support")
+  expect_identical(warn_locs(items[[1]]$sub[[1]]), "LocA")
+  expect_match(items[[1]]$sub[[1]]$text, "Sill and range are extrapolated", fixed = TRUE)
   # Range resolution describes lag support, not optimizer convergence.
-  expect_no_match(html, "converged", fixed = TRUE)
+  expect_no_match(warn_text(items), "converged", fixed = TRUE)
 
   # The window fails at both ends, and the two mean opposite things.
   below <- f
   attr(below, "vgm_diagnostics")$range_side <- "below"
-  html_b <- build_vgm_warning_html(list(LocB_act = below))
-  expect_match(html_b, "Practical range is below sampled-distance resolution", fixed = TRUE)
-  expect_match(html_b, "effective short-range resolution threshold", fixed = TRUE)
-  expect_match(html_b, "near-pure nugget", fixed = TRUE)
-  expect_no_match(html_b, "extends beyond sampled lag support", fixed = TRUE)
+  sub_b <- vgm_warning_items(list(LocB_act = below))[[1]]$sub
+  expect_identical(vapply(sub_b, `[[`, character(1), "title"),
+                   "Practical range is below sampled-distance resolution")
+  expect_match(sub_b[[1]]$text, "effective short-range resolution threshold", fixed = TRUE)
+  expect_match(sub_b[[1]]$text, "near-pure nugget", fixed = TRUE)
 })
 
 test_that("a variogram still rising at the cutoff gets a hedged trend advisory", {
@@ -799,19 +820,20 @@ test_that("a variogram still rising at the cutoff gets a hedged trend advisory",
                                      max_lag = 700, sill_resolved = FALSE,
                                      range_side = "beyond", trend_suspected = TRUE,
                                      target_degenerate = FALSE)
-  html <- build_vgm_warning_html(list(LocA_act = f))
-  expect_match(html, "Sill not observed; possible large-scale trend", fixed = TRUE)
+  items <- vgm_warning_items(list(LocA_act = f))
+  trend <- warn_entry(items, "Sill not observed; possible large-scale trend")
+  expect_identical(warn_locs(trend), "LocA")
   # The trend case is named by its remedy, never by an engine to switch to:
   # the variogram alone cannot say which case applies.
-  expect_match(html, "kriging its residuals addresses the trend case", fixed = TRUE)
-  expect_no_match(html, "Regression Kriging", fixed = TRUE)
+  expect_match(trend$text, "kriging its residuals addresses the trend case", fixed = TRUE)
+  expect_no_match(warn_text(items), "Regression Kriging", fixed = TRUE)
   # A rising variogram is a diagnostic for trend, never proof of it.
-  expect_no_match(html, "non-stationarity detected", fixed = TRUE)
+  expect_no_match(warn_text(items), "non-stationarity detected", fixed = TRUE)
 
-  # An unknown engine keeps the value-scale wording: the banner must never
+  # An unknown engine keeps the value-scale wording: the box must never
   # depend on the caller having resolved a method.
-  expect_match(build_vgm_warning_html(list(LocA_act = f), engine = "OK"),
-               "Sill not observed; possible large-scale trend", fixed = TRUE)
+  expect_true("Sill not observed; possible large-scale trend" %in%
+                warn_titles(vgm_warning_items(list(LocA_act = f), engine = "OK")))
 })
 
 test_that("the rising-variogram advisory never tells a detrending engine to detrend", {
@@ -824,84 +846,146 @@ test_that("the rising-variogram advisory never tells a detrending engine to detr
   # RK and RFK krige the residuals of a fitted trend, so "model the trend with
   # covariates and fit the variogram to the residuals" is what they already did.
   for (eng in c("RK", "RFK")) {
-    html <- build_vgm_warning_html(list(LocA_act = f), engine = eng)
-    expect_match(html, "Residual variogram still rising at the lag cutoff", fixed = TRUE)
-    expect_match(html, "Scientific Analysis", fixed = TRUE)
+    items <- vgm_warning_items(list(LocA_act = f), engine = eng)
+    txt <- warn_text(items)
+    expect_true("Residual variogram still rising at the lag cutoff" %in% warn_titles(items))
+    expect_match(txt, "Scientific Analysis", fixed = TRUE)
     # The circularity guard: no engine is named, in either direction.
-    expect_no_match(html, "Regression Kriging", fixed = TRUE)
-    expect_no_match(html, "Sill not observed", fixed = TRUE)
+    expect_no_match(txt, "Regression Kriging", fixed = TRUE)
+    expect_no_match(txt, "Sill not observed", fixed = TRUE)
     # The extent cause has no in-app remedy and must stay on the list.
-    expect_match(html, "spatial correlation extending beyond the sampled area", fixed = TRUE)
+    expect_match(txt, "spatial correlation extending beyond the sampled area", fixed = TRUE)
     # The variogram cannot separate the causes, though other diagnostics may;
-    # near samples the band claims less sensitivity, not accuracy.
-    expect_match(html, "The variogram alone cannot tell these apart", fixed = TRUE)
-    expect_no_match(html, "well supported", fixed = TRUE)
+    # near samples the entry claims less sensitivity, not accuracy.
+    expect_match(txt, "The variogram alone cannot tell these apart", fixed = TRUE)
+    expect_no_match(txt, "well supported", fixed = TRUE)
   }
 
   # CK does not detrend (its variogram is seeded from the measured values), so
-  # it keeps the value-scale wording if it ever reaches this banner.
-  html_ck <- build_vgm_warning_html(list(LocA_act = f), engine = "CK")
-  expect_match(html_ck, "Sill not observed; possible large-scale trend", fixed = TRUE)
-  expect_no_match(html_ck, "Residual variogram still rising", fixed = TRUE)
+  # it keeps the value-scale wording if it ever reaches this box.
+  ck <- warn_titles(vgm_warning_items(list(LocA_act = f), engine = "CK"))
+  expect_true("Sill not observed; possible large-scale trend" %in% ck)
+  expect_false("Residual variogram still rising at the lag cutoff" %in% ck)
 })
 
-test_that("a pure-nugget band follows the engine and names no engine on the residual scale", {
+test_that("a pure-nugget entry follows the engine and names no engine on the residual scale", {
   pn <- mock_pure_nugget()
   for (eng in list(NULL, "OK", "CK")) {
-    html <- build_vgm_warning_html(list(LocA_act = pn), engine = eng)
-    expect_match(html, "No spatial structure detected in the variogram for: LocA (actual) (3 to 8 pairs per lag)",
-                 fixed = TRUE)
+    flat <- warn_entry(vgm_warning_items(list(LocA_act = pn), engine = eng),
+                       "No spatial structure detected in the variogram")
+    expect_identical(flat$locs[[1]], list(name = "LocA", surface = "actual", note = "3 to 8 pairs per lag"))
     # Not detected is not absent, and the flat fit is a model selection, not a
     # calibrated test.
-    expect_match(html, "does not show that no structure exists", fixed = TRUE)
-    expect_match(html, "not a significance test", fixed = TRUE)
+    expect_match(flat$text, "does not show that no structure exists", fixed = TRUE)
+    expect_match(flat$text, "not a significance test", fixed = TRUE)
     # Naming IDW and TPS is not circular under a value-scale engine.
-    expect_match(html, "IDW and TPS", fixed = TRUE)
-    expect_match(html, "Manual Tuning", fixed = TRUE)
+    expect_match(flat$text, "IDW and TPS", fixed = TRUE)
+    expect_match(flat$text, "Manual Tuning", fixed = TRUE)
   }
   for (eng in c("RK", "RFK")) {
-    html <- build_vgm_warning_html(list(LocA_act = pn), engine = eng)
+    items <- vgm_warning_items(list(LocA_act = pn), engine = eng)
+    flat <- warn_entry(items, "No residual spatial structure detected by the variogram fit")
+    # Pairs per lag are given on the value scale only.
+    expect_identical(flat$locs[[1]], list(name = "LocA", surface = "actual", note = NULL))
     # A flat residual fit does not establish that no residual structure exists.
-    expect_match(html, "No residual spatial structure detected by the variogram fit for: LocA (actual)",
-                 fixed = TRUE)
-    expect_match(html, "does not show that the residuals carry no structure", fixed = TRUE)
-    expect_no_match(html, "remains", fixed = TRUE)
-    expect_match(html, "the trend plus the mean residual", fixed = TRUE)
-    expect_no_match(html, "IDW", fixed = TRUE)
-    expect_no_match(html, "Regression Kriging", fixed = TRUE)
-    expect_no_match(html, "Manual Tuning", fixed = TRUE)
+    expect_match(flat$text, "does not show that the residuals carry no structure", fixed = TRUE)
+    expect_match(flat$text, "the trend plus the mean residual", fixed = TRUE)
+    txt <- warn_text(items)
+    expect_no_match(txt, "remains", fixed = TRUE)
+    expect_no_match(txt, "IDW", fixed = TRUE)
+    expect_no_match(txt, "Regression Kriging", fixed = TRUE)
+    expect_no_match(txt, "Manual Tuning", fixed = TRUE)
   }
 
   # A pure nugget left by the zero-nugget rule never claims that no structure
   # was detected: a structured Matern was refused.
   for (eng in c("OK", "RK")) {
-    html <- build_vgm_warning_html(list(LocA_act = mock_pure_nugget("zero_nugget_rule")), engine = eng)
-    expect_match(html, "Pure nugget used for", fixed = TRUE)
-    expect_match(html, "a Mat&eacute;rn at a zero nugget", fixed = TRUE)
-    expect_no_match(html, "detected", fixed = TRUE)
+    items <- vgm_warning_items(list(LocA_act = mock_pure_nugget("zero_nugget_rule")), engine = eng)
+    expect_match(items[[1]]$title, "Pure nugget used", fixed = TRUE)
+    expect_match(items[[1]]$text, "a Matérn at a zero nugget", fixed = TRUE)
+    expect_no_match(warn_text(items), "detected", fixed = TRUE)
   }
 
-  # A pure nugget whose variogram still rises carries the engine-aware trend band.
+  # A pure nugget whose variogram still rises carries the engine-aware trend entry.
   rising <- mock_pure_nugget(trend = TRUE)
-  expect_match(build_vgm_warning_html(list(LocA_act = rising), engine = "OK"),
-               "Sill not observed; possible large-scale trend", fixed = TRUE)
-  expect_match(build_vgm_warning_html(list(LocA_act = rising), engine = "RK"),
-               "Residual variogram still rising", fixed = TRUE)
+  expect_true("Sill not observed; possible large-scale trend" %in%
+                warn_titles(vgm_warning_items(list(LocA_act = rising), engine = "OK")))
+  expect_true("Residual variogram still rising at the lag cutoff" %in%
+                warn_titles(vgm_warning_items(list(LocA_act = rising), engine = "RK")))
 
-  # Under RK or RFK, a locality whose trend fell back to OK holds the measured
+  # Under RK or RFK, a locality whose trend fell back to OK holds the target
   # values' variogram (`of`, as the Variogram Parameters card reads it), so its
-  # bands take the value-scale wording beside the residual ones.
+  # entries take the value-scale wording beside the residual ones.
   of <- c(A_act = VGM_OF_RESIDUALS, B_act = VGM_OF_FALLBACK)
-  html <- build_vgm_warning_html(list(A_act = rising, B_act = rising), engine = "RFK", of = of)
-  expect_match(html, "No residual spatial structure detected by the variogram fit for: A (actual).", fixed = TRUE)
-  expect_match(html, "No spatial structure detected in the variogram for: B (actual) (3 to 8 pairs per lag)",
-               fixed = TRUE)
-  expect_match(html, "Residual variogram still rising at the lag cutoff for: A (actual).", fixed = TRUE)
-  expect_match(html, "Sill not observed; possible large-scale trend for: B (actual).", fixed = TRUE)
+  items <- vgm_warning_items(list(A_act = rising, B_act = rising), engine = "RFK", of = of)
+  expect_identical(warn_locs(warn_entry(items, "No residual spatial structure detected by the variogram fit")), "A")
+  expect_identical(warn_entry(items, "No spatial structure detected in the variogram")$locs[[1]]$note,
+                   "3 to 8 pairs per lag")
+  expect_identical(warn_locs(warn_entry(items, "No spatial structure detected in the variogram")), "B")
+  expect_identical(warn_locs(warn_entry(items, "Residual variogram still rising at the lag cutoff")), "A")
+  expect_identical(warn_locs(warn_entry(items, "Sill not observed; possible large-scale trend")), "B")
   refused <- mock_pure_nugget("zero_nugget_rule")
-  html <- build_vgm_warning_html(list(A_act = refused, B_act = refused), engine = "RK", of = of)
-  expect_match(html, "Pure nugget used for the trend residuals of: A (actual).", fixed = TRUE)
-  expect_match(html, "Pure nugget used for: B (actual).", fixed = TRUE)
+  items <- vgm_warning_items(list(A_act = refused, B_act = refused), engine = "RK", of = of)
+  expect_identical(warn_locs(warn_entry(items, "Pure nugget used for the trend residuals")), "A")
+  expect_identical(warn_locs(warn_entry(items, "Pure nugget used")), "B")
+})
+
+test_that("a locality whose RK, RFK or CK model failed is named as kriged by OK", {
+  clean <- manual_vgm(1, "Sph", 300, 0.3)
+  rising <- mock_pure_nugget(trend = TRUE)
+  of <- c(A_act = VGM_OF_RESIDUALS, B_act = VGM_OF_FALLBACK)
+  items <- vgm_warning_items(list(A_act = rising, B_act = clean), target = "act", engine = "RK",
+                             of = of, fallback = "B_act")
+  # Right after the red entries, before every variogram condition.
+  expect_identical(warn_titles(items)[1], "Ordinary Kriging used instead of Regression Kriging")
+  expect_identical(items[[1]]$sev, "warn")
+  # Named although its variogram raises nothing.
+  expect_identical(warn_locs(items[[1]]), "B")
+  expect_match(items[[1]]$text, "Ordinary Kriging of the measured values, without covariates", fixed = TRUE)
+  expect_match(items[[1]]$text, "Run Log", fixed = TRUE)
+  # CK records no variogram of its own, so every fit it shows is a fallback's.
+  ck <- vgm_warning_items(list(C_act = clean), target = "act", engine = "CK", fallback = "C_act")
+  expect_identical(warn_titles(ck), "Ordinary Kriging used instead of Co-Kriging")
+  expect_match(ck[[1]]$text, "^Co-Kriging failed for these localities")
+  pre <- vgm_warning_items(list(C_pre = clean), target = "pre", engine = "CK", fallback = "C_pre")
+  expect_match(pre[[1]]$text, "Ordinary Kriging of the uploaded predictions, without covariates", fixed = TRUE)
+  both <- vgm_warning_items(list(C_act = clean, C_pre = clean), engine = "RFK", fallback = c("C_act", "C_pre"))
+  expect_match(both[[1]]$text, "measured values for Actual, uploaded predictions for Predicted", fixed = TRUE)
+  expect_identical(vapply(both[[1]]$locs, `[[`, character(1), "surface"), c("actual", "predicted"))
+  # Another map's fallback is not this map's.
+  expect_length(vgm_warning_items(list(C_act = clean), target = "pre", engine = "CK", fallback = "C_act"), 0)
+  expect_null(build_vgm_warning_html(list(A_act = clean), engine = "OK"))
+})
+
+test_that("the fallback keys are the surfaces without the engine's own model", {
+  # .ok_fallback() keeps none of the failed engine's model, which every other
+  # surface stores; the two closures are read from the chunk that ships them.
+  root <- normalizePath(file.path(testthat::test_path(), "..", ".."), mustWork = TRUE)
+  chunk <- as.list(parse(file.path(root, "server_setup.R"), keep.source = FALSE))
+  defs <- Filter(function(e) is.call(e) && identical(e[[1]], as.name("<-")) && is.name(e[[2]]) &&
+                   as.character(e[[2]]) %in% c("disp_engine_fallback", "disp_vgm_of"), chunk)
+  expect_length(defs, 2L)
+  env <- new.env()
+  for (d in defs) eval(d, env)
+  keys <- c("A_act", "B_act")
+  fallback <- function(method, ...) {
+    env$rv <- list(disp = list(method = method, v_fits = list(A_act = 1, B_act = 1)), ...)
+    env$disp_engine_fallback(keys)
+  }
+  expect_identical(fallback("RK", model_summaries = list(A_act = "lm")), c(A_act = FALSE, B_act = TRUE))
+  expect_identical(fallback("RFK", rf_models = list(B_act = "forest")), c(A_act = TRUE, B_act = FALSE))
+  expect_identical(fallback("CK", gstat_objs = list(A_act = "LMC")), c(A_act = FALSE, B_act = TRUE))
+  # Another engine's model does not count.
+  expect_identical(fallback("RK", rf_models = list(A_act = "forest", B_act = "forest")),
+                   c(A_act = TRUE, B_act = TRUE))
+  for (m in c("OK", "IDW", "TPS")) expect_identical(fallback(m), c(A_act = FALSE, B_act = FALSE))
+  # What a fit describes stays an RK/RFK distinction: CK's fallbacks are
+  # named without adding a Variogram Of column for CK.
+  env$rv <- list(disp = list(method = "RK", v_fits = list(A_act = 1, B_act = 1)),
+                 model_summaries = list(A_act = "lm"))
+  expect_identical(env$disp_vgm_of(), c(A_act = VGM_OF_RESIDUALS, B_act = VGM_OF_FALLBACK))
+  env$rv$disp$method <- "CK"
+  expect_null(env$disp_vgm_of())
 })
 
 test_that("a range at the search limit is a bound under every engine, naming none", {
@@ -911,13 +995,21 @@ test_that("a range at the search limit is a bound under every engine, naming non
                                      range_at_ceiling = TRUE, trend_suspected = FALSE,
                                      target_degenerate = FALSE)
   for (eng in list(NULL, "OK", "CK", "RK", "RFK")) {
-    html <- build_vgm_warning_html(list(LocA_act = f), engine = eng)
-    expect_match(html, "Range at the search limit for: LocA (actual)", fixed = TRUE)
-    expect_match(html, paste0("up to ", VGM_RANGE_CEILING_MULT, " &times; the longest lag"), fixed = TRUE)
-    expect_match(html, "a bound, not an estimate", fixed = TRUE)
-    expect_no_match(html, "Kriging", fixed = TRUE)
-    expect_no_match(html, "IDW", fixed = TRUE)
+    items <- vgm_warning_items(list(LocA_act = f), engine = eng)
+    ceil <- warn_sub(items, "Range at the search limit")
+    expect_identical(warn_locs(ceil), "LocA")
+    expect_match(ceil$text, paste("reaches", VGM_RANGE_CEILING_MULT, "× the longest lag"), fixed = TRUE)
+    expect_match(ceil$text, "search limit sets the upper bound", fixed = TRUE)
+    expect_no_match(warn_text(items), "Kriging", fixed = TRUE)
+    expect_no_match(warn_text(items), "IDW", fixed = TRUE)
   }
+  # Reported whatever the status, as the Scientific Guide states: a range set
+  # reaching the ceiling is a bound even when its middle lies in the window.
+  at_ceiling <- f
+  attr(at_ceiling, "vgm_diagnostics")[c("status", "range_side")] <- list("ok", NA_character_)
+  items <- vgm_warning_items(list(LocA_act = at_ceiling))
+  expect_identical(warn_titles(items), "Variogram range not resolved within the empirical lag window")
+  expect_identical(vapply(items[[1]]$sub, `[[`, character(1), "title"), "Range at the search limit")
 })
 
 test_that("a nugget the data do not identify is reported as an interval, naming the locality", {
@@ -928,11 +1020,11 @@ test_that("a nugget the data do not identify is reported as an interval, naming 
                                      nugget_share_interval = c(0, 0.298), nugget_identified = FALSE,
                                      trend_suspected = FALSE, target_degenerate = FALSE)
   for (eng in list(NULL, "OK", "RK")) {
-    html <- build_vgm_warning_html(list(Kale_act = f), engine = eng)
-    expect_match(html, "Nugget not identified for: Kale (actual) (nugget 0 to 29.8% of the sill)",
-                 fixed = TRUE)
+    ridge <- warn_entry(vgm_warning_items(list(Kale_act = f), engine = eng), "Nugget not identified")
+    expect_identical(ridge$locs[[1]][c("name", "note")],
+                     list(name = "Kale", note = "nugget 0 to 29.8% of the sill"))
     # Equal criteria on the chosen bins, not a statement of statistical precision.
-    expect_match(html, "binned empirical variogram equally well (numerically equivalent fits, not a confidence interval)",
+    expect_match(ridge$text, "binned empirical variogram equally well (numerically equivalent fits, not a confidence interval)",
                  fixed = TRUE)
   }
   chr <- .vgm_params_chr(f)
@@ -949,16 +1041,74 @@ test_that("a nugget the data do not identify is reported as an interval, naming 
   expect_false(ex$`Range At Search Limit`)
 })
 
-test_that("banner close button targets its own container, not a fixed id", {
-  html <- build_vgm_warning_html(list(L1_act = mock_pure_nugget()))
-  expect_match(html, "this.parentElement.style.display", fixed = TRUE)
-  expect_no_match(html, "getElementById", fixed = TRUE)
+test_that("the Warnings box opens collapsed, counts its entries and closes from a real button", {
+  f_fb <- robust_vgm_fit(NULL, c(1, 2, 3))   # the stand-in of a failed fit
+  html <- build_vgm_warning_html(list(L1_act = f_fb, L2_act = mock_pure_nugget()))
+  # Collapsed: a <details> without `open`, one line with the count.
+  expect_match(html, "<details class=\"mn-warn-details\">", fixed = TRUE)
+  expect_match(html, "<span class=\"mn-warn-count\">2</span>", fixed = TRUE)
+  # The worst entry colours that line, and its tooltip lists the entries.
+  expect_match(html, "mn-warn-box mn-sev-danger", fixed = TRUE)
+  expect_match(html, "title=\"Variogram fit failed&#10;No spatial structure detected in the variogram\"",
+               fixed = TRUE)
+  # Entries keep their own severity.
+  expect_match(html, "mn-warn-item mn-sev-danger", fixed = TRUE)
+  expect_match(html, "mn-warn-item mn-sev-warn", fixed = TRUE)
+  expect_match(html, '<ol class="mn-warn-list" tabindex="0" aria-label="Map warnings">', fixed = TRUE)
+  # A real button with a name, outside the summary (a control inside it
+  # would toggle the box as well).
+  expect_match(html, "<button type=\"button\" class=\"mn-warn-close\" aria-label=\"Hide warnings\"", fixed = TRUE)
+  expect_match(html, "</details>\n  <button", fixed = TRUE)
+  # Styled by the theme and wired by add_map_warnings(): nothing inline.
+  expect_no_match(html, "style=", fixed = TRUE)
+  expect_no_match(html, "onclick", fixed = TRUE)
 })
 
-test_that("a locality name from the data is escaped in the banner", {
+test_that("a locality name from the data is escaped in the Warnings box", {
   html <- build_vgm_warning_html(list(`Plot <2> & B_act` = mock_pure_nugget()))
-  expect_match(html, "Plot &lt;2&gt; &amp; B (actual)", fixed = TRUE)
+  expect_match(html, "Plot &lt;2&gt; &amp; B", fixed = TRUE)
   expect_no_match(html, "<2>", fixed = TRUE)
+})
+
+test_that("add_map_warnings puts the box at the bottom-left and wires it right after", {
+  html <- build_vgm_warning_html(list(L1_act = mock_pure_nugget()))
+  m <- add_map_warnings(leaflet::leaflet(), html)
+  # In the widget's own call list, so the wiring follows the box even when
+  # leaflet holds the calls back until a hidden map is shown.
+  expect_identical(vapply(m$x$calls, `[[`, character(1), "method"), c("addControl", "mnWireWarnings"))
+  args <- m$x$calls[[1]]$args
+  expect_identical(args[[2]], "bottomleft")
+  # Its own class: the default "info legend" would cap it at the legend's 190px.
+  expect_identical(args[[4]], "mn-warn-control")
+  m0 <- leaflet::leaflet()
+  expect_identical(add_map_warnings(m0, NULL), m0)
+
+  # The box keeps its pointer events (the wheel scrolls it, a drag selects its
+  # text), and its close button hides every box through Overlays > Warnings.
+  js <- map_warnings_js()
+  expect_match(js, "LW.methods.mnWireWarnings", fixed = TRUE)
+  expect_match(js, "L.DomEvent.disableClickPropagation(ctrl)", fixed = TRUE)
+  expect_match(js, "L.DomEvent.disableScrollPropagation(ctrl)", fixed = TRUE)
+  expect_match(js, "classList.add('mn-hide-map-warnings')", fixed = TRUE)
+  expect_match(js, "getElementById('show_map_warnings')", fixed = TRUE)
+})
+
+test_that("the close button, the Overlays checkbox and the stylesheet name the same switch", {
+  # The close button unticks a checkbox in another file, whose observer sets
+  # the class the stylesheet hides: an id or class that drifted on any side
+  # would leave a dead button, and no test of one half alone can see that.
+  root <- normalizePath(file.path(testthat::test_path(), "..", ".."), mustWork = TRUE)
+  src <- function(f) paste(readLines(file.path(root, f), warn = FALSE), collapse = "\n")
+  expect_match(src("ui_main.R"), "tags$script(HTML(map_warnings_js()))", fixed = TRUE)
+  expect_match(src("ui_main_tabs.R"), "checkboxInput(\"show_map_warnings\", \"Warnings\", TRUE", fixed = TRUE)
+  viewer <- src("server_map_viewer.R")
+  expect_match(viewer, "class = \"mn-hide-map-warnings\"", fixed = TRUE)
+  expect_match(viewer, "condition = isFALSE(input$show_map_warnings)", fixed = TRUE)
+  # A new run's (or a restored run's) warnings are shown again.
+  expect_match(viewer, "observeEvent(rv$results_rev, updateCheckboxInput(session, \"show_map_warnings\", value = TRUE)",
+               fixed = TRUE)
+  expect_match(monolith_theme_css(), "body.mn-hide-map-warnings .mn-warn-control { display: none !important; }",
+               fixed = TRUE)
 })
 
 # ── Sill-derived diagnostics and their qualifier ────────────────────────────
@@ -1008,10 +1158,12 @@ test_that("a variogram subtitle reads the fitted parameters the Variogram Parame
                                      sill_resolved = FALSE, target_degenerate = FALSE)
   expect_match(vgm_fit_subtitle(f),
                "Practical Range: 900, model-extrapolated beyond the longest lag 700)", fixed = TRUE)
-  # At the search limit the range is a bound, and the subtitle says so.
+  # The equally fitting range interval can reach the limit even when the
+  # reported range is inside it, as in this example.
   attr(f, "vgm_diagnostics")$range_at_ceiling <- TRUE
-  expect_match(vgm_fit_subtitle(f), "Practical Range: 900 at the search limit, model-extrapolated",
+  expect_match(vgm_fit_subtitle(f), "Practical Range: 900 (equally fitting ranges reach the search limit), model-extrapolated",
                fixed = TRUE)
+  expect_match(.vgm_params_chr(f)[5], "The interval of equally fitting ranges reaches the search limit", fixed = TRUE)
   # A Matern names its smoothness; small values keep their digits.
   m <- gstat::vgm(psill = 3.873e-05, model = "Mat", range = 6510, nugget = 0.000172, kappa = 1.5)
   expect_match(vgm_fit_subtitle(m),
@@ -1567,6 +1719,7 @@ test_that("a residual-kriging listing says what each variogram describes", {
   out <- vgm_params_export_df(fits, of = of)
   expect_identical(names(out)[1:4], c("Locality", "Target", "Variogram Of", "Model"))
   expect_identical(out$`Variogram Of`, unname(of))
+  expect_identical(out$`Variogram Of`[2], "Target values (OK fallback)")
   # The same rows as the plain listing, which has no such column.
   expect_identical(out[setdiff(names(out), "Variogram Of")], vgm_params_export_df(fits))
   expect_identical(vgm_params_export_df(fits, locs = "B", of = of)$`Variogram Of`,

@@ -107,20 +107,23 @@
     }
   }
 
-  # RK/RFK krige trend residuals; where a locality's trend step failed, the OK
-  # fallback stored the measured values' variogram and no trend object exists.
-  # `keys` are v_fits names ("<locality>_act" / "_pre").
-  disp_trend_fallback <- function(keys) {
+  # Which surfaces of the displayed RK, RFK or CK run the engine did not make:
+  # it failed there and the OK fallback kriged the target values, keeping
+  # none of the engine's own model (trend summary, forest or LMC), which every
+  # other surface stores. `keys` are v_fits names ("<locality>_act" / "_pre");
+  # all FALSE under any other engine.
+  disp_engine_fallback <- function(keys) {
     m <- rv$disp$method %||% ""
-    trend <- if (m == "RFK") rv$rf_models else rv$model_summaries
-    stats::setNames(vapply(keys, function(k) m %in% c("RK", "RFK") && is.null(trend[[k]]),
+    own <- switch(m, RK = rv$model_summaries, RFK = rv$rf_models, CK = rv$gstat_objs, NULL)
+    stats::setNames(vapply(keys, function(k) m %in% c("RK", "RFK", "CK") && is.null(own[[k]]),
                            logical(1)), keys)
   }
   # What each fit of the displayed run describes (vgm_params_export_df's
-  # `of`); NULL for an engine without a trend step.
+  # `of`): RK/RFK krige trend residuals, their fallback the target values.
+  # NULL for an engine without a trend step.
   disp_vgm_of <- function(fits = rv$disp$v_fits) {
     if (!(rv$disp$method %||% "") %in% c("RK", "RFK") || !length(fits)) return(NULL)
-    ifelse(disp_trend_fallback(names(fits)), VGM_OF_FALLBACK, VGM_OF_RESIDUALS)
+    ifelse(disp_engine_fallback(names(fits)), VGM_OF_FALLBACK, VGM_OF_RESIDUALS)
   }
 
   # `method` comes from the run that produced the assets, never input$method,

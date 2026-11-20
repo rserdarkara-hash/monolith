@@ -123,10 +123,12 @@ ui_main_tabs <- mainPanel(width = 9,
                                  checkboxInput("show_north", "North Arrow", FALSE, width = "auto"),
                                  checkboxInput("show_borders", "Borders", FALSE, width = "auto"),
                                  checkboxInput("show_scale", "Map Scale", FALSE, width = "auto"),
-                                 # Leaflet's own controls, on by default; off gives the bare
-                                 # surface (e.g. before a Quick export).
+                                 # Map controls, on by default; off gives the bare surface
+                                 # (e.g. before a Quick export). The Warnings boxes' close
+                                 # button unticks Warnings, and a new run ticks it again.
                                  checkboxInput("show_draw_tools", "Drawing Tools", TRUE, width = "auto"),
                                  checkboxInput("show_ruler", "Ruler", TRUE, width = "auto"),
+                                 checkboxInput("show_map_warnings", "Warnings", TRUE, width = "auto"),
                                  # Off by default: the map heading already shows the label.
                                  checkboxInput("show_legend_title", HTML(paste0("Variable Label in Legend", info_tooltip("legend_title_info", "Repeats the variable label (and its unit) inside the map legend. It is already shown as the map heading above, so it is off by default - turn it on for a legend that has to stand alone in an export."))), FALSE, width = "auto")
                              ),
