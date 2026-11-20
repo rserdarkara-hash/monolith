@@ -712,13 +712,13 @@
     setColWidths(wb, sheet, cols = seq_len(max(1L, ncol(df))), widths = "auto")
   }
 
-  # A raster item's GeoTIFF is ONE file when it holds one locality or the
-  # run's localities share a lattice without overlapping (rv$disp$mergeable,
-  # set when the run lands), and a zip of one file per locality otherwise. The
-  # registry and rv$disp always describe the same run (a restore swaps them
-  # together).
+  # The run's grid and boundary checks gate multi-locality files. A product
+  # can have different coverage, so check its own tiles before naming the
+  # download. An archive restore swaps the registry and run context together.
   gtiff_single <- function(item) {
-    export_raster_count(item) == 1L || isTRUE(rv$disp$mergeable)
+    count <- export_raster_count(item)
+    count == 1L || (count > 1L && isTRUE(rv$disp$mergeable) &&
+                      export_raster_mergeable(item, rv$disp$grid_res_native))
   }
 
   # What a registry item is written as: "gtiff" only for items holding a
@@ -753,8 +753,9 @@
   # file names: one file, or one per locality with the locality in its name.
   # A missing tag must never cost a file: write_geotiff keeps the raster and
   # warns, and the warning is put where the user can see it.
-  write_item_geotiffs <- function(item, dir, stem) {
-    rasters <- export_rasters(item, merge = isTRUE(rv$disp$mergeable))
+  write_item_geotiffs <- function(item, dir, stem, merge = gtiff_single(item)) {
+    rasters <- export_rasters(item, merge = merge,
+                              nominal_res = rv$disp$grid_res_native)
     if (length(rasters) == 0) stop("No raster surface to export.")
     filenames <- unique_export_filenames(
       paste0(stem, if (length(rasters) > 1) paste0("_", safe_key(names(rasters))), ".tif"),
@@ -794,7 +795,7 @@
             on.exit(unlink(dir, recursive = TRUE), add = TRUE)
             stem <- tools::file_path_sans_ext(export_file_name(
               "Export", item$id, rv$disp$method, format(Sys.time(), "%Y%m%d_%H%M%S"), "tif"))
-            files <- write_item_geotiffs(item, dir, stem)
+            files <- write_item_geotiffs(item, dir, stem, merge = identical(ext, "tif"))
             if (identical(ext, "zip")) {
               zip::zip(zipfile = file, files = files, root = dir)
             } else {
@@ -904,7 +905,8 @@
             if (ext %in% c("tif", "zip")) {
               # Per-locality GeoTIFFs sit beside the other files, not in a
               # zip of their own.
-              filename <- write_item_geotiffs(item, temp_dir, tools::file_path_sans_ext(filename))
+              filename <- write_item_geotiffs(item, temp_dir, tools::file_path_sans_ext(filename),
+                                              merge = identical(ext, "tif"))
             } else {
               p <- generate_styled_plot(
                 item, input,

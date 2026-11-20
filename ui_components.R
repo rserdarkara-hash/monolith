@@ -879,8 +879,11 @@ METRIC_MARKER_NOTES <- c(
                 "clustering of those errors and its usual reference distribution does not",
                 "hold: the p-value is not reported, and the value cannot on its own diagnose",
                 "a missing spatial trend."),
-  na    = paste("NA* Not computable for this point set (see the Run Log); it does not mean",
-                "the quantity is zero or that no structure was found.")
+  na    = "NA* The metric could not be computed for this point set. See the Run Log.",
+  moran_degenerate = paste("NA* Moran's I is unavailable when",
+                           "CV errors have no usable variance."),
+  negative_r = paste("A superscript minus means higher observed values tend to have lower predictions.",
+                     "R² (Corr) measures the strength of the linear relationship.")
 )
 
 table_footnote <- function(markers) {
@@ -890,17 +893,20 @@ table_footnote <- function(markers) {
 }
 
 # DataTables columnDefs entry that displays `cols` of `df` through
-# mnFormatSig() while sorting and copying still see the numbers. `rownames`
+# mnFormatSig() while sorting still sees the numbers. `rownames`
 # shifts the column index when the table shows row names.
-sig_render_defs <- function(df, cols, rownames = FALSE) {
+sig_render_defs <- function(df, cols, rownames = FALSE, minus_flag = NULL) {
   idx <- match(cols, names(df))
   idx <- idx[!is.na(idx)]
   if (!length(idx)) return(list())
+  suffix <- if (is.null(minus_flag)) "" else {
+    sprintf(" + (row[%d] === true ? '<sup>&minus;</sup>' : '')", minus_flag)
+  }
   list(list(targets = idx - 1L + as.integer(isTRUE(rownames)),
             render = DT::JS(
-              "function (data, type) {",
-              "  return type === 'display' && typeof window.mnFormatSig === 'function'",
-              "    ? window.mnFormatSig(data) : data;",
+              "function (data, type, row) {",
+              "  if (type !== 'display' || typeof window.mnFormatSig !== 'function') return data;",
+              paste0("  return window.mnFormatSig(data)", suffix, ";"),
               "}")))
 }
 
@@ -908,9 +914,10 @@ sig_render_defs <- function(df, cols, rownames = FALSE) {
 # in the Classification Suite). Paging is off because dom = 't' hides its
 # controls, which would strand rows past the first page. `scroll_x = FALSE`
 # keeps header and body one table for tables that fit the narrowest viewport.
-# `signif_cols` are shown at four significant digits.
+# `signif_cols` are shown at four significant digits. `superscript_minus`
+# names one of those columns and gives the logical flag for each row.
 sci_dt <- function(df, escape = TRUE, header_tooltips = NULL, scroll_x = TRUE,
-                   signif_cols = NULL) {
+                   signif_cols = NULL, superscript_minus = NULL) {
   # Never return NULL: DT's binding reads `data.lazyRender` before its null
   # check, so a NULL sent to a hidden table throws inside Shiny's message
   # dispatch and drops the rest of the batch.
@@ -924,7 +931,16 @@ sci_dt <- function(df, escape = TRUE, header_tooltips = NULL, scroll_x = TRUE,
   status_like <- ncol(df) == 1 && nrow(df) == 1 && names(df)[1] %in% c("Status", "Error")
   tbl_class <- if (status_like) "display mn-status-table" else "display"
   opts <- list(dom = 't', paging = FALSE, scrollX = isTRUE(scroll_x))
-  if (!is.null(signif_cols)) opts$columnDefs <- sig_render_defs(df, signif_cols)
+  if (any(superscript_minus$rows)) {
+    minus_flag <- ncol(df)
+    df[[".superscript_minus"]] <- superscript_minus$rows
+    col <- superscript_minus$column
+    opts$columnDefs <- c(sig_render_defs(df, setdiff(signif_cols, col)),
+                         sig_render_defs(df, col, minus_flag = minus_flag),
+                         list(list(targets = minus_flag, visible = FALSE, searchable = FALSE)))
+  } else if (!is.null(signif_cols)) {
+    opts$columnDefs <- sig_render_defs(df, signif_cols)
+  }
   if (!is.null(header_tooltips)) {
     ths <- lapply(names(df), function(nm) {
       if (nm %in% names(header_tooltips)) {

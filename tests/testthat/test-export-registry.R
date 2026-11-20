@@ -139,6 +139,58 @@ test_that("a GeoTIFF export is one file on one lattice and one file per locality
     }
     expect_identical(tif_info(file.path(dir, one))$metadata[[1]]$MONOLITH_LOCALITY, "Kale, Tavas")
 
+    # Packed one-row grids far apart need the resolution recorded by the run.
+    res <- 7.2632570371654
+    tile <- function(iy, pred, variance) {
+      r <- terra::rast(nrows = 1, ncols = 2, nlyrs = 2,
+                       xmin = 62000 * res, xmax = 62002 * res,
+                       ymin = iy * res, ymax = (iy + 1) * res, crs = "EPSG:32633")
+      names(r) <- c("var1.pred", "var1.var")
+      terra::values(r) <- cbind(pred, variance)
+      r
+    }
+    pair <- list(Kale = tile(790000, c(1.2345, 2), c(NA_real_, NA_real_)),
+                 Tavas = tile(950000, c(3, 4.5678), c(0.124, 0.4)))
+    rv$disp$grid_res_native <- c(Kale = res, Tavas = res)
+    fractional <- shared
+    fractional$obj <- lapply(pair, terra::wrap)
+    expect_identical(export_ext_for(fractional, "gtiff"), "tif")
+    packed_files <- write_item_geotiffs(fractional, dir, "fractional")
+    expect_identical(packed_files, "fractional.tif")
+    back <- terra::rast(file.path(dir, packed_files))
+    expect_true(terra::same.crs(back, pair[[1]]))
+    expect_equal(dim(back), c(160001, 2, 2))
+    expect_identical(names(back), c("var1.pred", "var1.var"))
+    for (r in pair) {
+      centers <- terra::xyFromCell(r, seq_len(terra::ncell(r)))
+      cells <- terra::cellFromXY(back, centers)
+      expect_lt(max(abs(terra::xyFromCell(back, cells) - centers)), 1e-6 * res)
+      expect_equal(as.matrix(terra::extract(back, centers)), terra::values(r),
+                   tolerance = 1e-6, ignore_attr = TRUE)
+    }
+    expect_true(all(is.na(terra::values(back, row = 2, nrows = 1))))
+
+    # The missing-cell mask can differ by product, even on the same run grid.
+    # Each tile matches the longer anchor, but the two shorter tiles' raw
+    # edges differ by more than the alignment tolerance.
+    tile_at <- function(x, columns, value) {
+      terra::rast(nrows = 1, ncols = columns, xmin = x, xmax = x + columns,
+                  ymin = 0, ymax = 1, crs = "EPSG:32633", vals = value)
+    }
+    rv$disp$grid_res_native <- c(Anchor = 1, West = 1, East = 1)
+    alternate <- fractional
+    alternate$obj <- list(Anchor = tile_at(0, 4, 1),
+                          West = tile_at(10 - 0.75e-6, 2, 2),
+                          East = tile_at(11 + 0.75e-6, 2, 3))
+    expect_true(rasters_share_lattice(alternate$obj, rv$disp$grid_res_native))
+    expect_true(rasters_have_shared_cells(alternate$obj, rv$disp$grid_res_native))
+    expect_identical(export_ext_for(alternate, "gtiff"), "zip")
+    expect_identical(write_item_geotiffs(alternate, dir, "alternate"),
+                     c("alternate_Anchor.tif", "alternate_West.tif", "alternate_East.tif"))
+
+    alternate$obj$East <- tile_at(11.5, 2, 3)
+    expect_identical(export_ext_for(alternate, "gtiff"), "zip")
+
     # Distinct names must survive a case-insensitive filesystem, including a
     # literal name that is another locality's sanitised key.
     rv$disp$mergeable <- FALSE

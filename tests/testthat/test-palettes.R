@@ -231,7 +231,7 @@ test_that("res_mode_label names the resolution logic the sidebar offers", {
 test_that("the run log says what a multi-locality GeoTIFF export holds", {
   shared <- grid_export_note(TRUE, TRUE, "30 m")
   expect_match(shared, "^\\[Grid\\] Every locality is on one lattice \\(cell size 30 m\\)")
-  expect_match(shared, "holds them in one raster, cell for cell", fixed = TRUE)
+  expect_match(shared, "no shared populated cells export in one raster, cell for cell", fixed = TRUE)
   # One lattice, but two localities cover the same ground: one raster per locality.
   overlap <- grid_export_note(TRUE, FALSE, "30 m")
   expect_match(overlap, "share one lattice (cell size 30 m) but their boundaries overlap", fixed = TRUE)

@@ -255,7 +255,7 @@ grid_export_note <- function(lattice, apart, resolution, shared_cells = FALSE) {
   size <- if (is.null(resolution)) "" else paste0(" (cell size ", resolution, ")")
   if (isTRUE(lattice) && isTRUE(apart) && !isTRUE(shared_cells)) {
     paste0("[Grid] Every locality is on one lattice", size,
-           ": a GeoTIFF export holds them in one raster, cell for cell.")
+           ": products with aligned grids and no shared populated cells export in one raster, cell for cell.")
   } else if (isTRUE(lattice)) {
     paste0("[Grid] The localities share one lattice", size,
            if (isTRUE(shared_cells)) " but share populated cells, " else " but their boundaries overlap, ",
@@ -628,7 +628,7 @@ pred_perf_df <- function(obs, pre) {
   m <- perform_cv(data.frame(var1.observed = obs, var1.pred = pre), moran = FALSE)
   signed <- isTRUE(m$signed_target)
   mean_v <- mean(obs)
-  mae <- mean(abs(obs - pre))
+  mae <- m$mae
   nmae <- if (!signed && is.finite(mae) && abs(mean_v) > 0) (mae / abs(mean_v)) * 100 else NA_real_
   metric <- c("R² (NSE/Traditional)", "R² (Correlation)", "RMSE", "NRMSE (mean, %)",
               "NRMSE (SD)", "MAE", "NMAE (mean, %)", "MBE (ML pred - observed)",

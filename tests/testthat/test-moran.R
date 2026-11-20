@@ -29,6 +29,97 @@ test_that("calc_moran returns an all-NA list for NULL coords", {
   expect_moran_all_na(calc_moran(c(1, 2, 3), NULL))
 })
 
+test_that("Moran diagnostics are undefined for a constant error field", {
+  coords <- as.matrix(expand.grid(x = 1:8, y = 1:6))
+  expect_moran_all_na(calc_moran(rep(0, 48), coords))
+  expect_moran_all_na(calc_moran(rep(0.5, 48), coords))
+})
+
+test_that("Moran's I and its permutation test are invariant to extreme error units", {
+  xy <- expand.grid(x = 1:8, y = 1:6)
+  error <- rep(c(-1, 1, 0), length.out = nrow(xy))
+  reference <- calc_moran(error, xy)
+  for (scale in c(1e-200, 1e200)) {
+    scaled <- error * scale
+    expect_equal(calc_moran(scaled, xy), reference)
+    scored <- perform_cv(cbind(xy, var1.observed = 0, var1.pred = -scaled))
+    expect_false(scored$moran_degenerate)
+    expect_equal(unname(unlist(scored[c("moran_i", "moran_e", "moran_p")])),
+                 unname(unlist(reference)))
+  }
+})
+
+test_that("Moran diagnostics require two finite coordinates for every scored error", {
+  xy <- expand.grid(x = 1:4, y = 1:3)
+  error <- rep(c(-1, 0, 1), 4)
+  expect_moran_all_na(calc_moran(error, xy$x))
+  xy$x <- NA_real_
+  expect_moran_all_na(calc_moran(error, xy))
+  for (spread in c(0, 1)) {
+    scored <- perform_cv(cbind(xy, var1.observed = 7, var1.pred = 7 - spread * error))
+    expect_false(scored$moran_degenerate)
+    expect_identical(unname(unlist(scored[c("moran_i", "moran_e", "moran_p")])),
+                     rep(NA_real_, 3))
+  }
+})
+
+test_that("Moran's I tests usable spread at the scored target scale", {
+  xy <- expand.grid(x = 1:8, y = 1:6)
+  score <- function(obs, err) {
+    perform_cv(cbind(xy, var1.observed = obs, var1.pred = obs - err))
+  }
+  pattern <- rep(c(-1, 1, 0), length.out = nrow(xy))
+  for (obs in list(rep(7, nrow(xy)), seq(4, 8, length.out = nrow(xy)))) {
+    res <- score(obs, pattern * 2^-49)
+    expect_identical(unname(unlist(res[c("moran_i", "moran_e", "moran_p")])), rep(NA_real_, 3))
+    expect_true(res$moran_degenerate)
+    expect_equal(res$coverage, 1)
+    expect_gt(res$rmse, 0)
+    row <- cv_metrics_export_df(res, "Actual Model")
+    expect_identical(row[["Moran's I"]], NA_real_)
+    expect_identical(row[["Moran p"]], NA_real_)
+  }
+  for (obs in list(7, 0, 1e-12)) {
+    err <- pattern * (if (obs == 0) 1 else obs) * 0.1
+    res <- score(rep(obs, nrow(xy)), err)
+    expect_false(res$moran_degenerate)
+    expect_true(is.finite(res$moran_i))
+    expect_equal(res$moran_e, -1 / 47)
+    expect_true(is.finite(res$moran_p))
+  }
+
+  # An observation excluded from scoring cannot set the reference scale.
+  with_missing <- cbind(xy, var1.observed = c(1e12, rep(7, 47)),
+                        var1.pred = c(NA_real_, (7 - pattern * 0.1)[-1]))
+  expect_true(is.finite(perform_cv(with_missing)$moran_i))
+})
+
+test_that("the pooled Moran guard uses the pooled scored errors", {
+  xy <- expand.grid(x = seq(500000, by = 50, length.out = 8),
+                    y = seq(5800000, by = 50, length.out = 6))
+  make_cv <- function(rows, error) {
+    sf::st_as_sf(cbind(xy[rows, ], var1.observed = 7, var1.pred = 7 - error),
+                 coords = c("x", "y"), crs = 32633)
+  }
+  pool <- list(A = make_cv(1:24, 0), B = make_cv(25:48, 2^-49))
+  res <- perform_pooled_cv(pool)
+  expect_true(res$moran_degenerate)
+  expect_equal(res$n, 48)
+  expect_identical(res$moran_e, NA_real_)
+  expect_match(as.character(table_footnote("moran_degenerate")), MORAN_DEGENERATE_NOTE, fixed = TRUE)
+
+  # Two individually constant fields can vary across the pooled set.
+  pool$B <- make_cv(25:48, 1)
+  expect_true(all(vapply(lapply(pool, perform_cv), `[[`, logical(1), "moran_degenerate")))
+  res <- perform_pooled_cv(pool)
+  expect_false(res$moran_degenerate)
+  expect_true(is.finite(res$moran_i))
+  expect_equal(res$moran_e, -1 / 47)
+  block <- cv_metrics_export_df(res, "Actual Model", moran = moran_reading("block"))
+  expect_identical(block[["Moran's I"]], res$moran_i)
+  expect_identical(block[["Moran p"]], NA_real_)
+})
+
 test_that("calc_moran is reproducible for duplicate coordinates and preserves RNG state", {
   set.seed(7)
   n <- 12

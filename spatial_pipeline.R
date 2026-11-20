@@ -65,8 +65,7 @@ write_warning_file <- function(l, prefix, message) {
 # (warning file and run log) by both surfaces.
 .degenerate_target_msg <- paste0(
   "Target has no usable variance in this locality (all values equal or ",
-  "differing only in noise digits); the surface will be constant and ",
-  "R² / NSE / CCC / RPD / RPIQ are undefined.")
+  "differing only in noise digits).")
 
 # ── Point-buffer boundary vs grid-resolution coherence ─────────────────────
 # A cell survives the boundary clip only when its CENTRE is inside the
@@ -295,42 +294,97 @@ live_rasters <- function(r_list) {
   })
 }
 
-#' TRUE when the rasters (live or Packed) lie on one lattice: one CRS, one
-#' cell size and one origin, so that merging them moves no value. Fixed and
-#' Auto (Global) grids in a projected Target Mapping CRS do; Auto (Per
-#' Locality) grids, a geographic target and a locality coarsened by the
-#' candidate-cell cap do not. The tolerance is a millionth of a cell, far
-#' inside the tenth of a cell terra::merge itself accepts as aligned.
-rasters_share_lattice <- function(r_list) {
+# A shared lattice and the integer edge offsets of each tile, in extent order.
+# Packed extents lose some precision. Comparing edges to a nearby anchor
+# avoids amplifying small resolution errors over the distance to CRS zero.
+.raster_lattice_edges <- function(rs, nominal_res) {
+  if (!all(vapply(rs[-1], terra::same.crs, logical(1), y = rs[[1]]))) return(NULL)
+  nominal <- unname(nominal_res[names(rs)])
+  have_nominal <- length(nominal) == length(rs) && all(is.finite(nominal) & nominal > 0)
+  if (have_nominal && any(nominal != nominal[1])) return(NULL)
+
+  extents <- vapply(rs, function(r) as.vector(terra::ext(r)), numeric(4))
+  dims <- vapply(rs, function(r) c(ncol(r), nrow(r)), numeric(2))
+  tol <- 1e-6
+  edges <- extents
+  origin <- res <- numeric(2)
+  for (axis in 1:2) {
+    lo <- 2 * axis - 1
+    hi <- lo + 1
+    width <- extents[hi, ] - extents[lo, ]
+    size <- width / dims[axis, ]
+    ref <- order(-width, extents[lo, ], extents[hi, ])[1]
+    step <- if (have_nominal) nominal[1] else size[ref]
+    if (any(!is.finite(size) | size <= 0 | abs(size / step - 1) > tol)) return(NULL)
+    anchor <- extents[lo, ref]
+    lower <- (extents[lo, ] - anchor) / step
+    upper <- (extents[hi, ] - anchor) / step
+    index <- round(lower)
+    end <- index + dims[axis, ]
+    if (any(abs(lower - index) > tol | abs(upper - end) > tol)) return(NULL)
+    edges[lo, ] <- index
+    edges[hi, ] <- end
+    origin[axis] <- anchor
+    res[axis] <- step
+  }
+  list(edges = edges, origin = origin, res = res)
+}
+
+#' TRUE when the rasters (live or Packed) share one CRS, cell size and lattice.
+#' `nominal_res` optionally supplies the full-precision projected grid sizes
+#' in native CRS units, named by locality.
+rasters_share_lattice <- function(r_list, nominal_res = NULL) {
   rs <- live_rasters(r_list)
-  if (length(rs) < 2) return(TRUE)
-  res0 <- terra::res(rs[[1]])
-  org0 <- terra::origin(rs[[1]])
-  tol <- 1e-6 * res0
-  all(vapply(rs[-1], function(r) {
-    if (!terra::same.crs(rs[[1]], r) || any(abs(terra::res(r) - res0) > tol)) return(FALSE)
-    # terra reports an origin within half a cell of zero, so two aligned
-    # lattices can differ by a whole cell there.
-    off <- abs(terra::origin(r) - org0) %% res0
-    all(pmin(off, res0 - off) <= tol)
-  }, logical(1)))
+  length(rs) < 2L || !is.null(.raster_lattice_edges(rs, nominal_res))
+}
+
+# Read corresponding windows using each tile's row and column offsets. This
+# also works when terra rejects cropped tiles with slightly different extents.
+.populated_window_overlap <- function(a, b, edges) {
+  left <- max(edges[1, ])
+  right <- min(edges[2, ])
+  bottom <- max(edges[3, ])
+  top <- min(edges[4, ])
+  if (left >= right || bottom >= top || !terra::hasValues(a) || !terra::hasValues(b)) return(FALSE)
+  terra::readStart(a)
+  on.exit(terra::readStop(a))
+  terra::readStart(b)
+  on.exit(terra::readStop(b), add = TRUE)
+
+  width <- right - left
+  height <- top - bottom
+  col_block <- min(width, 1e6)
+  row_block <- max(1, floor(1e6 / col_block))
+  for (row in seq.int(1, height, by = row_block)) {
+    for (col in seq.int(1, width, by = col_block)) {
+      nr <- min(row_block, height - row + 1)
+      nc <- min(col_block, width - col + 1)
+      av <- terra::readValues(a, row = edges[4, 1] - top + row, nrows = nr,
+                              col = left - edges[1, 1] + col, ncols = nc)
+      bv <- terra::readValues(b, row = edges[4, 2] - top + row, nrows = nr,
+                              col = left - edges[1, 2] + col, ncols = nc)
+      if (any(!is.na(av) & !is.na(bv))) return(TRUE)
+    }
+  }
+  FALSE
 }
 
 #' TRUE when two localities populate the same cell on a shared lattice.
 #' Boundary polygons alone cannot decide this: boundary-inclusive clipping
 #' keeps a centre on their shared edge in both rasters. Only intersections
 #' of extents are read, without constructing a sparse merged raster.
-rasters_have_shared_cells <- function(r_list) {
+rasters_have_shared_cells <- function(r_list, nominal_res = NULL, lattice = NULL) {
   rs <- lapply(live_rasters(r_list), function(r) r[[1]])
   if (length(rs) < 2) return(FALSE)
+  # Tiles that fit a common anchor can differ from one another by twice
+  # the alignment tolerance. Use their accepted offsets on the common
+  # lattice. When there is no common lattice, still check aligned pairs.
+  lattice <- lattice %||% .raster_lattice_edges(rs, nominal_res)
   for (i in seq_len(length(rs) - 1L)) for (j in seq.int(i + 1L, length(rs))) {
-    if (!rasters_share_lattice(rs[c(i, j)])) next
-    a <- as.vector(terra::ext(rs[[i]])); b <- as.vector(terra::ext(rs[[j]]))
-    overlap <- c(max(a[1], b[1]), min(a[2], b[2]), max(a[3], b[3]), min(a[4], b[4]))
-    if (overlap[1] >= overlap[2] || overlap[3] >= overlap[4]) next
-    left <- terra::crop(rs[[i]], terra::ext(overlap))
-    right <- terra::crop(rs[[j]], terra::ext(overlap))
-    if (terra::global(!is.na(left) & !is.na(right), "sum", na.rm = TRUE)[[1]] > 0) return(TRUE)
+    pair <- c(i, j)
+    edges <- if (is.null(lattice)) .raster_lattice_edges(rs[pair], nominal_res)$edges else
+      lattice$edges[, pair, drop = FALSE]
+    if (!is.null(edges) && .populated_window_overlap(rs[[i]], rs[[j]], edges)) return(TRUE)
   }
   FALSE
 }
@@ -340,13 +394,26 @@ rasters_have_shared_cells <- function(r_list) {
 #' overlap, each cell's prediction and variance come from the same locality.
 #' Rasters on different lattices are refused, because terra::merge would
 #' resample them onto the first one's.
-merge_wrapped_rasters <- function(raster_list) {
-  rasters <- unname(live_rasters(raster_list))
+merge_wrapped_rasters <- function(raster_list, nominal_res = NULL) {
+  rasters <- live_rasters(raster_list)
   if (length(rasters) == 0) return(NULL)
   if (length(rasters) == 1) return(rasters[[1]])
-  if (!rasters_share_lattice(rasters)) {
+  lattice <- .raster_lattice_edges(rasters, nominal_res)
+  if (is.null(lattice)) {
     stop("These rasters do not share one lattice; merging them would resample their values.")
   }
+  # Let the verified union, rather than the first tile's packed cell size,
+  # set the output geometry. Even a tiny error in a short tile's cell size
+  # can drift across a large gap. A valueless template establishes the grid
+  # without changing the original rasters or their precedence in the merge.
+  x <- range(lattice$edges[1:2, ])
+  y <- range(lattice$edges[3:4, ])
+  xlim <- lattice$origin[1] + x * lattice$res[1]
+  ylim <- lattice$origin[2] + y * lattice$res[2]
+  template <- terra::rast(nrows = diff(y), ncols = diff(x), nlyrs = terra::nlyr(rasters[[1]]),
+                          xmin = xlim[1], xmax = xlim[2], ymin = ylim[1], ymax = ylim[2],
+                          crs = terra::crs(rasters[[1]]))
+  names(template) <- names(rasters[[1]])
   # terra::merge takes each LAYER from the first raster holding a value, so a
   # withheld variance (NA beside a prediction, .withhold_variance()) would be
   # filled from an overlapping locality's. Marked -Inf for the merge, it keeps
@@ -356,7 +423,10 @@ merge_wrapped_rasters <- function(raster_list) {
     r[["var1.var"]] <- terra::ifel(is.na(r[["var1.var"]]) & !is.na(r[["var1.pred"]]), -Inf, r[["var1.var"]])
     r
   })
-  merged <- do.call(terra::merge, rasters)
+  merged <- do.call(terra::merge, c(list(template), unname(rasters), list(resample = FALSE)))
+  if (!terra::compareGeom(template, merged, lyrs = TRUE, tolerance = 1e-6, stopOnError = FALSE)) {
+    stop("The merged raster does not match the verified lattice.")
+  }
   if (any(banded)) merged[["var1.var"]] <- terra::classify(merged[["var1.var"]], cbind(-Inf, NA))
   merged
 }
@@ -474,10 +544,10 @@ crs_metre_factor <- function(crs) {
 
 #' Reproject a finished surface (working CRS) into the Target Mapping CRS. The
 #' same system (terra::same.crs) is relabelled, not resampled, which would
-#' rewrite every cell at float precision. Another projected CRS gets cells of
-#' the run's resolution `res_m` (metres) on one lattice with origin 0, so
-#' localities merge without resampling and cell sizes stay exact; a
-#' geographic target keeps terra's choice of degrees.
+#' rewrite every cell at float precision. For another projected CRS, request
+#' the run resolution `res_m` in native units and a lattice anchored at 0.
+#' GeoTIFF packaging checks the resulting edges before merging. A geographic
+#' target keeps terra's choice of degrees.
 project_to_target <- function(r, crs_sel, res_m) {
   if (terra::same.crs(r, crs_sel)) {
     terra::crs(r) <- crs_sel
@@ -1349,9 +1419,8 @@ run_regional_interpolation <- function(item, current_method, current_crs, aux_va
         vals <- list(...)
         for (nm in names(vals)) res_out[[paste0(nm, "_", tg)]] <<- vals[[nm]]
       }
-      # A constant target gives a flat surface, a fallback variogram and
-      # undefined (NA) ratio metrics; name the cause on both channels (the
-      # progress panel closes when the maps are revealed).
+      # Report the observed target's spread before fitting. Metric
+      # availability is determined later from the scored pairs.
       if (.is_degenerate_covariate(pts_s[[col]])) {
         write_warning_file(l, tg, .degenerate_target_msg)
         log_add("\n[WARN] ", l, " (", surface, "): ", .degenerate_target_msg)
@@ -1400,6 +1469,9 @@ run_regional_interpolation <- function(item, current_method, current_crs, aux_va
           aux_dropped_collocation = out$aux_dropped_collocation,
           aux_dropped_vif = out$aux_dropped_vif, ck_design = out$ck_design)
       log_add("\n", out$log_msg)
+      if (isTRUE(out$cv_metrics$moran_degenerate)) {
+        log_add("\n[CV] ", l, " (", surface, "): ", MORAN_DEGENERATE_NOTE)
+      }
       kn <- knndm_note(mp, out, pts_s, surface)
       if (!is.null(kn)) log_add("\n", kn)
       # The covariate surfaces serve both surfaces: their log is written once.

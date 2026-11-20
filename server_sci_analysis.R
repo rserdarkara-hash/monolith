@@ -892,8 +892,16 @@
       smape_cell <- scale_cell("smape")
 
       moran_i <- val("moran_i"); moran_e <- val("moran_e"); moran_p <- val("moran_p")
+      moran_unavailable <- function() {
+        if (isTRUE(res$moran_degenerate)) {
+          markers <<- c(markers, "moran_degenerate")
+          return(sprintf('<span title="%s">NA*</span>', MORAN_DEGENERATE_NOTE))
+        }
+        markers <<- c(markers, "na")
+        na_marker
+      }
       i_cell <- if (is.na(moran_i)) {
-        markers <- c(markers, "na"); na_marker
+        moran_unavailable()
       } else if (mor$block) {
         markers <- c(markers, "block")
         sprintf('<span title="%s: these residuals inherit the fold geometry and a shared extrapolation condition within each withheld group of samples. E[I] = -1/(n-1) = %s">%s†</span>',
@@ -906,7 +914,7 @@
       p_cell <- if (!mor$report_p && !is.na(moran_i)) {
         markers <- c(markers, "block"); na_block(mor)
       } else if (is.na(moran_p)) {
-        markers <- c(markers, "na"); na_marker
+        moran_unavailable()
       } else {
         # Rendered like every other p in the app ("< 0.001" rather than a
         # rounded 0), HTML-escaped because this table renders with escape = FALSE.
@@ -923,7 +931,9 @@
           moran_p    = p_cell,
           val(k))
       }
-      list(df = df, block = isTRUE(mor$block), label = mor$label,
+      negative_r <- isTRUE(val("pearson_r") < 0)
+      if (negative_r) markers <- c(markers, "negative_r")
+      list(df = df, block = isTRUE(mor$block), label = mor$label, negative_r = negative_r,
            markers = unique(markers))
     }
 
@@ -941,7 +951,7 @@
     block_all <- all(vapply(specs, `[[`, logical(1), "block")) && length(labels) == 1
     if (block_all) names(df)[names(df) == "Moran's I"] <- labels
 
-    list(df = df, num_cols = num_cols,
+    list(df = df, num_cols = num_cols, negative_r = vapply(specs, `[[`, logical(1), "negative_r"),
          markers = unique(unlist(lapply(specs, `[[`, "markers"))))
   })
 
@@ -953,8 +963,8 @@
     if (run_cancelled()) return(sci_dt(data.frame(Status = RUN_CANCELLED_NOTE)))
     m <- metrics_rows()
     # escape = FALSE keeps the tooltip-bearing spans in the marker cells
-    sci_dt(m$df, escape = FALSE, header_tooltips = sci_metric_tooltips(),
-           signif_cols = m$num_cols)
+    sci_dt(m$df, escape = FALSE, header_tooltips = sci_metric_tooltips(), signif_cols = m$num_cols,
+           superscript_minus = list(column = CV_METRIC_LABELS[["r2"]], rows = m$negative_r))
   })
 
   # The markers' footnote, under the table rather than in it: a table cell can

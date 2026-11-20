@@ -1295,6 +1295,15 @@ export_raster_count <- function(item) {
   sum(vapply(src, inherits, logical(1), what = c("SpatRaster", "PackedSpatRaster")))
 }
 
+# Check the product's own grid and populated cells before choosing TIFF or ZIP.
+# For derived products a band and its square root have the same valid mask.
+export_raster_mergeable <- function(item, nominal_res = NULL) {
+  d <- item$derived
+  rs <- if (is.null(d)) live_rasters(item$obj) else surface_band(d$src, d$layer)
+  lattice <- .raster_lattice_edges(rs, nominal_res)
+  !is.null(lattice) && !rasters_have_shared_cells(rs, nominal_res, lattice)
+}
+
 #' The rasters an export-registry item writes as GeoTIFF, each named by the
 #' localities it holds; NULL for an item without a raster form. With `merge`
 #' (the run's localities share one lattice, rasters_share_lattice(), so merging
@@ -1302,12 +1311,12 @@ export_raster_count <- function(item) {
 #' Otherwise there is one per locality,
 #' each on its own grid, and none is resampled onto another's. A variance band
 #' that holds no value is left out of its raster.
-export_rasters <- function(item, merge = FALSE) {
+export_rasters <- function(item, merge = FALSE, nominal_res = NULL) {
   if (export_raster_count(item) == 0L) return(NULL)
   rs <- live_rasters(export_item_obj(item))
   if (isTRUE(merge) && length(rs) > 1) {
-    if (rasters_have_shared_cells(rs)) stop("Localities share populated cells; export one GeoTIFF per locality.")
-    rs <- stats::setNames(list(merge_wrapped_rasters(rs)), paste(names(rs), collapse = ", "))
+    if (rasters_have_shared_cells(rs, nominal_res)) stop("Localities share populated cells; export one GeoTIFF per locality.")
+    rs <- stats::setNames(list(merge_wrapped_rasters(rs, nominal_res)), paste(names(rs), collapse = ", "))
   }
   lapply(rs, drop_empty_variance)
 }

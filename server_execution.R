@@ -1274,6 +1274,8 @@
       # Each locality's cell size (the Auto modes set it during the run), for
       # the Cell Sizes overlay and the run record.
       rv$disp$grid_res_used <- grid_res_used
+      metre_factor <- crs_metre_factor(crs_sel)
+      rv$disp$grid_res_native <- if (is.finite(metre_factor)) unlist(grid_res_used) / metre_factor
       if (length(grid_res_used)) {
         used <- round(unlist(grid_res_used), 1)
         rv$run_config_summary$resolution <- if (length(unique(used)) == 1) {
@@ -1371,11 +1373,12 @@
     # (server_export.R). Every surface of a locality sits on that locality's grid.
     run_grids <- c(rv$rast_list_act, rv$rast_list_pre)
     run_grids <- run_grids[!duplicated(names(run_grids))]
+    nominal_res <- rv$disp$grid_res_native
     rv$disp$shared_cells <- c(
-      act = rasters_have_shared_cells(rv$rast_list_act),
-      pre = rasters_have_shared_cells(rv$rast_list_pre))
+      act = rasters_have_shared_cells(rv$rast_list_act, nominal_res),
+      pre = rasters_have_shared_cells(rv$rast_list_pre, nominal_res))
     if (length(run_grids) > 1) {
-      lattice <- rasters_share_lattice(run_grids)
+      lattice <- rasters_share_lattice(run_grids, nominal_res)
       apart <- all(is.finite(rv$bound_overlap_m2)) && all(rv$bound_overlap_m2 <= LOCALITY_OVERLAP_TOL_M2)
       shared <- any(rv$disp$shared_cells)
       rv$disp$mergeable <- lattice && apart && !shared
@@ -1414,6 +1417,9 @@
     pooled_cv <- function(data_list, metrics_list, label, infos, pooled) {
       res <- isolate(pooled())
       if(is.null(res)) return(NULL)
+      if (isTRUE(res$moran_degenerate)) {
+        rv$log <- paste0(rv$log, "\n[CV] Total (Combined) (", label, "): ", MORAN_DEGENERATE_NOTE)
+      }
       # The pooled row's Moran reading follows the localities it pooled: the
       # block reading only where every one of them was scored under blocks.
       types <- vapply(names(data_list), function(l) {

@@ -250,6 +250,57 @@ test_that(".cv_to_df converts plain data.frame as-is", {
 
 # ── perform_cv ─────────────────────────────────────────────────────────────
 
+test_that("CV keeps the signed Pearson correlation of the scored pairs", {
+  score <- function(pred) perform_cv(
+    data.frame(var1.observed = c(-1, 0, 1, NA, 500), var1.pred = c(pred, 500, NA)),
+    moran = FALSE)
+  for (x in list(c(r = -1, 1, 0, -1), c(r = 1, -1, 0, 1),
+                 c(r = 0, 1, -2, 1), c(r = NA_real_, 1, 1, 1))) {
+    got <- score(unname(x[-1]))
+    expect_equal(got$pearson_r, unname(x[1]))
+    expect_equal(got$r2, unname(x[1])^2)
+    row <- cv_metrics_export_df(got, "Actual Model")
+    expect_identical(row[["R² (Corr)"]], got$r2)
+  }
+})
+
+test_that("CV error and agreement metrics survive extreme units", {
+  obs <- c(1, 2, 4, 8)
+  pre <- rev(obs)
+  score <- function(obs, pre) {
+    perform_cv(data.frame(var1.observed = obs, var1.pred = pre), moran = FALSE)
+  }
+  unitless <- c("nse", "ccc", "rpd", "rpiq", "nrmse_mean", "nrmse_sd", "smape")
+  reference <- score(obs, pre)
+  pearson <- stats::cor(obs, pre)
+  for (scale in c(1e-200, 1e200)) {
+    got <- score(obs * scale, pre * scale)
+    expect_equal(got$pearson_r, pearson)
+    expect_equal(got$r2, pearson^2)
+    expect_equal(unlist(got[unitless]), unlist(reference[unitless]))
+    expect_equal(got$rmse / scale, sqrt(mean((obs - pre)^2)))
+    expect_equal(got$mae / scale, mean(abs(obs - pre)))
+  }
+
+  # A shared normalization cannot preserve both spreads in this example.
+  mixed <- score(obs * 1e-150, pre * 1e30)
+  expect_equal(mixed$nrmse_sd / 1e180, sqrt(mean(pre^2)) / stats::sd(obs))
+  expect_equal(mixed$rpd * 1e180, stats::sd(obs) / sqrt(mean(pre^2)))
+  expect_equal(mixed$ccc * 1e180, 2 * stats::cov(obs, pre) /
+    (stats::var(pre) + mean(pre)^2 * 4 / 3))
+
+  # A single unrepresentable difference can still yield finite averages.
+  sparse <- c(1e308, rep(0, 15))
+  overflow <- score(sparse, -sparse)
+  expect_equal(overflow$rmse / 1e307, 5)
+  expect_equal(overflow$mae / 1e307, 1.25)
+  expect_equal(overflow$me / 1e307, 1.25)
+  expect_equal(overflow$smape, 12.5)
+
+  integers <- score(c(2e9L, 1e9L), c(1e9L, 2e9L))
+  expect_equal(integers$smape, 200 / 3)
+})
+
 test_that("perform_cv returns all-NA metrics for NULL input", {
   res <- perform_cv(NULL)
   expect_true(is.na(res$rmse))
@@ -1209,6 +1260,22 @@ test_that("sci_dt formats named numeric columns and can drop scrollX", {
   expect_true(is.numeric(w$x$data[[2]]))
   expect_true(sci_dt(df)$x$options$scrollX)
   expect_false(sci_dt(df, scroll_x = FALSE)$x$options$scrollX)
+})
+
+test_that("the R² direction marker is a display-only addition to a numeric column", {
+  label <- CV_METRIC_LABELS[["r2"]]
+  df <- data.frame(Source = c("Actual Model", "Predicted Model"), check.names = FALSE)
+  df[[label]] <- c(1, 0.25)
+  signs <- list(column = label, rows = c(TRUE, FALSE))
+  w <- sci_dt(df, escape = FALSE, signif_cols = label, superscript_minus = signs)
+  defs <- w$x$options$columnDefs
+  expect_identical(w$x$data[[label]], c(1, 0.25))
+  expect_identical(w$x$data[[".superscript_minus"]], signs$rows)
+  expect_match(as.character(defs[[1]]$render), "type !== 'display'", fixed = TRUE)
+  expect_match(as.character(defs[[1]]$render), "<sup>&minus;</sup>", fixed = TRUE)
+  expect_false(defs[[2]]$visible)
+  expect_match(as.character(table_footnote("negative_r")), "higher observed values tend to have lower predictions",
+               fixed = TRUE)
 })
 
 # ── NRMSE (mean) / SMAPE on a target whose values span zero ────────────────

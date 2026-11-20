@@ -14,6 +14,41 @@ detect_cv_columns <- function(cnames) {
   list(pred = pre_col, observed = obs_col)
 }
 
+# Leave headroom for the squares and sums used by scale-free statistics.
+# Ordinary magnitudes retain their arithmetic and their full precision.
+.product_scale <- function(magnitude) {
+  bounds <- sqrt(sqrt(c(.Machine$double.xmin, .Machine$double.xmax)))
+  if (is.finite(magnitude) && magnitude > 0 &&
+      (magnitude < bounds[1] || magnitude > bounds[2])) magnitude else 1
+}
+
+.scale_for_products <- function(x, magnitude = max(abs(x))) {
+  scale <- .product_scale(magnitude)
+  if (scale == 1) x else x / scale
+}
+
+.cv_error_units <- function(obs, pre) {
+  residuals <- as.double(obs) - pre
+  scale <- .product_scale(max(abs(residuals), 0, na.rm = TRUE))
+  values <- if (scale == 1) residuals else residuals / scale
+  if (any(is.infinite(residuals) & is.finite(obs) & is.finite(pre))) {
+    scale <- max(abs(obs[is.finite(obs)]), abs(pre[is.finite(pre)]))
+    values <- obs / scale - pre / scale
+  }
+  list(raw = residuals, values = values, scale = scale,
+       rmse = sqrt(mean(values^2, na.rm = TRUE)))
+}
+
+# Divide positive quantities represented in different units. Recover a
+# representable ratio if one of the intermediate operations is out of range.
+.cv_spread_ratio <- function(a, b, scale_a, scale_b) {
+  if ((scale_a == 1 && scale_b == 1) || is.na(a) || is.na(b)) return(a / b)
+  if (a == 0) return(0)
+  ratio <- (a / b) * (scale_a / scale_b)
+  if (is.finite(ratio) && ratio > 0) return(ratio)
+  exp(log(a) - log(b) + log(scale_a) - log(scale_b))
+}
+
 #' Lin's concordance correlation coefficient on jointly complete pairs, using
 #' population moments (Lin 1989). NA below 2 pairs or when either vector is
 #' constant.
@@ -25,6 +60,15 @@ calc_ccc <- function(observed, predicted) {
   observed <- observed[ok]
   predicted <- predicted[ok]
   if (length(observed) < 2) return(NA)
+
+  magnitudes <- c(max(abs(observed)), max(abs(predicted)))
+  weights <- c(1, 1)
+  if (any(vapply(magnitudes, .product_scale, numeric(1)) != 1)) {
+    if (any(!is.finite(magnitudes) | magnitudes == 0)) return(NA_real_)
+    observed <- observed / magnitudes[1]
+    predicted <- predicted / magnitudes[2]
+    weights <- magnitudes / max(magnitudes)
+  }
 
   n <- length(observed)
   mean_obs <- mean(observed)
@@ -45,8 +89,9 @@ calc_ccc <- function(observed, predicted) {
 
   cov_op <- cov(observed, predicted) * scale_pop
 
-  numerator <- 2 * cov_op
-  denominator <- var_obs + var_pred + (mean_obs - mean_pred)^2
+  numerator <- 2 * cov_op * prod(weights)
+  denominator <- var_obs * weights[1]^2 + var_pred * weights[2]^2 +
+    (mean_obs * weights[1] - mean_pred * weights[2])^2
   
   if (is.na(denominator) || denominator == 0) return(NA)
   
@@ -57,22 +102,30 @@ calc_ccc <- function(observed, predicted) {
 # Degenerate cases (constant observations, zero mean, perfect fit) return NA,
 # not +/-Inf, which would flow into the tables, exports and pooled row. Values
 # are returned at full precision; the display layer formats them.
-augment_metrics <- function(obs, pre) {
+augment_metrics <- function(obs, pre, errors = .cv_error_units(obs, pre)) {
   res <- list(nse = NA, nrmse_mean = NA, nrmse_sd = NA, rpd = NA, rpiq = NA,
               smape = NA, signed_target = NA)
   if (length(obs) < 2) return(res)
 
-  residuals <- obs - pre
-  rmse <- sqrt(mean(residuals^2, na.rm = TRUE))
-  mean_obs <- mean(obs, na.rm = TRUE)
-  sd_obs <- sd(obs, na.rm = TRUE)
+  obs_scale <- .product_scale(max(abs(obs), 0, na.rm = TRUE))
+  obs_units <- if (obs_scale == 1) obs else obs / obs_scale
+  mean_obs <- mean(obs_units, na.rm = TRUE)
+  sd_obs <- sd(obs_units, na.rm = TRUE)
   iqr_obs <- IQR(obs, na.rm = TRUE)
+  iqr_scale <- 1
+  if (is.infinite(iqr_obs) && obs_scale != 1) {
+    iqr_obs <- IQR(obs_units, na.rm = TRUE)
+    iqr_scale <- obs_scale
+  }
   rng_obs <- suppressWarnings(range(obs, na.rm = TRUE))
 
-  sst <- sum((obs - mean_obs)^2, na.rm = TRUE)
-  sse <- sum(residuals^2, na.rm = TRUE)
+  sst <- sum((obs_units - mean_obs)^2, na.rm = TRUE)
+  sse <- sum(errors$values^2, na.rm = TRUE)
   # NSE is undefined when the observations carry no variance (0/0).
-  res$nse <- if (is.finite(sst) && sst > 0) 1 - (sse / sst) else NA
+  if (is.finite(sst) && sst > 0) {
+    res$nse <- if (obs_scale == 1 && errors$scale == 1) 1 - sse / sst else
+      1 - .cv_spread_ratio(sqrt(sse), sqrt(sst), errors$scale, obs_scale)^2
+  }
 
   # Mean-normalised and percentage errors need a ratio scale: when the observed
   # values span zero the origin is arbitrary (NRMSE changes with recentring and
@@ -84,25 +137,37 @@ augment_metrics <- function(obs, pre) {
   # NRMSE (mean) = CV(RMSE), normalised by |mean| so a negative-mean variable
   # does not report a negative percentage.
   res$nrmse_mean <- if (!res$signed_target && is.finite(mean_obs) && abs(mean_obs) > 0) {
-    (rmse / abs(mean_obs)) * 100
+    .cv_spread_ratio(errors$rmse, abs(mean_obs), errors$scale, obs_scale) * 100
   } else NA
 
   # NRMSE (SD): RMSE in units of the observed spread, invariant to recentring.
   # With RMSE on n and SD on n - 1 it equals sqrt((1 - NSE)(n - 1)/n) and
   # 1/RPD: a scale-free restatement, no evidence beyond NSE.
-  res$nrmse_sd <- if (is.finite(sd_obs) && sd_obs > 0) rmse / sd_obs else NA
+  res$nrmse_sd <- if (is.finite(sd_obs) && sd_obs > 0) {
+    .cv_spread_ratio(errors$rmse, sd_obs, errors$scale, obs_scale)
+  } else NA
 
   # RPD / RPIQ are spread-to-error ratios (Chang et al. 2001): undefined at
   # zero error, so both guard on rmse > 0, not just RPIQ's spread term.
-  res$rpd <- if (is.finite(rmse) && rmse > 0) sd_obs / rmse else NA
-  res$rpiq <- if (is.finite(rmse) && rmse > 0 && iqr_obs > 0) iqr_obs / rmse else NA
+  if (is.finite(errors$rmse) && errors$rmse > 0) {
+    res$rpd <- .cv_spread_ratio(sd_obs, errors$rmse, obs_scale, errors$scale)
+    if (isTRUE(iqr_obs > 0)) res$rpiq <- .cv_spread_ratio(iqr_obs, errors$rmse, iqr_scale, errors$scale)
+  }
 
   # sMAPE's summand is 0/0 where obs == pre == 0. Dropping those rows via
   # na.rm would average sMAPE over a different n than every other metric;
   # define the term as 0 instead (the usual convention) so n stays consistent.
   if (!res$signed_target) {
-    denom <- abs(obs) + abs(pre)
-    term <- ifelse(denom == 0, 0, 2 * abs(residuals) / denom)
+    denom <- abs(as.double(obs)) + abs(pre)
+    numerator <- 2 * abs(errors$raw)
+    term <- ifelse(denom == 0, 0, numerator / denom)
+    extreme <- which((is.infinite(denom) | is.infinite(numerator)) & is.finite(obs) & is.finite(pre))
+    if (length(extreme)) {
+      scale <- pmax(abs(obs[extreme]), abs(pre[extreme]))
+      o <- obs[extreme] / scale
+      p <- pre[extreme] / scale
+      term[extreme] <- 2 * abs(o - p) / (abs(o) + abs(p))
+    }
     res$smape <- mean(term, na.rm = TRUE) * 100
   }
 
@@ -151,6 +216,12 @@ moran_perm_p <- function(obs, sim, tol = sqrt(.Machine$double.eps) * max(1, abs(
   out
 }
 
+.moran_coordinates <- function(coords, n) {
+  if (is.null(dim(coords))) return(NULL)
+  xy <- as.matrix(coords)
+  if (nrow(xy) == n && ncol(xy) == 2L && is.numeric(xy) && all(is.finite(xy))) xy
+}
+
 #' Residual Moran's I with its null expectation and significance.
 #'
 #' Returns `list(i, e_i, p)`: the statistic, E[I] = -1/(n-1) (negative, so I
@@ -161,27 +232,26 @@ moran_perm_p <- function(obs, sim, tol = sqrt(.Machine$double.eps) * max(1, abs(
 #' computable", never "no spatial structure".
 calc_moran <- function(residuals, coords) {
   na_res <- list(i = NA_real_, e_i = NA_real_, p = NA_real_)
-  if (is.null(residuals) || is.null(coords)) return(na_res)
   n <- length(residuals)
-  if (n < 3 || nrow(coords) != n) return(na_res)
+  if (n < 3L) return(na_res)
+  if (any(!is.finite(residuals)) || all(residuals == residuals[1])) return(na_res)
+  coords <- .moran_coordinates(coords, n)
+  if (is.null(coords)) return(na_res)
+  residuals <- .scale_for_products(residuals)
 
   tryCatch({
-    coords_matrix <- as.matrix(coords)
-    if (any(duplicated(coords_matrix))) {
+    if (any(duplicated(coords))) {
       # Separate duplicates (knearneigh() errors on them) under a seeded
       # sandbox. The jitter must exceed the coordinates' ULP (~9.3e-10 at a UTM
       # northing of 4.5e6) yet leave the neighbour graph unchanged: 1e-9 of the
       # span, floored at 1e-12 of the magnitude and at 1e-8.
       coords <- with_seed(12345, {
-        span <- suppressWarnings(max(diff(range(coords_matrix[, 1], na.rm = TRUE)),
-                                     diff(range(coords_matrix[, 2], na.rm = TRUE))))
-        mag <- suppressWarnings(max(abs(coords_matrix), na.rm = TRUE))
+        span <- max(diff(range(coords[, 1])), diff(range(coords[, 2])))
+        mag <- max(abs(coords))
         if (!is.finite(span)) span <- 0
-        if (!is.finite(mag)) mag <- 0
         jit_amt <- max(1e-8, span * 1e-9, mag * 1e-12)
-        coords_matrix[, 1] <- jitter(coords_matrix[, 1], amount = jit_amt)
-        coords_matrix[, 2] <- jitter(coords_matrix[, 2], amount = jit_amt)
-        coords_matrix
+        cbind(jitter(coords[, 1], amount = jit_amt),
+              jitter(coords[, 2], amount = jit_amt))
       })
     }
     
@@ -191,7 +261,7 @@ calc_moran <- function(residuals, coords) {
     k_nn <- min(8L, nrow(coords) - 1L)
     # Muffle only spdep's expected "k greater than one-third" note at small n.
     nb <- withCallingHandlers(
-      spdep::knn2nb(spdep::knearneigh(as.matrix(coords), k = k_nn), sym = TRUE),
+      spdep::knn2nb(spdep::knearneigh(coords, k = k_nn), sym = TRUE),
       warning = function(w) {
         if (grepl("greater than one-third", conditionMessage(w))) invokeRestart("muffleWarning")
       }
@@ -206,6 +276,7 @@ calc_moran <- function(residuals, coords) {
     n_eff <- n - sum(cards == 0L)
     s0 <- spdep::Szero(lw)
     i_obs <- spdep::moran(residuals, lw, n_eff, s0, zero.policy = TRUE)$I
+    if (!is.finite(i_obs)) return(na_res)
     zc <- residuals - mean(residuals)
     sims <- (n_eff / s0) * .moran_perm_crossprods(
       zc, rep.int(seq_len(n), cards), unlist(lw$neighbours), unlist(lw$weights)) / sum(zc^2)
@@ -225,6 +296,7 @@ calc_moran <- function(residuals, coords) {
     diffs <- residuals - mean(residuals)
     ss <- sum(diffs^2)
     i_obs <- n * sum(weights * outer(diffs, diffs)) / (s0 * ss)
+    if (!is.finite(i_obs)) return(na_res)
     # E[I] is a property of the null hypothesis, not of the weights. The
     # p-value is the kNN path's permutation test, run over THIS weight matrix.
     edge <- which(weights != 0, arr.ind = TRUE)
@@ -262,6 +334,8 @@ is_coord_col <- function(x) {
   tolower(trimws(x)) %in% c(.coord_names_x, .coord_names_y)
 }
 
+MORAN_DEGENERATE_NOTE <- "CV errors have no usable variance."
+
 #' Error metrics for one cross-validation object, at full precision.
 #'
 #' `moran = FALSE` skips residual Moran's I (repeated CV reports it for the
@@ -273,9 +347,10 @@ is_coord_col <- function(x) {
 perform_cv <- function(cv_obj, moran = TRUE) {
   # n = predicted pairs, n_expected = rows with an observed value; metrics use
   # the predicted pairs only, and coverage says how many rows that is.
-  res <- list(rmse = NA, r2 = NA, nse = NA, me = NA, mae = NA, ccc = NA,
+  res <- list(rmse = NA, r2 = NA, pearson_r = NA_real_, nse = NA, me = NA, mae = NA, ccc = NA,
               nrmse_mean = NA, nrmse_sd = NA, rpd = NA, rpiq = NA, smape = NA,
-              moran_i = NA, moran_e = NA, moran_p = NA, n = 0,
+              moran_i = NA_real_, moran_e = NA_real_, moran_p = NA_real_,
+              moran_degenerate = FALSE, n = 0,
               n_expected = 0, coverage = NA_real_, signed_target = NA,
               block_fallback = isTRUE(attr(cv_obj, "block_fallback")),
               knndm_branch = attr(cv_obj, "knndm")$branch %||% NA_character_)
@@ -306,19 +381,22 @@ perform_cv <- function(cv_obj, moran = TRUE) {
 
   if (length(obs) < 2) return(res)
 
-  residuals <- obs - pre
+  errors <- .cv_error_units(obs, pre)
 
-  res$rmse <- sqrt(mean(residuals^2, na.rm = TRUE))
-  res$me <- mean(residuals, na.rm = TRUE)
-  res$mae <- mean(abs(residuals), na.rm = TRUE)
+  res$rmse <- errors$rmse * errors$scale
+  res$me <- mean(errors$values, na.rm = TRUE) * errors$scale
+  res$mae <- mean(abs(errors$values), na.rm = TRUE) * errors$scale
   # Guard constant vectors explicitly: cor() would warn, and in a worker the
   # warning reaches the run log unexplained.
-  res$r2 <- if (isTRUE(stats::sd(obs) > 0) && isTRUE(stats::sd(pre) > 0)) {
-    tryCatch(cor(obs, pre)^2, error = function(e) NA_real_)
-  } else NA_real_
+  magnitude <- c(max(abs(obs)), max(abs(pre)))
+  if (all(is.finite(magnitude)) && any(obs != obs[1]) && any(pre != pre[1])) {
+    res$pearson_r <- stats::cor(.scale_for_products(obs, magnitude[1]),
+                                .scale_for_products(pre, magnitude[2]))
+  }
+  res$r2 <- res$pearson_r^2
 
   res$ccc <- calc_ccc(obs, pre)
-  aug <- augment_metrics(obs, pre)
+  aug <- augment_metrics(obs, pre, errors)
   res$nse <- aug$nse
   res$nrmse_mean <- aug$nrmse_mean
   res$nrmse_sd <- aug$nrmse_sd
@@ -336,15 +414,24 @@ perform_cv <- function(cv_obj, moran = TRUE) {
   }
   x_col <- pick_coord(cnames, .coord_names_x, "^easting")
   y_col <- pick_coord(cnames, .coord_names_y, "^northing")
-  if (isTRUE(moran) && !is.na(x_col) && !is.na(y_col)) {
-      coords <- df[valid, c(x_col, y_col)]
-      # I on its own cannot be read without its null expectation; carry E[I] and
-      # the two-sided permutation p alongside it.
-      mor <- calc_moran(residuals, coords)
-      res$moran_i <- mor$i
-      res$moran_e <- mor$e_i
-      # Every display formats the p-value through format_p_value().
-      res$moran_p <- mor$p
+  if (isTRUE(moran) && length(obs) >= 3L && !is.na(x_col) && !is.na(y_col)) {
+    coords <- .moran_coordinates(df[valid, c(x_col, y_col)], length(obs))
+    if (is.null(coords)) return(res)
+    # Roundoff is relative to the scored observations. An all-zero target
+    # provides no scale, so use the error field's own magnitude in that case.
+    raw_finite <- all(is.finite(errors$raw))
+    residuals <- if (raw_finite) errors$raw else errors$values
+    reference <- if (raw_finite) magnitude[1] else magnitude[1] / errors$scale
+    if (all(is.finite(residuals)) &&
+        .is_degenerate_covariate(residuals, scale = if (reference > 0) reference)) {
+      res$moran_degenerate <- TRUE
+      return(res)
+    }
+    # Carry the null expectation and the two-sided permutation p alongside I.
+    mor <- calc_moran(residuals, coords)
+    res$moran_i <- mor$i
+    res$moran_e <- mor$e_i
+    res$moran_p <- mor$p
   }
   
   return(res)

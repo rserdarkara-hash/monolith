@@ -241,6 +241,55 @@
       "Author": "Alina Beygelzimer [aut] (cover tree library), Sham Kakadet [aut] (cover tree library), John Langford [aut] (cover tree library), Sunil Arya [aut] (ANN library 1.1.2 for the kd-tree approach), David Mount [aut] (ANN library 1.1.2 for the kd-tree approach), Shengqiao Li [aut, cre]",
       "Maintainer": "Shengqiao Li <lishengqiao@yahoo.com>"
     },
+    "GauPro": {
+      "Package": "GauPro",
+      "Version": "0.2.17",
+      "Source": "Repository",
+      "Type": "Package",
+      "Title": "Gaussian Process Fitting",
+      "Authors@R": "person(given = \"Collin\", family = \"Erickson\", role = c(\"aut\", \"cre\"), email = \"collinberickson@gmail.com\")",
+      "Maintainer": "Collin Erickson <collinberickson@gmail.com>",
+      "Description": "Fits a Gaussian process model to data. Gaussian processes are commonly used in computer experiments to fit an interpolating model. The model is stored as an 'R6' object and can be easily updated with new  data. There are options to run in parallel, and 'Rcpp' has been used to speed up calculations. For more info about Gaussian process software, see Erickson et al. (2018) <doi:10.1016/j.ejor.2017.10.002>.",
+      "License": "GPL-3",
+      "LinkingTo": [
+        "Rcpp",
+        "RcppArmadillo"
+      ],
+      "Imports": [
+        "ggplot2",
+        "Rcpp",
+        "R6",
+        "lbfgs"
+      ],
+      "RoxygenNote": "7.3.2",
+      "Depends": [
+        "mixopt (> 0.1.0)",
+        "numDeriv",
+        "rmarkdown",
+        "tidyr"
+      ],
+      "Suggests": [
+        "ContourFunctions",
+        "dplyr",
+        "ggrepel",
+        "gridExtra",
+        "knitr",
+        "lhs",
+        "MASS",
+        "microbenchmark",
+        "rlang",
+        "splitfngr",
+        "testthat",
+        "testthatmulti"
+      ],
+      "VignetteBuilder": "knitr",
+      "URL": "https://github.com/CollinErickson/GauPro",
+      "BugReports": "https://github.com/CollinErickson/GauPro/issues",
+      "Encoding": "UTF-8",
+      "NeedsCompilation": "yes",
+      "Author": "Collin Erickson [aut, cre]",
+      "Repository": "CRAN"
+    },
     "KernSmooth": {
       "Package": "KernSmooth",
       "Version": "2.23-27",
@@ -475,6 +524,46 @@
       "VignetteBuilder": "Rcpp",
       "NeedsCompilation": "yes",
       "Author": "Dirk Eddelbuettel [aut, cre] (ORCID: <https://orcid.org/0000-0001-6419-907X>), Romain Francois [aut] (ORCID: <https://orcid.org/0000-0002-2444-4226>), JJ Allaire [aut] (ORCID: <https://orcid.org/0000-0003-0174-9868>), Kevin Ushey [aut] (ORCID: <https://orcid.org/0000-0003-2880-7407>), Qiang Kou [aut] (ORCID: <https://orcid.org/0000-0001-6786-5453>), Nathan Russell [aut], Iñaki Ucar [aut] (ORCID: <https://orcid.org/0000-0001-6403-5550>), Doug Bates [aut] (ORCID: <https://orcid.org/0000-0001-8316-9503>), John Chambers [aut]",
+      "Maintainer": "Dirk Eddelbuettel <edd@debian.org>",
+      "Repository": "CRAN"
+    },
+    "RcppArmadillo": {
+      "Package": "RcppArmadillo",
+      "Version": "15.6.0-1",
+      "Source": "Repository",
+      "Type": "Package",
+      "Title": "'Rcpp' Integration for the 'Armadillo' Templated Linear Algebra Library",
+      "Date": "2026-09-07",
+      "Authors@R": "c(person(\"Dirk\", \"Eddelbuettel\", role = c(\"aut\", \"cre\"), email = \"edd@debian.org\", comment = c(ORCID = \"0000-0001-6419-907X\")), person(\"Romain\", \"Francois\", role = \"aut\", comment = c(ORCID = \"0000-0002-2444-4226\")), person(\"Doug\", \"Bates\", role = \"aut\", comment = c(ORCID = \"0000-0001-8316-9503\")), person(\"Binxiang\", \"Ni\", role = \"aut\"), person(\"Conrad\", \"Sanderson\", role = \"aut\", comment = c(ORCID = \"0000-0002-0049-4501\")))",
+      "Description": "'Armadillo' is a templated C++ linear algebra library aiming towards a good balance between speed and ease of use. It provides high-level syntax and functionality deliberately similar to Matlab. It is useful for algorithm development directly in C++, or quick conversion of research code into production environments. It provides efficient classes for vectors, matrices and cubes where dense and sparse matrices are supported. Integer, floating point and complex numbers are supported. A sophisticated expression evaluator (based on template meta-programming) automatically combines several operations to increase speed and efficiency. Dynamic evaluation automatically chooses optimal code paths based on detected matrix structures. Matrix decompositions are provided through integration with LAPACK, or one of its high performance drop-in replacements (such as 'MKL' or 'OpenBLAS'). It can automatically use 'OpenMP' multi-threading (parallelisation) to speed up computationally expensive operations. . The 'RcppArmadillo' package includes the header files from the 'Armadillo' library; users do not need to install 'Armadillo' itself in order to use 'RcppArmadillo'. Starting from release 15.0.0, the minimum compilation standard is C++14. . Since release 7.800.0, 'Armadillo' is licensed under Apache License 2; previous releases were under licensed as MPL 2.0 from version 3.800.0 onwards and LGPL-3 prior to that; 'RcppArmadillo' (the 'Rcpp' bindings/bridge to Armadillo) is licensed under the GNU GPL version 2 or later, as is the rest of 'Rcpp'.",
+      "License": "GPL (>= 2)",
+      "LazyLoad": "yes",
+      "Depends": [
+        "R (>= 3.3.0)"
+      ],
+      "LinkingTo": [
+        "Rcpp"
+      ],
+      "Imports": [
+        "Rcpp (>= 1.1.1)",
+        "stats",
+        "utils",
+        "methods"
+      ],
+      "Suggests": [
+        "tinytest",
+        "Matrix (>= 1.3.0)",
+        "pkgKitten",
+        "reticulate",
+        "slam"
+      ],
+      "URL": "https://github.com/RcppCore/RcppArmadillo, https://dirk.eddelbuettel.com/code/rcpp.armadillo.html",
+      "BugReports": "https://github.com/RcppCore/RcppArmadillo/issues",
+      "RoxygenNote": "6.0.1",
+      "Encoding": "UTF-8",
+      "VignetteBuilder": "Rcpp",
+      "NeedsCompilation": "yes",
+      "Author": "Dirk Eddelbuettel [aut, cre] (ORCID: <https://orcid.org/0000-0001-6419-907X>), Romain Francois [aut] (ORCID: <https://orcid.org/0000-0002-2444-4226>), Doug Bates [aut] (ORCID: <https://orcid.org/0000-0001-8316-9503>), Binxiang Ni [aut], Conrad Sanderson [aut] (ORCID: <https://orcid.org/0000-0002-0049-4501>)",
       "Maintainer": "Dirk Eddelbuettel <edd@debian.org>",
       "Repository": "CRAN"
     },
@@ -3609,6 +3698,28 @@
       "Maintainer": "Hadley Wickham <hadley@rstudio.com>",
       "Repository": "CRAN"
     },
+    "lbfgs": {
+      "Package": "lbfgs",
+      "Version": "1.2.1.2",
+      "Source": "Repository",
+      "Type": "Package",
+      "Title": "Limited-memory BFGS Optimization",
+      "Date": "2022-06-23",
+      "Authors@R": "c(person(\"Antonio\", \"Coppola\", role = c(\"aut\", \"cre\", \"cph\"), email = \"acoppola@stanford.edu\"), person(\"Brandon\", \"Stewart\", role = c(\"aut\", \"cph\")), person(\"Naoaki\", \"Okazaki\", role = c(\"aut\", \"cph\")), person(\"David\", \"Ardia\", role = c(\"ctb\", \"cph\")), person(\"Dirk\", \"Eddelbuettel\", role = c(\"ctb\", \"cph\")), person(\"Katharine\", \"Mullen\", role = c(\"ctb\", \"cph\")), person(\"Jorge\", \"Nocedal\", role = c(\"ctb\", \"cph\")))",
+      "Maintainer": "Antonio Coppola <acoppola@stanford.edu>",
+      "Description": "A wrapper built around the libLBFGS optimization library by Naoaki Okazaki. The lbfgs package implements both the Limited-memory Broyden-Fletcher-Goldfarb-Shanno (L-BFGS) and the Orthant-Wise Quasi-Newton Limited-Memory (OWL-QN) optimization algorithms. The L-BFGS algorithm solves the problem of minimizing an objective, given its gradient, by iteratively computing approximations of the inverse Hessian matrix. The OWL-QN algorithm finds the optimum of an objective plus the L1-norm of the problem's parameters. The package offers a fast and memory-efficient implementation of these optimization routines, which is particularly suited for high-dimensional problems.",
+      "License": "GPL (>= 2)",
+      "Imports": [
+        "Rcpp (>= 0.11.2)",
+        "methods"
+      ],
+      "LinkingTo": [
+        "Rcpp"
+      ],
+      "Author": "Antonio Coppola [aut, cre, cph], Brandon Stewart [aut, cph], Naoaki Okazaki [aut, cph], David Ardia [ctb, cph], Dirk Eddelbuettel [ctb, cph], Katharine Mullen [ctb, cph], Jorge Nocedal [ctb, cph]",
+      "NeedsCompilation": "yes",
+      "Repository": "CRAN"
+    },
     "leaflet": {
       "Package": "leaflet",
       "Version": "2.2.3",
@@ -3995,6 +4106,36 @@
       "NeedsCompilation": "yes",
       "Author": "Yihui Xie [aut, cre] (<https://orcid.org/0000-0003-0645-5666>, https://yihui.org), Jeffrey Horner [ctb], Beilei Bian [ctb]",
       "Maintainer": "Yihui Xie <xie@yihui.name>",
+      "Repository": "CRAN"
+    },
+    "mixopt": {
+      "Package": "mixopt",
+      "Version": "0.1.3",
+      "Source": "Repository",
+      "Type": "Package",
+      "Title": "Mixed Variable Optimization",
+      "Authors@R": "person(given = \"Collin\", family = \"Erickson\", role = c(\"aut\", \"cre\"), email = \"collinberickson@gmail.com\")",
+      "Maintainer": "Collin Erickson <collinberickson@gmail.com>",
+      "Description": "Mixed variable optimization for non-linear functions. Can optimize function whose inputs are a combination of continuous, ordered, and unordered variables.",
+      "Depends": [
+        "dplyr",
+        "ggplot2",
+        "splitfngr"
+      ],
+      "Suggests": [
+        "ContourFunctions",
+        "gridExtra",
+        "lhs",
+        "testthat (>= 3.0.0)"
+      ],
+      "License": "LGPL (>= 3)",
+      "Encoding": "UTF-8",
+      "URL": "https://github.com/CollinErickson/mixopt",
+      "BugReports": "https://github.com/CollinErickson/mixopt/issues",
+      "RoxygenNote": "7.3.1",
+      "Config/testthat/edition": "3",
+      "NeedsCompilation": "no",
+      "Author": "Collin Erickson [aut, cre]",
       "Repository": "CRAN"
     },
     "modelenv": {
@@ -6715,6 +6856,25 @@
       "NeedsCompilation": "yes",
       "Author": "Roger Bivand [cre, aut] (ORCID: <https://orcid.org/0000-0003-2392-6140>, ROR: <https://ror.org/04v53s997>), Micah Altman [ctb], Luc Anselin [ctb], Renato Assunção [ctb], Anil Bera [ctb], Olaf Berke [ctb], F. Guillaume Blanchet [ctb], Marilia Carvalho [ctb], Bjarke Christensen [ctb], Yongwan Chun [ctb], Carsten Dormann [ctb], Stéphane Dray [ctb], Dewey Dunnington [ctb] (ORCID: <https://orcid.org/0000-0002-9415-4582>), Virgilio Gómez-Rubio [ctb], Malabika Koley [ctb], Tomasz Kossowski [ctb] (ORCID: <https://orcid.org/0000-0002-9976-4398>), Elias Krainski [ctb], Pierre Legendre [ctb], Nicholas Lewin-Koh [ctb], Angela Li [ctb], Giovanni Millo [ctb], Werner Mueller [ctb], Hisaji Ono [ctb], Josiah Parry [ctb] (ORCID: <https://orcid.org/0000-0001-9910-865X>), Pedro Peres-Neto [ctb], Michał Pietrzak [ctb] (ORCID: <https://orcid.org/0000-0002-9263-4478>), Gianfranco Piras [ctb], Markus Reder [ctb], Jeff Sauer [ctb], Michael Tiefelsdorf [ctb], René Westerholt [ctb], Justyna Wilk [ctb] (ORCID: <https://orcid.org/0000-0003-1495-2910>), Levi Wolf [ctb], Danlin Yu [ctb]",
       "Maintainer": "Roger Bivand <Roger.Bivand@nhh.no>",
+      "Repository": "CRAN"
+    },
+    "splitfngr": {
+      "Package": "splitfngr",
+      "Version": "0.1.2",
+      "Source": "Repository",
+      "Type": "Package",
+      "Title": "Combined Evaluation and Split Access of Functions",
+      "Author": "Collin Erickson",
+      "Maintainer": "Collin Erickson <collinberickson@gmail.com>",
+      "Description": "Some R functions, such as optim(), require a function its gradient passed as separate arguments. When these are expensive to calculate it may be much faster to calculate the function (fn) and gradient (gr) together since they often share many calculations (chain rule). This package allows the user to pass in a single function that returns both the function and gradient, then splits (hence 'splitfngr') them so the results can be accessed separately. The functions provided allow this to be done with any number of functions/values, not just for functions and gradients.",
+      "License": "GPL-3",
+      "LazyData": "TRUE",
+      "Encoding": "UTF-8",
+      "RoxygenNote": "6.1.1",
+      "Imports": [
+        "lbfgs"
+      ],
+      "NeedsCompilation": "no",
       "Repository": "CRAN"
     },
     "stars": {

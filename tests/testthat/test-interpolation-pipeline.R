@@ -226,9 +226,8 @@ test_that("rasters share a lattice only with one CRS, cell size and origin", {
   # Half a cell off, in x or in y.
   expect_false(rasters_share_lattice(list(base, lattice_raster(500010 + 15, 4400040, 5, 30))))
   expect_false(rasters_share_lattice(list(base, lattice_raster(500010, 4400040 + 15, 5, 30))))
-  # A whole cell less a hair is the same lattice (terra reports the origin
-  # within half a cell of zero, so the offset wraps); a thousandth of a cell
-  # is another one.
+  # An offset just short of a whole cell is within tolerance. An offset
+  # another thousandth of a cell away is outside it.
   expect_true(rasters_share_lattice(list(base, lattice_raster(500010 + 30 - 1e-7, 4400040, 5, 30))))
   expect_false(rasters_share_lattice(list(base, lattice_raster(500010 + 0.03, 4400040, 5, 30))))
   # Another cell size on a common corner, and another CRS.
@@ -242,6 +241,37 @@ test_that("rasters share a lattice only with one CRS, cell size and origin", {
   expect_equal(terra::res(m), c(30, 30))
   expect_error(merge_wrapped_rasters(list(base, lattice_raster(500010 + 15, 4400040, 5, 30))),
                "do not share one lattice")
+})
+
+test_that("packed fractional grids use their edges and dimensions to establish alignment", {
+  res <- 7.2632570371654
+  crs <- "EPSG:32633"
+  a <- grid_template(c(xmin = 450000, ymin = 5800000, xmax = 450000 + 30 * res,
+                       ymax = 5800000 + 30 * res), res, crs, snap = TRUE)
+  b <- grid_template(c(xmin = 452000, ymin = 5803000, xmax = 452000 + 100 * res,
+                       ymax = 5803000 + 100 * res), res, crs, snap = TRUE)
+  terra::values(a) <- 1
+  terra::values(b) <- 2
+  rs <- list(A = terra::wrap(a), B = terra::wrap(b))
+  expect_true(rasters_share_lattice(list(a, b)))
+  expect_true(rasters_share_lattice(rs))
+  expect_true(rasters_share_lattice(rev(rs)))
+
+  # The upper edge must match the lower edge plus the dimension, even
+  # when accumulated drift leaves both edges at whole cell offsets.
+  fine <- terra::rast(nrows = 1, ncols = 1000001, xmin = 0, xmax = 1000001,
+                      ymin = 0, ymax = 1, crs = crs)
+  drift <- terra::rast(nrows = 1, ncols = 1000001, xmin = 0, xmax = 1000002,
+                       ymin = 0, ymax = 1, crs = crs)
+  expect_false(rasters_share_lattice(list(fine, drift)))
+
+  tile <- function(iy) terra::wrap(lattice_raster(62000 * res, iy * res, 1, res, crs = crs))
+  short <- list(A = tile(790000), B = tile(950000))
+  nominal <- c(A = res, B = res)
+  expect_false(rasters_share_lattice(short))
+  expect_true(rasters_share_lattice(short, nominal))
+  expect_true(rasters_share_lattice(rev(short), nominal))
+  expect_false(rasters_share_lattice(short, c(A = res, B = res * (1 + 1e-8))))
 })
 
 # ── pooled_raster_values ──────────────────────────────────────────────────
@@ -372,6 +402,25 @@ test_that("adjacent localities sharing boundary cells cannot lose them in an exp
   # Extents can overlap without both localities holding a value in a cell.
   b[c(1, 4, 7, 10)] <- NA
   expect_false(rasters_have_shared_cells(list(A = a, B = b)))
+})
+
+test_that("packed touching extents and populated intersections are decided in cell coordinates", {
+  res <- 7.2632570371654
+  tile <- function(iy, nr, vals) {
+    terra::rast(nrows = nr, ncols = 4, xmin = 62000 * res, xmax = 62004 * res,
+                ymin = iy * res, ymax = (iy + nr) * res, vals = vals, crs = "EPSG:32633")
+  }
+  a <- tile(791660, 2, rep(1, 8))
+  b <- tile(791662, 10, rep(2, 40))
+  packed <- function(right) list(A = terra::wrap(a), B = terra::wrap(right))
+  expect_true(rasters_share_lattice(packed(b)))
+  expect_false(rasters_have_shared_cells(packed(b)))
+  expect_false(rasters_have_shared_cells(rev(packed(b))))
+
+  overlap <- tile(791661, 10, rep(2, 40))
+  expect_true(rasters_have_shared_cells(packed(overlap)))
+  overlap[37:40] <- NA
+  expect_false(rasters_have_shared_cells(packed(overlap)))
 })
 
 test_that("class areas sum every projected cell's own ellipsoidal area", {
@@ -3139,8 +3188,8 @@ test_that("a constant target names itself in the run warnings", {
   wf <- file.path(tmp, "warn_const_tgt_LocA_act.txt")
   expect_true(file.exists(wf))
   warn_txt <- paste(readLines(wf), collapse = " ")
-  expect_match(warn_txt, "no usable variance")
-  expect_match(warn_txt, "undefined")
+  expect_match(warn_txt, "Target has no usable variance in this locality", fixed = TRUE)
+  expect_false(grepl("undefined", warn_txt, fixed = TRUE))
 
   # And in the RETURNED LOG, not only in the file. The warning file holds one
   # message per locality and surface and the completion handler deletes it, so
@@ -3984,7 +4033,8 @@ test_that("OK under a pure nugget returns the global mean and nugget(1 + 1/n)", 
                       coords = c("x", "y"), crs = 32635)
 
   res <- suppressWarnings(
-    apply_OK(pts, "ph", tgt, lags, list(pre_fit = gstat::vgm(nug, "Nug", 0))))
+    apply_OK(pts, "ph", tgt, lags,
+             list(pre_fit = gstat::vgm(nug, "Nug", 0), cv_strategy = "loocv")))
 
   # With no spatial correlation every weight is 1/n, so ordinary kriging
   # degenerates to the sample mean, and its variance is the nugget plus the
@@ -3992,6 +4042,15 @@ test_that("OK under a pure nugget returns the global mean and nugget(1 + 1/n)", 
   n <- nrow(pts)
   expect_equal(res$res_sf$var1.pred, mean(pts$ph), tolerance = 1e-10)
   expect_equal(res$res_sf$var1.var, nug * (1 + 1 / n), tolerance = 1e-10)
+
+  # The full-neighbourhood leave-one-out means have slope -1/(n-1)
+  # against the centred observations. Their r² is 1 even with negative NSE.
+  cv <- res$cv_obj
+  expect_equal(cv$var1.pred, (sum(pts$ph) - cv$observed) / (n - 1), tolerance = 1e-10)
+  expect_equal(res$cv_metrics$coverage, 1)
+  expect_equal(res$cv_metrics$pearson_r, -1)
+  expect_equal(res$cv_metrics$r2, 1)
+  expect_equal(res$cv_metrics$nse, 1 - (n / (n - 1))^2, tolerance = 1e-10)
 })
 
 test_that("RK prediction is the lm trend plus the kriged residual", {
